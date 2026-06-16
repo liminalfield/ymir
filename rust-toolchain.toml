@@ -1,0 +1,7 @@
+# Pinned compiler so every machine (and CI) builds with the exact same toolchain.
+# A fixed toolchain is part of the determinism promise: byte-identical output
+# depends on the compiler not drifting underfoot.
+[toolchain]
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

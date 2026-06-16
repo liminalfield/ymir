@@ -1,3 +1,16 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+license = "GPL-3.0-only"
+authors = ["Oluf Andrews <oluf@oandrews.com>"]
+rust-version = "1.95"
+
+# Lint policy lives here so every crate inherits it with `[lints] workspace = true`.
+# The `cargo clippy --all-targets -- -D warnings` gate then turns these into hard
+# errors, which is how `missing_docs` and the no-unsafe rule are enforced.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
