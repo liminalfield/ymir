@@ -1,0 +1,21 @@
+# Rust build artifacts
+/target
+
+# NOTE: Cargo.lock is intentionally NOT ignored.
+# Ymir is an application, so the committed lockfile gives both your machines
+# (and any contributor) identical dependency versions.
+
+# Local terrain output / test renders
+/out
+/outputs
+*.tmp
+
+# Editor and IDE
+.idea/
+.vscode/
+*.iml
+# (If you later want shared VS Code settings, un-ignore a curated .vscode/)
+
+# OS cruft
+.DS_Store
+Thumbs.db
