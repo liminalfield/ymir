@@ -12,11 +12,13 @@
 //! - [`ContentHash`]: a canonical, machine-independent fingerprint of a field or
 //!   layer, the foundation that memoization, golden tests, and save/load build on.
 //! - [`export`]: writing a field's height layer to disk (16-bit grayscale PNG).
+//! - [`noise`]: a deterministic Perlin/fBm height generator.
 //!
 //! Later steps add the `Operator` trait, the node registry, and the evaluator.
 
 pub mod export;
 pub mod layers;
+pub mod noise;
 
 mod field;
 mod hash;
