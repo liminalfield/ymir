@@ -1,0 +1,10 @@
+#!/usr/bin/env sh
+#
+# Pre-commit hook: refuse commits that introduce mechanical shortcuts.
+# Tracked in the repo via `git config core.hooksPath .githooks`.
+# See scripts/check-shortcuts.sh and the "No shortcuts" section of CLAUDE.md.
+
+set -eu
+
+repo_root=$(git rev-parse --show-toplevel)
+exec "$repo_root/scripts/check-shortcuts.sh" --staged

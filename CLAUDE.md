@@ -34,6 +34,34 @@ fire-and-forget:
 The maintainer will typically hand you one step of the build plan at a time. Respect
 that pace even if you can see further ahead.
 
+## No shortcuts (fix causes, not symptoms)
+
+The maintainer is not in a hurry. Correctness and doing this exceedingly well always
+outrank doing it quickly. The failure to avoid is making a symptom disappear instead of
+fixing its cause. The canonical example from other work: adding a timer or sleep to mask
+a race rather than fixing the dependency that caused it.
+
+When the correct solution is hard, do the correct solution. If it is large, unclear, or
+needs a decision, stop at the checkpoint and say so. Never ship a hack to keep the step
+moving. Asking is always better than guessing.
+
+Concretely forbidden as symptom-hiding shortcuts:
+
+- Arbitrary timers, sleeps, or polling to dodge a race or ordering problem.
+- `unwrap`, `expect`, or panics on expected conditions (also required elsewhere).
+- `#[allow(...)]` to silence a clippy lint instead of fixing the underlying code.
+- `todo!`, `unimplemented!`, or stub bodies left in committed code.
+- Tests that assert nothing, are `#[ignore]`d, or are weakened to pass.
+- Hardcoding a value purely to make a test or check go green.
+- Swallowing an error (`let _ =`, `.ok()`, an empty `Err` arm) to quiet a failure.
+
+A green build is necessary, not sufficient. The bar is that an experienced Rust reviewer
+would find no shortcut, not merely that `cargo test` passes. A scanner (`.githooks` +
+a Stop hook, see `scripts/check-shortcuts.sh`) blocks the mechanical shapes above at
+commit time; the conceptual shortcuts are caught by the per-step review and the tests.
+A deliberate, justified exception is annotated inline with `// shortcut-ok: <reason>`,
+which should be rare and visible in review.
+
 ## Core philosophy
 
 Everything is data. One universal type flows on every edge of the node graph, so the
@@ -60,10 +88,11 @@ The single type on every edge is a `Field`:
 
 Conventions:
 
-- **Height values are normalized.** The `height` layer holds values in `[0, 1]`
-  internally; world vertical scale is applied only at export. This keeps nodes
-  resolution- and scale-agnostic and freely composable. (If the maintainer prefers
-  metric heights, this is the one convention to flip before step 1.)
+- **Height values are nominally normalized.** The `height` layer works in `[0, 1]`,
+  with world vertical scale applied at export. It is NOT hard-clamped: intermediate
+  operations may exceed the range and export maps the actual range. Treat `[0, 1]` as
+  the working convention, not an invariant enforced on every value. (If the maintainer
+  prefers metric heights, this is the one convention to flip before step 1.)
 - **Layer names are constants, not bare strings.** Define canonical names (e.g.
   `layers::HEIGHT`, `layers::MASK`) so a typo is a compile error, while still allowing
   arbitrary custom layer names.
@@ -80,10 +109,17 @@ not, via `field.layer_or(layers::MASK, 1.0)`. Hold this on every node.
 ## Nodes
 
 - `Operator` is a trait: stateless behavior plus a `NodeSpec` schema. The engine
-  depends only on this trait and holds `Box<dyn Operator>`.
-- A graph node instance stores `(type_id, params, connections)`. Behavior lives in the
-  operator, per-instance config in the graph. This separation enables clean
-  memoization.
+  depends only on this trait and holds `Box<dyn Operator>`. Signature:
+  `eval(&self, inputs: &[&Field], params: &Params, ctx: &EvalContext) -> Result<Vec<Field>, Error>`.
+- Inputs are an ordered, named list from the start. `eval` receives multiple inputs,
+  so combine and blend nodes with two or more inputs are first-class, never a retrofit.
+  The single-input modifier is just the common case, not a constraint.
+- A graph node instance stores `(stable_id, type_id, params, connections)`. The
+  `stable_id` is a persistent identity assigned at creation and serialized, distinct
+  from the runtime slotmap `NodeId` used only for wiring and lookup. Seeding and any
+  per-node identity derive from `stable_id`, never from the slotmap key, so a saved
+  project reloads to identical output. Behavior lives in the operator, per-instance
+  config in the graph; this separation enables clean memoization.
 - `NodeSpec` declares `inputs`, `outputs`, and a `params` schema (name, type, range,
   default). Schema only, never GUI widgets.
 - Node categories are derived from arity, never a hard-coded enum the engine branches
@@ -105,16 +141,38 @@ file. Enforced in four places:
 
 A new node = one new file implementing `Operator` + one `inventory::submit!`.
 
+Registration gotcha: `inventory`'s register-before-main can be dropped by the linker
+when an operator's module is otherwise unreferenced (under `--gc-sections` and in some
+test configs), making a node silently vanish from the registry. Ensure node modules sit
+on a referenced path, prefer `linkme` if stripping shows up, and keep a CI smoke test
+that asserts the expected node count so a missing node fails fast.
+
 ## Engine behavior
 
 - Headless core: no GUI dependencies in `ymir-core`. Keep it testable and usable in
   batch mode.
-- Pull-based, memoized evaluation. Evaluate from the requested endpoint, cache each
-  node's output keyed on params plus upstream hashes, recompute only downstream of a
-  change.
-- Resolution and region independence: operations evaluate at a requested resolution
-  and crop. Iterative sims (erosion) use tiling with halo overlap so a preview matches
-  the full-resolution build.
+- One evaluation request, `EvalContext`, threads resolution, region, seed, and the
+  target endpoint through evaluation together. Operators receive it, so `eval`'s
+  signature stays stable as the engine grows. Do not pass these as loose arguments.
+- Pull-based, memoized evaluation. Validate the graph is a DAG first, evaluate from the
+  requested endpoint, and recompute only downstream of a change.
+- Bounded cache. A full-resolution `Field` per node will exhaust memory on a large
+  graph at build resolution. The cache is bounded by policy (cache along the active
+  evaluation path plus a small LRU for reuse), not unbounded memoization of every node.
+  This is a designed-in seam, not a later patch.
+- Resolution behavior is two distinct things, and conflating them is a trap:
+  - Sampled operations (noise, anything evaluated per cell from continuous
+    coordinates) are resolution-independent: the same world coordinates yield the same
+    value at any resolution.
+  - Iterative simulations (erosion) are resolution-dependent physics, not sampled
+    functions. Running N iterations at 512 squared and at 2048 squared produces
+    genuinely different terrain. A low-resolution preview is therefore an approximation
+    of the full build, not an identical result. Do not promise otherwise anywhere.
+  - What we do promise: determinism at a given resolution; a tiled build matches an
+    untiled build at the same resolution (halo overlap handles seams); and erosion
+    parameters are expressed in resolution-aware terms (strength and scale in world
+    units, iteration counts scaled with cell count) so the preview is representative
+    rather than misleading. The target-resolution build is the source of truth.
 
 ## Determinism (hard requirement)
 
@@ -125,16 +183,43 @@ Rust footguns:
 - `HashMap` iteration order is nondeterministic. Never let output depend on it; use
   ordered iteration wherever layer or node order can affect results.
 - `rayon` reductions must be order-independent.
-- Seeds are derived deterministically and threaded through `detail`, never read from
-  the clock or a thread id.
+- A node's seed is derived from the global seed (carried in `EvalContext`) and the
+  node's persistent `stable_id`, never from the runtime slotmap key, the clock, or a
+  thread id. So a node yields identical output across reloads and graph edits, while
+  changing the global seed reseeds the whole world and each node stays internally stable.
 
 Every node and the evaluator get a determinism test: run twice, assert identical bytes.
+
+## Hashing and identity
+
+Memoization keys, golden snapshot tests, and save/load all depend on canonical,
+deterministic hashing. Decide it once, early:
+
+- `ParamValue` has defined `Eq` and `Hash`. Floats are hashed by bit pattern with NaN
+  and signed zero normalized, so equal params always produce equal keys. (`Params`, the
+  value a node receives, is the ordered `name -> ParamValue` map; keep the names
+  consistent in code.)
+- Hashing a `Field` or layer uses a canonical order: layers in sorted name order, cells
+  row-major, `f32` by bits. Never hash in `HashMap` iteration order.
+- A node's cache key is its `type_id`, its canonical param hash, the hashes of its
+  upstream inputs, and the `EvalContext` fields it depends on (seed, resolution,
+  region). Including the context in every key is the simplest correct rule: a generator
+  has no upstream inputs, so without it, two builds at different seed or resolution
+  collide on `type_id` plus params and the cache returns a stale field. Propagating
+  context transitively through input hashes is an optimization on top, never a
+  substitute. A node may later declare which context fields it actually depends on (via
+  `NodeSpec`) to avoid over-invalidating, for instance a node that ignores the seed.
+
+Small, but it underpins determinism, the memo cache, and golden tests at once, so it is
+its own decision, not an incidental detail.
 
 ## Error model
 
 - One crate error type (`thiserror`).
 - The engine surfaces per-node failures as values and never panics. A failing node is
   reported (shown "red" in a future GUI) while the rest of the graph still evaluates.
+- A graph cycle is detected before evaluation and reported as a graph error, never a
+  panic or infinite recursion.
 - No `unwrap`, `expect`, or panics in library code on expected conditions.
 
 ## Testing and regression strategy
@@ -143,8 +228,8 @@ Every node and the evaluator get a determinism test: run twice, assert identical
 - Property tests (`proptest`) for invariants: pass-through leaves untouched layers
   identical; evaluation is deterministic; `layer_or` returns the default for missing
   layers.
-- Golden snapshot tests: hash a generated heightmap so a refactor that silently
-  changes output fails the test.
+- Golden snapshot tests: hash a generated heightmap (canonical order, per above) so a
+  refactor that silently changes output fails the test.
 - `criterion` benchmarks on hot paths (noise, erosion) so performance regressions
   surface.
 
@@ -174,6 +259,18 @@ standard library and a few well-chosen crates over many.
 Serialized graphs carry a format version field. Evolving the node or param schema must
 not orphan existing project files; provide a migration path or explicit, documented
 breaking changes. Treat users' saved projects as something to preserve.
+
+## Keeping seams clean (forward-compatibility)
+
+Extension comes from clean seams, not speculative abstraction. Do not add machinery for
+a feature before it exists. Two cheap habits keep future work easy:
+
+- Access `Layer` data through methods, never raw `Vec<f32>` indexing scattered across
+  the codebase. If a typed or categorical layer is ever genuinely needed, that keeps it
+  a contained change rather than a global rewrite.
+- Nodes that compute useful intermediate fields (for example erosion's flow, water, and
+  sediment) write them as layers rather than discarding them. Downstream nodes and later
+  features will consume them.
 
 ## Workspace layout
 
@@ -206,16 +303,19 @@ cargo bench        # once benchmarks exist
 
 Each step is a reviewable, runnable commit. Do them one at a time, pausing for review.
 
-1. `Field`, `Layer`, `layer_or`, and the layer-name constants, with unit tests for
-   pass-through and default behavior.
+1. `Field`, `Layer`, `layer_or`, the layer-name constants, and the canonical
+   `Field`/layer hashing, with unit tests for pass-through, default behavior, and
+   stable hashing. (`ParamValue` and `EvalContext` are designed now in this doc but
+   built when first needed, at steps 4 and 5, to keep this step small.)
 2. 16-bit PNG export of a field's height layer, plus a `main` that fills a gradient, so
    `cargo run` writes a viewable heightmap.
 3. A Perlin/fBm generator writing the height layer, plus the determinism test (same
    seed, identical bytes).
-4. The `Operator` trait, `NodeSpec`, and the `inventory` registry, with the noise
-   generator refactored into the first operator.
-5. The graph type and the pull-based memoized evaluator, wiring generator into
-   endpoint, with tests for evaluation, memoization, and determinism.
+4. The `Operator` trait, `NodeSpec`, and the `inventory` registry (with the missing-node
+   smoke test), the noise generator refactored into the first operator.
+5. The graph type and the pull-based, DAG-validated, bounded-cache evaluator, wiring
+   generator into endpoint, with tests for evaluation, memoization, cycle handling, and
+   determinism.
 6. Export becomes an endpoint operator; a mask-aware thermal erosion modifier joins,
    giving a real three-node graph, with a golden snapshot test on the output.
 

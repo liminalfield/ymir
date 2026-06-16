@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"$CLAUDE_PROJECT_DIR/scripts/check-shortcuts.sh\" --worktree || exit 2",
+            "statusMessage": "Scanning for shortcuts"
+          }
+        ]
+      }
+    ]
+  }
+}
