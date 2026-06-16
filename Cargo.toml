@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# Bare `cargo run` builds and runs the CLI without needing `-p ymir-cli`.
+default-members = ["crates/ymir-cli"]
 
 [workspace.package]
 edition = "2024"

@@ -11,3 +11,8 @@ description = "Headless engine for Ymir: the Field data model, operators, regist
 workspace = true
 
 [dependencies]
+# First external dependency. 16-bit PNG requires DEFLATE plus per-chunk CRCs;
+# a vetted encoder is justified over hand-rolling those. `png` is the de facto
+# standard and pulls a small tree (deflate + crc only), unlike the heavier
+# `image` crate.
+png = "0.17"

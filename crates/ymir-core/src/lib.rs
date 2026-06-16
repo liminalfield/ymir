@@ -11,13 +11,16 @@
 //! - [`layers`]: canonical layer-name constants, so a typo is a compile error.
 //! - [`ContentHash`]: a canonical, machine-independent fingerprint of a field or
 //!   layer, the foundation that memoization, golden tests, and save/load build on.
+//! - [`export`]: writing a field's height layer to disk (16-bit grayscale PNG).
 //!
 //! Later steps add the `Operator` trait, the node registry, and the evaluator.
+
+pub mod export;
+pub mod layers;
 
 mod field;
 mod hash;
 mod layer;
-pub mod layers;
 mod region;
 
 pub use field::Field;
