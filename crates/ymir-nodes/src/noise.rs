@@ -1,33 +1,29 @@
-//! Coherent-noise height generation.
+//! Coherent-noise terrain math, used by the fBm generator operator.
 //!
 //! A hand-rolled 2D Perlin generator with fractional Brownian motion (fBm)
 //! layering. The algorithm is specified here rather than pulled from a crate on
 //! purpose: byte-identical output for a given seed is a core promise, and an
 //! external noise crate does not contract to keep its output stable across
-//! versions. The same reasoning drives the hand-rolled hashing in [`crate`].
+//! versions. The same reasoning drives the hand-rolled hashing in `ymir-core`.
 //!
-//! Gradients are derived by hashing integer lattice coordinates together with
-//! the seed, so there is no permutation table to carry and the function is fully
-//! stateless and deterministic. Sampling is done in world coordinates derived
-//! from the field's [`Region`], which is what makes the generator
-//! resolution-independent: raising the resolution samples more points of the
-//! same continuous function rather than producing different terrain.
+//! Gradients are derived by hashing integer lattice coordinates together with the
+//! seed, so there is no permutation table and the function is fully stateless and
+//! deterministic. Sampling is done in world coordinates derived from the
+//! [`Region`], which is what makes the generator resolution-independent: raising
+//! the resolution samples more of the same continuous function rather than
+//! producing different terrain.
 //!
-//! This is a plain function for now; step 4 wraps it as the first `Operator`.
-//! It is also single-threaded for now: each cell is an independent pure function
-//! of its coordinates, so `rayon` parallelism drops in unchanged once benchmarks
-//! justify it.
+//! Single-threaded for now: each cell is an independent pure function of its
+//! coordinates, so `rayon` parallelism drops in unchanged once benchmarks justify
+//! it.
 
 use std::sync::Arc;
 
-use crate::layers;
-use crate::{Field, Layer, Region};
+use ymir_core::{Field, Layer, Region, layers};
 
 /// Parameters for fractional Brownian motion layering of Perlin noise.
-///
-/// These become node parameters once the generator is an operator.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct FbmParams {
+pub(crate) struct FbmParams {
     /// Base feature frequency: how many noise cycles span one unit of the region.
     pub frequency: f64,
     /// Number of summed octaves. More octaves add finer detail.
@@ -79,8 +75,7 @@ const GRADIENTS: [(f32, f32); 8] = [
 /// The noise is sampled across `region` in world space, so the same `seed`,
 /// `params`, and `region` yield a consistent sampling of one continuous function
 /// at any resolution.
-#[must_use]
-pub fn fbm_field(
+pub(crate) fn fbm_field(
     width: usize,
     height: usize,
     region: Region,
@@ -226,8 +221,8 @@ mod tests {
 
     #[test]
     fn fbm_field_matches_golden_value() {
-        // Fixed fingerprint of a known generator output. A change means the noise
-        // algorithm changed, which must be deliberate (it shifts every heightmap).
+        // Fixed fingerprint, unchanged from before the math moved out of
+        // ymir-core: this proves the relocation altered zero bytes of output.
         let field = fbm_field(8, 8, Region::UNIT, FbmParams::default(), 42);
         assert_eq!(field.content_hash().to_u64(), 0x6735_0dbf_a122_5544);
     }

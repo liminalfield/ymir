@@ -28,6 +28,7 @@ use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
 use crate::Field;
+use crate::error::{Error, Result};
 use crate::layers;
 
 /// How `height` values map onto the 16-bit output range.
@@ -72,14 +73,12 @@ impl HeightRange {
 
 /// Writes the field's `height` layer to `path` as a 16-bit grayscale PNG.
 ///
-/// File I/O can fail, so this returns [`io::Result`]. The crate-wide error type
-/// does not exist until step 4; this folds into it then.
-///
 /// # Errors
 ///
-/// Returns an error if the file cannot be created, if the field has no `height`
-/// layer, or if the PNG encoder fails.
-pub fn export_png(field: &Field, path: impl AsRef<Path>, range: HeightRange) -> io::Result<()> {
+/// Returns [`Error::Io`] if the file cannot be created or written,
+/// [`Error::MissingLayer`] if the field has no `height` layer, or
+/// [`Error::PngEncode`] if the encoder rejects the image.
+pub fn export_png(field: &Field, path: impl AsRef<Path>, range: HeightRange) -> Result<()> {
     let file = File::create(path)?;
     let writer = BufWriter::new(file);
     write_png(field, writer, range)
@@ -89,17 +88,24 @@ pub fn export_png(field: &Field, path: impl AsRef<Path>, range: HeightRange) -> 
 ///
 /// Kept generic over [`Write`] so tests can encode into an in-memory buffer and
 /// decode it back without touching the filesystem.
-fn write_png<W: Write>(field: &Field, writer: W, range: HeightRange) -> io::Result<()> {
+fn write_png<W: Write>(field: &Field, writer: W, range: HeightRange) -> Result<()> {
+    // The height layer is genuinely required here: an export endpoint asked to
+    // write a field with no height has nothing to write. This is the sanctioned
+    // use of MissingLayer; optional layers must use `layer_or` instead.
     let layer = field
         .layer(layers::HEIGHT)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "field has no height layer"))?;
+        .ok_or_else(|| Error::MissingLayer {
+            name: layers::HEIGHT.to_string(),
+        })?;
 
     // The layer's own dimensions are the image's, so the sample buffer length
     // always matches the declared PNG size.
-    let width = u32::try_from(layer.width())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "width exceeds u32"))?;
-    let height = u32::try_from(layer.height())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "height exceeds u32"))?;
+    let to_u32 = |n: usize| {
+        u32::try_from(n)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "dimension exceeds u32"))
+    };
+    let width = to_u32(layer.width())?;
+    let height = to_u32(layer.height())?;
 
     // PNG stores 16-bit samples big-endian (network byte order).
     let mut data = Vec::with_capacity(layer.len() * 2);
@@ -110,19 +116,10 @@ fn write_png<W: Write>(field: &Field, writer: W, range: HeightRange) -> io::Resu
     let mut encoder = png::Encoder::new(writer, width, height);
     encoder.set_color(png::ColorType::Grayscale);
     encoder.set_depth(png::BitDepth::Sixteen);
-    let mut png_writer = encoder.write_header().map_err(encoding_error)?;
-    png_writer.write_image_data(&data).map_err(encoding_error)?;
-    png_writer.finish().map_err(encoding_error)?;
+    let mut png_writer = encoder.write_header()?;
+    png_writer.write_image_data(&data)?;
+    png_writer.finish()?;
     Ok(())
-}
-
-/// Flattens a PNG encoding error into an [`io::Error`], unwrapping the inner I/O
-/// error when there is one.
-fn encoding_error(e: png::EncodingError) -> io::Error {
-    match e {
-        png::EncodingError::IoError(io) => io,
-        other => io::Error::other(other),
-    }
 }
 
 #[cfg(test)]
@@ -215,6 +212,6 @@ mod tests {
         let field = Field::new(2, 2, Region::UNIT);
         let mut bytes = Vec::new();
         let err = write_png(&field, &mut bytes, HeightRange::Normalized).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert!(matches!(err, Error::MissingLayer { name } if name == layers::HEIGHT));
     }
 }

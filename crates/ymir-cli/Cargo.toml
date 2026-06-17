@@ -12,3 +12,6 @@ workspace = true
 
 [dependencies]
 ymir-core = { path = "../ymir-core" }
+# Depended on for its operator registrations. The binary must also anchor it in
+# code (`use ymir_nodes as _;`), or the linker can drop the registrations.
+ymir-nodes = { path = "../ymir-nodes" }

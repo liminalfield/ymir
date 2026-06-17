@@ -11,8 +11,14 @@ description = "Headless engine for Ymir: the Field data model, operators, regist
 workspace = true
 
 [dependencies]
-# First external dependency. 16-bit PNG requires DEFLATE plus per-chunk CRCs;
-# a vetted encoder is justified over hand-rolling those. `png` is the de facto
-# standard and pulls a small tree (deflate + crc only), unlike the heavier
-# `image` crate.
+# 16-bit PNG requires DEFLATE plus per-chunk CRCs; a vetted encoder is justified
+# over hand-rolling those. `png` is the de facto standard and pulls a small tree
+# (deflate + crc only), unlike the heavier `image` crate. PNG encoding is
+# non-terrain-semantic format I/O, so it stays in core.
 png = "0.17"
+# Derive macro for the single crate error type, the documented error strategy.
+thiserror = "2"
+# Distributed registration: nodes in `ymir-nodes` submit operator entries that
+# this crate collects, with no central enum. The link-time gotcha is guarded by
+# `use ymir_nodes as _;` in the binary plus a node-count smoke test.
+inventory = "0.3"
