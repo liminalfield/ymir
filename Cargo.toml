@@ -1,8 +1,10 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-# Bare `cargo run` builds and runs the CLI without needing `-p ymir-cli`.
-default-members = ["crates/ymir-cli"]
+# No `default-members`: bare `cargo test`/`build`/`clippy` must cover the whole
+# workspace, not one crate. Bare `cargo run` still resolves to ymir-cli on its own
+# while it is the only binary; revisit (a `-p` or `default-run`) once ymir-gui adds
+# a second binary.
 
 [workspace.package]
 edition = "2024"
