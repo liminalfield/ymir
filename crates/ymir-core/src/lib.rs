@@ -14,10 +14,11 @@
 //!   node schema and per-evaluation context.
 //! - [`registry`]: the collection point where downstream crates register their
 //!   operators.
+//! - [`Graph`]/[`EvalCache`]/[`EvalRequest`]: the node graph and the pull-based,
+//!   memoized evaluator.
 //! - [`export`]: writing a field's height layer to disk (16-bit grayscale PNG).
 //!
-//! Concrete operators live in `ymir-nodes`, which depends on this crate. The
-//! graph and evaluator arrive in a later step.
+//! Concrete operators live in `ymir-nodes`, which depends on this crate.
 
 pub mod export;
 pub mod layers;
@@ -25,7 +26,9 @@ pub mod registry;
 
 mod context;
 mod error;
+mod eval;
 mod field;
+mod graph;
 mod hash;
 mod layer;
 mod operator;
@@ -35,7 +38,9 @@ mod spec;
 
 pub use context::EvalContext;
 pub use error::{Error, Result};
+pub use eval::{EvalCache, EvalRequest};
 pub use field::Field;
+pub use graph::{Graph, NodeId};
 pub use hash::ContentHash;
 pub use layer::Layer;
 pub use operator::Operator;

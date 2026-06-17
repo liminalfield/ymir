@@ -29,6 +29,33 @@ pub enum Error {
     /// The PNG encoder rejected the image or failed to write it.
     #[error("PNG encoding failed: {0}")]
     PngEncode(#[from] png::EncodingError),
+
+    /// Evaluation reached a node already on the current path: the graph has a
+    /// cycle and cannot be pulled. Reported, never a panic or stack overflow.
+    #[error("graph contains a cycle")]
+    Cycle,
+
+    /// A required input port had no connection at evaluation time.
+    #[error("operator {type_id:?} input port {port} is not connected")]
+    DisconnectedInput {
+        /// The consuming node's type id.
+        type_id: &'static str,
+        /// The unconnected input port index.
+        port: usize,
+    },
+
+    /// A connection or output index referenced a port the node does not have.
+    #[error("operator {type_id:?} has no port {port}")]
+    InvalidPort {
+        /// The node's type id.
+        type_id: &'static str,
+        /// The out-of-range port index.
+        port: usize,
+    },
+
+    /// A `NodeId` did not refer to a node in the graph (e.g. it was removed).
+    #[error("node not found in graph")]
+    NodeNotFound,
 }
 
 /// Convenience alias for results carrying the crate [`Error`].

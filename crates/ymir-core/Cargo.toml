@@ -22,3 +22,7 @@ thiserror = "2"
 # this crate collects, with no central enum. The link-time gotcha is guarded by
 # `use ymir_nodes as _;` in the binary plus a node-count smoke test.
 inventory = "0.3"
+# Generational keys for the node graph: a deleted node's NodeId cannot alias a
+# later one, which the future editor needs. Chosen over a Vec+index, which has a
+# dangling-reference bug under deletion.
+slotmap = "1"

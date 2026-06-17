@@ -1,38 +1,37 @@
-//! Temporary step-4 runner: construct the fBm operator through the registry,
-//! evaluate it, and export the result, so `cargo run` still produces a viewable
-//! heightmap while exercising the operator mechanism end-to-end. This will be
-//! replaced by a real graph-driven CLI once the evaluator lands.
+//! Temporary step-5 runner: build a one-node graph with the fBm generator,
+//! evaluate it through the engine, and export the result, so `cargo run` flows
+//! through the graph and evaluator. This will grow into a real graph-driven CLI.
 
 use std::error::Error;
 
 use ymir_core::export::{HeightRange, export_png};
 use ymir_core::registry::make;
-use ymir_core::{EvalContext, Params, Region};
+use ymir_core::{EvalCache, EvalRequest, Graph, Params, Region};
 
 // Anchor ymir-nodes so its operator registrations link into this binary. Without
 // this the binary only references ymir-core (the registry), nothing names
-// ymir-nodes, and the linker can drop its registrations entirely. The node-count
-// test below guards against exactly that.
+// ymir-nodes, and the linker can drop its registrations entirely.
 use ymir_nodes as _;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let size: usize = 512;
     let seed: u64 = 42;
 
-    let operator = make("generator.fbm")
+    let fbm = make("generator.fbm")
         .ok_or("operator 'generator.fbm' is not registered (is ymir-nodes linked?)")?;
 
-    // Empty params: the operator falls back to its schema defaults.
-    let ctx = EvalContext::new(size, size, Region::UNIT, seed);
-    let outputs = operator.eval(&[], &Params::default(), &ctx)?;
-    let field = outputs
-        .into_iter()
-        .next()
-        .ok_or("operator produced no output field")?;
+    // A one-node graph: the generator is both head and requested endpoint.
+    let mut graph = Graph::new();
+    let node = graph.add_op(fbm, Params::default());
+
+    let request = EvalRequest::new(size, size, Region::UNIT, seed);
+    let mut cache = EvalCache::new(64);
+    let outputs = graph.evaluate(node, &request, &mut cache)?;
+    let field = outputs.first().ok_or("operator produced no output field")?;
 
     std::fs::create_dir_all("out")?;
     let path = "out/heightmap.png";
-    export_png(&field, path, HeightRange::Normalized)?;
+    export_png(field, path, HeightRange::Normalized)?;
 
     println!("wrote {path} ({size}x{size}, 16-bit grayscale, fBm seed {seed})");
     Ok(())

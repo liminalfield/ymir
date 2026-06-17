@@ -1,0 +1,499 @@
+//! The pull-based, memoized evaluator.
+//!
+//! Evaluation pulls from a requested target node, recursively evaluating its
+//! upstream inputs, and memoizes results. Two cache tiers cooperate:
+//!
+//! - A per-pull working set holds every node the current evaluation touches and
+//!   is never evicted mid-pull, so a small persistent cache can never drop a
+//!   result the active path still needs (no thrashing on deep graphs).
+//! - A persistent [`EvalCache`], bounded by an LRU policy, carries results across
+//!   evaluations so only nodes downstream of a change recompute.
+//!
+//! A node's cache key is composed from its upstream nodes' keys, not by
+//! re-hashing their full-resolution output fields: determinism makes an upstream
+//! key a faithful proxy for its output, which keeps the key cheap. True
+//! output-byte hashing stays reserved for golden tests.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use crate::context::EvalContext;
+use crate::error::{Error, Result};
+use crate::field::Field;
+use crate::graph::{Graph, NodeId};
+use crate::hash::Fnv1a64;
+use crate::param::Params;
+use crate::region::Region;
+
+/// The global parameters of one evaluation request: resolution, region, and the
+/// global seed. The target node is a separate argument to [`Graph::evaluate`],
+/// since which node is requested is the evaluator's concern, not an operator's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EvalRequest {
+    /// Requested grid width in cells.
+    pub width: usize,
+    /// Requested grid height in cells.
+    pub height: usize,
+    /// World-space region to evaluate.
+    pub region: Region,
+    /// Global seed; each node's seed is derived from this and its `stable_id`.
+    pub seed: u64,
+}
+
+impl EvalRequest {
+    /// Creates an evaluation request.
+    #[must_use]
+    pub fn new(width: usize, height: usize, region: Region, seed: u64) -> Self {
+        Self {
+            width,
+            height,
+            region,
+            seed,
+        }
+    }
+}
+
+/// A bounded, cross-evaluation result cache with least-recently-used eviction.
+///
+/// This is the persistent tier only. Within a single evaluation the active path
+/// is pinned separately, so entries here may be evicted freely without ever
+/// dropping a result the current pull still needs.
+pub struct EvalCache {
+    entries: HashMap<NodeId, CacheEntry>,
+    capacity: usize,
+    tick: u64,
+}
+
+struct CacheEntry {
+    key: u64,
+    outputs: Arc<Vec<Field>>,
+    last_used: u64,
+}
+
+impl EvalCache {
+    /// Creates a cache holding at most `capacity` node results across
+    /// evaluations. A capacity of zero keeps nothing between pulls (the active
+    /// path is still pinned within each pull).
+    #[must_use]
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            capacity,
+            tick: 0,
+        }
+    }
+
+    /// Returns the cached outputs for `id` if present and still keyed by `key`.
+    fn get(&mut self, id: NodeId, key: u64) -> Option<Arc<Vec<Field>>> {
+        let entry = self.entries.get_mut(&id)?;
+        if entry.key != key {
+            return None;
+        }
+        self.tick += 1;
+        entry.last_used = self.tick;
+        Some(Arc::clone(&entry.outputs))
+    }
+
+    /// Inserts or replaces `id`'s result, evicting the least-recently-used entry
+    /// while over capacity.
+    fn insert(&mut self, id: NodeId, key: u64, outputs: Arc<Vec<Field>>) {
+        self.tick += 1;
+        let last_used = self.tick;
+        self.entries.insert(
+            id,
+            CacheEntry {
+                key,
+                outputs,
+                last_used,
+            },
+        );
+
+        while self.entries.len() > self.capacity {
+            // last_used is unique per access, so the minimum is unambiguous and
+            // eviction is deterministic.
+            let Some(victim) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, e)| e.last_used)
+                .map(|(&id, _)| id)
+            else {
+                break;
+            };
+            self.entries.remove(&victim);
+        }
+    }
+}
+
+impl Graph {
+    /// Evaluates `target`, returning its output fields (one per output port).
+    ///
+    /// Results are memoized in `cache` across calls, so re-evaluating after
+    /// changing one node recomputes only that node and what is downstream of it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Cycle`] if the reachable subgraph has a cycle,
+    /// [`Error::NodeNotFound`] if `target` or an upstream node is missing,
+    /// [`Error::DisconnectedInput`] if a required input is unconnected, or any
+    /// error an operator returns.
+    pub fn evaluate(
+        &self,
+        target: NodeId,
+        request: &EvalRequest,
+        cache: &mut EvalCache,
+    ) -> Result<Arc<Vec<Field>>> {
+        let mut computed: HashMap<NodeId, (u64, Arc<Vec<Field>>)> = HashMap::new();
+        let mut in_progress: HashSet<NodeId> = HashSet::new();
+        let result = self.pull(target, request, cache, &mut computed, &mut in_progress)?;
+
+        // Flush the active path into the persistent cache once the pull is done,
+        // so the next evaluation can reuse unchanged nodes.
+        for (id, (key, outputs)) in computed {
+            cache.insert(id, key, outputs);
+        }
+        Ok(result)
+    }
+
+    fn pull(
+        &self,
+        id: NodeId,
+        request: &EvalRequest,
+        cache: &mut EvalCache,
+        computed: &mut HashMap<NodeId, (u64, Arc<Vec<Field>>)>,
+        in_progress: &mut HashSet<NodeId>,
+    ) -> Result<Arc<Vec<Field>>> {
+        // Already produced in this pull (e.g. a diamond's shared ancestor).
+        if let Some((_, outputs)) = computed.get(&id) {
+            return Ok(Arc::clone(outputs));
+        }
+        // A node re-entered while still on the stack is a back edge: a cycle.
+        if !in_progress.insert(id) {
+            return Err(Error::Cycle);
+        }
+
+        let node = self.node(id).ok_or(Error::NodeNotFound)?;
+
+        // Evaluate each input, collecting its output Arc, the consumed output
+        // index, and its cache key (for composing this node's key).
+        let mut upstream: Vec<(Arc<Vec<Field>>, usize, u64)> =
+            Vec::with_capacity(node.inputs.len());
+        for (port, slot) in node.inputs.iter().enumerate() {
+            let conn = slot.as_ref().ok_or(Error::DisconnectedInput {
+                type_id: node.type_id,
+                port,
+            })?;
+            let outputs = self.pull(conn.source, request, cache, computed, in_progress)?;
+            let upstream_key = computed.get(&conn.source).map_or(0, |(key, _)| *key);
+            upstream.push((outputs, conn.output, upstream_key));
+        }
+
+        let seed = derive_seed(request.seed, node.stable_id);
+        let input_keys: Vec<u64> = upstream.iter().map(|(_, _, key)| *key).collect();
+        let key = compute_key(node.type_id, &node.params, &input_keys, request, seed);
+
+        // Reuse a persistent result if its key still matches.
+        if let Some(outputs) = cache.get(id, key) {
+            computed.insert(id, (key, Arc::clone(&outputs)));
+            in_progress.remove(&id);
+            return Ok(outputs);
+        }
+
+        // Gather input field references for the operator.
+        let mut inputs: Vec<&Field> = Vec::with_capacity(upstream.len());
+        for (outputs, output_index, _) in &upstream {
+            let field = outputs.get(*output_index).ok_or(Error::InvalidPort {
+                type_id: node.type_id,
+                port: *output_index,
+            })?;
+            inputs.push(field);
+        }
+
+        let ctx = EvalContext::new(request.width, request.height, request.region, seed);
+        let outputs = Arc::new(node.operator.eval(&inputs, &node.params, &ctx)?);
+
+        computed.insert(id, (key, Arc::clone(&outputs)));
+        in_progress.remove(&id);
+        Ok(outputs)
+    }
+}
+
+/// Derives a node's seed from the global seed and its stable id, via the
+/// SplitMix64 finalizer, so a node yields the same result regardless of graph
+/// order or unrelated edits.
+fn derive_seed(global_seed: u64, stable_id: u64) -> u64 {
+    let mut h = global_seed ^ stable_id.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    h ^= h >> 30;
+    h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    h ^= h >> 27;
+    h = h.wrapping_mul(0x94D0_49BB_1331_11EB);
+    h ^= h >> 31;
+    h
+}
+
+/// Composes a node's cache key from its type, params, upstream keys, and the
+/// request context (resolution, region, derived seed).
+fn compute_key(
+    type_id: &str,
+    params: &Params,
+    input_keys: &[u64],
+    request: &EvalRequest,
+    seed: u64,
+) -> u64 {
+    let mut h = Fnv1a64::new();
+    h.write_str(type_id);
+    h.write_u64(params.content_hash().to_u64());
+    h.write_usize(input_keys.len());
+    for &key in input_keys {
+        h.write_u64(key);
+    }
+    h.write_usize(request.width);
+    h.write_usize(request.height);
+    request.region.hash_into(&mut h);
+    h.write_u64(seed);
+    h.finish().to_u64()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layers;
+    use crate::operator::Operator;
+    use crate::param::ParamValue;
+    use crate::spec::{NodeSpec, PortSpec};
+    use crate::{Layer, Region};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A generator whose output is a constant field driven by the per-node seed,
+    /// counting how many times it is evaluated.
+    struct CountingGen {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Operator for CountingGen {
+        fn spec(&self) -> NodeSpec {
+            NodeSpec {
+                type_id: "test.gen",
+                label: "Test Gen".into(),
+                inputs: Vec::new(),
+                outputs: vec![PortSpec::new("out")],
+                params: Vec::new(),
+            }
+        }
+
+        fn eval(&self, _: &[&Field], _: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let value = (ctx.seed % 1000) as f32 / 1000.0;
+            let layer = Layer::filled(ctx.width, ctx.height, value);
+            Ok(vec![
+                Field::new(ctx.width, ctx.height, ctx.region)
+                    .with_layer(layers::HEIGHT, Arc::new(layer)),
+            ])
+        }
+    }
+
+    /// A one-input modifier that adds its `delta` param to the height layer,
+    /// counting evaluations.
+    struct CountingAdd {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Operator for CountingAdd {
+        fn spec(&self) -> NodeSpec {
+            NodeSpec {
+                type_id: "test.add",
+                label: "Test Add".into(),
+                inputs: vec![PortSpec::new("in")],
+                outputs: vec![PortSpec::new("out")],
+                params: Vec::new(),
+            }
+        }
+
+        fn eval(&self, inputs: &[&Field], params: &Params, _: &EvalContext) -> Result<Vec<Field>> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let delta = params.get_f64("delta", 0.0) as f32;
+            let input = inputs[0];
+            let src = input.layer_or(layers::HEIGHT, 0.0);
+            let layer = Layer::from_fn(input.width(), input.height(), |x, y| {
+                src.get(x, y).unwrap_or(0.0) + delta
+            });
+            let mut out = input.clone();
+            out.set_layer(layers::HEIGHT, Arc::new(layer));
+            Ok(vec![out])
+        }
+    }
+
+    fn request() -> EvalRequest {
+        EvalRequest::new(16, 16, Region::UNIT, 42)
+    }
+
+    #[test]
+    fn evaluates_a_chain() {
+        let mut graph = Graph::new();
+        let head = graph.add_op(
+            Box::new(CountingGen {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new(),
+        );
+        let add = graph.add_op(
+            Box::new(CountingAdd {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new().with("delta", ParamValue::Float(0.25)),
+        );
+        graph.connect(head, 0, add, 0).unwrap();
+
+        let mut cache = EvalCache::new(16);
+        let out = graph.evaluate(add, &request(), &mut cache).unwrap();
+        let height = out[0].layer(layers::HEIGHT).unwrap();
+        // Generator value plus delta, uniform across the field.
+        let base = height.as_slice()[0];
+        assert!(height.as_slice().iter().all(|&v| (v - base).abs() < 1e-6));
+        assert!(base >= 0.25);
+    }
+
+    #[test]
+    fn evaluation_is_deterministic() {
+        let build = || {
+            let mut graph = Graph::new();
+            let head = graph.add_op(
+                Box::new(CountingGen {
+                    calls: Arc::new(AtomicUsize::new(0)),
+                }),
+                Params::new(),
+            );
+            let add = graph.add_op(
+                Box::new(CountingAdd {
+                    calls: Arc::new(AtomicUsize::new(0)),
+                }),
+                Params::new().with("delta", ParamValue::Float(0.1)),
+            );
+            graph.connect(head, 0, add, 0).unwrap();
+            (graph, add)
+        };
+
+        let (g1, t1) = build();
+        let (g2, t2) = build();
+        let mut c1 = EvalCache::new(16);
+        let mut c2 = EvalCache::new(16);
+        let a = g1.evaluate(t1, &request(), &mut c1).unwrap();
+        let b = g2.evaluate(t2, &request(), &mut c2).unwrap();
+        assert_eq!(a[0].content_hash(), b[0].content_hash());
+    }
+
+    #[test]
+    fn memoization_recomputes_only_downstream_of_a_change() {
+        let gen_calls = Arc::new(AtomicUsize::new(0));
+        let add_calls = Arc::new(AtomicUsize::new(0));
+
+        let mut graph = Graph::new();
+        let head = graph.add_op(
+            Box::new(CountingGen {
+                calls: Arc::clone(&gen_calls),
+            }),
+            Params::new(),
+        );
+        let add = graph.add_op(
+            Box::new(CountingAdd {
+                calls: Arc::clone(&add_calls),
+            }),
+            Params::new().with("delta", ParamValue::Float(0.25)),
+        );
+        graph.connect(head, 0, add, 0).unwrap();
+
+        let mut cache = EvalCache::new(16);
+
+        graph.evaluate(add, &request(), &mut cache).unwrap();
+        assert_eq!(gen_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(add_calls.load(Ordering::Relaxed), 1);
+
+        // Re-evaluate unchanged: nothing recomputes.
+        graph.evaluate(add, &request(), &mut cache).unwrap();
+        assert_eq!(gen_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(add_calls.load(Ordering::Relaxed), 1);
+
+        // Change only the downstream node: the generator is reused, add recomputes.
+        graph
+            .set_params(add, Params::new().with("delta", ParamValue::Float(0.5)))
+            .unwrap();
+        graph.evaluate(add, &request(), &mut cache).unwrap();
+        assert_eq!(gen_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(add_calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn cycles_are_reported_not_panicked() {
+        let mut graph = Graph::new();
+        let a = graph.add_op(
+            Box::new(CountingAdd {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new(),
+        );
+        let b = graph.add_op(
+            Box::new(CountingAdd {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new(),
+        );
+        graph.connect(a, 0, b, 0).unwrap();
+        graph.connect(b, 0, a, 0).unwrap();
+
+        let mut cache = EvalCache::new(16);
+        let err = graph.evaluate(b, &request(), &mut cache).unwrap_err();
+        assert!(matches!(err, Error::Cycle));
+    }
+
+    #[test]
+    fn active_path_is_pinned_even_with_zero_capacity() {
+        // Capacity 0 keeps nothing across pulls, but within one pull the active
+        // path must not be evicted, so each node evaluates exactly once.
+        let gen_calls = Arc::new(AtomicUsize::new(0));
+        let add_calls = Arc::new(AtomicUsize::new(0));
+
+        let mut graph = Graph::new();
+        let head = graph.add_op(
+            Box::new(CountingGen {
+                calls: Arc::clone(&gen_calls),
+            }),
+            Params::new(),
+        );
+        let add = graph.add_op(
+            Box::new(CountingAdd {
+                calls: Arc::clone(&add_calls),
+            }),
+            Params::new().with("delta", ParamValue::Float(0.25)),
+        );
+        graph.connect(head, 0, add, 0).unwrap();
+
+        let mut cache = EvalCache::new(0);
+        graph.evaluate(add, &request(), &mut cache).unwrap();
+        assert_eq!(gen_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(add_calls.load(Ordering::Relaxed), 1);
+
+        // Nothing persisted, so a fresh pull recomputes both.
+        graph.evaluate(add, &request(), &mut cache).unwrap();
+        assert_eq!(gen_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(add_calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn disconnected_input_is_an_error() {
+        let mut graph = Graph::new();
+        let add = graph.add_op(
+            Box::new(CountingAdd {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new(),
+        );
+        let mut cache = EvalCache::new(16);
+        let err = graph.evaluate(add, &request(), &mut cache).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::DisconnectedInput {
+                type_id: "test.add",
+                port: 0
+            }
+        ));
+    }
+}
