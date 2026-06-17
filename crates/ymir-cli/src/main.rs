@@ -1,39 +1,45 @@
-//! Temporary step-5 runner: build a one-node graph with the fBm generator,
-//! evaluate it through the engine, and export the result, so `cargo run` flows
-//! through the graph and evaluator. This will grow into a real graph-driven CLI.
+//! Temporary step-6 runner: build a three-node graph (fBm generator -> thermal
+//! erosion -> PNG export endpoint) and evaluate the endpoint, so `cargo run`
+//! renders eroded terrain through the full engine. This will grow into a real
+//! graph-driven CLI.
 
 use std::error::Error;
 
-use ymir_core::export::{HeightRange, export_png};
 use ymir_core::registry::make;
-use ymir_core::{EvalCache, EvalRequest, Graph, Params, Region};
+use ymir_core::{EvalCache, EvalRequest, Graph, ParamValue, Params, Region};
 
 // Anchor ymir-nodes so its operator registrations link into this binary. Without
 // this the binary only references ymir-core (the registry), nothing names
 // ymir-nodes, and the linker can drop its registrations entirely.
 use ymir_nodes as _;
 
+fn make_op(type_id: &str) -> Result<Box<dyn ymir_core::Operator>, Box<dyn Error>> {
+    make(type_id).ok_or_else(|| format!("operator {type_id:?} is not registered").into())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let size: usize = 512;
     let seed: u64 = 42;
+    let path = "out/heightmap.png";
 
-    let fbm = make("generator.fbm")
-        .ok_or("operator 'generator.fbm' is not registered (is ymir-nodes linked?)")?;
-
-    // A one-node graph: the generator is both head and requested endpoint.
     let mut graph = Graph::new();
-    let node = graph.add_op(fbm, Params::default());
+    let generator = graph.add_op(make_op("generator.fbm")?, Params::default());
+    let erosion = graph.add_op(make_op("modifier.thermal_erosion")?, Params::default());
+    let export = graph.add_op(
+        make_op("endpoint.export")?,
+        Params::new().with("path", ParamValue::Text(path.to_string())),
+    );
 
+    graph.connect(generator, 0, erosion, 0)?;
+    graph.connect(erosion, 0, export, 0)?;
+
+    // Pulling the endpoint evaluates the chain and writes the file as a side
+    // effect (endpoints are not memoized).
     let request = EvalRequest::new(size, size, Region::UNIT, seed);
     let mut cache = EvalCache::new(64);
-    let outputs = graph.evaluate(node, &request, &mut cache)?;
-    let field = outputs.first().ok_or("operator produced no output field")?;
+    graph.evaluate(export, &request, &mut cache)?;
 
-    std::fs::create_dir_all("out")?;
-    let path = "out/heightmap.png";
-    export_png(field, path, HeightRange::Normalized)?;
-
-    println!("wrote {path} ({size}x{size}, 16-bit grayscale, fBm seed {seed})");
+    println!("wrote {path} ({size}x{size}, 16-bit grayscale, fBm + thermal erosion, seed {seed})");
     Ok(())
 }
 
@@ -44,18 +50,25 @@ mod tests {
     // Smoke test for the inventory link-time gotcha: if ymir-nodes were not
     // linked, the registry would be empty and this fails fast.
     #[test]
-    fn registry_reports_exactly_one_operator() {
+    fn registry_has_the_expected_operators() {
         let mut type_ids: Vec<&str> = registry::entries().map(|e| e.type_id).collect();
+        type_ids.sort_unstable();
+
+        let mut unique = type_ids.clone();
+        unique.dedup();
         assert_eq!(
+            unique.len(),
             type_ids.len(),
-            1,
-            "expected exactly one registered operator"
+            "duplicate type_id in registry"
         );
 
-        // Guard against duplicate type_ids slipping in unnoticed.
-        type_ids.sort_unstable();
-        type_ids.dedup();
-        assert_eq!(type_ids, ["generator.fbm"]);
-        assert_eq!(registry::count(), 1);
+        assert_eq!(
+            type_ids,
+            [
+                "endpoint.export",
+                "generator.fbm",
+                "modifier.thermal_erosion"
+            ],
+        );
     }
 }

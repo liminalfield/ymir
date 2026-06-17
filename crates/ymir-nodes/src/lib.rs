@@ -10,7 +10,11 @@
 //! crate explicitly (`use ymir_nodes as _;`); merely calling the registry by
 //! string does not reference this crate and would let the linker drop it.
 
+mod export;
 mod fbm;
 mod noise;
+mod thermal;
 
+pub use export::ExportPng;
 pub use fbm::Fbm;
+pub use thermal::ThermalErosion;

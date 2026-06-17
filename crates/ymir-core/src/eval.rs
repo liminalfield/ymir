@@ -191,8 +191,14 @@ impl Graph {
         let input_keys: Vec<u64> = upstream.iter().map(|(_, _, key)| *key).collect();
         let key = compute_key(node.type_id, &node.params, &input_keys, request, seed);
 
+        // An endpoint produces no field, so there is nothing to memoize: its job
+        // is the side effect (e.g. writing a file), which must happen on every
+        // pull. Only non-endpoints consult or populate the cache. Its upstream
+        // fields are still memoized normally, which is where the savings are.
+        let is_endpoint = node.output_count == 0;
+
         // Reuse a persistent result if its key still matches.
-        if let Some(outputs) = cache.get(id, key) {
+        if !is_endpoint && let Some(outputs) = cache.get(id, key) {
             computed.insert(id, (key, Arc::clone(&outputs)));
             in_progress.remove(&id);
             return Ok(outputs);
@@ -211,7 +217,11 @@ impl Graph {
         let ctx = EvalContext::new(request.width, request.height, request.region, seed);
         let outputs = Arc::new(node.operator.eval(&inputs, &node.params, &ctx)?);
 
-        computed.insert(id, (key, Arc::clone(&outputs)));
+        // Endpoints are neither pinned nor flushed to the persistent cache, so
+        // they re-execute on every pull.
+        if !is_endpoint {
+            computed.insert(id, (key, Arc::clone(&outputs)));
+        }
         in_progress.remove(&id);
         Ok(outputs)
     }
@@ -319,6 +329,29 @@ mod tests {
             let mut out = input.clone();
             out.set_layer(layers::HEIGHT, Arc::new(layer));
             Ok(vec![out])
+        }
+    }
+
+    /// A one-input endpoint (no outputs) that counts how often it executes its
+    /// side effect.
+    struct CountingSink {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Operator for CountingSink {
+        fn spec(&self) -> NodeSpec {
+            NodeSpec {
+                type_id: "test.sink",
+                label: "Test Sink".into(),
+                inputs: vec![PortSpec::new("in")],
+                outputs: Vec::new(),
+                params: Vec::new(),
+            }
+        }
+
+        fn eval(&self, _: &[&Field], _: &Params, _: &EvalContext) -> Result<Vec<Field>> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(Vec::new())
         }
     }
 
@@ -475,6 +508,36 @@ mod tests {
         graph.evaluate(add, &request(), &mut cache).unwrap();
         assert_eq!(gen_calls.load(Ordering::Relaxed), 2);
         assert_eq!(add_calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn endpoints_always_execute_but_upstream_is_memoized() {
+        let gen_calls = Arc::new(AtomicUsize::new(0));
+        let sink_calls = Arc::new(AtomicUsize::new(0));
+
+        let mut graph = Graph::new();
+        let head = graph.add_op(
+            Box::new(CountingGen {
+                calls: Arc::clone(&gen_calls),
+            }),
+            Params::new(),
+        );
+        let sink = graph.add_op(
+            Box::new(CountingSink {
+                calls: Arc::clone(&sink_calls),
+            }),
+            Params::new(),
+        );
+        graph.connect(head, 0, sink, 0).unwrap();
+
+        let mut cache = EvalCache::new(16);
+        graph.evaluate(sink, &request(), &mut cache).unwrap();
+        graph.evaluate(sink, &request(), &mut cache).unwrap();
+
+        // The endpoint executes its side effect every pull...
+        assert_eq!(sink_calls.load(Ordering::Relaxed), 2);
+        // ...while its upstream field is computed once and memoized.
+        assert_eq!(gen_calls.load(Ordering::Relaxed), 1);
     }
 
     #[test]
