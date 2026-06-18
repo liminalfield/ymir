@@ -22,3 +22,8 @@ eframe.workspace = true
 # Pane kinds self-register by id, the same distributed-registration pattern the
 # engine uses for operators and categories.
 inventory = "0.3"
+# The node editor. egui-snarl is low-adoption and churny (nine breaking changes
+# across fifteen releases), so it is pinned exactly rather than by caret and tracked
+# actively; upgrades are a deliberate, egui-lockstep step. 0.10.0 resolves against
+# the workspace's egui 0.34 with no duplicate egui in the tree.
+egui-snarl = "=0.10.0"

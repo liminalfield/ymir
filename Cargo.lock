@@ -537,6 +537,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "egui-scale"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ce997efb2ffc1b52c36694dcf272e60f7ed918c27ea8a8e4df3ba512cf53f3c"
+dependencies = [
+ "egui",
+]
+
+[[package]]
+name = "egui-snarl"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92c653b5af7844f50cc7a1f0e9b095845cee7c379702636f63ada519b8388a76"
+dependencies = [
+ "egui",
+ "egui-scale",
+ "slab",
+ "smallvec",
+]
+
+[[package]]
 name = "egui-wgpu"
 version = "0.34.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3429,6 +3450,7 @@ name = "ymir-gui"
 version = "0.1.0"
 dependencies = [
  "eframe",
+ "egui-snarl",
  "inventory",
  "ymir-core",
  "ymir-nodes",

@@ -15,6 +15,13 @@ use ymir_core::registry;
 use ymir_core::{Field, Graph, Layer, Params, Region, layers};
 use ymir_nodes::{CategoryDef, categories, find_category, tr};
 
+// The reconciliation spike (issue #5): a headless proof that egui-snarl can be a
+// pure view over the core graph, gating the real canvas in step 5. It is test-only
+// (the deliverable is the confirmed policy, not shipped canvas code), so it does
+// not enter the running binary.
+#[cfg(test)]
+mod spike;
+
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
