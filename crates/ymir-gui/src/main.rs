@@ -11,16 +11,16 @@
 use std::sync::Arc;
 
 use eframe::egui;
+use egui_snarl::Snarl;
+use egui_snarl::ui::SnarlWidget;
 use ymir_core::registry;
-use ymir_core::{Field, Graph, Layer, Params, Region, layers};
+use ymir_core::{Field, Graph, Layer, Region, layers};
 use ymir_nodes::{CategoryDef, categories, find_category, tr};
 
-// The reconciliation spike (issue #5): a headless proof that egui-snarl can be a
-// pure view over the core graph, gating the real canvas in step 5. It is test-only
-// (the deliverable is the confirmed policy, not shipped canvas code), so it does
-// not enter the running binary.
-#[cfg(test)]
-mod spike;
+// The node-editor canvas (GUI step 5, issue #6): egui-snarl as a pure view over the
+// core graph, per the policy confirmed by the spike (issue #5).
+mod canvas;
+use canvas::Handle;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -47,9 +47,12 @@ enum ActiveTab {
 /// The data panes draw from. Panes receive `&mut AppState`, never the app shell,
 /// so they stay mount-agnostic.
 struct AppState {
-    /// The graph being composed. Rendered by the canvas (step 5) and evaluated
-    /// (step 6); for now nodes are added but not yet wired or displayed.
+    /// The canonical graph being composed. The canvas renders it and edits flow
+    /// back into it; the evaluator (step 6) runs it.
     graph: Graph,
+    /// The canvas view over `graph`: snarl holds only node handles (`stable_id`)
+    /// and view-state (positions), never a copy of node data.
+    snarl: Snarl<Handle>,
     /// The selected palette tab (defaults to the first category on first draw).
     active_tab: Option<ActiveTab>,
     /// The node-search query; when non-empty it overrides the active tab.
@@ -64,6 +67,7 @@ impl AppState {
     fn new() -> Self {
         Self {
             graph: Graph::new(),
+            snarl: Snarl::new(),
             active_tab: None,
             search: String::new(),
             field: placeholder_field(),
@@ -145,11 +149,12 @@ fn visible_nodes<'a>(
     }
 }
 
-/// Instantiates `type_id` via the registry and adds it to `graph`. Returns the
-/// new node's id, or `None` if the type is unregistered.
-fn add_node(graph: &mut Graph, type_id: &str) -> Option<ymir_core::NodeId> {
-    let operator = registry::make(type_id)?;
-    Some(graph.add_op(operator, Params::default()))
+/// A spawn position for the next node placed from the ribbon, cascaded by the
+/// current node count so successive adds do not stack exactly on top of each other.
+/// Once placed, a node is freely draggable on the canvas.
+fn spawn_pos(node_count: usize) -> egui::Pos2 {
+    let step = (node_count % 12) as f32 * 24.0;
+    egui::pos2(40.0 + step, 40.0 + step)
 }
 
 // ---- pane kinds (self-registered by id) -------------------------------------
@@ -237,7 +242,8 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
         for entry in shown {
             let key = format!("node-{}", entry.type_id);
             if ui.button(tr(&key)).clicked() {
-                add_node(&mut state.graph, entry.type_id);
+                let pos = spawn_pos(state.graph.node_count());
+                canvas::add_node(&mut state.graph, &mut state.snarl, entry.type_id, pos);
             }
         }
     });
@@ -276,12 +282,13 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
 inventory::submit! { PaneKind { id: "preview-2d", draw: preview_2d_pane } }
 
 fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
-    let count = state.graph.node_count();
-    ui.centered_and_justified(|ui| {
-        ui.weak(format!(
-            "Node canvas — placeholder (step 5).  Graph: {count} node(s)"
-        ));
-    });
+    // Disjoint borrows: the viewer holds the graph while snarl is rendered. Both
+    // are distinct fields of the state, so this split is sound.
+    let AppState { graph, snarl, .. } = state;
+    let mut viewer = canvas::GraphViewer { graph };
+    SnarlWidget::new()
+        .id_salt("ymir-canvas")
+        .show(snarl, &mut viewer, ui);
 }
 inventory::submit! { PaneKind { id: "canvas", draw: canvas_pane } }
 
@@ -444,15 +451,6 @@ mod tests {
     #[test]
     fn all_operators_are_categorized() {
         assert!(!has_uncategorized_nodes());
-    }
-
-    #[test]
-    fn add_node_grows_the_graph_and_rejects_unknown() {
-        let mut graph = Graph::new();
-        assert!(add_node(&mut graph, "generator.fbm").is_some());
-        assert_eq!(graph.node_count(), 1);
-        assert!(add_node(&mut graph, "no.such.node").is_none());
-        assert_eq!(graph.node_count(), 1);
     }
 
     #[test]
