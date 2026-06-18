@@ -1,16 +1,26 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-# No `default-members`: bare `cargo test`/`build`/`clippy` must cover the whole
-# workspace, not one crate. Bare `cargo run` still resolves to ymir-cli on its own
-# while it is the only binary; revisit (a `-p` or `default-run`) once ymir-gui adds
-# a second binary.
+# No `default-members`, so bare `cargo test`/`build`/`clippy` cover the whole
+# workspace. With two binaries now (ymir-cli, ymir-gui) bare `cargo run` is
+# ambiguous: use `cargo run -p ymir-cli` or `cargo run -p ymir-gui`.
 
 [workspace.package]
 edition = "2024"
 license = "GPL-3.0-only"
 authors = ["Oluf Andrews <oluf@oandrews.com>"]
 rust-version = "1.95"
+
+# egui stack pinned centrally: egui-snarl, egui-phosphor, and any future
+# egui_tiles/egui_dock must share one egui major, so the GUI crates inherit this
+# version and bump in lockstep. Wgpu backend (the 3D viewport needs it), no glow.
+[workspace.dependencies]
+eframe = { version = "0.34", default-features = false, features = [
+    "wgpu",
+    "default_fonts",
+    "wayland",
+    "x11",
+] }
 
 # Lint policy lives here so every crate inherits it with `[lints] workspace = true`.
 # The `cargo clippy --all-targets -- -D warnings` gate then turns these into hard

@@ -1,0 +1,17 @@
+[package]
+name = "ymir-gui"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Ymir's node editor and viewport (egui + wgpu)."
+
+[lints]
+workspace = true
+
+[dependencies]
+ymir-core = { path = "../ymir-core" }
+# eframe is the egui application framework (window, event loop, wgpu backend).
+# Version is pinned centrally in the workspace so the egui stack stays in lockstep.
+eframe.workspace = true
