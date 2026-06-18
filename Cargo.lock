@@ -3429,6 +3429,7 @@ name = "ymir-gui"
 version = "0.1.0"
 dependencies = [
  "eframe",
+ "inventory",
  "ymir-core",
 ]
 

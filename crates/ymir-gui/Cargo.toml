@@ -15,3 +15,6 @@ ymir-core = { path = "../ymir-core" }
 # eframe is the egui application framework (window, event loop, wgpu backend).
 # Version is pinned centrally in the workspace so the egui stack stays in lockstep.
 eframe.workspace = true
+# Pane kinds self-register by id, the same distributed-registration pattern the
+# engine uses for operators and categories.
+inventory = "0.3"
