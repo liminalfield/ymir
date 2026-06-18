@@ -132,6 +132,12 @@ impl Graph {
         Ok(())
     }
 
+    /// The number of nodes in the graph.
+    #[must_use]
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
     /// Borrows a node by id, for the evaluator.
     pub(crate) fn node(&self, id: NodeId) -> Option<&Node> {
         self.nodes.get(id)

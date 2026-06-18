@@ -12,6 +12,10 @@ workspace = true
 
 [dependencies]
 ymir-core = { path = "../ymir-core" }
+# Depended on so its operator and category registrations populate the palette,
+# and for the tr(key) resolver and CategoryDef. Using its items directly links
+# the crate (and its inventory registrations), so no separate anchor is needed.
+ymir-nodes = { path = "../ymir-nodes" }
 # eframe is the egui application framework (window, event loop, wgpu backend).
 # Version is pinned centrally in the workspace so the egui stack stays in lockstep.
 eframe.workspace = true

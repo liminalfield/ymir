@@ -3431,6 +3431,7 @@ dependencies = [
  "eframe",
  "inventory",
  "ymir-core",
+ "ymir-nodes",
 ]
 
 [[package]]
