@@ -21,7 +21,8 @@ impl Operator for ExportPng {
     fn spec(&self) -> NodeSpec {
         NodeSpec {
             type_id: TYPE_ID,
-            label: "Export PNG".into(),
+            category: "output",
+            tags: &["png", "export", "output", "endpoint"],
             inputs: vec![PortSpec::new("in")],
             outputs: Vec::new(),
             params: vec![ParamSpec::new(

@@ -18,7 +18,8 @@ impl Operator for Fbm {
     fn spec(&self) -> NodeSpec {
         NodeSpec {
             type_id: TYPE_ID,
-            label: "fBm Noise".into(),
+            category: "noise",
+            tags: &["perlin", "fbm", "noise", "generator"],
             inputs: Vec::new(),
             outputs: vec![PortSpec::new("out")],
             params: vec![
@@ -108,7 +109,7 @@ mod tests {
 
     #[test]
     fn spec_is_a_generator() {
-        assert_eq!(Fbm.spec().category(), ymir_core::Category::Generator);
+        assert_eq!(Fbm.spec().kind(), ymir_core::NodeKind::Generator);
         assert_eq!(Fbm.spec().type_id, TYPE_ID);
     }
 }

@@ -283,7 +283,8 @@ mod tests {
         fn spec(&self) -> NodeSpec {
             NodeSpec {
                 type_id: "test.gen",
-                label: "Test Gen".into(),
+                category: "test",
+                tags: &[],
                 inputs: Vec::new(),
                 outputs: vec![PortSpec::new("out")],
                 params: Vec::new(),
@@ -311,7 +312,8 @@ mod tests {
         fn spec(&self) -> NodeSpec {
             NodeSpec {
                 type_id: "test.add",
-                label: "Test Add".into(),
+                category: "test",
+                tags: &[],
                 inputs: vec![PortSpec::new("in")],
                 outputs: vec![PortSpec::new("out")],
                 params: Vec::new(),
@@ -342,7 +344,8 @@ mod tests {
         fn spec(&self) -> NodeSpec {
             NodeSpec {
                 type_id: "test.sink",
-                label: "Test Sink".into(),
+                category: "test",
+                tags: &[],
                 inputs: vec![PortSpec::new("in")],
                 outputs: Vec::new(),
                 params: Vec::new(),

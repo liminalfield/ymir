@@ -46,4 +46,4 @@ pub use layer::Layer;
 pub use operator::Operator;
 pub use param::{ParamKind, ParamSpec, ParamValue, Params};
 pub use region::Region;
-pub use spec::{Category, NodeSpec, PortSpec};
+pub use spec::{NodeKind, NodeSpec, PortSpec};

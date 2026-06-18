@@ -120,11 +120,16 @@ not, via `field.layer_or(layers::MASK, 1.0)`. Hold this on every node.
   per-node identity derive from `stable_id`, never from the slotmap key, so a saved
   project reloads to identical output. Behavior lives in the operator, per-instance
   config in the graph; this separation enables clean memoization.
-- `NodeSpec` declares `inputs`, `outputs`, and a `params` schema (name, type, range,
-  default). Schema only, never GUI widgets.
-- Node categories are derived from arity, never a hard-coded enum the engine branches
-  on. No inputs => generator; no outputs => endpoint; both => modifier. "Generators
-  only at the head" enforces itself, since a generator has no input socket.
+- `NodeSpec` declares `type_id`, a palette `category` id, search `tags`, `inputs`,
+  `outputs`, and a `params` schema (name, type, range, default). Schema only, never GUI
+  widgets, and only ids/keys, never display prose: the human name and description are
+  resolved by convention from `type_id` through a downstream `tr(key)` layer, so the
+  engine stays free of localization.
+- A node's kind (`NodeKind`: generator, modifier, endpoint) is derived from arity, never
+  a hard-coded enum the engine branches on. No inputs => generator; no outputs =>
+  endpoint; both => modifier. "Generators only at the head" enforces itself, since a
+  generator has no input socket. This kind is engine structure, distinct from the
+  presentation `category` id above.
 
 ## The invariant that keeps nodes additive
 
