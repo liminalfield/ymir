@@ -12,7 +12,11 @@ use crate::spec::NodeSpec;
 /// names a concrete operator type. Per-instance configuration lives in the graph
 /// (params and connections), not in the operator, which keeps operators stateless
 /// and memoization clean.
-pub trait Operator {
+///
+/// `Send + Sync` is required so the graph can be evaluated on a worker thread (the
+/// GUI runs evaluation off the UI thread). Operators are stateless, so this is a
+/// natural fit; if one ever needs interior state, it must be thread-safe.
+pub trait Operator: Send + Sync {
     /// The node's schema: identity, ports, and parameters.
     fn spec(&self) -> NodeSpec;
 

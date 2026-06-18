@@ -56,6 +56,12 @@ pub enum Error {
     /// A `NodeId` did not refer to a node in the graph (e.g. it was removed).
     #[error("node not found in graph")]
     NodeNotFound,
+
+    /// Evaluation was cancelled via a [`CancelToken`](crate::CancelToken) before
+    /// it completed. The partial result is discarded; a completed evaluation is
+    /// never affected, so this does not impact determinism.
+    #[error("evaluation cancelled")]
+    Cancelled,
 }
 
 /// Convenience alias for results carrying the crate [`Error`].

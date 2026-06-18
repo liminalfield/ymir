@@ -24,6 +24,7 @@ pub mod export;
 pub mod layers;
 pub mod registry;
 
+mod cancel;
 mod context;
 mod error;
 mod eval;
@@ -36,6 +37,7 @@ mod param;
 mod region;
 mod spec;
 
+pub use cancel::CancelToken;
 pub use context::EvalContext;
 pub use error::{Error, Result};
 pub use eval::{EvalCache, EvalRequest};

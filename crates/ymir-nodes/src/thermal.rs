@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use ymir_core::registry::OperatorEntry;
 use ymir_core::{
-    EvalContext, Field, Layer, NodeSpec, Operator, ParamKind, ParamSpec, ParamValue, Params,
+    Error, EvalContext, Field, Layer, NodeSpec, Operator, ParamKind, ParamSpec, ParamValue, Params,
     PortSpec, Result, layers,
 };
 
@@ -63,7 +63,7 @@ impl Operator for ThermalErosion {
         }
     }
 
-    fn eval(&self, inputs: &[&Field], params: &Params, _: &EvalContext) -> Result<Vec<Field>> {
+    fn eval(&self, inputs: &[&Field], params: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
         let input = inputs[0];
         let width = input.width();
         let height = input.height();
@@ -80,6 +80,11 @@ impl Operator for ThermalErosion {
         let mut delta = vec![0.0_f32; heights.len()];
 
         for _ in 0..iterations {
+            // Erosion is the slow node; poll cancellation each pass so a
+            // superseded preview aborts instead of running to completion.
+            if ctx.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
             erode_pass(
                 &heights,
                 &mut delta,
@@ -260,5 +265,18 @@ mod tests {
         for w in diag.windows(2) {
             assert_eq!(w[0], w[1], "diagonal neighbours must be equal");
         }
+    }
+
+    #[test]
+    fn cancelled_erosion_aborts() {
+        // A pre-cancelled context makes the iteration loop bail on its first pass.
+        let cancel = ymir_core::CancelToken::new();
+        cancel.cancel();
+        let ctx = EvalContext::new(32, 32, Region::UNIT, 0).with_cancel(cancel);
+        let input = spike_field(false);
+        let err = ThermalErosion
+            .eval(&[&input], &Params::default(), &ctx)
+            .unwrap_err();
+        assert!(matches!(err, Error::Cancelled));
     }
 }

@@ -17,6 +17,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use crate::cancel::CancelToken;
 use crate::context::EvalContext;
 use crate::error::{Error, Result};
 use crate::field::Field;
@@ -28,7 +29,7 @@ use crate::region::Region;
 /// The global parameters of one evaluation request: resolution, region, and the
 /// global seed. The target node is a separate argument to [`Graph::evaluate`],
 /// since which node is requested is the evaluator's concern, not an operator's.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct EvalRequest {
     /// Requested grid width in cells.
     pub width: usize,
@@ -38,10 +39,13 @@ pub struct EvalRequest {
     pub region: Region,
     /// Global seed; each node's seed is derived from this and its `stable_id`.
     pub seed: u64,
+    /// Cancellation signal, threaded into each node's context; defaults to
+    /// never-cancel.
+    cancel: CancelToken,
 }
 
 impl EvalRequest {
-    /// Creates an evaluation request.
+    /// Creates an evaluation request with no cancellation attached.
     #[must_use]
     pub fn new(width: usize, height: usize, region: Region, seed: u64) -> Self {
         Self {
@@ -49,7 +53,18 @@ impl EvalRequest {
             height,
             region,
             seed,
+            cancel: CancelToken::new(),
         }
+    }
+
+    /// Attaches a cancellation token. The GUI cancels it when a newer change
+    /// supersedes this evaluation; the evaluator polls it between nodes and
+    /// long-running operators poll it inside their loops, both aborting with
+    /// [`Error::Cancelled`].
+    #[must_use]
+    pub fn with_cancel(mut self, cancel: CancelToken) -> Self {
+        self.cancel = cancel;
+        self
     }
 }
 
@@ -81,6 +96,12 @@ impl EvalCache {
             capacity,
             tick: 0,
         }
+    }
+
+    /// Whether `id`'s cached result is still valid for `key` (read-only; does not
+    /// touch recency). Backs [`Graph::cache_status`].
+    fn is_valid(&self, id: NodeId, key: u64) -> bool {
+        self.entries.get(&id).is_some_and(|e| e.key == key)
     }
 
     /// Returns the cached outputs for `id` if present and still keyed by `key`.
@@ -162,6 +183,10 @@ impl Graph {
         computed: &mut HashMap<NodeId, (u64, Arc<Vec<Field>>)>,
         in_progress: &mut HashSet<NodeId>,
     ) -> Result<Arc<Vec<Field>>> {
+        // Bail as soon as a newer change has superseded this evaluation.
+        if request.cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
         // Already produced in this pull (e.g. a diamond's shared ancestor).
         if let Some((_, outputs)) = computed.get(&id) {
             return Ok(Arc::clone(outputs));
@@ -214,7 +239,8 @@ impl Graph {
             inputs.push(field);
         }
 
-        let ctx = EvalContext::new(request.width, request.height, request.region, seed);
+        let ctx = EvalContext::new(request.width, request.height, request.region, seed)
+            .with_cancel(request.cancel.clone());
         let outputs = Arc::new(node.operator.eval(&inputs, &node.params, &ctx)?);
 
         // Endpoints are neither pinned nor flushed to the persistent cache, so
@@ -224,6 +250,67 @@ impl Graph {
         }
         in_progress.remove(&id);
         Ok(outputs)
+    }
+
+    /// Reports, for every node reachable from `target`, whether its result is
+    /// currently cached (`true`) or would recompute (`false`) for `request`.
+    ///
+    /// This is the read-only signal behind the canvas stale-vs-cached indicators.
+    /// It recomputes each node's cache key (cheap, no evaluation) and checks it
+    /// against the cache without perturbing eval or recency. Endpoints are never
+    /// cached, so they always report `false`.
+    ///
+    /// # Errors
+    ///
+    /// Same structural errors as [`evaluate`](Self::evaluate): [`Error::Cycle`],
+    /// [`Error::NodeNotFound`], or [`Error::DisconnectedInput`].
+    pub fn cache_status(
+        &self,
+        target: NodeId,
+        request: &EvalRequest,
+        cache: &EvalCache,
+    ) -> Result<HashMap<NodeId, bool>> {
+        let mut keys: HashMap<NodeId, u64> = HashMap::new();
+        let mut in_progress: HashSet<NodeId> = HashSet::new();
+        self.node_key(target, request, &mut keys, &mut in_progress)?;
+        Ok(keys
+            .iter()
+            .map(|(&id, &key)| (id, cache.is_valid(id, key)))
+            .collect())
+    }
+
+    /// Recomputes a node's cache key (and, memoized in `keys`, its upstream
+    /// nodes') without evaluating anything. Mirrors the key composition in
+    /// [`pull`](Self::pull): a node's key is built from its upstream keys.
+    fn node_key(
+        &self,
+        id: NodeId,
+        request: &EvalRequest,
+        keys: &mut HashMap<NodeId, u64>,
+        in_progress: &mut HashSet<NodeId>,
+    ) -> Result<u64> {
+        if let Some(&key) = keys.get(&id) {
+            return Ok(key);
+        }
+        if !in_progress.insert(id) {
+            return Err(Error::Cycle);
+        }
+        let node = self.node(id).ok_or(Error::NodeNotFound)?;
+
+        let mut input_keys: Vec<u64> = Vec::with_capacity(node.inputs.len());
+        for (port, slot) in node.inputs.iter().enumerate() {
+            let conn = slot.as_ref().ok_or(Error::DisconnectedInput {
+                type_id: node.type_id,
+                port,
+            })?;
+            input_keys.push(self.node_key(conn.source, request, keys, in_progress)?);
+        }
+
+        let seed = derive_seed(request.seed, node.stable_id);
+        let key = compute_key(node.type_id, &node.params, &input_keys, request, seed);
+        keys.insert(id, key);
+        in_progress.remove(&id);
+        Ok(key)
     }
 }
 
@@ -561,5 +648,95 @@ mod tests {
                 port: 0
             }
         ));
+    }
+
+    #[test]
+    fn graph_evaluates_on_a_worker_thread() {
+        // Compiles only if Graph (and thus Box<dyn Operator>) is Send, which the
+        // Operator: Send + Sync bound provides.
+        let mut graph = Graph::new();
+        let head = graph.add_op(
+            Box::new(CountingGen {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new(),
+        );
+        let req = request();
+        let on_worker = std::thread::spawn(move || {
+            let mut cache = EvalCache::new(8);
+            graph.evaluate(head, &req, &mut cache).unwrap()[0].content_hash()
+        })
+        .join()
+        .unwrap();
+
+        // Same bytes as evaluating locally (determinism is thread-independent).
+        let mut graph = Graph::new();
+        let head = graph.add_op(
+            Box::new(CountingGen {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new(),
+        );
+        let local = graph
+            .evaluate(head, &request(), &mut EvalCache::new(8))
+            .unwrap()[0]
+            .content_hash();
+        assert_eq!(on_worker, local);
+    }
+
+    #[test]
+    fn cancellation_aborts_evaluation() {
+        let cancel = crate::CancelToken::new();
+        cancel.cancel();
+
+        let mut graph = Graph::new();
+        let head = graph.add_op(
+            Box::new(CountingGen {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new(),
+        );
+        let req = request().with_cancel(cancel);
+        let err = graph
+            .evaluate(head, &req, &mut EvalCache::new(8))
+            .unwrap_err();
+        assert!(matches!(err, Error::Cancelled));
+    }
+
+    #[test]
+    fn cache_status_reflects_staleness() {
+        let mut graph = Graph::new();
+        let head = graph.add_op(
+            Box::new(CountingGen {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new(),
+        );
+        let add = graph.add_op(
+            Box::new(CountingAdd {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new().with("delta", ParamValue::Float(0.25)),
+        );
+        graph.connect(head, 0, add, 0).unwrap();
+
+        let req = request();
+        let mut cache = EvalCache::new(8);
+
+        // Nothing evaluated yet: both stale.
+        let status = graph.cache_status(add, &req, &cache).unwrap();
+        assert!(!status[&head] && !status[&add]);
+
+        graph.evaluate(add, &req, &mut cache).unwrap();
+        let status = graph.cache_status(add, &req, &cache).unwrap();
+        assert!(status[&head] && status[&add], "both cached after eval");
+
+        // Change only the downstream node: the generator stays cached, add goes stale.
+        graph
+            .set_params(add, Params::new().with("delta", ParamValue::Float(0.5)))
+            .unwrap();
+        let status = graph.cache_status(add, &req, &cache).unwrap();
+        assert!(status[&head], "unchanged upstream stays cached");
+        assert!(!status[&add], "changed node is stale");
     }
 }
