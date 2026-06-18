@@ -445,6 +445,40 @@ mod tests {
         }
     }
 
+    /// A two-input modifier that sums the height layers of both inputs, counting
+    /// evaluations. The first real merge node (issue #14) will be shaped like this;
+    /// here it exercises multi-input gathering and the diamond shared-ancestor case.
+    struct CountingMerge {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Operator for CountingMerge {
+        fn spec(&self) -> NodeSpec {
+            NodeSpec {
+                type_id: "test.merge",
+                category: "test",
+                tags: &[],
+                inputs: vec![PortSpec::new("a"), PortSpec::new("b")],
+                outputs: vec![PortSpec::new("out")],
+                params: Vec::new(),
+            }
+        }
+
+        fn eval(&self, inputs: &[&Field], _: &Params, _: &EvalContext) -> Result<Vec<Field>> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            // The evaluator gathers every input slot before calling eval, so both
+            // inputs are present here; an unwired port would have failed upstream.
+            let a = inputs[0].layer_or(layers::HEIGHT, 0.0);
+            let b = inputs[1].layer_or(layers::HEIGHT, 0.0);
+            let layer = Layer::from_fn(inputs[0].width(), inputs[0].height(), |x, y| {
+                a.get(x, y).unwrap_or(0.0) + b.get(x, y).unwrap_or(0.0)
+            });
+            let mut out = inputs[0].clone();
+            out.set_layer(layers::HEIGHT, Arc::new(layer));
+            Ok(vec![out])
+        }
+    }
+
     fn request() -> EvalRequest {
         EvalRequest::new(16, 16, Region::UNIT, 42)
     }
@@ -542,6 +576,98 @@ mod tests {
         graph.evaluate(add, &request(), &mut cache).unwrap();
         assert_eq!(gen_calls.load(Ordering::Relaxed), 1);
         assert_eq!(add_calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn diamond_evaluates_the_shared_ancestor_once_and_merges_correctly() {
+        // A splits into two branches B and C, which merge into D:
+        //   A -> B \
+        //   A -> C  > D
+        // The shared ancestor A must evaluate once, not once per branch, and the
+        // merge must see the same A on both inputs.
+        let gen_calls = Arc::new(AtomicUsize::new(0));
+        let b_calls = Arc::new(AtomicUsize::new(0));
+        let c_calls = Arc::new(AtomicUsize::new(0));
+        let merge_calls = Arc::new(AtomicUsize::new(0));
+
+        let mut graph = Graph::new();
+        let a = graph.add_op(
+            Box::new(CountingGen {
+                calls: Arc::clone(&gen_calls),
+            }),
+            Params::new(),
+        );
+        let b = graph.add_op(
+            Box::new(CountingAdd {
+                calls: Arc::clone(&b_calls),
+            }),
+            Params::new().with("delta", ParamValue::Float(0.1)),
+        );
+        let c = graph.add_op(
+            Box::new(CountingAdd {
+                calls: Arc::clone(&c_calls),
+            }),
+            Params::new().with("delta", ParamValue::Float(0.2)),
+        );
+        let d = graph.add_op(
+            Box::new(CountingMerge {
+                calls: Arc::clone(&merge_calls),
+            }),
+            Params::new(),
+        );
+        graph.connect(a, 0, b, 0).unwrap();
+        graph.connect(a, 0, c, 0).unwrap();
+        graph.connect(b, 0, d, 0).unwrap();
+        graph.connect(c, 0, d, 1).unwrap();
+
+        let mut cache = EvalCache::new(16);
+        let out = graph.evaluate(d, &request(), &mut cache).unwrap();
+
+        // The shared ancestor evaluated exactly once despite feeding two branches;
+        // every other node once.
+        assert_eq!(
+            gen_calls.load(Ordering::Relaxed),
+            1,
+            "shared ancestor must evaluate once, not per branch"
+        );
+        assert_eq!(b_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(c_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(merge_calls.load(Ordering::Relaxed), 1);
+
+        // Both branches saw the same A, so the merge is (A+0.1) + (A+0.2), uniform
+        // across the field. A's own value comes from an independent lone-generator
+        // build: it has the same stable_id (0) and seed, so it reproduces A exactly.
+        let a_value = {
+            let mut g = Graph::new();
+            let lone = g.add_op(
+                Box::new(CountingGen {
+                    calls: Arc::new(AtomicUsize::new(0)),
+                }),
+                Params::new(),
+            );
+            let mut c = EvalCache::new(4);
+            g.evaluate(lone, &request(), &mut c).unwrap()[0]
+                .layer(layers::HEIGHT)
+                .unwrap()
+                .as_slice()[0]
+        };
+        let height = out[0].layer(layers::HEIGHT).unwrap();
+        let value = height.as_slice()[0];
+        assert!(
+            height.as_slice().iter().all(|&v| (v - value).abs() < 1e-6),
+            "merge output must be uniform"
+        );
+        assert!(
+            (value - (2.0 * a_value + 0.3)).abs() < 1e-6,
+            "merge must sum both branches over the same shared ancestor"
+        );
+
+        // Re-evaluating the diamond is fully served from cache: nothing recomputes.
+        graph.evaluate(d, &request(), &mut cache).unwrap();
+        assert_eq!(gen_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(b_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(c_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(merge_calls.load(Ordering::Relaxed), 1);
     }
 
     #[test]
