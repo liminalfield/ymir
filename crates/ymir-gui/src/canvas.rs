@@ -26,6 +26,31 @@ pub(crate) type Handle = u64;
 /// graph before snarl is touched, so core stays the single source of truth.
 pub(crate) struct GraphViewer<'a> {
     pub(crate) graph: &'a mut Graph,
+    /// The currently selected node, for the header highlight. Input, read-only.
+    pub(crate) selected: Option<Handle>,
+    /// Each node's final rect with its handle, collected during rendering. These
+    /// are in the canvas's local (graph) space, not screen space. The canvas
+    /// resolves a plain click to a node from these after the frame, rather than
+    /// registering a competing interaction — so the collapse chevron, the pins, and
+    /// node dragging all keep their own input. Output.
+    pub(crate) node_rects: Vec<(Handle, egui::Rect)>,
+    /// The canvas pan/zoom transform (local graph space to screen). snarl reports
+    /// it each frame; the canvas uses its inverse to map a screen click back into
+    /// the local space the node rects live in. Output.
+    pub(crate) to_global: egui::emath::TSTransform,
+}
+
+impl<'a> GraphViewer<'a> {
+    /// A viewer for graph-structure tests that do not exercise selection.
+    #[cfg(test)]
+    fn for_test(graph: &'a mut Graph) -> Self {
+        Self {
+            graph,
+            selected: None,
+            node_rects: Vec::new(),
+            to_global: egui::emath::TSTransform::IDENTITY,
+        }
+    }
 }
 
 impl GraphViewer<'_> {
@@ -64,6 +89,62 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
             Some(spec) => tr(&format!("node-{}", spec.type_id)).to_string(),
             None => "<missing>".to_string(),
         }
+    }
+
+    fn show_header(
+        &mut self,
+        node: SnarlNodeId,
+        _inputs: &[InPin],
+        _outputs: &[OutPin],
+        ui: &mut egui::Ui,
+        snarl: &mut Snarl<Handle>,
+    ) {
+        let handle = snarl.get_node(node).copied();
+        let title = handle
+            .and_then(|h| self.core_id(h))
+            .and_then(|id| self.graph.spec(id))
+            .map_or_else(
+                || "<missing>".to_string(),
+                |spec| tr(&format!("node-{}", spec.type_id)).to_string(),
+            );
+        // The title is purely visual; selection is handled over the whole node in
+        // `final_node_rect`. Selection shows as bold accent text. `selectable(false)`
+        // keeps the title from being text-selectable, so it shows the normal cursor
+        // (not a text I-beam) and reads as a node title, not editable text.
+        let is_selected = handle.is_some() && handle == self.selected;
+        let text = if is_selected {
+            egui::RichText::new(title)
+                .strong()
+                .color(ui.visuals().selection.stroke.color)
+        } else {
+            egui::RichText::new(title)
+        };
+        ui.add(egui::Label::new(text).selectable(false));
+    }
+
+    fn final_node_rect(
+        &mut self,
+        node: SnarlNodeId,
+        rect: egui::Rect,
+        _ui: &mut egui::Ui,
+        snarl: &mut Snarl<Handle>,
+    ) {
+        // Record the node's rect for post-frame click resolution. Deliberately no
+        // interaction here: registering one would sit on top of snarl's own widgets
+        // (the collapse chevron, the pins) and swallow their clicks.
+        if let Some(handle) = snarl.get_node(node).copied() {
+            self.node_rects.push((handle, rect));
+        }
+    }
+
+    fn current_transform(
+        &mut self,
+        to_global: &mut egui::emath::TSTransform,
+        _snarl: &mut Snarl<Handle>,
+    ) {
+        // Capture (do not change) the pan/zoom transform, so a screen click can be
+        // mapped into the local space the node rects are recorded in.
+        self.to_global = *to_global;
     }
 
     fn inputs(&mut self, node: &Handle) -> usize {
@@ -256,7 +337,7 @@ mod tests {
 
         let head_handle = graph.stable_id(head).expect("handle");
         let modr_handle = graph.stable_id(modr).expect("handle");
-        let mut viewer = GraphViewer { graph: &mut graph };
+        let mut viewer = GraphViewer::for_test(&mut graph);
 
         assert_eq!(viewer.title(&head_handle), tr("node-generator.fbm"));
         assert_eq!(viewer.inputs(&head_handle), 0);
@@ -277,7 +358,7 @@ mod tests {
         );
 
         let (out, inp) = pins(&snarl, s_head, s_modr);
-        GraphViewer { graph: &mut graph }.connect(&out, &inp, &mut snarl);
+        GraphViewer::for_test(&mut graph).connect(&out, &inp, &mut snarl);
 
         assert!(edge_exists(&graph, head, modr));
         assert_eq!(wires_into(&snarl, s_modr), 1);
@@ -293,12 +374,12 @@ mod tests {
         let (sa, sb) = (snarl_id(&snarl, &graph, a), snarl_id(&snarl, &graph, b));
 
         let (out, inp) = pins(&snarl, sa, sb);
-        GraphViewer { graph: &mut graph }.connect(&out, &inp, &mut snarl);
+        GraphViewer::for_test(&mut graph).connect(&out, &inp, &mut snarl);
         assert!(edge_exists(&graph, a, b));
 
         // b -> a would close a loop: refused in core and never wired in snarl.
         let (out, inp) = pins(&snarl, sb, sa);
-        GraphViewer { graph: &mut graph }.connect(&out, &inp, &mut snarl);
+        GraphViewer::for_test(&mut graph).connect(&out, &inp, &mut snarl);
         assert!(!edge_exists(&graph, b, a));
         assert_eq!(wires_into(&snarl, sa), 0);
         assert_in_sync(&graph, &snarl);
@@ -318,9 +399,9 @@ mod tests {
         );
 
         let (out, inp) = pins(&snarl, s1, sm);
-        GraphViewer { graph: &mut graph }.connect(&out, &inp, &mut snarl);
+        GraphViewer::for_test(&mut graph).connect(&out, &inp, &mut snarl);
         let (out, inp) = pins(&snarl, s2, sm);
-        GraphViewer { graph: &mut graph }.connect(&out, &inp, &mut snarl);
+        GraphViewer::for_test(&mut graph).connect(&out, &inp, &mut snarl);
 
         assert!(edge_exists(&graph, g2, modr));
         assert!(!edge_exists(&graph, g1, modr));
@@ -340,9 +421,9 @@ mod tests {
         );
 
         let (out, inp) = pins(&snarl, sh, sm);
-        GraphViewer { graph: &mut graph }.connect(&out, &inp, &mut snarl);
+        GraphViewer::for_test(&mut graph).connect(&out, &inp, &mut snarl);
         let (out, inp) = pins(&snarl, sh, sm);
-        GraphViewer { graph: &mut graph }.disconnect(&out, &inp, &mut snarl);
+        GraphViewer::for_test(&mut graph).disconnect(&out, &inp, &mut snarl);
 
         assert!(!edge_exists(&graph, head, modr));
         assert_eq!(wires_into(&snarl, sm), 0);
@@ -360,7 +441,7 @@ mod tests {
             snarl_id(&snarl, &graph, modr),
         );
         let (out, inp) = pins(&snarl, sh, sm);
-        GraphViewer { graph: &mut graph }.connect(&out, &inp, &mut snarl);
+        GraphViewer::for_test(&mut graph).connect(&out, &inp, &mut snarl);
 
         remove_snarl_node(&mut graph, &mut snarl, sh);
         assert_eq!(graph.node_count(), 1);

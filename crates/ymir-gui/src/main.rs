@@ -21,6 +21,8 @@ use ymir_nodes::{CategoryDef, categories, find_category, tr};
 // core graph, per the policy confirmed by the spike (issue #5).
 mod canvas;
 use canvas::Handle;
+// The parameter inspector: ParamSpec-driven widgets, no per-node code.
+mod param_ui;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -53,6 +55,9 @@ struct AppState {
     /// The canvas view over `graph`: snarl holds only node handles (`stable_id`)
     /// and view-state (positions), never a copy of node data.
     snarl: Snarl<Handle>,
+    /// The node selected on the canvas (its `stable_id`), whose parameters the
+    /// inspector edits. Refreshed each frame from the canvas selection.
+    selected: Option<Handle>,
     /// The selected palette tab (defaults to the first category on first draw).
     active_tab: Option<ActiveTab>,
     /// The node-search query; when non-empty it overrides the active tab.
@@ -68,6 +73,7 @@ impl AppState {
         Self {
             graph: Graph::new(),
             snarl: Snarl::new(),
+            selected: None,
             active_tab: None,
             search: String::new(),
             field: placeholder_field(),
@@ -250,9 +256,43 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
 }
 inventory::submit! { PaneKind { id: "ribbon", draw: ribbon_pane } }
 
-fn params_pane(ui: &mut egui::Ui, _state: &mut AppState) {
+fn params_pane(ui: &mut egui::Ui, state: &mut AppState) {
     ui.heading("Parameters");
-    ui.weak("(node / global parameter tabs — placeholder)");
+
+    // Resolve the selected handle to a live node; nothing selected (or it was
+    // deleted) shows a hint, not an error.
+    let Some(id) = state.selected.and_then(|h| state.graph.node_id_of(h)) else {
+        ui.weak("Select a node to edit its parameters.");
+        return;
+    };
+    let Some(spec) = state.graph.spec(id) else {
+        ui.weak("Select a node to edit its parameters.");
+        return;
+    };
+
+    ui.label(tr(&format!("node-{}", spec.type_id)));
+    if spec.params.is_empty() {
+        ui.weak("This node has no parameters.");
+        return;
+    }
+
+    // Edit against a clone of the current params, then write back once if anything
+    // changed. The graph stays the single source of truth.
+    let mut params = state.graph.params(id).cloned().unwrap_or_default();
+    let mut changed = false;
+    for pspec in &spec.params {
+        let current = param_ui::current_value(&params, pspec);
+        if let Some(new_value) = param_ui::edit(ui, pspec, &current) {
+            params.insert(pspec.name.clone(), new_value);
+            changed = true;
+        }
+    }
+
+    if changed && let Err(err) = state.graph.set_params(id, params) {
+        // The node would have to vanish mid-frame to reach here; surface it rather
+        // than swallow it.
+        ui.colored_label(ui.visuals().error_fg_color, err.to_string());
+    }
 }
 inventory::submit! { PaneKind { id: "params", draw: params_pane } }
 
@@ -284,11 +324,59 @@ inventory::submit! { PaneKind { id: "preview-2d", draw: preview_2d_pane } }
 fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // Disjoint borrows: the viewer holds the graph while snarl is rendered. Both
     // are distinct fields of the state, so this split is sound.
-    let AppState { graph, snarl, .. } = state;
-    let mut viewer = canvas::GraphViewer { graph };
-    SnarlWidget::new()
+    let AppState {
+        graph,
+        snarl,
+        selected,
+        ..
+    } = &mut *state;
+    let mut viewer = canvas::GraphViewer {
+        graph,
+        selected: *selected,
+        node_rects: Vec::new(),
+        to_global: egui::emath::TSTransform::IDENTITY,
+    };
+    let response = SnarlWidget::new()
         .id_salt("ymir-canvas")
         .show(snarl, &mut viewer, ui);
+
+    // Resolve selection from a plain click (snarl 0.10 only selects on shift-click).
+    // A click is a press-and-release without movement, so drags — wiring from or to
+    // a pin, and node moves — are excluded automatically and keep their behavior.
+    // Reading the pointer rather than registering an interaction leaves snarl's own
+    // widgets (the collapse chevron, the pins) their clicks.
+    let click = ui
+        .ctx()
+        .input(|i| {
+            i.pointer
+                .primary_clicked()
+                .then(|| i.pointer.interact_pos())
+        })
+        .flatten();
+    if let Some(screen_pos) = click.filter(|p| response.rect.contains(*p)) {
+        // Node rects are in the canvas's local space; map the screen click back into
+        // it through the inverse pan/zoom transform before hit-testing.
+        let pos = viewer.to_global.inverse() * screen_pos;
+        match viewer
+            .node_rects
+            .iter()
+            .find(|(_, rect)| rect.contains(pos))
+        {
+            Some((handle, rect)) => {
+                // The collapse chevron sits at the header's top-left and toggles the
+                // node; a click there must not also select. Exclude that corner.
+                let chevron = egui::Rect::from_min_size(
+                    rect.min,
+                    egui::Vec2::splat(ui.spacing().icon_width + 12.0),
+                );
+                if !chevron.contains(pos) {
+                    *selected = Some(*handle);
+                }
+            }
+            // A click on empty canvas clears the selection.
+            None => *selected = None,
+        }
+    }
 }
 inventory::submit! { PaneKind { id: "canvas", draw: canvas_pane } }
 
