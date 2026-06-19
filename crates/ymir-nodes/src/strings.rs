@@ -15,12 +15,19 @@ pub fn tr(key: &str) -> &str {
     match key {
         // Categories.
         "category-noise" => "Noise",
+        "category-combine" => "Combine",
         "category-erosion" => "Erosion",
         "category-output" => "Output",
 
         // fBm generator.
         "node-generator.fbm" => "fBm Noise",
         "node-generator.fbm-desc" => "Fractional Brownian motion of Perlin noise.",
+
+        // Combine / blend.
+        "node-modifier.combine" => "Combine",
+        "node-modifier.combine-desc" => {
+            "Merges two fields: add, multiply, min, max, or a mask-weighted mix."
+        }
 
         // Thermal erosion.
         "node-modifier.thermal_erosion" => "Thermal Erosion",

@@ -67,6 +67,7 @@ mod tests {
             [
                 "endpoint.export",
                 "generator.fbm",
+                "modifier.combine",
                 "modifier.thermal_erosion"
             ],
         );

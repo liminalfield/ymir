@@ -11,6 +11,7 @@
 //! string does not reference this crate and would let the linker drop it.
 
 mod category;
+mod combine;
 mod export;
 mod fbm;
 mod noise;
@@ -18,6 +19,7 @@ mod strings;
 mod thermal;
 
 pub use category::{CategoryDef, categories, find_category};
+pub use combine::Combine;
 pub use export::ExportPng;
 pub use fbm::Fbm;
 pub use strings::tr;
