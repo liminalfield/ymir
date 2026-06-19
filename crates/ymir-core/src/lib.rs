@@ -46,6 +46,6 @@ pub use graph::{Graph, NodeId};
 pub use hash::ContentHash;
 pub use layer::Layer;
 pub use operator::{Operator, OperatorClone};
-pub use param::{ParamKind, ParamSpec, ParamValue, Params};
+pub use param::{Curve, ParamKind, ParamSpec, ParamValue, Params};
 pub use region::Region;
 pub use spec::{NodeKind, NodeSpec, PortSpec};

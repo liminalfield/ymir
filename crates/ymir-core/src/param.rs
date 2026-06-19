@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use crate::hash::{ContentHash, Fnv1a64};
 
-/// A single parameter value, one of four scalar kinds.
+/// A single parameter value.
 ///
 /// Floats are `f64` for configuration precision; an operator casts to `f32` when
 /// it applies the value to a field. There is intentionally no `std::hash::Hash`
@@ -22,6 +22,8 @@ pub enum ParamValue {
     Bool(bool),
     /// A text value.
     Text(String),
+    /// A transfer curve (control points), for shaping nodes.
+    Curve(Curve),
 }
 
 /// Canonical bit pattern of an `f64` for equality and hashing: every NaN maps to
@@ -36,6 +38,111 @@ fn canonical_f64_bits(v: f64) -> u64 {
     }
 }
 
+/// Canonical bit pattern of an `f32` (for curve control points), with the same NaN
+/// and signed-zero normalization as [`canonical_f64_bits`].
+fn canonical_f32_bits(v: f32) -> u32 {
+    if v.is_nan() {
+        f32::NAN.to_bits()
+    } else if v == 0.0 {
+        0
+    } else {
+        v.to_bits()
+    }
+}
+
+/// A transfer curve: control points in the unit square, evaluated by linear
+/// interpolation. Shaping nodes (remap, levels) carry their transfer function as a
+/// single editable `Curve` value rather than a handful of opaque sliders, which is
+/// what makes the shape visible and controllable. Points are sanitized to `[0, 1]`
+/// and sorted by `x`; a value off the ends holds the nearest endpoint.
+#[derive(Clone, Debug)]
+pub struct Curve {
+    points: Vec<(f32, f32)>,
+}
+
+impl Curve {
+    /// Builds a curve, sanitizing each point: NaN becomes `0`, both coordinates
+    /// clamp to `[0, 1]`, and the points are sorted by `x`.
+    #[must_use]
+    pub fn new(points: impl IntoIterator<Item = (f32, f32)>) -> Self {
+        let clamp = |v: f32| if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) };
+        let mut points: Vec<(f32, f32)> = points
+            .into_iter()
+            .map(|(x, y)| (clamp(x), clamp(y)))
+            .collect();
+        points.sort_by(|a, b| a.0.total_cmp(&b.0));
+        Self { points }
+    }
+
+    /// The identity curve `y = x`.
+    #[must_use]
+    pub fn identity() -> Self {
+        Self::new([(0.0, 0.0), (1.0, 1.0)])
+    }
+
+    /// The control points, sorted by `x`.
+    #[must_use]
+    pub fn points(&self) -> &[(f32, f32)] {
+        &self.points
+    }
+
+    /// Evaluates the curve at `x` by linear interpolation, holding the nearest
+    /// endpoint outside the point range. An empty curve is the identity.
+    #[must_use]
+    pub fn sample(&self, x: f32) -> f32 {
+        match (self.points.first(), self.points.last()) {
+            (Some(&(first_x, first_y)), Some(&(last_x, last_y))) => {
+                if x <= first_x {
+                    return first_y;
+                }
+                if x >= last_x {
+                    return last_y;
+                }
+                for w in self.points.windows(2) {
+                    let (x0, y0) = w[0];
+                    let (x1, y1) = w[1];
+                    if x >= x0 && x <= x1 {
+                        let span = x1 - x0;
+                        if span <= f32::EPSILON {
+                            return y1;
+                        }
+                        return y0 + (y1 - y0) * (x - x0) / span;
+                    }
+                }
+                last_y
+            }
+            _ => x,
+        }
+    }
+
+    /// Folds the curve into a hash in point order, `f32` by canonical bits.
+    pub(crate) fn hash_into(&self, h: &mut Fnv1a64) {
+        h.write_usize(self.points.len());
+        for &(x, y) in &self.points {
+            h.write_u64(u64::from(canonical_f32_bits(x)));
+            h.write_u64(u64::from(canonical_f32_bits(y)));
+        }
+    }
+}
+
+impl PartialEq for Curve {
+    fn eq(&self, other: &Self) -> bool {
+        self.points.len() == other.points.len()
+            && self.points.iter().zip(&other.points).all(|(a, b)| {
+                canonical_f32_bits(a.0) == canonical_f32_bits(b.0)
+                    && canonical_f32_bits(a.1) == canonical_f32_bits(b.1)
+            })
+    }
+}
+
+impl Eq for Curve {}
+
+impl Default for Curve {
+    fn default() -> Self {
+        Self::identity()
+    }
+}
+
 impl PartialEq for ParamValue {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -45,6 +152,7 @@ impl PartialEq for ParamValue {
             (ParamValue::Int(a), ParamValue::Int(b)) => a == b,
             (ParamValue::Bool(a), ParamValue::Bool(b)) => a == b,
             (ParamValue::Text(a), ParamValue::Text(b)) => a == b,
+            (ParamValue::Curve(a), ParamValue::Curve(b)) => a == b,
             _ => false,
         }
     }
@@ -72,6 +180,10 @@ impl ParamValue {
             ParamValue::Text(s) => {
                 h.write_bytes(&[3]);
                 h.write_str(s);
+            }
+            ParamValue::Curve(c) => {
+                h.write_bytes(&[4]);
+                c.hash_into(h);
             }
         }
     }
@@ -147,6 +259,15 @@ impl Params {
         }
     }
 
+    /// Returns the curve at `name`, or `default` if absent or not a curve.
+    #[must_use]
+    pub fn get_curve<'a>(&'a self, name: &str, default: &'a Curve) -> &'a Curve {
+        match self.0.get(name) {
+            Some(ParamValue::Curve(c)) => c,
+            _ => default,
+        }
+    }
+
     /// Iterates the parameters in name order.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &ParamValue)> {
         self.0.iter().map(|(k, v)| (k.as_str(), v))
@@ -204,6 +325,9 @@ pub enum ParamKind {
         /// The selectable option ids, in display order.
         options: &'static [&'static str],
     },
+    /// A transfer curve, edited as a visual curve widget. The value is a
+    /// [`ParamValue::Curve`].
+    Curve,
 }
 
 /// The schema for one parameter: its name, kind, and default value.
@@ -241,7 +365,8 @@ fn default_matches_kind(kind: &ParamKind, default: &ParamValue) -> bool {
         (ParamKind::Float { .. }, ParamValue::Float(_))
         | (ParamKind::Int { .. }, ParamValue::Int(_))
         | (ParamKind::Bool, ParamValue::Bool(_))
-        | (ParamKind::Text, ParamValue::Text(_)) => true,
+        | (ParamKind::Text, ParamValue::Text(_))
+        | (ParamKind::Curve, ParamValue::Curve(_)) => true,
         (ParamKind::Enum { options }, ParamValue::Text(value)) => options.contains(&value.as_str()),
         _ => false,
     }
@@ -314,6 +439,57 @@ mod tests {
 
         let c = a.clone().with("octaves", ParamValue::Int(6));
         assert_ne!(a.content_hash(), c.content_hash());
+    }
+
+    #[test]
+    fn curve_samples_linearly_and_holds_the_ends() {
+        // A peak: up to 1 at x=0.5, back down to 0 at x=1.
+        let c = Curve::new([(0.0, 0.0), (0.5, 1.0), (1.0, 0.0)]);
+        assert!((c.sample(0.0) - 0.0).abs() < 1e-6);
+        assert!((c.sample(0.25) - 0.5).abs() < 1e-6);
+        assert!((c.sample(0.5) - 1.0).abs() < 1e-6);
+        assert!((c.sample(0.75) - 0.5).abs() < 1e-6);
+        assert!((c.sample(1.0) - 0.0).abs() < 1e-6);
+        // Off the ends holds the nearest endpoint.
+        assert_eq!(c.sample(-0.5), 0.0);
+        assert_eq!(c.sample(2.0), 0.0);
+    }
+
+    #[test]
+    fn identity_curve_is_y_equals_x() {
+        let c = Curve::identity();
+        for x in [0.0_f32, 0.3, 0.7, 1.0] {
+            assert!((c.sample(x) - x).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn curve_new_sanitizes_and_sorts() {
+        // Out of order, out of range, and a NaN x are all cleaned up.
+        let c = Curve::new([(1.0, 2.0), (f32::NAN, 0.5), (0.5, -1.0)]);
+        assert_eq!(c.points(), &[(0.0, 0.5), (0.5, 0.0), (1.0, 1.0)]);
+    }
+
+    #[test]
+    fn equal_curves_hash_equal_as_param_values() {
+        let a = ParamValue::Curve(Curve::new([(0.0, 0.0), (1.0, 1.0)]));
+        let b = ParamValue::Curve(Curve::identity());
+        assert_eq!(a, b);
+        assert_eq!(hash(&a), hash(&b));
+        // A different curve is not equal and hashes differently.
+        let c = ParamValue::Curve(Curve::new([(0.0, 0.0), (1.0, 0.0)]));
+        assert_ne!(a, c);
+        assert_ne!(hash(&a), hash(&c));
+    }
+
+    #[test]
+    fn curve_paramspec_accepts_a_curve_default() {
+        let spec = ParamSpec::new(
+            "curve",
+            ParamKind::Curve,
+            ParamValue::Curve(Curve::identity()),
+        );
+        assert!(matches!(spec.kind, ParamKind::Curve));
     }
 
     #[test]
