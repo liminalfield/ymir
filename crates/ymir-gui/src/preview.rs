@@ -11,10 +11,14 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::thread::{self, JoinHandle};
 
 use eframe::egui;
-use ymir_core::{EvalCache, EvalRequest, Field, Graph, NodeId, layers};
+use ymir_core::{CancelToken, Error, EvalCache, EvalRequest, Field, Graph, NodeId, layers};
 
 /// Worker-side persistent cache capacity, in cached node results.
 const WORKER_CACHE_CAP: usize = 64;
+/// Minimum interval between preview submissions. A fast parameter drag throttles to
+/// this cadence instead of queuing a job every frame; the final, settled value is
+/// always submitted once the interval elapses (the trailing value wins).
+const DEBOUNCE_SECS: f64 = 0.08;
 
 /// A unit of preview work: a graph snapshot to evaluate for one target node.
 struct Job {
@@ -54,7 +58,15 @@ pub(crate) struct PreviewEngine {
     /// The job number currently shown; results at or below it are stale.
     shown: u64,
     /// The last output signature submitted, so unchanged work is not resubmitted.
-    last_key: Option<u64>,
+    submitted_key: Option<u64>,
+    /// A changed signature waiting for the debounce interval before submission;
+    /// always the latest, so the trailing value wins.
+    pending_key: Option<u64>,
+    /// Time of the last submission (seconds), for debounce throttling.
+    last_submit_time: f64,
+    /// Cancellation for the in-flight job, cancelled when a newer job supersedes it
+    /// so a slow erosion preview aborts instead of running to completion.
+    current_cancel: CancelToken,
     /// A structural error from the synchronous key check (e.g. a disconnected
     /// input), recomputed each frame; takes priority over a stale image.
     structural_error: Option<String>,
@@ -75,7 +87,10 @@ impl PreviewEngine {
             _worker: worker,
             generation: 0,
             shown: 0,
-            last_key: None,
+            submitted_key: None,
+            pending_key: None,
+            last_submit_time: 0.0,
+            current_cancel: CancelToken::new(),
             structural_error: None,
             eval_error: None,
             texture: None,
@@ -86,20 +101,31 @@ impl PreviewEngine {
     /// Submits a fresh evaluation if the previewed output would differ from the last
     /// one submitted. A structural error (disconnected input, cycle) is detected
     /// here, synchronously and cheaply, and shown instead of submitting work.
-    pub(crate) fn sync(&mut self, graph: &Graph, target: NodeId, request: EvalRequest) {
+    pub(crate) fn sync(&mut self, graph: &Graph, target: NodeId, request: EvalRequest, now: f64) {
         match graph.output_key(target, &request) {
             Ok(key) => {
                 self.structural_error = None;
-                if self.last_key != Some(key) {
-                    self.last_key = Some(key);
-                    self.submit(graph, target, request);
+                if self.submitted_key != Some(key) {
+                    // Remember the latest changed signature; it is submitted below
+                    // once the debounce interval elapses, so the trailing value wins.
+                    self.pending_key = Some(key);
                 }
             }
             Err(err) => {
                 self.structural_error = Some(err.to_string());
                 // Force a resubmit once the graph is valid again.
-                self.last_key = None;
+                self.submitted_key = None;
+                self.pending_key = None;
             }
+        }
+
+        if let Some(key) = self.pending_key
+            && now - self.last_submit_time >= DEBOUNCE_SECS
+        {
+            self.submitted_key = Some(key);
+            self.pending_key = None;
+            self.last_submit_time = now;
+            self.submit(graph, target, request);
         }
     }
 
@@ -107,11 +133,15 @@ impl PreviewEngine {
         let Some(target) = graph.stable_id(target) else {
             return;
         };
+        // Abort whatever the worker is currently evaluating: it is now superseded.
+        self.current_cancel.cancel();
+        let cancel = CancelToken::new();
+        self.current_cancel = cancel.clone();
         self.generation += 1;
         let job = Job {
             graph: graph.clone(),
             target,
-            request,
+            request: request.with_cancel(cancel),
             generation: self.generation,
         };
         if self.job_tx.send(job).is_err() {
@@ -133,7 +163,10 @@ impl PreviewEngine {
                 }
             }
         }
-        if self.generation > self.shown {
+        // Keep ticking while a result is in flight or a debounced submit is due, so
+        // the async update and the trailing submit both happen promptly even when
+        // the UI would otherwise be idle.
+        if self.generation > self.shown || self.pending_key.is_some() {
             ctx.request_repaint();
         }
     }
@@ -199,25 +232,29 @@ fn worker_loop(job_rx: &Receiver<Job>, result_tx: &Sender<Outcome>) {
         while let Ok(newer) = job_rx.try_recv() {
             job = newer;
         }
-        let outcome = evaluate_job(&job, &mut cache);
-        if result_tx.send(outcome).is_err() {
+        // A cancelled job was superseded: evaluate_job returns None and nothing is
+        // reported, avoiding a flash of a stale or "cancelled" result.
+        if let Some(outcome) = evaluate_job(&job, &mut cache)
+            && result_tx.send(outcome).is_err()
+        {
             break; // the UI is gone
         }
     }
 }
 
 /// Evaluates one job's target to a single preview field, mapping every failure to a
-/// message rather than panicking.
-fn evaluate_job(job: &Job, cache: &mut EvalCache) -> Outcome {
+/// message rather than panicking. Returns `None` if the job was cancelled (a newer
+/// job superseded it), so it is not reported.
+fn evaluate_job(job: &Job, cache: &mut EvalCache) -> Option<Outcome> {
     let generation = job.generation;
     let Some(target) = job.graph.node_id_of(job.target) else {
-        return Outcome::Failed {
+        return Some(Outcome::Failed {
             generation,
             message: "node was removed".to_string(),
-        };
+        });
     };
     match job.graph.evaluate(target, &job.request, cache) {
-        Ok(outputs) => match outputs.first() {
+        Ok(outputs) => Some(match outputs.first() {
             Some(field) => Outcome::Ready {
                 generation,
                 field: field.clone(),
@@ -226,11 +263,12 @@ fn evaluate_job(job: &Job, cache: &mut EvalCache) -> Outcome {
                 generation,
                 message: "node has no output to preview".to_string(),
             },
-        },
-        Err(err) => Outcome::Failed {
+        }),
+        Err(Error::Cancelled) => None,
+        Err(err) => Some(Outcome::Failed {
             generation,
             message: err.to_string(),
-        },
+        }),
     }
 }
 
@@ -264,5 +302,28 @@ mod tests {
         assert_eq!(gray8(-0.5), 0);
         assert_eq!(gray8(1.5), 255);
         assert_eq!(gray8(0.5), 128);
+    }
+
+    #[test]
+    fn a_cancelled_job_reports_nothing() {
+        use ymir_core::{Params, Region, registry};
+
+        let mut graph = Graph::new();
+        let id = graph.add_op(registry::make("generator.fbm").expect("fbm"), Params::new());
+        let target = graph.stable_id(id).expect("stable id");
+
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        let job = Job {
+            graph,
+            target,
+            request: EvalRequest::new(32, 32, Region::UNIT, 0).with_cancel(cancel),
+            generation: 1,
+        };
+
+        // A superseded (pre-cancelled) job evaluates to nothing, so the worker
+        // reports no stale result.
+        let mut cache = EvalCache::new(4);
+        assert!(evaluate_job(&job, &mut cache).is_none());
     }
 }

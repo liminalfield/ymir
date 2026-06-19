@@ -336,7 +336,8 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // Submit a snapshot for off-thread evaluation if the output changed, collect any
     // result, and render — none of which blocks the UI thread.
     let request = EvalRequest::new(PREVIEW_RES, PREVIEW_RES, Region::UNIT, state.seed);
-    state.preview.sync(&state.graph, id, request);
+    let now = ui.input(|i| i.time);
+    state.preview.sync(&state.graph, id, request, now);
     state.preview.poll(ui.ctx());
     state.preview.show(ui);
 }
