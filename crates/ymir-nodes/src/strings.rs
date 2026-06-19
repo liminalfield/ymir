@@ -28,7 +28,7 @@ pub fn tr(key: &str) -> &str {
         // Combine / blend.
         "node-modifier.combine" => "Combine",
         "node-modifier.combine-desc" => {
-            "Merges two fields: add, multiply, min, max, or a mask-weighted mix."
+            "Merges two fields: add, subtract, multiply, min, max, or a mask-weighted mix."
         }
 
         // Mask generator.

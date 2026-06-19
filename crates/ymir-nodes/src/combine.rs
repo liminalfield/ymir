@@ -2,8 +2,8 @@
 //! operation.
 //!
 //! Inputs are `a` (the base) and `b` (the overlay). The op is selectable: add,
-//! multiply, min, max, or a mask-weighted mix (linear interpolation from `a` to
-//! `b`). The base's non-height layers pass through, and its `mask` layer drives the
+//! subtract, multiply, min, max, or a mask-weighted mix (linear interpolation from
+//! `a` to `b`). The base's non-height layers pass through, and its `mask` layer drives the
 //! mix weight. Mask-aware per the soft-layer contract: with no mask present the mix
 //! weight is uniform (`1.0`), so the node never gates on a mask.
 
@@ -20,11 +20,12 @@ const TYPE_ID: &str = "modifier.combine";
 
 /// Combine operation ids, in dropdown order. These are the stored param values.
 const OP_ADD: &str = "add";
+const OP_SUBTRACT: &str = "subtract";
 const OP_MULTIPLY: &str = "multiply";
 const OP_MIN: &str = "min";
 const OP_MAX: &str = "max";
 const OP_MIX: &str = "mix";
-const OPS: &[&str] = &[OP_ADD, OP_MULTIPLY, OP_MIN, OP_MAX, OP_MIX];
+const OPS: &[&str] = &[OP_ADD, OP_SUBTRACT, OP_MULTIPLY, OP_MIN, OP_MAX, OP_MIX];
 
 /// Two-input combine/blend modifier: inputs `a` (base) and `b` (overlay), one
 /// output.
@@ -36,7 +37,9 @@ impl Operator for Combine {
         NodeSpec {
             type_id: TYPE_ID,
             category: "combine",
-            tags: &["combine", "blend", "mix", "add", "multiply", "modifier"],
+            tags: &[
+                "combine", "blend", "mix", "add", "subtract", "multiply", "modifier",
+            ],
             inputs: vec![PortSpec::new("a"), PortSpec::new("b")],
             outputs: vec![PortSpec::new("out")],
             params: vec![ParamSpec::new(
@@ -66,6 +69,7 @@ impl Operator for Combine {
             let av = base.get(x, y).unwrap_or(0.0);
             let bv = overlay.get(x, y).unwrap_or(0.0);
             match op {
+                OP_SUBTRACT => av - bv,
                 OP_MULTIPLY => av * bv,
                 OP_MIN => av.min(bv),
                 OP_MAX => av.max(bv),
@@ -119,6 +123,7 @@ mod tests {
         let b = const_field(0.5);
         for (op, expected) in [
             (OP_ADD, 1.1_f32),
+            (OP_SUBTRACT, 0.1),
             (OP_MULTIPLY, 0.30),
             (OP_MIN, 0.5),
             (OP_MAX, 0.6),
