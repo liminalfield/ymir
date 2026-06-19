@@ -85,6 +85,18 @@ impl CanvasView {
             self.rect.center()
         }
     }
+
+    /// Maps a screen position into graph space, falling back to the visible centre
+    /// if the transform is degenerate, so a placement is never a non-finite point
+    /// (a NaN position panics egui's layout). Used to drop a node at the cursor.
+    fn graph_pos_finite(&self, screen: egui::Pos2) -> egui::Pos2 {
+        let mapped = self.graph_pos(screen);
+        if mapped.is_finite() {
+            mapped
+        } else {
+            self.center()
+        }
+    }
 }
 
 /// The data panes draw from. Panes receive `&mut AppState`, never the app shell,
@@ -113,6 +125,9 @@ struct AppState {
     active_tab: Option<ActiveTab>,
     /// The node-search query; when non-empty it overrides the active tab.
     search: String,
+    /// The cursor-anchored node-creation menu (issue #51), open only while the user
+    /// is picking a node. `None` when closed.
+    node_menu: Option<NodeMenu>,
 }
 
 impl AppState {
@@ -126,8 +141,27 @@ impl AppState {
             preview: PreviewEngine::new(),
             active_tab: None,
             search: String::new(),
+            node_menu: None,
         }
     }
+}
+
+/// The cursor-anchored node-creation menu (issue #51): opened with Space over the
+/// canvas, it drops the chosen node at the cursor. An empty search browses the
+/// categories (drilling into one to list its nodes); a non-empty search shows flat
+/// results across all categories.
+struct NodeMenu {
+    /// Where the menu opened, in screen space; the created node lands here.
+    anchor: egui::Pos2,
+    /// The canvas view captured at open time, giving the screen-to-graph mapping for
+    /// placement (stable even if the canvas re-lays-out while the menu is open).
+    view: CanvasView,
+    /// The filter query; non-empty overrides category browsing with flat results.
+    search: String,
+    /// The category drilled into; `None` is the top-level category list.
+    drilled: Option<&'static str>,
+    /// True only on the frame the menu opened, so the search field grabs focus once.
+    just_opened: bool,
 }
 
 // ---- palette: registry-driven node listing (pure, testable) -----------------
@@ -200,6 +234,31 @@ fn visible_nodes<'a>(
             .collect()
     } else {
         entries.iter().filter(|e| node_matches(e, &query)).collect()
+    }
+}
+
+/// What the node menu lists right now: the top-level categories, or a set of nodes
+/// (a drilled-in category, or flat search results).
+enum MenuBody<'a> {
+    Categories(Vec<&'static CategoryDef>),
+    Nodes(Vec<&'a NodeEntry>),
+}
+
+/// Chooses what the node menu shows. A non-empty search wins (flat results across
+/// all categories); otherwise a drilled-in category lists its nodes, and the top
+/// level lists the categories. Pure, so the navigation logic is unit-tested apart
+/// from the egui drawing.
+fn menu_body<'a>(
+    entries: &'a [NodeEntry],
+    search: &str,
+    drilled: Option<&'static str>,
+) -> MenuBody<'a> {
+    if !search.trim().is_empty() {
+        MenuBody::Nodes(visible_nodes(entries, None, search))
+    } else if let Some(cat) = drilled {
+        MenuBody::Nodes(visible_nodes(entries, Some(ActiveTab::Category(cat)), ""))
+    } else {
+        MenuBody::Categories(categories_sorted())
     }
 }
 
@@ -387,7 +446,126 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
 }
 inventory::submit! { PaneKind { id: "preview-2d", draw: preview_2d_pane } }
 
+/// Draws the cursor-anchored node-creation menu when open, and applies its outcome:
+/// drilling into a category, creating a node at the cursor, or closing. A no-op when
+/// the menu is closed.
+fn node_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
+    // Esc closes without creating. Checked before borrowing the menu so it can clear
+    // `node_menu` outright.
+    if state.node_menu.is_some() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        state.node_menu = None;
+    }
+    let Some(menu) = state.node_menu.as_mut() else {
+        return;
+    };
+
+    let entries = node_entries();
+    // Outcomes collected during the draw, applied after the menu borrow is released:
+    // a node to create, a new drill target, or a request to close.
+    let mut create: Option<&'static str> = None;
+    let mut drill: Option<Option<&'static str>> = None;
+
+    let area = egui::Area::new(egui::Id::new("ymir-node-menu"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(menu.anchor)
+        .constrain(true);
+    // A fixed menu width: rows fill it through a justified layout, so nothing
+    // queries `available_width`.
+    const MENU_WIDTH: f32 = 180.0;
+    let area_resp = area.show(ui.ctx(), |ui| {
+        egui::Frame::menu(ui.style()).show(ui, |ui| {
+            ui.set_width(MENU_WIDTH);
+
+            // A bare search field: a hint, not a label, so it costs no row after the
+            // first use and vanishes the moment you type.
+            let edit = egui::TextEdit::singleline(&mut menu.search)
+                .hint_text("filter nodes")
+                .desired_width(f32::INFINITY);
+            let resp = ui.add(edit);
+            if menu.just_opened {
+                resp.request_focus();
+                menu.just_opened = false;
+            }
+            ui.separator();
+
+            // The list sizes to its content each frame. No scroll area: a scroll
+            // area must size its viewport from the previous frame's content, so it
+            // lags (and, while egui is idle, sticks) when the list shrinks then grows
+            // across a drill-in/back. The current lists are short enough to fit; a
+            // scroll area is the deliberate addition for when a category can overflow
+            // the screen.
+            ui.with_layout(
+                egui::Layout::top_down_justified(egui::Align::Min),
+                |ui| match menu_body(&entries, &menu.search, menu.drilled) {
+                    MenuBody::Categories(cats) => {
+                        for cat in cats {
+                            let label = format!("{}  >", tr(&format!("category-{}", cat.id)));
+                            if menu_row(ui, &label) {
+                                drill = Some(Some(cat.id));
+                            }
+                        }
+                    }
+                    MenuBody::Nodes(nodes) => {
+                        // A back row returns to the categories (drill-in only, never
+                        // while searching, which has no category context).
+                        if menu.search.trim().is_empty()
+                            && menu.drilled.is_some()
+                            && menu_row(ui, "< back")
+                        {
+                            drill = Some(None);
+                        }
+                        if nodes.is_empty() {
+                            ui.weak("no matches");
+                        }
+                        for entry in nodes {
+                            if menu_row(ui, tr(&format!("node-{}", entry.type_id))) {
+                                create = Some(entry.type_id);
+                            }
+                        }
+                    }
+                },
+            );
+        });
+    });
+
+    // The placement view and anchor are Copy; read them out so the menu borrow can
+    // end before the state is mutated below.
+    let anchor = menu.anchor;
+    let view = menu.view;
+    let menu_rect = area_resp.response.rect;
+
+    // A primary press outside the menu dismisses it.
+    let clicked_outside = ui.input(|i| {
+        i.pointer.primary_pressed()
+            && i.pointer
+                .interact_pos()
+                .is_some_and(|p| !menu_rect.contains(p))
+    });
+
+    if clicked_outside {
+        state.node_menu = None;
+    } else if let Some(type_id) = create {
+        let pos = view.graph_pos_finite(anchor);
+        canvas::add_node(&mut state.graph, &mut state.snarl, type_id, pos);
+        state.node_menu = None;
+    } else if let Some(target) = drill
+        && let Some(menu) = state.node_menu.as_mut()
+    {
+        menu.drilled = target;
+    }
+}
+
+/// A menu row: a borderless selectable button that fills the row width under the
+/// caller's justified layout (so it never queries `available_width`).
+fn menu_row(ui: &mut egui::Ui, text: &str) -> bool {
+    ui.add(egui::Button::selectable(false, text)).clicked()
+}
+
 fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
+    // While the node menu is open it owns the pointer: skip canvas selection so a
+    // click on a menu row does not also select or clear under it.
+    let menu_open = state.node_menu.is_some();
+
     // The previewed node's status dot, for its header. Only a previewable selected
     // node has one (the preview evaluates a single target). Computed before the
     // disjoint borrow below, from read-only fields.
@@ -445,7 +623,10 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 .then(|| i.pointer.interact_pos())
         })
         .flatten();
-    if let Some(screen_pos) = click.filter(|p| canvas_rect.contains(*p)) {
+    if let Some(screen_pos) = click
+        .filter(|_| !menu_open)
+        .filter(|p| canvas_rect.contains(*p))
+    {
         // Node rects are in the canvas's local space; map the screen click back into
         // it through the inverse pan/zoom transform before hit-testing.
         let pos = viewer.to_global.inverse() * screen_pos;
@@ -474,6 +655,29 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // by CanvasView::center falling back to the screen centre, so placement stays
     // finite (a NaN position panics egui's layout) and on the canvas.
     state.canvas_view = view.rect.is_finite().then_some(view);
+
+    // Space over the canvas opens the node-creation menu at the cursor (issue #51),
+    // unless a text field already has focus (so a space typed elsewhere never opens
+    // it). The view captured above gives the screen-to-graph mapping for placement.
+    if state.node_menu.is_none() && !ui.ctx().egui_wants_keyboard_input() {
+        let anchor = ui
+            .input(|i| {
+                i.key_pressed(egui::Key::Space)
+                    .then(|| i.pointer.hover_pos())
+                    .flatten()
+            })
+            .filter(|p| canvas_rect.contains(*p));
+        if let (Some(anchor), Some(view)) = (anchor, state.canvas_view) {
+            state.node_menu = Some(NodeMenu {
+                anchor,
+                view,
+                search: String::new(),
+                drilled: None,
+                just_opened: true,
+            });
+        }
+    }
+    node_menu_ui(ui, state);
 }
 inventory::submit! { PaneKind { id: "canvas", draw: canvas_pane } }
 
@@ -661,6 +865,74 @@ mod tests {
         // Without a view yet, falls back near the origin.
         let fallback = spawn_pos(None, 0);
         assert!(fallback.x < 100.0 && fallback.y < 100.0);
+    }
+
+    #[test]
+    fn graph_pos_finite_falls_back_when_degenerate() {
+        // The node menu places at an arbitrary cursor point; a degenerate transform
+        // must not yield a non-finite position (which would panic egui's layout).
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let degenerate = CanvasView {
+            to_global: egui::emath::TSTransform::new(egui::vec2(0.0, 0.0), 0.0),
+            rect,
+        };
+        let p = degenerate.graph_pos_finite(egui::pos2(123.0, 456.0));
+        assert!(p.is_finite());
+        assert_eq!(p, degenerate.center());
+        // A valid transform maps the point straight through.
+        let view = CanvasView {
+            to_global: egui::emath::TSTransform::IDENTITY,
+            rect,
+        };
+        assert_eq!(
+            view.graph_pos_finite(egui::pos2(123.0, 456.0)),
+            egui::pos2(123.0, 456.0)
+        );
+    }
+
+    #[test]
+    fn menu_body_browses_categories_then_drills_in() {
+        let entries = node_entries();
+        // Empty search, no drill: the top-level category list.
+        match menu_body(&entries, "", None) {
+            MenuBody::Categories(cats) => {
+                let ids: Vec<&str> = cats.iter().map(|c| c.id).collect();
+                assert_eq!(
+                    ids,
+                    [
+                        "generator",
+                        "selector",
+                        "adjust",
+                        "combine",
+                        "geology",
+                        "output"
+                    ]
+                );
+            }
+            MenuBody::Nodes(_) => panic!("expected the category list at the top level"),
+        }
+        // Drilled into a category: only that category's nodes.
+        match menu_body(&entries, "", Some("adjust")) {
+            MenuBody::Nodes(nodes) => {
+                assert!(nodes.iter().all(|e| e.category == "adjust"));
+                assert!(nodes.iter().any(|e| e.type_id == "modifier.curve"));
+                assert!(nodes.iter().any(|e| e.type_id == "modifier.invert"));
+            }
+            MenuBody::Categories(_) => panic!("expected the drilled-in node list"),
+        }
+    }
+
+    #[test]
+    fn menu_body_search_is_flat_and_ignores_drill() {
+        let entries = node_entries();
+        // A non-empty search overrides drill state with flat results across all
+        // categories.
+        match menu_body(&entries, "fbm", Some("adjust")) {
+            MenuBody::Nodes(nodes) => {
+                assert!(nodes.iter().any(|e| e.type_id == "generator.fbm"));
+            }
+            MenuBody::Categories(_) => panic!("a search shows flat node results"),
+        }
     }
 
     #[test]
