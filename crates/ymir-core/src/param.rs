@@ -173,9 +173,9 @@ impl Params {
 
 /// The kind of a parameter: its value type and the editor it implies.
 ///
-/// Marked `#[non_exhaustive]` because it is expected to grow (a `Code` kind for a
-/// wrangler node, an `Enum { options }` kind), and growth should not be a
-/// breaking change for code that matches on it.
+/// Marked `#[non_exhaustive]` because it is expected to grow (e.g. a `Code` kind
+/// for a wrangler node), and growth should not be a breaking change for code that
+/// matches on it.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum ParamKind {
@@ -197,6 +197,13 @@ pub enum ParamKind {
     Bool,
     /// Free text.
     Text,
+    /// A choice from a fixed set of option ids. The value is the selected id as a
+    /// [`ParamValue::Text`]; the ids are resolved to display labels downstream via
+    /// `tr`, so this kind carries no prose.
+    Enum {
+        /// The selectable option ids, in display order.
+        options: &'static [&'static str],
+    },
 }
 
 /// The schema for one parameter: its name, kind, and default value.
@@ -227,15 +234,17 @@ impl ParamSpec {
     }
 }
 
-/// Whether a default value's variant is consistent with the declared kind.
+/// Whether a default value's variant is consistent with the declared kind. An
+/// `Enum` default must also be one of the declared options.
 fn default_matches_kind(kind: &ParamKind, default: &ParamValue) -> bool {
-    matches!(
-        (kind, default),
+    match (kind, default) {
         (ParamKind::Float { .. }, ParamValue::Float(_))
-            | (ParamKind::Int { .. }, ParamValue::Int(_))
-            | (ParamKind::Bool, ParamValue::Bool(_))
-            | (ParamKind::Text, ParamValue::Text(_))
-    )
+        | (ParamKind::Int { .. }, ParamValue::Int(_))
+        | (ParamKind::Bool, ParamValue::Bool(_))
+        | (ParamKind::Text, ParamValue::Text(_)) => true,
+        (ParamKind::Enum { options }, ParamValue::Text(value)) => options.contains(&value.as_str()),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -305,5 +314,21 @@ mod tests {
 
         let c = a.clone().with("octaves", ParamValue::Int(6));
         assert_ne!(a.content_hash(), c.content_hash());
+    }
+
+    #[test]
+    fn enum_kind_carries_options_and_a_valid_default() {
+        let spec = ParamSpec::new(
+            "op",
+            ParamKind::Enum {
+                options: &["add", "multiply", "mix"],
+            },
+            ParamValue::Text("mix".into()),
+        );
+        let ParamKind::Enum { options } = spec.kind else {
+            panic!("expected an enum kind");
+        };
+        assert_eq!(options, ["add", "multiply", "mix"]);
+        assert_eq!(spec.default, ParamValue::Text("mix".into()));
     }
 }

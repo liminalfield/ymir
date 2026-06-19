@@ -20,9 +20,11 @@ pub(crate) enum Widget {
     Checkbox,
     /// A single-line text field.
     Text,
+    /// A dropdown over a fixed set of option ids.
+    Dropdown { options: &'static [&'static str] },
     /// A kind this build cannot edit yet. `ParamKind` is `#[non_exhaustive]`, so a
-    /// future kind (an enum or code parameter) degrades to a read-only display
-    /// rather than risk corrupting a value it does not understand.
+    /// future kind degrades to a read-only display rather than risk corrupting a
+    /// value it does not understand.
     ReadOnly,
 }
 
@@ -39,6 +41,7 @@ pub(crate) fn widget_for(kind: &ParamKind) -> Widget {
         },
         ParamKind::Bool => Widget::Checkbox,
         ParamKind::Text => Widget::Text,
+        ParamKind::Enum { options } => Widget::Dropdown { options },
         // ParamKind is #[non_exhaustive]; an unknown future kind degrades, never
         // panics. This is graceful degradation, not a swallowed case.
         _ => Widget::ReadOnly,
@@ -107,6 +110,28 @@ pub(crate) fn edit(
                 .inner;
             resp.changed().then_some(ParamValue::Text(x))
         }
+        (Widget::Dropdown { options }, ParamValue::Text(v)) => {
+            let mut selected = v.clone();
+            let changed = ui
+                .horizontal(|ui| {
+                    ui.label(name);
+                    egui::ComboBox::from_id_salt(name)
+                        .selected_text(selected.clone())
+                        .show_ui(ui, |ui| {
+                            let mut changed = false;
+                            for option in options {
+                                changed |= ui
+                                    .selectable_value(&mut selected, (*option).to_string(), *option)
+                                    .changed();
+                            }
+                            changed
+                        })
+                        .inner
+                        .unwrap_or(false)
+                })
+                .inner;
+            changed.then_some(ParamValue::Text(selected))
+        }
         _ => {
             ui.horizontal(|ui| {
                 ui.label(name);
@@ -133,6 +158,14 @@ mod tests {
         );
         assert_eq!(widget_for(&ParamKind::Bool), Widget::Checkbox);
         assert_eq!(widget_for(&ParamKind::Text), Widget::Text);
+        assert_eq!(
+            widget_for(&ParamKind::Enum {
+                options: &["add", "mix"]
+            }),
+            Widget::Dropdown {
+                options: &["add", "mix"]
+            }
+        );
     }
 
     #[test]
