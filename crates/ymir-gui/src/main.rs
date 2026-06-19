@@ -8,13 +8,11 @@
 //! graph. The canvas and evaluator (steps 5 and 6) render and run that graph; for
 //! now the canvas shows the node count and the 2D preview shows a placeholder.
 
-use std::sync::Arc;
-
 use eframe::egui;
 use egui_snarl::Snarl;
 use egui_snarl::ui::SnarlWidget;
 use ymir_core::registry;
-use ymir_core::{Field, Graph, Layer, Region, layers};
+use ymir_core::{EvalCache, EvalRequest, Field, Graph, Region, layers};
 use ymir_nodes::{CategoryDef, categories, find_category, tr};
 
 // The node-editor canvas (GUI step 5, issue #6): egui-snarl as a pure view over the
@@ -23,6 +21,13 @@ mod canvas;
 use canvas::Handle;
 // The parameter inspector: ParamSpec-driven widgets, no per-node code.
 mod param_ui;
+
+/// Resolution of the interactive 2D preview. Low for responsiveness; it is an
+/// approximation of the target-resolution build, never equal to it (erosion is
+/// resolution-dependent). The build resolution is decided later (step 6c).
+const PREVIEW_RES: usize = 256;
+/// Capacity of the preview evaluation cache, in cached node results.
+const PREVIEW_CACHE_CAP: usize = 64;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -56,16 +61,28 @@ struct AppState {
     /// and view-state (positions), never a copy of node data.
     snarl: Snarl<Handle>,
     /// The node selected on the canvas (its `stable_id`), whose parameters the
-    /// inspector edits. Refreshed each frame from the canvas selection.
+    /// inspector edits and whose output the 2D preview shows. Refreshed each frame
+    /// from the canvas selection.
     selected: Option<Handle>,
+    /// The global seed for evaluation, set by the ribbon control. Reseeds the whole
+    /// world; each node stays internally stable across edits.
+    seed: u64,
+    /// The memoized evaluation cache, reused across frames so an unchanged graph
+    /// re-evaluates from cache and only changed nodes recompute.
+    cache: EvalCache,
+    /// The 2D preview texture for the current result, re-uploaded only when the
+    /// previewed field changes (tracked by `preview_hash`).
+    preview_texture: Option<egui::TextureHandle>,
+    /// Content hash of the field currently in `preview_texture`, to skip redundant
+    /// uploads.
+    preview_hash: Option<u64>,
+    /// The last evaluation error for the previewed node, shown in place of the
+    /// image. A failing node is reported, not panicked on.
+    preview_error: Option<String>,
     /// The selected palette tab (defaults to the first category on first draw).
     active_tab: Option<ActiveTab>,
     /// The node-search query; when non-empty it overrides the active tab.
     search: String,
-    /// A hardcoded field for the 2D preview until the evaluator is wired (step 6).
-    field: Field,
-    /// The 2D preview texture, uploaded once on first use.
-    preview: Option<egui::TextureHandle>,
 }
 
 impl AppState {
@@ -74,10 +91,13 @@ impl AppState {
             graph: Graph::new(),
             snarl: Snarl::new(),
             selected: None,
+            seed: 0,
+            cache: EvalCache::new(PREVIEW_CACHE_CAP),
+            preview_texture: None,
+            preview_hash: None,
+            preview_error: None,
             active_tab: None,
             search: String::new(),
-            field: placeholder_field(),
-            preview: None,
         }
     }
 }
@@ -234,8 +254,15 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
         );
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            // Build runs the graph; wired in step 6.
+            // Build is the full-resolution cook; wired in a later step (6c).
             ui.add_enabled(false, egui::Button::new("Build"));
+            ui.separator();
+            // Global seed: reseeds the whole world and re-evaluates the preview.
+            ui.add(
+                egui::DragValue::new(&mut state.seed)
+                    .prefix("seed: ")
+                    .speed(1),
+            );
         });
     });
 
@@ -298,26 +325,57 @@ inventory::submit! { PaneKind { id: "params", draw: params_pane } }
 
 fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
     ui.heading("2D preview");
+    ui.weak(format!(
+        "{PREVIEW_RES}×{PREVIEW_RES} preview — an approximation, not the build"
+    ));
 
-    // Upload the preview texture once (disjoint field borrows: `field` is read
-    // while `preview` is filled).
-    let texture = {
-        let field = &state.field;
-        state.preview.get_or_insert_with(|| {
-            ui.ctx().load_texture(
-                "preview",
-                field_to_image(field),
-                egui::TextureOptions::LINEAR,
-            )
-        })
+    let Some(id) = state.selected.and_then(|h| state.graph.node_id_of(h)) else {
+        ui.weak("Select a node to preview its output.");
+        return;
     };
-    let width = ui.available_width();
-    let sized = egui::load::SizedTexture::new(texture.id(), texture.size_vec2());
-    ui.add(
-        egui::Image::new(sized)
-            .max_width(width)
-            .maintain_aspect_ratio(true),
-    );
+
+    // Evaluate the selected node at the preview resolution. The cache memoizes, so
+    // an unchanged graph returns immediately and only changed nodes recompute. (Off
+    // the UI thread in the next step; fine synchronously at this resolution.)
+    let request = EvalRequest::new(PREVIEW_RES, PREVIEW_RES, Region::UNIT, state.seed);
+    match state.graph.evaluate(id, &request, &mut state.cache) {
+        Ok(outputs) => {
+            state.preview_error = None;
+            match outputs.first() {
+                Some(field) => {
+                    // Re-upload the texture only when the previewed field changes.
+                    let hash = field.content_hash().to_u64();
+                    if state.preview_hash != Some(hash) {
+                        state.preview_texture = Some(ui.ctx().load_texture(
+                            "preview",
+                            field_to_image(field),
+                            egui::TextureOptions::LINEAR,
+                        ));
+                        state.preview_hash = Some(hash);
+                    }
+                }
+                None => {
+                    state.preview_texture = None;
+                    state.preview_hash = None;
+                }
+            }
+        }
+        Err(err) => state.preview_error = Some(err.to_string()),
+    }
+
+    if let Some(err) = &state.preview_error {
+        ui.colored_label(ui.visuals().error_fg_color, err);
+    } else if let Some(texture) = &state.preview_texture {
+        let width = ui.available_width();
+        let sized = egui::load::SizedTexture::new(texture.id(), texture.size_vec2());
+        ui.add(
+            egui::Image::new(sized)
+                .max_width(width)
+                .maintain_aspect_ratio(true),
+        );
+    } else {
+        ui.weak("This node has no output to preview.");
+    }
 }
 inventory::submit! { PaneKind { id: "preview-2d", draw: preview_2d_pane } }
 
@@ -453,19 +511,6 @@ fn field_to_image(field: &Field) -> egui::ColorImage {
         rgba.extend_from_slice(&[g, g, g, 255]);
     }
     egui::ColorImage::from_rgba_unmultiplied([layer.width(), layer.height()], &rgba)
-}
-
-/// A hardcoded radial-dome field, standing in for graph output.
-fn placeholder_field() -> Field {
-    let size: usize = 256;
-    let centre = (size - 1) as f32 / 2.0;
-    let max_dist = (2.0 * centre * centre).sqrt();
-    let dome = Layer::from_fn(size, size, |x, y| {
-        let dx = x as f32 - centre;
-        let dy = y as f32 - centre;
-        1.0 - (dx * dx + dy * dy).sqrt() / max_dist
-    });
-    Field::new(size, size, Region::UNIT).with_layer(layers::HEIGHT, Arc::new(dome))
 }
 
 // ---- app shell --------------------------------------------------------------
