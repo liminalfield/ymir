@@ -19,6 +19,9 @@ const WORKER_CACHE_CAP: usize = 64;
 /// this cadence instead of queuing a job every frame; the final, settled value is
 /// always submitted once the interval elapses (the trailing value wins).
 const DEBOUNCE_SECS: f64 = 0.08;
+/// Status-indicator colours. Red reuses the theme's error colour at render time.
+const STATUS_OK: egui::Color32 = egui::Color32::from_rgb(0x53, 0xb0, 0x5a);
+const STATUS_BUSY: egui::Color32 = egui::Color32::from_rgb(0xe0, 0xa8, 0x2e);
 
 /// A unit of preview work: a graph snapshot to evaluate for one target node.
 struct Job {
@@ -42,6 +45,19 @@ impl Outcome {
             Outcome::Ready { generation, .. } | Outcome::Failed { generation, .. } => *generation,
         }
     }
+}
+
+/// The preview's coarse state, surfaced as a stoplight indicator. "Processing" is
+/// observable only because evaluation runs off the UI thread; a synchronous eval
+/// would freeze the frame and never show it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Status {
+    /// Settled and current.
+    UpToDate,
+    /// A newer evaluation is in flight.
+    Processing,
+    /// The previewed node failed, structurally or during evaluation.
+    Error,
 }
 
 /// Drives background preview evaluation. The UI calls [`sync`](Self::sync) (submit
@@ -198,27 +214,69 @@ impl PreviewEngine {
         }
     }
 
-    /// Renders the current preview: a structural error first, then an evaluation
-    /// error, then the image, then an "evaluating" hint while the first result is
-    /// pending.
+    /// The coarse status, for the stoplight. A structural error is current
+    /// (recomputed each frame); an in-flight evaluation supersedes any stale
+    /// evaluation error.
+    fn status(&self) -> Status {
+        if self.structural_error.is_some() {
+            Status::Error
+        } else if self.pending_key.is_some() || self.generation > self.shown {
+            Status::Processing
+        } else if self.eval_error.is_some() {
+            Status::Error
+        } else {
+            Status::UpToDate
+        }
+    }
+
+    /// The current status as a single indicator colour, for a node-header badge.
+    /// Red uses the theme's error colour.
+    pub(crate) fn status_color(&self, visuals: &egui::Visuals) -> egui::Color32 {
+        match self.status() {
+            Status::UpToDate => STATUS_OK,
+            Status::Processing => STATUS_BUSY,
+            Status::Error => visuals.error_fg_color,
+        }
+    }
+
+    /// Draws the stoplight: a coloured dot plus a short label.
+    fn status_chip(ui: &mut egui::Ui, status: Status) {
+        let (color, label) = match status {
+            Status::UpToDate => (STATUS_OK, "Up to date"),
+            Status::Processing => (STATUS_BUSY, "Evaluating…"),
+            Status::Error => (ui.visuals().error_fg_color, "Error"),
+        };
+        ui.horizontal(|ui| {
+            let diameter = ui.text_style_height(&egui::TextStyle::Body) * 0.6;
+            let (rect, _) =
+                ui.allocate_exact_size(egui::vec2(diameter, diameter), egui::Sense::hover());
+            ui.painter()
+                .circle_filled(rect.center(), diameter * 0.5, color);
+            ui.label(label);
+        });
+    }
+
+    /// Renders the current preview: a status stoplight, then either the error
+    /// message (when failed) or the most recent image. A processing state keeps the
+    /// last image visible while the refresh is in flight.
     pub(crate) fn show(&self, ui: &mut egui::Ui) {
-        if let Some(err) = self.structural_error.as_ref().or(self.eval_error.as_ref()) {
-            ui.colored_label(ui.visuals().error_fg_color, err);
+        let status = self.status();
+        Self::status_chip(ui, status);
+
+        if status == Status::Error {
+            if let Some(err) = self.structural_error.as_ref().or(self.eval_error.as_ref()) {
+                ui.colored_label(ui.visuals().error_fg_color, err);
+            }
             return;
         }
-        match &self.texture {
-            Some(texture) => {
-                let width = ui.available_width();
-                let sized = egui::load::SizedTexture::new(texture.id(), texture.size_vec2());
-                ui.add(
-                    egui::Image::new(sized)
-                        .max_width(width)
-                        .maintain_aspect_ratio(true),
-                );
-            }
-            None => {
-                ui.weak("Evaluating…");
-            }
+        if let Some(texture) = &self.texture {
+            let width = ui.available_width();
+            let sized = egui::load::SizedTexture::new(texture.id(), texture.size_vec2());
+            ui.add(
+                egui::Image::new(sized)
+                    .max_width(width)
+                    .maintain_aspect_ratio(true),
+            );
         }
     }
 }

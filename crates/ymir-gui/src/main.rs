@@ -344,6 +344,20 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
 inventory::submit! { PaneKind { id: "preview-2d", draw: preview_2d_pane } }
 
 fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
+    // The previewed node's status dot, for its header. Only a previewable selected
+    // node has one (the preview evaluates a single target). Computed before the
+    // disjoint borrow below, from read-only fields.
+    let status = state
+        .selected
+        .and_then(|h| state.graph.node_id_of(h).map(|id| (h, id)))
+        .filter(|(_, id)| {
+            state
+                .graph
+                .spec(*id)
+                .is_some_and(|spec| !spec.outputs.is_empty())
+        })
+        .map(|(h, _)| (h, state.preview.status_color(ui.visuals())));
+
     // Disjoint borrows: the viewer holds the graph while snarl is rendered. Both
     // are distinct fields of the state, so this split is sound.
     let AppState {
@@ -357,6 +371,7 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         selected: *selected,
         node_rects: Vec::new(),
         to_global: egui::emath::TSTransform::IDENTITY,
+        status,
     };
     let response = SnarlWidget::new()
         .id_salt("ymir-canvas")

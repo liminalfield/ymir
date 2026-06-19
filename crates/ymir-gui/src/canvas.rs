@@ -38,6 +38,10 @@ pub(crate) struct GraphViewer<'a> {
     /// it each frame; the canvas uses its inverse to map a screen click back into
     /// the local space the node rects live in. Output.
     pub(crate) to_global: egui::emath::TSTransform,
+    /// The previewed node's handle and its preview-status colour, drawn as a small
+    /// dot at the left of that node's header. Only the previewed (selected) node has
+    /// a status, since the preview evaluates a single target. Input, read-only.
+    pub(crate) status: Option<(Handle, egui::Color32)>,
 }
 
 impl<'a> GraphViewer<'a> {
@@ -49,6 +53,7 @@ impl<'a> GraphViewer<'a> {
             selected: None,
             node_rects: Vec::new(),
             to_global: egui::emath::TSTransform::IDENTITY,
+            status: None,
         }
     }
 }
@@ -119,7 +124,19 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
         } else {
             egui::RichText::new(title)
         };
-        ui.add(egui::Label::new(text).selectable(false));
+        ui.horizontal(|ui| {
+            // Preview-status dot, left of the title, only for the previewed node.
+            if let Some((status_handle, color)) = self.status
+                && handle == Some(status_handle)
+            {
+                let diameter = ui.text_style_height(&egui::TextStyle::Body) * 0.55;
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(diameter, diameter), egui::Sense::hover());
+                ui.painter()
+                    .circle_filled(rect.center(), diameter * 0.5, color);
+            }
+            ui.add(egui::Label::new(text).selectable(false));
+        });
     }
 
     fn final_node_rect(
