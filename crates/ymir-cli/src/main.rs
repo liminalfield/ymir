@@ -68,6 +68,7 @@ mod tests {
                 "endpoint.export",
                 "generator.fbm",
                 "modifier.combine",
+                "modifier.curve",
                 "modifier.invert",
                 "modifier.mask",
                 "modifier.thermal_erosion"

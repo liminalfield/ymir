@@ -22,6 +22,8 @@ pub(crate) enum Widget {
     Text,
     /// A dropdown over a fixed set of option ids.
     Dropdown { options: &'static [&'static str] },
+    /// A visual transfer-curve editor.
+    CurveEditor,
     /// A kind this build cannot edit yet. `ParamKind` is `#[non_exhaustive]`, so a
     /// future kind degrades to a read-only display rather than risk corrupting a
     /// value it does not understand.
@@ -42,6 +44,7 @@ pub(crate) fn widget_for(kind: &ParamKind) -> Widget {
         ParamKind::Bool => Widget::Checkbox,
         ParamKind::Text => Widget::Text,
         ParamKind::Enum { options } => Widget::Dropdown { options },
+        ParamKind::Curve => Widget::CurveEditor,
         // ParamKind is #[non_exhaustive]; an unknown future kind degrades, never
         // panics. This is graceful degradation, not a swallowed case.
         _ => Widget::ReadOnly,
@@ -133,6 +136,10 @@ pub(crate) fn edit(
                 .inner;
             changed.then_some(ParamValue::Text(selected))
         }
+        (Widget::CurveEditor, ParamValue::Curve(curve)) => {
+            ui.label(name);
+            crate::curve_edit::curve_editor(ui, curve).map(ParamValue::Curve)
+        }
         _ => {
             ui.horizontal(|ui| {
                 ui.label(name);
@@ -167,6 +174,7 @@ mod tests {
                 options: &["add", "mix"]
             }
         );
+        assert_eq!(widget_for(&ParamKind::Curve), Widget::CurveEditor);
     }
 
     #[test]

@@ -21,6 +21,8 @@ mod canvas;
 use canvas::Handle;
 // The parameter inspector: ParamSpec-driven widgets, no per-node code.
 mod param_ui;
+// The visual curve editor widget (GUI step A2), rendered for ParamKind::Curve.
+mod curve_edit;
 // Background preview evaluation (GUI step 6b): off-thread, latest-wins.
 mod preview;
 use preview::PreviewEngine;

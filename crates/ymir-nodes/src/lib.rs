@@ -12,6 +12,7 @@
 
 mod category;
 mod combine;
+mod curve;
 mod export;
 mod fbm;
 mod invert;
@@ -22,6 +23,7 @@ mod thermal;
 
 pub use category::{CategoryDef, categories, find_category};
 pub use combine::Combine;
+pub use curve::CurveNode;
 pub use export::ExportPng;
 pub use fbm::Fbm;
 pub use invert::Invert;

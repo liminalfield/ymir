@@ -50,11 +50,17 @@ fn canonical_f32_bits(v: f32) -> u32 {
     }
 }
 
-/// A transfer curve: control points in the unit square, evaluated by linear
-/// interpolation. Shaping nodes (remap, levels) carry their transfer function as a
-/// single editable `Curve` value rather than a handful of opaque sliders, which is
-/// what makes the shape visible and controllable. Points are sanitized to `[0, 1]`
-/// and sorted by `x`; a value off the ends holds the nearest endpoint.
+/// A transfer curve: control points in the unit square, evaluated by smooth
+/// (monotone cubic) interpolation. Shaping nodes (remap, levels) carry their
+/// transfer function as a single editable `Curve` value rather than a handful of
+/// opaque sliders, which is what makes the shape visible and controllable. Points
+/// are sanitized to `[0, 1]` and sorted by `x`; a value off the ends holds the
+/// nearest endpoint.
+///
+/// The interpolation (Fritsch-Carlson) passes through every control point and never
+/// overshoots, so a two-point curve is exactly the straight line between them, a
+/// peak stays at its peak value, and the output stays within the control points'
+/// range.
 #[derive(Clone, Debug)]
 pub struct Curve {
     points: Vec<(f32, f32)>,
@@ -86,33 +92,20 @@ impl Curve {
         &self.points
     }
 
-    /// Evaluates the curve at `x` by linear interpolation, holding the nearest
-    /// endpoint outside the point range. An empty curve is the identity.
+    /// Returns a sampler that evaluates the curve with smooth (monotone cubic)
+    /// interpolation. The per-point tangents are computed once, so evaluating over
+    /// a whole field does not recompute them per cell. A value off the ends holds
+    /// the nearest endpoint; an empty curve is the identity.
+    pub fn sampler(&self) -> impl Fn(f32) -> f32 + '_ {
+        let tangents = curve_tangents(&self.points);
+        move |x| eval_hermite(&self.points, &tangents, x)
+    }
+
+    /// Evaluates the curve at `x`. A one-off convenience; for evaluating over a
+    /// field prefer [`sampler`](Self::sampler), which precomputes tangents once.
     #[must_use]
     pub fn sample(&self, x: f32) -> f32 {
-        match (self.points.first(), self.points.last()) {
-            (Some(&(first_x, first_y)), Some(&(last_x, last_y))) => {
-                if x <= first_x {
-                    return first_y;
-                }
-                if x >= last_x {
-                    return last_y;
-                }
-                for w in self.points.windows(2) {
-                    let (x0, y0) = w[0];
-                    let (x1, y1) = w[1];
-                    if x >= x0 && x <= x1 {
-                        let span = x1 - x0;
-                        if span <= f32::EPSILON {
-                            return y1;
-                        }
-                        return y0 + (y1 - y0) * (x - x0) / span;
-                    }
-                }
-                last_y
-            }
-            _ => x,
-        }
+        eval_hermite(&self.points, &curve_tangents(&self.points), x)
     }
 
     /// Folds the curve into a hash in point order, `f32` by canonical bits.
@@ -141,6 +134,94 @@ impl Default for Curve {
     fn default() -> Self {
         Self::identity()
     }
+}
+
+/// Per-point tangents for monotone cubic (Fritsch-Carlson) interpolation. The
+/// tangents are chosen so the curve passes through every point without overshoot:
+/// they are zero at a local extremum and limited so each segment stays monotone.
+fn curve_tangents(points: &[(f32, f32)]) -> Vec<f32> {
+    let n = points.len();
+    if n < 2 {
+        return vec![0.0; n];
+    }
+    // Secant slopes of each segment.
+    let secant: Vec<f32> = points
+        .windows(2)
+        .map(|w| {
+            let dx = w[1].0 - w[0].0;
+            if dx.abs() < f32::EPSILON {
+                0.0
+            } else {
+                (w[1].1 - w[0].1) / dx
+            }
+        })
+        .collect();
+
+    // Initial tangents: secant at the ends, averaged across a vertex inside, and
+    // zero at a sign change (a local extremum) so the curve does not overshoot.
+    let mut m = vec![0.0_f32; n];
+    m[0] = secant[0];
+    m[n - 1] = secant[n - 2];
+    for i in 1..n - 1 {
+        m[i] = if secant[i - 1] * secant[i] <= 0.0 {
+            0.0
+        } else {
+            (secant[i - 1] + secant[i]) / 2.0
+        };
+    }
+
+    // Fritsch-Carlson limiter: keep each segment monotone.
+    for i in 0..n - 1 {
+        if secant[i].abs() < f32::EPSILON {
+            m[i] = 0.0;
+            m[i + 1] = 0.0;
+        } else {
+            let a = m[i] / secant[i];
+            let b = m[i + 1] / secant[i];
+            let s = a * a + b * b;
+            if s > 9.0 {
+                let t = 3.0 / s.sqrt();
+                m[i] = t * a * secant[i];
+                m[i + 1] = t * b * secant[i];
+            }
+        }
+    }
+    m
+}
+
+/// Evaluates the cubic Hermite curve defined by `points` and their `tangents` at
+/// `x`, holding the nearest endpoint outside the point range.
+fn eval_hermite(points: &[(f32, f32)], tangents: &[f32], x: f32) -> f32 {
+    let (Some(&(first_x, first_y)), Some(&(last_x, last_y))) = (points.first(), points.last())
+    else {
+        return x;
+    };
+    if x <= first_x {
+        return first_y;
+    }
+    if x >= last_x {
+        return last_y;
+    }
+    for i in 0..points.len() - 1 {
+        let (x0, y0) = points[i];
+        let (x1, y1) = points[i + 1];
+        if x >= x0 && x <= x1 {
+            let h = x1 - x0;
+            if h <= f32::EPSILON {
+                return y1;
+            }
+            let t = (x - x0) / h;
+            let t2 = t * t;
+            let t3 = t2 * t;
+            // Hermite basis functions.
+            let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
+            let h10 = t3 - 2.0 * t2 + t;
+            let h01 = -2.0 * t3 + 3.0 * t2;
+            let h11 = t3 - t2;
+            return h00 * y0 + h10 * h * tangents[i] + h01 * y1 + h11 * h * tangents[i + 1];
+        }
+    }
+    last_y
 }
 
 impl PartialEq for ParamValue {
@@ -442,17 +523,36 @@ mod tests {
     }
 
     #[test]
-    fn curve_samples_linearly_and_holds_the_ends() {
+    fn curve_passes_through_points_without_overshoot() {
         // A peak: up to 1 at x=0.5, back down to 0 at x=1.
         let c = Curve::new([(0.0, 0.0), (0.5, 1.0), (1.0, 0.0)]);
+        // Passes exactly through every control point.
         assert!((c.sample(0.0) - 0.0).abs() < 1e-6);
-        assert!((c.sample(0.25) - 0.5).abs() < 1e-6);
         assert!((c.sample(0.5) - 1.0).abs() < 1e-6);
-        assert!((c.sample(0.75) - 0.5).abs() < 1e-6);
         assert!((c.sample(1.0) - 0.0).abs() < 1e-6);
         // Off the ends holds the nearest endpoint.
         assert_eq!(c.sample(-0.5), 0.0);
         assert_eq!(c.sample(2.0), 0.0);
+        // Monotone cubic never overshoots: the peak is the max, all stays in [0, 1],
+        // and the first half rises monotonically.
+        let mut prev = -1.0;
+        for k in 0..=100 {
+            let x = k as f32 / 100.0;
+            let y = c.sample(x);
+            assert!((0.0..=1.0 + 1e-6).contains(&y), "overshoot at {x}: {y}");
+            if x <= 0.5 {
+                assert!(y >= prev - 1e-6, "not monotone rising at {x}");
+                prev = y;
+            }
+        }
+    }
+
+    #[test]
+    fn a_two_point_curve_is_exactly_linear() {
+        // With two points the monotone cubic is the straight line between them.
+        assert!((Curve::identity().sample(0.3) - 0.3).abs() < 1e-6);
+        let inv = Curve::new([(0.0, 1.0), (1.0, 0.0)]);
+        assert!((inv.sample(0.3) - 0.7).abs() < 1e-6);
     }
 
     #[test]

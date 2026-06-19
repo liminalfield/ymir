@@ -39,6 +39,10 @@ pub fn tr(key: &str) -> &str {
         "node-modifier.invert" => "Invert",
         "node-modifier.invert-desc" => "Flips the height layer (1 - height).",
 
+        // Curve (height shaping).
+        "node-modifier.curve" => "Curve",
+        "node-modifier.curve-desc" => "Reshapes height through an editable transfer curve.",
+
         // Thermal erosion.
         "node-modifier.thermal_erosion" => "Thermal Erosion",
         "node-modifier.thermal_erosion-desc" => {
