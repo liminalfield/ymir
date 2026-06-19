@@ -54,6 +54,39 @@ enum ActiveTab {
     Uncategorized,
 }
 
+/// The canvas's pan/zoom view, captured each frame so other panes (the ribbon
+/// add) can place a node where the user is actually looking. The transform maps
+/// the canvas's local graph space to screen; `rect` is the canvas area on screen.
+/// This is the one shared "screen point to graph position" helper the node-creation
+/// paths (ribbon add, future tab-menu) build on.
+#[derive(Clone, Copy)]
+struct CanvasView {
+    to_global: egui::emath::TSTransform,
+    rect: egui::Rect,
+}
+
+impl CanvasView {
+    /// Maps a screen position into the canvas's local graph space.
+    fn graph_pos(&self, screen: egui::Pos2) -> egui::Pos2 {
+        self.to_global.inverse() * screen
+    }
+
+    /// The graph-space position at the centre of the visible canvas.
+    ///
+    /// A degenerate transform (an empty, not-yet-laid-out canvas) maps to a
+    /// non-finite point; fall back to the screen-space centre, which is correct
+    /// while the transform is the identity-like default it recovers to, and keeps
+    /// placement finite (a NaN position panics egui's layout) and on the canvas.
+    fn center(&self) -> egui::Pos2 {
+        let mapped = self.graph_pos(self.rect.center());
+        if mapped.is_finite() {
+            mapped
+        } else {
+            self.rect.center()
+        }
+    }
+}
+
 /// The data panes draw from. Panes receive `&mut AppState`, never the app shell,
 /// so they stay mount-agnostic.
 struct AppState {
@@ -63,6 +96,9 @@ struct AppState {
     /// The canvas view over `graph`: snarl holds only node handles (`stable_id`)
     /// and view-state (positions), never a copy of node data.
     snarl: Snarl<Handle>,
+    /// The canvas's pan/zoom view from the last frame, for placing new nodes in
+    /// view. `None` until the canvas has drawn once.
+    canvas_view: Option<CanvasView>,
     /// The node selected on the canvas (its `stable_id`), whose parameters the
     /// inspector edits and whose output the 2D preview shows. Refreshed each frame
     /// from the canvas selection.
@@ -84,6 +120,7 @@ impl AppState {
         Self {
             graph: Graph::new(),
             snarl: Snarl::new(),
+            canvas_view: None,
             selected: None,
             seed: 0,
             preview: PreviewEngine::new(),
@@ -166,12 +203,17 @@ fn visible_nodes<'a>(
     }
 }
 
-/// A spawn position for the next node placed from the ribbon, cascaded by the
-/// current node count so successive adds do not stack exactly on top of each other.
-/// Once placed, a node is freely draggable on the canvas.
-fn spawn_pos(node_count: usize) -> egui::Pos2 {
+/// A spawn position (in graph space) for the next node placed from the ribbon.
+///
+/// Anchored at the centre of the currently visible canvas so the node lands where
+/// the user is looking, not at a fixed graph-space origin that may be off-screen
+/// when panned or zoomed. A small per-add cascade keeps successive adds from
+/// stacking exactly. Falls back to a fixed point before the canvas has drawn once.
+fn spawn_pos(view: Option<CanvasView>, node_count: usize) -> egui::Pos2 {
     let step = (node_count % 12) as f32 * 24.0;
-    egui::pos2(40.0 + step, 40.0 + step)
+    let base = view.map_or(egui::pos2(40.0, 40.0), |v| v.center());
+    // Offset up-left of centre so the node body sits roughly centred, then cascade.
+    base + egui::vec2(step - 60.0, step - 24.0)
 }
 
 // ---- pane kinds (self-registered by id) -------------------------------------
@@ -266,7 +308,7 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
         for entry in shown {
             let key = format!("node-{}", entry.type_id);
             if ui.button(tr(&key)).clicked() {
-                let pos = spawn_pos(state.graph.node_count());
+                let pos = spawn_pos(state.canvas_view, state.graph.node_count());
                 canvas::add_node(&mut state.graph, &mut state.snarl, entry.type_id, pos);
             }
         }
@@ -375,9 +417,20 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         to_global: egui::emath::TSTransform::IDENTITY,
         status,
     };
-    let response = SnarlWidget::new()
+    // The canvas's screen rect comes from the ui, not snarl's response: snarl
+    // returns an unbounded `EVERYTHING` rect, so it cannot be used for hit-testing
+    // or to locate the visible centre.
+    let canvas_rect = ui.max_rect();
+    SnarlWidget::new()
         .id_salt("ymir-canvas")
         .show(snarl, &mut viewer, ui);
+
+    // Capture the view now (Copy data, no borrows); stored on the state at the end,
+    // once the graph/snarl/selected borrows are released.
+    let view = CanvasView {
+        to_global: viewer.to_global,
+        rect: canvas_rect,
+    };
 
     // Resolve selection from a plain click (snarl 0.10 only selects on shift-click).
     // A click is a press-and-release without movement, so drags — wiring from or to
@@ -392,7 +445,7 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 .then(|| i.pointer.interact_pos())
         })
         .flatten();
-    if let Some(screen_pos) = click.filter(|p| response.rect.contains(*p)) {
+    if let Some(screen_pos) = click.filter(|p| canvas_rect.contains(*p)) {
         // Node rects are in the canvas's local space; map the screen click back into
         // it through the inverse pan/zoom transform before hit-testing.
         let pos = viewer.to_global.inverse() * screen_pos;
@@ -416,6 +469,11 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
             None => *selected = None,
         }
     }
+
+    // Keep the view as long as its rect is finite; a degenerate transform is handled
+    // by CanvasView::center falling back to the screen centre, so placement stays
+    // finite (a NaN position panics egui's layout) and on the canvas.
+    state.canvas_view = view.rect.is_finite().then_some(view);
 }
 inventory::submit! { PaneKind { id: "canvas", draw: canvas_pane } }
 
@@ -550,6 +608,52 @@ mod tests {
     #[test]
     fn all_operators_are_categorized() {
         assert!(!has_uncategorized_nodes());
+    }
+
+    #[test]
+    fn canvas_view_maps_screen_to_graph() {
+        // With a pan+zoom transform, the screen->graph map is the inverse: a 2x
+        // zoom and a (100, 50) pan put graph-space (0,0) at screen (100, 50).
+        let view = CanvasView {
+            to_global: egui::emath::TSTransform::new(egui::vec2(100.0, 50.0), 2.0),
+            rect: egui::Rect::from_min_size(egui::pos2(100.0, 50.0), egui::vec2(200.0, 200.0)),
+        };
+        assert_eq!(
+            view.graph_pos(egui::pos2(100.0, 50.0)),
+            egui::pos2(0.0, 0.0)
+        );
+        // The visible centre maps to the graph-space centre of the view.
+        assert_eq!(view.center(), egui::pos2(50.0, 50.0));
+    }
+
+    #[test]
+    fn a_degenerate_view_falls_back_to_the_screen_centre() {
+        // A zero-scale transform inverts to non-finite coordinates; center() falls
+        // back to the screen-space centre so placement stays finite (a NaN position
+        // panics egui's layout) and on the canvas, not at a fixed off-screen origin.
+        // Regression for the ribbon-add crash and the off-screen placement on a
+        // fresh, not-yet-laid-out canvas.
+        let rect = egui::Rect::from_min_size(egui::pos2(100.0, 50.0), egui::vec2(800.0, 600.0));
+        let view = CanvasView {
+            to_global: egui::emath::TSTransform::new(egui::vec2(0.0, 0.0), 0.0),
+            rect,
+        };
+        assert!(view.center().is_finite());
+        assert_eq!(view.center(), rect.center());
+    }
+
+    #[test]
+    fn spawn_pos_anchors_on_the_visible_centre() {
+        let view = CanvasView {
+            to_global: egui::emath::TSTransform::IDENTITY,
+            rect: egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0)),
+        };
+        // Near the visible centre (400, 300), not the fixed origin.
+        let p = spawn_pos(Some(view), 0);
+        assert!((p.x - (400.0 - 60.0)).abs() < 1e-3 && (p.y - (300.0 - 24.0)).abs() < 1e-3);
+        // Without a view yet, falls back near the origin.
+        let fallback = spawn_pos(None, 0);
+        assert!(fallback.x < 100.0 && fallback.y < 100.0);
     }
 
     #[test]
