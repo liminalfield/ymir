@@ -27,7 +27,7 @@ impl Operator for CurveNode {
     fn spec(&self) -> NodeSpec {
         NodeSpec {
             type_id: TYPE_ID,
-            category: "filter",
+            category: "adjust",
             tags: &["curve", "remap", "levels", "shape", "gamma", "modifier"],
             inputs: vec![PortSpec::new("in")],
             outputs: vec![PortSpec::new("out")],

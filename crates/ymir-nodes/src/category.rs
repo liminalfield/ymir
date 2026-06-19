@@ -9,9 +9,9 @@
 
 /// Presentation metadata for a palette category, registered by id.
 pub struct CategoryDef {
-    /// Category id, matching `NodeSpec::category` (e.g. `"noise"`).
+    /// Category id, matching `NodeSpec::category` (e.g. `"generator"`).
     pub id: &'static str,
-    /// Icon id (e.g. `"waves"`), resolved to a glyph by the GUI. A plain string,
+    /// Icon id (e.g. `"mountains"`), resolved to a glyph by the GUI. A plain string,
     /// so this data layer stays free of GUI types.
     pub icon: &'static str,
     /// Sort order within the palette; lower sorts first.
@@ -33,11 +33,17 @@ pub fn find_category(id: &str) -> Option<&'static CategoryDef> {
     inventory::iter::<CategoryDef>().find(|c| c.id == id)
 }
 
-inventory::submit! { CategoryDef { id: "noise", icon: "waves", sort: 0 } }
-inventory::submit! { CategoryDef { id: "combine", icon: "merge", sort: 5 } }
-inventory::submit! { CategoryDef { id: "filter", icon: "adjust", sort: 6 } }
-inventory::submit! { CategoryDef { id: "mask", icon: "mask", sort: 7 } }
-inventory::submit! { CategoryDef { id: "erosion", icon: "mountains", sort: 10 } }
+// The palette taxonomy. Two of these fall out of arity (generators have no input,
+// outputs no output); the rest subdivide the modifiers. The line between `adjust`
+// (pointwise, single input) and a future `filter` (spatial/neighborhood) is the one
+// teachable cut; `combine` is pointwise but multi-input. `geology` holds natural
+// processes, erosion included. Unpopulated buckets (filter, generator sub-tabs,
+// hydrology) are added when their nodes exist, not before.
+inventory::submit! { CategoryDef { id: "generator", icon: "grid", sort: 0 } }
+inventory::submit! { CategoryDef { id: "selector", icon: "target", sort: 10 } }
+inventory::submit! { CategoryDef { id: "adjust", icon: "sliders", sort: 20 } }
+inventory::submit! { CategoryDef { id: "combine", icon: "merge", sort: 30 } }
+inventory::submit! { CategoryDef { id: "geology", icon: "mountains", sort: 40 } }
 inventory::submit! { CategoryDef { id: "output", icon: "export", sort: 90 } }
 
 #[cfg(test)]
@@ -47,7 +53,14 @@ mod tests {
 
     #[test]
     fn known_categories_are_registered() {
-        for id in ["noise", "combine", "filter", "mask", "erosion", "output"] {
+        for id in [
+            "generator",
+            "selector",
+            "adjust",
+            "combine",
+            "geology",
+            "output",
+        ] {
             assert!(
                 find_category(id).is_some(),
                 "category {id:?} not registered"

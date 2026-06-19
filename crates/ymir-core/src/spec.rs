@@ -43,7 +43,7 @@ pub enum NodeKind {
 pub struct NodeSpec {
     /// Stable type identifier, also the registry key (e.g. `"generator.fbm"`).
     pub type_id: &'static str,
-    /// Palette category id (e.g. `"noise"`) that groups nodes in the editor. A
+    /// Palette category id (e.g. `"generator"`) that groups nodes in the editor. A
     /// presentation grouping, registered downstream; the engine never reads it.
     pub category: &'static str,
     /// Optional search tags.

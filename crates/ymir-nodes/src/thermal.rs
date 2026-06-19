@@ -40,7 +40,7 @@ impl Operator for ThermalErosion {
     fn spec(&self) -> NodeSpec {
         NodeSpec {
             type_id: TYPE_ID,
-            category: "erosion",
+            category: "geology",
             tags: &["thermal", "talus", "erosion", "modifier"],
             inputs: vec![PortSpec::new("in")],
             outputs: vec![PortSpec::new("out")],

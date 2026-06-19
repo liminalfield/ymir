@@ -19,7 +19,7 @@ impl Operator for Fbm {
     fn spec(&self) -> NodeSpec {
         NodeSpec {
             type_id: TYPE_ID,
-            category: "noise",
+            category: "generator",
             tags: &["perlin", "fbm", "noise", "generator"],
             inputs: Vec::new(),
             outputs: vec![PortSpec::new("out")],

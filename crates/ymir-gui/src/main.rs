@@ -574,19 +574,26 @@ mod tests {
     #[test]
     fn categories_are_sorted_by_sort_then_id() {
         let ids: Vec<&str> = categories_sorted().iter().map(|c| c.id).collect();
-        // sort 0, 5, 6, 7, 10, 90
+        // sort 0, 10, 20, 30, 40, 90
         assert_eq!(
             ids,
-            ["noise", "combine", "filter", "mask", "erosion", "output"]
+            [
+                "generator",
+                "selector",
+                "adjust",
+                "combine",
+                "geology",
+                "output"
+            ]
         );
     }
 
     #[test]
     fn nodes_filter_by_category() {
         let entries = node_entries();
-        let noise = visible_nodes(&entries, Some(ActiveTab::Category("noise")), "");
-        assert!(noise.iter().all(|e| e.category == "noise"));
-        assert!(noise.iter().any(|e| e.type_id == "generator.fbm"));
+        let generators = visible_nodes(&entries, Some(ActiveTab::Category("generator")), "");
+        assert!(generators.iter().all(|e| e.category == "generator"));
+        assert!(generators.iter().any(|e| e.type_id == "generator.fbm"));
     }
 
     #[test]

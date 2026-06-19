@@ -22,7 +22,7 @@ impl Operator for Invert {
     fn spec(&self) -> NodeSpec {
         NodeSpec {
             type_id: TYPE_ID,
-            category: "filter",
+            category: "adjust",
             tags: &["invert", "flip", "negate", "modifier"],
             inputs: vec![PortSpec::new("in")],
             outputs: vec![PortSpec::new("out")],

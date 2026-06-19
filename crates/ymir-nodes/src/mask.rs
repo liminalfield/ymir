@@ -36,7 +36,7 @@ impl Operator for Mask {
     fn spec(&self) -> NodeSpec {
         NodeSpec {
             type_id: TYPE_ID,
-            category: "mask",
+            category: "selector",
             tags: &["mask", "slope", "select", "height", "modifier"],
             inputs: vec![PortSpec::new("in")],
             outputs: vec![PortSpec::new("out")],

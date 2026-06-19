@@ -14,12 +14,12 @@
 pub fn tr(key: &str) -> &str {
     match key {
         // Categories.
-        "category-noise" => "Noise",
+        "category-generator" => "Generators",
+        "category-selector" => "Selectors",
+        "category-adjust" => "Adjust",
         "category-combine" => "Combine",
-        "category-filter" => "Filter",
-        "category-mask" => "Mask",
-        "category-erosion" => "Erosion",
-        "category-output" => "Output",
+        "category-geology" => "Geology",
+        "category-output" => "Outputs",
 
         // fBm generator.
         "node-generator.fbm" => "fBm Noise",
@@ -66,7 +66,7 @@ mod tests {
     #[test]
     fn resolves_known_keys_and_falls_back() {
         assert_eq!(tr("node-generator.fbm"), "fBm Noise");
-        assert_eq!(tr("category-erosion"), "Erosion");
+        assert_eq!(tr("category-geology"), "Geology");
         // Unknown key echoes itself, never panics.
         assert_eq!(tr("node-does.not.exist"), "node-does.not.exist");
     }
