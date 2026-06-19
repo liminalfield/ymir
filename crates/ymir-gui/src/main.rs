@@ -1,18 +1,18 @@
 //! Ymir's node editor and viewport.
 //!
-//! Step 4 (issue #4): the ribbon and palette. The ribbon's category tabs come
-//! from the registered `CategoryDef`s, the per-tab node toolbar from the operator
-//! registry filtered by `NodeSpec.category`, and a search field fuzzy-matches over
-//! node names and tags — all generated from the registries, never a hand-kept
-//! list, and labelled through `tr(key)`. Clicking a node adds it to the core
-//! graph. The canvas and evaluator (steps 5 and 6) render and run that graph; for
-//! now the canvas shows the node count and the 2D preview shows a placeholder.
+//! The app shell mounts self-registered panes (ribbon, canvas, parameter
+//! inspector, 2D preview) over a single canonical [`Graph`]. The ribbon and
+//! palette are generated from the operator and category registries; the canvas
+//! ([`canvas`]) is an `egui-snarl` pure view over the graph; the inspector
+//! ([`param_ui`]) edits the selected node's params; and the 2D preview
+//! ([`preview`]) evaluates the selected node's output on a worker thread. All
+//! display strings resolve through `tr(key)`, so this crate holds no node prose.
 
 use eframe::egui;
 use egui_snarl::Snarl;
 use egui_snarl::ui::SnarlWidget;
 use ymir_core::registry;
-use ymir_core::{EvalCache, EvalRequest, Field, Graph, Region, layers};
+use ymir_core::{EvalRequest, Graph, Region};
 use ymir_nodes::{CategoryDef, categories, find_category, tr};
 
 // The node-editor canvas (GUI step 5, issue #6): egui-snarl as a pure view over the
@@ -21,13 +21,14 @@ mod canvas;
 use canvas::Handle;
 // The parameter inspector: ParamSpec-driven widgets, no per-node code.
 mod param_ui;
+// Background preview evaluation (GUI step 6b): off-thread, latest-wins.
+mod preview;
+use preview::PreviewEngine;
 
 /// Resolution of the interactive 2D preview. Low for responsiveness; it is an
 /// approximation of the target-resolution build, never equal to it (erosion is
 /// resolution-dependent). The build resolution is decided later (step 6c).
 const PREVIEW_RES: usize = 256;
-/// Capacity of the preview evaluation cache, in cached node results.
-const PREVIEW_CACHE_CAP: usize = 64;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -67,18 +68,9 @@ struct AppState {
     /// The global seed for evaluation, set by the ribbon control. Reseeds the whole
     /// world; each node stays internally stable across edits.
     seed: u64,
-    /// The memoized evaluation cache, reused across frames so an unchanged graph
-    /// re-evaluates from cache and only changed nodes recompute.
-    cache: EvalCache,
-    /// The 2D preview texture for the current result, re-uploaded only when the
-    /// previewed field changes (tracked by `preview_hash`).
-    preview_texture: Option<egui::TextureHandle>,
-    /// Content hash of the field currently in `preview_texture`, to skip redundant
-    /// uploads.
-    preview_hash: Option<u64>,
-    /// The last evaluation error for the previewed node, shown in place of the
-    /// image. A failing node is reported, not panicked on.
-    preview_error: Option<String>,
+    /// Background preview evaluation: submits graph snapshots and shows results
+    /// without ever blocking the UI thread.
+    preview: PreviewEngine,
     /// The selected palette tab (defaults to the first category on first draw).
     active_tab: Option<ActiveTab>,
     /// The node-search query; when non-empty it overrides the active tab.
@@ -92,10 +84,7 @@ impl AppState {
             snarl: Snarl::new(),
             selected: None,
             seed: 0,
-            cache: EvalCache::new(PREVIEW_CACHE_CAP),
-            preview_texture: None,
-            preview_hash: None,
-            preview_error: None,
+            preview: PreviewEngine::new(),
             active_tab: None,
             search: String::new(),
         }
@@ -333,49 +322,23 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
         ui.weak("Select a node to preview its output.");
         return;
     };
-
-    // Evaluate the selected node at the preview resolution. The cache memoizes, so
-    // an unchanged graph returns immediately and only changed nodes recompute. (Off
-    // the UI thread in the next step; fine synchronously at this resolution.)
-    let request = EvalRequest::new(PREVIEW_RES, PREVIEW_RES, Region::UNIT, state.seed);
-    match state.graph.evaluate(id, &request, &mut state.cache) {
-        Ok(outputs) => {
-            state.preview_error = None;
-            match outputs.first() {
-                Some(field) => {
-                    // Re-upload the texture only when the previewed field changes.
-                    let hash = field.content_hash().to_u64();
-                    if state.preview_hash != Some(hash) {
-                        state.preview_texture = Some(ui.ctx().load_texture(
-                            "preview",
-                            field_to_image(field),
-                            egui::TextureOptions::LINEAR,
-                        ));
-                        state.preview_hash = Some(hash);
-                    }
-                }
-                None => {
-                    state.preview_texture = None;
-                    state.preview_hash = None;
-                }
-            }
-        }
-        Err(err) => state.preview_error = Some(err.to_string()),
-    }
-
-    if let Some(err) = &state.preview_error {
-        ui.colored_label(ui.visuals().error_fg_color, err);
-    } else if let Some(texture) = &state.preview_texture {
-        let width = ui.available_width();
-        let sized = egui::load::SizedTexture::new(texture.id(), texture.size_vec2());
-        ui.add(
-            egui::Image::new(sized)
-                .max_width(width)
-                .maintain_aspect_ratio(true),
-        );
-    } else {
+    // Only nodes with an output can be previewed; evaluating an endpoint would run
+    // its side effect (export writing a file) just from selecting it.
+    if state
+        .graph
+        .spec(id)
+        .is_none_or(|spec| spec.outputs.is_empty())
+    {
         ui.weak("This node has no output to preview.");
+        return;
     }
+
+    // Submit a snapshot for off-thread evaluation if the output changed, collect any
+    // result, and render — none of which blocks the UI thread.
+    let request = EvalRequest::new(PREVIEW_RES, PREVIEW_RES, Region::UNIT, state.seed);
+    state.preview.sync(&state.graph, id, request);
+    state.preview.poll(ui.ctx());
+    state.preview.show(ui);
 }
 inventory::submit! { PaneKind { id: "preview-2d", draw: preview_2d_pane } }
 
@@ -494,25 +457,6 @@ fn mount(layout: &Layout, ui: &mut egui::Ui, state: &mut AppState) {
     });
 }
 
-// ---- field -> preview helpers -----------------------------------------------
-
-/// Maps a normalized height value to an 8-bit grayscale level, matching the PNG
-/// export's mapping (clamp to `[0, 1]`, scale to `0..=255`, round).
-fn gray8(value: f32) -> u8 {
-    (value.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
-}
-
-/// Builds a grayscale image from a field's `height` layer for the 2D preview.
-fn field_to_image(field: &Field) -> egui::ColorImage {
-    let layer = field.layer_or(layers::HEIGHT, 0.0);
-    let mut rgba = Vec::with_capacity(layer.len() * 4);
-    for &value in layer.as_slice() {
-        let g = gray8(value);
-        rgba.extend_from_slice(&[g, g, g, 255]);
-    }
-    egui::ColorImage::from_rgba_unmultiplied([layer.width(), layer.height()], &rgba)
-}
-
 // ---- app shell --------------------------------------------------------------
 
 struct YmirApp {
@@ -604,14 +548,5 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), total, "duplicate pane-kind id");
-    }
-
-    #[test]
-    fn gray8_maps_and_clamps() {
-        assert_eq!(gray8(0.0), 0);
-        assert_eq!(gray8(1.0), 255);
-        assert_eq!(gray8(-0.5), 0);
-        assert_eq!(gray8(1.5), 255);
-        assert_eq!(gray8(0.5), 128);
     }
 }
