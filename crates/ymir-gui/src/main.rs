@@ -160,8 +160,12 @@ struct NodeMenu {
     search: String,
     /// The category drilled into; `None` is the top-level category list.
     drilled: Option<&'static str>,
-    /// True only on the frame the menu opened, so the search field grabs focus once.
-    just_opened: bool,
+    /// The keyboard-highlighted row (index into the current row list). Arrow keys
+    /// move it; Enter activates it. Clamped to the row list each frame.
+    highlight: usize,
+    /// Set when the search field should grab keyboard focus next frame (on open and
+    /// after a drill, so typing keeps working without a click).
+    focus_search: bool,
 }
 
 // ---- palette: registry-driven node listing (pure, testable) -----------------
@@ -237,28 +241,53 @@ fn visible_nodes<'a>(
     }
 }
 
-/// What the node menu lists right now: the top-level categories, or a set of nodes
-/// (a drilled-in category, or flat search results).
-enum MenuBody<'a> {
-    Categories(Vec<&'static CategoryDef>),
-    Nodes(Vec<&'a NodeEntry>),
+/// One selectable line in the node menu. A flat row list is the single model both
+/// the mouse and the keyboard act on, so a highlight index and a click hit the same
+/// rows. Each variant carries only `'static` ids, so the list outlives the borrow of
+/// the menu state it was built from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MenuRow {
+    /// Returns from a drilled-in category to the category list.
+    Back,
+    /// A category to drill into, by id.
+    Category(&'static str),
+    /// A node to create, by `type_id`.
+    Node(&'static str),
 }
 
-/// Chooses what the node menu shows. A non-empty search wins (flat results across
-/// all categories); otherwise a drilled-in category lists its nodes, and the top
-/// level lists the categories. Pure, so the navigation logic is unit-tested apart
-/// from the egui drawing.
-fn menu_body<'a>(
-    entries: &'a [NodeEntry],
-    search: &str,
-    drilled: Option<&'static str>,
-) -> MenuBody<'a> {
+/// The rows the node menu shows, in display order. A non-empty search wins (flat
+/// node results across all categories); otherwise a drilled-in category lists a
+/// `Back` row then its nodes, and the top level lists the categories. Pure, so the
+/// navigation logic is unit-tested apart from the egui drawing.
+fn menu_rows(entries: &[NodeEntry], search: &str, drilled: Option<&'static str>) -> Vec<MenuRow> {
     if !search.trim().is_empty() {
-        MenuBody::Nodes(visible_nodes(entries, None, search))
+        visible_nodes(entries, None, search)
+            .iter()
+            .map(|e| MenuRow::Node(e.type_id))
+            .collect()
     } else if let Some(cat) = drilled {
-        MenuBody::Nodes(visible_nodes(entries, Some(ActiveTab::Category(cat)), ""))
+        std::iter::once(MenuRow::Back)
+            .chain(
+                visible_nodes(entries, Some(ActiveTab::Category(cat)), "")
+                    .iter()
+                    .map(|e| MenuRow::Node(e.type_id)),
+            )
+            .collect()
     } else {
-        MenuBody::Categories(categories_sorted())
+        categories_sorted()
+            .iter()
+            .map(|c| MenuRow::Category(c.id))
+            .collect()
+    }
+}
+
+/// The display label for a menu row. `>` / `<` are plain ASCII so they always render
+/// (the triangle glyphs are absent from egui's default fonts).
+fn menu_row_label(row: MenuRow) -> String {
+    match row {
+        MenuRow::Back => "< back".to_string(),
+        MenuRow::Category(id) => format!("{}  >", tr(&format!("category-{id}"))),
+        MenuRow::Node(type_id) => tr(&format!("node-{type_id}")).to_string(),
     }
 }
 
@@ -460,10 +489,47 @@ fn node_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
     };
 
     let entries = node_entries();
-    // Outcomes collected during the draw, applied after the menu borrow is released:
-    // a node to create, a new drill target, or a request to close.
-    let mut create: Option<&'static str> = None;
-    let mut drill: Option<Option<&'static str>> = None;
+    let rows = menu_rows(&entries, &menu.search, menu.drilled);
+
+    // Keyboard navigation: Up/Down move the highlight (wrapping), Enter activates it,
+    // Left/Right step back and forth through the category hierarchy. Read before the
+    // draw so the highlight shown is this frame's. A single-line search field ignores
+    // Up/Down, so they are free; Left/Right are used for navigation only when the
+    // search is empty (otherwise they edit the query's caret as usual).
+    let (up, down, left, right, enter) = ui.input(|i| {
+        (
+            i.key_pressed(egui::Key::ArrowUp),
+            i.key_pressed(egui::Key::ArrowDown),
+            i.key_pressed(egui::Key::ArrowLeft),
+            i.key_pressed(egui::Key::ArrowRight),
+            i.key_pressed(egui::Key::Enter),
+        )
+    });
+    if rows.is_empty() {
+        menu.highlight = 0;
+    } else {
+        let n = rows.len();
+        if down {
+            menu.highlight = (menu.highlight + 1) % n;
+        }
+        if up {
+            menu.highlight = (menu.highlight + n - 1) % n;
+        }
+        menu.highlight = menu.highlight.min(n - 1);
+    }
+    // The activated row: Enter takes the highlight; a click overrides with its row.
+    let mut activated = (enter && !rows.is_empty()).then_some(menu.highlight);
+    // Left/Right step through the hierarchy when not editing a query: Right drills
+    // into the highlighted category, Left returns via the Back row (always row 0 of a
+    // drilled-in list). Both reuse the row-activation path below.
+    if menu.search.trim().is_empty() {
+        if right && matches!(rows.get(menu.highlight), Some(MenuRow::Category(_))) {
+            activated = Some(menu.highlight);
+        }
+        if left && menu.drilled.is_some() {
+            activated = Some(0);
+        }
+    }
 
     let area = egui::Area::new(egui::Id::new("ymir-node-menu"))
         .order(egui::Order::Foreground)
@@ -482,9 +548,13 @@ fn node_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
                 .hint_text("filter nodes")
                 .desired_width(f32::INFINITY);
             let resp = ui.add(edit);
-            if menu.just_opened {
+            if menu.focus_search {
                 resp.request_focus();
-                menu.just_opened = false;
+                menu.focus_search = false;
+            }
+            // Editing the query resets the highlight to the first result.
+            if resp.changed() {
+                menu.highlight = 0;
             }
             ui.separator();
 
@@ -494,37 +564,16 @@ fn node_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
             // across a drill-in/back. The current lists are short enough to fit; a
             // scroll area is the deliberate addition for when a category can overflow
             // the screen.
-            ui.with_layout(
-                egui::Layout::top_down_justified(egui::Align::Min),
-                |ui| match menu_body(&entries, &menu.search, menu.drilled) {
-                    MenuBody::Categories(cats) => {
-                        for cat in cats {
-                            let label = format!("{}  >", tr(&format!("category-{}", cat.id)));
-                            if menu_row(ui, &label) {
-                                drill = Some(Some(cat.id));
-                            }
-                        }
+            ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
+                if rows.is_empty() {
+                    ui.weak("no matches");
+                }
+                for (i, &row) in rows.iter().enumerate() {
+                    if menu_row(ui, &menu_row_label(row), i == menu.highlight) {
+                        activated = Some(i);
                     }
-                    MenuBody::Nodes(nodes) => {
-                        // A back row returns to the categories (drill-in only, never
-                        // while searching, which has no category context).
-                        if menu.search.trim().is_empty()
-                            && menu.drilled.is_some()
-                            && menu_row(ui, "< back")
-                        {
-                            drill = Some(None);
-                        }
-                        if nodes.is_empty() {
-                            ui.weak("no matches");
-                        }
-                        for entry in nodes {
-                            if menu_row(ui, tr(&format!("node-{}", entry.type_id))) {
-                                create = Some(entry.type_id);
-                            }
-                        }
-                    }
-                },
-            );
+                }
+            });
         });
     });
 
@@ -544,21 +593,38 @@ fn node_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
 
     if clicked_outside {
         state.node_menu = None;
-    } else if let Some(type_id) = create {
-        let pos = view.graph_pos_finite(anchor);
-        canvas::add_node(&mut state.graph, &mut state.snarl, type_id, pos);
-        state.node_menu = None;
-    } else if let Some(target) = drill
-        && let Some(menu) = state.node_menu.as_mut()
-    {
-        menu.drilled = target;
+    } else if let Some(&row) = activated.and_then(|i| rows.get(i)) {
+        match row {
+            // Drilling keeps the menu open: reset the highlight (skipping the Back row
+            // when entering a category) and refocus the search so typing continues.
+            MenuRow::Back => {
+                if let Some(menu) = state.node_menu.as_mut() {
+                    menu.drilled = None;
+                    menu.highlight = 0;
+                    menu.focus_search = true;
+                }
+            }
+            MenuRow::Category(id) => {
+                if let Some(menu) = state.node_menu.as_mut() {
+                    menu.drilled = Some(id);
+                    menu.highlight = 1;
+                    menu.focus_search = true;
+                }
+            }
+            MenuRow::Node(type_id) => {
+                let pos = view.graph_pos_finite(anchor);
+                canvas::add_node(&mut state.graph, &mut state.snarl, type_id, pos);
+                state.node_menu = None;
+            }
+        }
     }
 }
 
 /// A menu row: a borderless selectable button that fills the row width under the
-/// caller's justified layout (so it never queries `available_width`).
-fn menu_row(ui: &mut egui::Ui, text: &str) -> bool {
-    ui.add(egui::Button::selectable(false, text)).clicked()
+/// caller's justified layout (so it never queries `available_width`). `selected`
+/// draws the keyboard highlight.
+fn menu_row(ui: &mut egui::Ui, text: &str, selected: bool) -> bool {
+    ui.add(egui::Button::selectable(selected, text)).clicked()
 }
 
 fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
@@ -673,7 +739,8 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 view,
                 search: String::new(),
                 drilled: None,
-                just_opened: true,
+                highlight: 0,
+                focus_search: true,
             });
         }
     }
@@ -891,48 +958,46 @@ mod tests {
     }
 
     #[test]
-    fn menu_body_browses_categories_then_drills_in() {
+    fn menu_rows_browse_categories_then_drill_in() {
         let entries = node_entries();
-        // Empty search, no drill: the top-level category list.
-        match menu_body(&entries, "", None) {
-            MenuBody::Categories(cats) => {
-                let ids: Vec<&str> = cats.iter().map(|c| c.id).collect();
-                assert_eq!(
-                    ids,
-                    [
-                        "generator",
-                        "selector",
-                        "adjust",
-                        "combine",
-                        "geology",
-                        "output"
-                    ]
-                );
-            }
-            MenuBody::Nodes(_) => panic!("expected the category list at the top level"),
-        }
-        // Drilled into a category: only that category's nodes.
-        match menu_body(&entries, "", Some("adjust")) {
-            MenuBody::Nodes(nodes) => {
-                assert!(nodes.iter().all(|e| e.category == "adjust"));
-                assert!(nodes.iter().any(|e| e.type_id == "modifier.curve"));
-                assert!(nodes.iter().any(|e| e.type_id == "modifier.invert"));
-            }
-            MenuBody::Categories(_) => panic!("expected the drilled-in node list"),
-        }
+        // Empty search, no drill: the top-level category list, in palette order.
+        assert_eq!(
+            menu_rows(&entries, "", None),
+            [
+                MenuRow::Category("generator"),
+                MenuRow::Category("selector"),
+                MenuRow::Category("adjust"),
+                MenuRow::Category("combine"),
+                MenuRow::Category("geology"),
+                MenuRow::Category("output"),
+            ]
+        );
+        // Drilled into a category: a Back row, then that category's nodes only.
+        let drilled = menu_rows(&entries, "", Some("adjust"));
+        assert_eq!(drilled[0], MenuRow::Back);
+        assert!(drilled.contains(&MenuRow::Node("modifier.curve")));
+        assert!(drilled.contains(&MenuRow::Node("modifier.invert")));
+        // No node row outside the drilled category.
+        assert!(!drilled.contains(&MenuRow::Node("generator.fbm")));
     }
 
     #[test]
-    fn menu_body_search_is_flat_and_ignores_drill() {
+    fn menu_rows_search_is_flat_and_ignores_drill() {
         let entries = node_entries();
-        // A non-empty search overrides drill state with flat results across all
-        // categories.
-        match menu_body(&entries, "fbm", Some("adjust")) {
-            MenuBody::Nodes(nodes) => {
-                assert!(nodes.iter().any(|e| e.type_id == "generator.fbm"));
-            }
-            MenuBody::Categories(_) => panic!("a search shows flat node results"),
-        }
+        // A non-empty search overrides drill state with flat node results across all
+        // categories, and shows no Back row.
+        let rows = menu_rows(&entries, "fbm", Some("adjust"));
+        assert!(rows.contains(&MenuRow::Node("generator.fbm")));
+        assert!(!rows.contains(&MenuRow::Back));
+    }
+
+    #[test]
+    fn menu_row_labels_use_ascii_affordances() {
+        // The flyout/back affordances are plain ASCII (the triangle glyphs are absent
+        // from egui's default fonts and render as tofu).
+        assert_eq!(menu_row_label(MenuRow::Back), "< back");
+        assert!(menu_row_label(MenuRow::Category("adjust")).ends_with("  >"));
+        assert_eq!(menu_row_label(MenuRow::Node("modifier.invert")), "Invert");
     }
 
     #[test]
