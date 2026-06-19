@@ -74,6 +74,15 @@ points/vertices/primitives schema. Resisting that over-generalization is what ke
 Ymir a terrain tool rather than a general dataflow engine. Hold this line actively
 against scope creep.
 
+Prefer many small, single-purpose nodes over few multi-purpose ones. A graph should
+be readable from its node structure, not from parameters buried inside nodes:
+someone reading the wiring should see what it does. When a node accretes several
+behaviors, split it into focused nodes (an Invert node, not a remap with its output
+range swapped); reserve parameters for genuine intra-node configuration. This is the
+Unix philosophy applied to terrain graphs, and it is what makes the additive-node
+invariant pay off in practice. A corollary: shaping controls (levels, curves) need a
+visual widget, since bare sliders for a transfer function are not controllable.
+
 ## The data model
 
 The single type on every edge is a `Field`:
