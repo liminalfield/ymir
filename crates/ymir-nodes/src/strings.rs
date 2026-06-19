@@ -16,6 +16,7 @@ pub fn tr(key: &str) -> &str {
         // Categories.
         "category-noise" => "Noise",
         "category-combine" => "Combine",
+        "category-filter" => "Filter",
         "category-mask" => "Mask",
         "category-erosion" => "Erosion",
         "category-output" => "Output",
@@ -33,6 +34,10 @@ pub fn tr(key: &str) -> &str {
         // Mask generator.
         "node-modifier.mask" => "Mask",
         "node-modifier.mask-desc" => "Derives a 0..1 mask from slope or height.",
+
+        // Invert.
+        "node-modifier.invert" => "Invert",
+        "node-modifier.invert-desc" => "Flips the height layer (1 - height).",
 
         // Thermal erosion.
         "node-modifier.thermal_erosion" => "Thermal Erosion",
