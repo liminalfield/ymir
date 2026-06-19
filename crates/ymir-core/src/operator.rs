@@ -16,7 +16,13 @@ use crate::spec::NodeSpec;
 /// `Send + Sync` is required so the graph can be evaluated on a worker thread (the
 /// GUI runs evaluation off the UI thread). Operators are stateless, so this is a
 /// natural fit; if one ever needs interior state, it must be thread-safe.
-pub trait Operator: Send + Sync {
+///
+/// `Clone` is required (via the [`OperatorClone`] supertrait) so the whole graph
+/// can be cloned into a cheap snapshot and evaluated off-thread without locking the
+/// canonical graph the UI is editing. A node implementor only needs
+/// `#[derive(Clone)]`; since operators are stateless this is trivial (any heavy
+/// per-instance asset belongs behind an `Arc`).
+pub trait Operator: OperatorClone + Send + Sync {
     /// The node's schema: identity, ports, and parameters.
     fn spec(&self) -> NodeSpec;
 
@@ -31,4 +37,28 @@ pub trait Operator: Send + Sync {
     /// Returns an [`Error`](crate::Error) if the node cannot produce its output;
     /// the evaluator surfaces that as a failed node rather than panicking.
     fn eval(&self, inputs: &[&Field], params: &Params, ctx: &EvalContext) -> Result<Vec<Field>>;
+}
+
+/// Clones a `Box<dyn Operator>`. Blanket-implemented for every `Clone` operator, so
+/// node authors implement [`Operator`] and derive `Clone`, never this trait
+/// directly. It exists only to make the boxed trait object cloneable, which is what
+/// lets the graph be snapshotted for off-thread evaluation.
+pub trait OperatorClone {
+    /// Clones `self` into a fresh boxed operator.
+    fn clone_box(&self) -> Box<dyn Operator>;
+}
+
+impl<T> OperatorClone for T
+where
+    T: Operator + Clone + 'static,
+{
+    fn clone_box(&self) -> Box<dyn Operator> {
+        Box::new(self.clone())
+    }
+}
+
+impl Clone for Box<dyn Operator> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
 }

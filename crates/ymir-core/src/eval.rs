@@ -279,6 +279,25 @@ impl Graph {
             .collect())
     }
 
+    /// The content key of `target`'s output for `request`: a hash that changes if
+    /// and only if the previewed output would change (this node's params, anything
+    /// upstream of it, the seed, or the resolution). It composes cache keys without
+    /// evaluating anything, so it is cheap to call every frame.
+    ///
+    /// The GUI uses it as a change signal: when the key differs from the last one
+    /// submitted, it re-runs the background preview; otherwise the cached result
+    /// still stands.
+    ///
+    /// # Errors
+    ///
+    /// Same structural errors as [`evaluate`](Self::evaluate): [`Error::Cycle`],
+    /// [`Error::NodeNotFound`], or [`Error::DisconnectedInput`].
+    pub fn output_key(&self, target: NodeId, request: &EvalRequest) -> Result<u64> {
+        let mut keys: HashMap<NodeId, u64> = HashMap::new();
+        let mut in_progress: HashSet<NodeId> = HashSet::new();
+        self.node_key(target, request, &mut keys, &mut in_progress)
+    }
+
     /// Recomputes a node's cache key (and, memoized in `keys`, its upstream
     /// nodes') without evaluating anything. Mirrors the key composition in
     /// [`pull`](Self::pull): a node's key is built from its upstream keys.
@@ -362,6 +381,7 @@ mod tests {
 
     /// A generator whose output is a constant field driven by the per-node seed,
     /// counting how many times it is evaluated.
+    #[derive(Clone)]
     struct CountingGen {
         calls: Arc<AtomicUsize>,
     }
@@ -391,6 +411,7 @@ mod tests {
 
     /// A one-input modifier that adds its `delta` param to the height layer,
     /// counting evaluations.
+    #[derive(Clone)]
     struct CountingAdd {
         calls: Arc<AtomicUsize>,
     }
@@ -423,6 +444,7 @@ mod tests {
 
     /// A one-input endpoint (no outputs) that counts how often it executes its
     /// side effect.
+    #[derive(Clone)]
     struct CountingSink {
         calls: Arc<AtomicUsize>,
     }
@@ -448,6 +470,7 @@ mod tests {
     /// A two-input modifier that sums the height layers of both inputs, counting
     /// evaluations. The first real merge node (issue #14) will be shaped like this;
     /// here it exercises multi-input gathering and the diamond shared-ancestor case.
+    #[derive(Clone)]
     struct CountingMerge {
         calls: Arc<AtomicUsize>,
     }
@@ -536,6 +559,84 @@ mod tests {
         let a = g1.evaluate(t1, &request(), &mut c1).unwrap();
         let b = g2.evaluate(t2, &request(), &mut c2).unwrap();
         assert_eq!(a[0].content_hash(), b[0].content_hash());
+    }
+
+    #[test]
+    fn a_cloned_graph_evaluates_identically() {
+        // The GUI clones the canonical graph to evaluate off-thread; a clone must
+        // produce byte-identical output, addressed by the persistent stable_id.
+        let mut graph = Graph::new();
+        let head = graph.add_op(
+            Box::new(CountingGen {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new(),
+        );
+        let add = graph.add_op(
+            Box::new(CountingAdd {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new().with("delta", ParamValue::Float(0.3)),
+        );
+        graph.connect(head, 0, add, 0).unwrap();
+
+        let snapshot = graph.clone();
+        let target_sid = graph.stable_id(add).unwrap();
+        let snapshot_target = snapshot.node_id_of(target_sid).unwrap();
+
+        let mut c1 = EvalCache::new(16);
+        let mut c2 = EvalCache::new(16);
+        let original = graph.evaluate(add, &request(), &mut c1).unwrap();
+        let cloned = snapshot
+            .evaluate(snapshot_target, &request(), &mut c2)
+            .unwrap();
+        assert_eq!(original[0].content_hash(), cloned[0].content_hash());
+    }
+
+    #[test]
+    fn output_key_tracks_what_changes_the_output() {
+        let mut graph = Graph::new();
+        let head = graph.add_op(
+            Box::new(CountingGen {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new(),
+        );
+        let add = graph.add_op(
+            Box::new(CountingAdd {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new().with("delta", ParamValue::Float(0.1)),
+        );
+        graph.connect(head, 0, add, 0).unwrap();
+
+        let req = request();
+        let key = graph.output_key(add, &req).unwrap();
+        // Stable when nothing changes.
+        assert_eq!(key, graph.output_key(add, &req).unwrap());
+
+        // An upstream param change changes the key.
+        graph
+            .set_params(add, Params::new().with("delta", ParamValue::Float(0.5)))
+            .unwrap();
+        let after_param = graph.output_key(add, &req).unwrap();
+        assert_ne!(key, after_param);
+
+        // A different seed changes the key.
+        let reseeded = EvalRequest::new(16, 16, Region::UNIT, 999);
+        assert_ne!(after_param, graph.output_key(add, &reseeded).unwrap());
+
+        // A structurally broken target reports the error rather than a key.
+        let lone = graph.add_op(
+            Box::new(CountingAdd {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new(),
+        );
+        assert!(matches!(
+            graph.output_key(lone, &req),
+            Err(Error::DisconnectedInput { .. })
+        ));
     }
 
     #[test]

@@ -33,6 +33,7 @@ const NEIGHBORS: [(i32, i32, f32); 8] = [
 ];
 
 /// Thermal erosion modifier: one input, one output.
+#[derive(Clone)]
 pub struct ThermalErosion;
 
 impl Operator for ThermalErosion {

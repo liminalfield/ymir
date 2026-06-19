@@ -25,12 +25,14 @@ new_key_type! {
 
 /// A connection feeding one input port: which upstream node and which of its
 /// output ports.
+#[derive(Clone)]
 pub(crate) struct InputConn {
     pub(crate) source: NodeId,
     pub(crate) output: usize,
 }
 
 /// A node instance: behavior plus per-instance configuration and wiring.
+#[derive(Clone)]
 pub(crate) struct Node {
     /// Persistent identity, distinct from the runtime [`NodeId`]. Monotonic and
     /// never reused, it is the only identity that feeds the per-node seed.
@@ -48,6 +50,13 @@ pub(crate) struct Node {
 }
 
 /// A directed graph of operator nodes.
+///
+/// `Clone` produces an independent snapshot (operators are cloned via
+/// [`OperatorClone`](crate::OperatorClone), params and wiring deeply): the GUI
+/// clones the canonical graph to evaluate it on a worker thread without locking the
+/// graph it is editing. A clone evaluates identically to the original, since node
+/// identity for seeding is the persistent `stable_id`, which clones unchanged.
+#[derive(Clone)]
 pub struct Graph {
     nodes: SlotMap<NodeId, Node>,
     next_stable_id: u64,
@@ -295,6 +304,7 @@ mod tests {
     /// A test operator with arbitrary arity. Its `eval` is never run here; these
     /// tests exercise graph structure (wiring, removal, cycle queries), not
     /// evaluation.
+    #[derive(Clone)]
     struct Stub {
         type_id: &'static str,
         inputs: usize,

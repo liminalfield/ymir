@@ -12,6 +12,7 @@ use crate::noise::{FbmParams, fbm_field};
 const TYPE_ID: &str = "generator.fbm";
 
 /// fBm Perlin noise generator. A generator by arity: no inputs, one output.
+#[derive(Clone)]
 pub struct Fbm;
 
 impl Operator for Fbm {

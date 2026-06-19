@@ -15,6 +15,7 @@ const TYPE_ID: &str = "endpoint.export";
 /// Writes the input field's `height` layer to a 16-bit grayscale PNG. An endpoint
 /// by arity: one input, no outputs. The evaluator does not memoize endpoints, so
 /// the write happens on every pull.
+#[derive(Clone)]
 pub struct ExportPng;
 
 impl Operator for ExportPng {
