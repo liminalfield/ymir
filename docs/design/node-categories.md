@@ -78,6 +78,23 @@ refuses to special-case, breaking the uniform-`Field` promise `CLAUDE.md` is bui
 on. See [the mask & selection model note](mask-and-selection-model.md) for the
 creator/editor/attacher decomposition this rests on.
 
+## A node-vs-param decision: Combine stays one node
+
+The `combine` node keeps its operation (`add`, `subtract`, `multiply`, `min`,
+`max`, `mix`) as a parameter rather than splitting into one node per op. This was
+weighed against the node-readability principle and the principle does not apply
+here: its target is a node that hides genuinely *different behaviours* behind a
+mode (the canonical case is "an Invert node, not a remap with its range swapped",
+where range-swap is a non-obvious way to express invert). The combine ops are
+interchangeable variants of a single operation, binary field math: identical arity
+(2 to 1), identical mask contract, identical structure, differing only in the
+operator. That is genuine intra-node configuration, and one node with an operation
+selector is the universal idiom (World Machine's Combiner, Houdini, Nuke's Merge).
+The real cost, that the op is not visible in the wiring, is addressed by surfacing
+the chosen op in the node's canvas title, not by N thin nodes. So `combine` is a
+one-node tab for now and that is fine: it is the multi-input pointwise line, and it
+grows by gaining ops and a blend weight (issues #53, #54), not by fragmenting.
+
 ## Deferred until populated
 
 Documented here so they have an agreed home, but **not registered** until their
@@ -97,16 +114,9 @@ nodes exist:
 The tripwire that says "split now": a tab gets too crowded to scan at a glance, or
 one kind of node clearly dominates the traffic into a shared tab.
 
-## Two follow-ups this sets up
+## A follow-up this sets up
 
-1. **Split the `Combine` node into atomic nodes** (Add, Multiply, Max, Min, Mix).
-   Today's single node hides the operation in an enum param, which the
-   node-readability principle in `CLAUDE.md` argues against (a graph should read
-   from its structure, not from a mode buried in a node). Splitting it both honours
-   that principle and populates the `combine` tab five-deep, which is what makes
-   `combine` a real category rather than a one-button tab.
-
-2. **A target-layer `ParamKind`.** This is the spec extension that lets mask
+**A target-layer `ParamKind`.** This is the spec extension that lets mask
    editing be general layer-targeting nodes rather than mask clones, so "Masks"
    stays dissolved. The valid choices depend on which layers the upstream `Field`
    actually carries, so it is not a static enum; it needs the same layer resolver
