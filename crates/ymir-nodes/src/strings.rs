@@ -16,6 +16,7 @@ pub fn tr(key: &str) -> &str {
         // Categories.
         "category-noise" => "Noise",
         "category-combine" => "Combine",
+        "category-mask" => "Mask",
         "category-erosion" => "Erosion",
         "category-output" => "Output",
 
@@ -28,6 +29,10 @@ pub fn tr(key: &str) -> &str {
         "node-modifier.combine-desc" => {
             "Merges two fields: add, multiply, min, max, or a mask-weighted mix."
         }
+
+        // Mask generator.
+        "node-modifier.mask" => "Mask",
+        "node-modifier.mask-desc" => "Derives a 0..1 mask from slope or height.",
 
         // Thermal erosion.
         "node-modifier.thermal_erosion" => "Thermal Erosion",

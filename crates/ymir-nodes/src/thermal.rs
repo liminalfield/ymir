@@ -73,7 +73,7 @@ impl Operator for ThermalErosion {
         let strength = params.get_f64("strength", 0.5) as f32;
         let iterations = params.get_i64("iterations", 35).clamp(0, 100_000) as usize;
 
-        // Soft contract: erode everywhere when no mask is present.
+        // Soft contract: erode everywhere when no mask is present (mask 1.0).
         let source = input.layer_or(layers::HEIGHT, 0.0);
         let mask = input.layer_or(layers::MASK, 1.0);
 
@@ -86,23 +86,27 @@ impl Operator for ThermalErosion {
             if ctx.is_cancelled() {
                 return Err(Error::Cancelled);
             }
-            erode_pass(
-                &heights,
-                &mut delta,
-                mask.as_slice(),
-                width,
-                height,
-                talus,
-                strength,
-            );
+            erode_pass(&heights, &mut delta, width, height, talus, strength);
             for (h, d) in heights.iter_mut().zip(delta.iter()) {
                 *h += *d;
             }
         }
 
-        let eroded = Layer::from_fn(width, height, |x, y| heights[y * width + x]);
+        // Composite the eroded result over the original through the mask: a fully
+        // masked-out cell (mask 0) keeps its original height exactly, a fully
+        // masked-in cell (mask 1) takes the eroded height, and partial masks blend.
+        // This protects masked regions completely, unlike scaling each cell's
+        // shedding, which lets sediment still flow into them. The erosion itself is
+        // mass-conserving; the mask is a deliberate per-cell protect, so it does not
+        // conserve mass across a mask gradient.
+        let blended = Layer::from_fn(width, height, |x, y| {
+            let idx = y * width + x;
+            let original = source.get(x, y).unwrap_or(0.0);
+            let m = mask.get(x, y).unwrap_or(1.0);
+            original + (heights[idx] - original) * m
+        });
         let mut out = input.clone();
-        out.set_layer(layers::HEIGHT, Arc::new(eroded));
+        out.set_layer(layers::HEIGHT, Arc::new(blended));
         Ok(vec![out])
     }
 }
@@ -111,12 +115,11 @@ impl Operator for ThermalErosion {
 ///
 /// Mass-conserving by construction: what a cell sheds is exactly the sum added to
 /// its lower neighbours. Out-of-bounds neighbours are skipped, so material is held
-/// at the boundary rather than flowing off-grid. Erosion at a cell is scaled by
-/// its mask value, so a fully masked-out field is left unchanged.
+/// at the boundary rather than flowing off-grid. The mask is applied afterwards, in
+/// `eval`, as a per-cell composite, so a pass here always erodes everywhere.
 fn erode_pass(
     heights: &[f32],
     delta: &mut [f32],
-    mask: &[f32],
     width: usize,
     height: usize,
     talus: f32,
@@ -158,10 +161,9 @@ fn erode_pass(
             }
 
             if total_excess > 0.0 {
-                // Shed a stable fraction of the steepest excess, scaled by the
-                // mask, split among lower neighbours by their share of the excess.
-                let mask_here = mask.get(idx).copied().unwrap_or(1.0);
-                let moved = strength * max_excess * 0.5 * mask_here;
+                // Shed a stable fraction of the steepest excess, split among the
+                // lower neighbours by their share of the excess.
+                let moved = strength * max_excess * 0.5;
                 delta[idx] -= moved;
                 for &(nidx, excess) in &contributions[..count] {
                     delta[nidx] += moved * (excess / total_excess);

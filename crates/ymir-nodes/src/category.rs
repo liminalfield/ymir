@@ -35,6 +35,7 @@ pub fn find_category(id: &str) -> Option<&'static CategoryDef> {
 
 inventory::submit! { CategoryDef { id: "noise", icon: "waves", sort: 0 } }
 inventory::submit! { CategoryDef { id: "combine", icon: "merge", sort: 5 } }
+inventory::submit! { CategoryDef { id: "mask", icon: "mask", sort: 7 } }
 inventory::submit! { CategoryDef { id: "erosion", icon: "mountains", sort: 10 } }
 inventory::submit! { CategoryDef { id: "output", icon: "export", sort: 90 } }
 
@@ -45,7 +46,7 @@ mod tests {
 
     #[test]
     fn known_categories_are_registered() {
-        for id in ["noise", "combine", "erosion", "output"] {
+        for id in ["noise", "combine", "mask", "erosion", "output"] {
             assert!(
                 find_category(id).is_some(),
                 "category {id:?} not registered"

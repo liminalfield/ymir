@@ -514,7 +514,8 @@ mod tests {
     #[test]
     fn categories_are_sorted_by_sort_then_id() {
         let ids: Vec<&str> = categories_sorted().iter().map(|c| c.id).collect();
-        assert_eq!(ids, ["noise", "combine", "erosion", "output"]); // sort 0, 5, 10, 90
+        // sort 0, 5, 7, 10, 90
+        assert_eq!(ids, ["noise", "combine", "mask", "erosion", "output"]);
     }
 
     #[test]
