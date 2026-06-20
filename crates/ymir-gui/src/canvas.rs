@@ -45,6 +45,10 @@ pub(crate) struct GraphViewer<'a> {
     /// The node pinned as the preview target, if any (#39). It gets a ring around its
     /// status dot so it reads as locked. Input, read-only.
     pub(crate) pinned: Option<Handle>,
+    /// Set by the graph context menu ("Add node") to the graph-space position where
+    /// the user asked to add a node; the canvas reads it after the frame to open the
+    /// node menu there (#60). Output.
+    pub(crate) add_node_at: Option<egui::Pos2>,
 }
 
 impl<'a> GraphViewer<'a> {
@@ -58,6 +62,7 @@ impl<'a> GraphViewer<'a> {
             to_global: egui::emath::TSTransform::IDENTITY,
             status: None,
             pinned: None,
+            add_node_at: None,
         }
     }
 }
@@ -264,6 +269,19 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
     ) {
         if ui.button("Delete node").clicked() {
             remove_snarl_node(self.graph, snarl, node);
+            ui.close();
+        }
+    }
+
+    fn has_graph_menu(&mut self, _pos: egui::Pos2, _snarl: &mut Snarl<Handle>) -> bool {
+        true
+    }
+
+    fn show_graph_menu(&mut self, pos: egui::Pos2, ui: &mut egui::Ui, _snarl: &mut Snarl<Handle>) {
+        // Record the clicked spot; the canvas opens the node-creation menu there
+        // after the frame, reusing the Space menu (#60).
+        if ui.button("Add node").clicked() {
+            self.add_node_at = Some(pos);
             ui.close();
         }
     }

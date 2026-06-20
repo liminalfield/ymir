@@ -674,6 +674,19 @@ fn menu_row(ui: &mut egui::Ui, text: &str, selected: bool) -> bool {
     ui.add(egui::Button::selectable(selected, text)).clicked()
 }
 
+/// A fresh node-creation menu anchored at `anchor` (screen space), placing into
+/// `view`. Shared by the Space gesture and the right-click "Add node" (#51, #60).
+fn open_node_menu(anchor: egui::Pos2, view: CanvasView) -> NodeMenu {
+    NodeMenu {
+        anchor,
+        view,
+        search: String::new(),
+        drilled: None,
+        highlight: 0,
+        focus_search: true,
+    }
+}
+
 fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // While the node menu is open it owns the pointer: skip canvas selection so a
     // click on a menu row does not also select or clear under it.
@@ -702,6 +715,7 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         to_global: egui::emath::TSTransform::IDENTITY,
         status,
         pinned,
+        add_node_at: None,
     };
     // The canvas's screen rect comes from the ui, not snarl's response: snarl
     // returns an unbounded `EVERYTHING` rect, so it cannot be used for hit-testing
@@ -733,6 +747,8 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         to_global: viewer.to_global,
         rect: canvas_rect,
     };
+    // A graph-space spot from a right-click "Add node", if any (#60).
+    let add_node_at = viewer.add_node_at;
 
     // Resolve selection from a plain click (snarl 0.10 only selects on shift-click).
     // A click is a press-and-release without movement, so drags — wiring from or to
@@ -780,6 +796,18 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // finite (a NaN position panics egui's layout) and on the canvas.
     state.canvas_view = view.rect.is_finite().then_some(view);
 
+    // Right-click "Add node" (snarl graph menu) opens the node menu at the clicked
+    // graph spot, mapped back to screen for the anchor (#60).
+    if state.node_menu.is_none()
+        && let Some(graph_pos) = add_node_at
+        && let Some(view) = state.canvas_view
+    {
+        let anchor = view.to_global * graph_pos;
+        if anchor.is_finite() {
+            state.node_menu = Some(open_node_menu(anchor, view));
+        }
+    }
+
     // Space over the canvas opens the node-creation menu at the cursor (issue #51),
     // unless a text field already has focus (so a space typed elsewhere never opens
     // it). The view captured above gives the screen-to-graph mapping for placement.
@@ -792,14 +820,7 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
             })
             .filter(|p| canvas_rect.contains(*p));
         if let (Some(anchor), Some(view)) = (anchor, state.canvas_view) {
-            state.node_menu = Some(NodeMenu {
-                anchor,
-                view,
-                search: String::new(),
-                drilled: None,
-                highlight: 0,
-                focus_search: true,
-            });
+            state.node_menu = Some(open_node_menu(anchor, view));
         }
     }
     node_menu_ui(ui, state);
