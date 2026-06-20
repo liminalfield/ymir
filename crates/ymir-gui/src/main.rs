@@ -12,7 +12,7 @@ use eframe::egui;
 use egui_snarl::Snarl;
 use egui_snarl::ui::SnarlWidget;
 use ymir_core::registry;
-use ymir_core::{EvalRequest, Graph, Region};
+use ymir_core::{EvalRequest, Graph, NodeId, ParamValue, Region};
 use ymir_nodes::{CategoryDef, categories, find_category, tr};
 
 // The node-editor canvas (GUI step 5, issue #6): egui-snarl as a pure view over the
@@ -638,6 +638,39 @@ fn world_settings(ui: &mut egui::Ui, state: &mut AppState) {
                 .range(32..=1024),
         );
     });
+
+    ui.separator();
+    ui.label("Outputs");
+    ui.weak("Endpoints a Build will write; tick to include.");
+    // Endpoints are nodes with no outputs. Collect them first (releasing the snarl
+    // borrow) before mutating params below.
+    let endpoints: Vec<NodeId> = state
+        .snarl
+        .node_ids()
+        .filter_map(|(_, &handle)| state.graph.node_id_of(handle))
+        .filter(|&id| state.graph.spec(id).is_some_and(|s| s.outputs.is_empty()))
+        .collect();
+    if endpoints.is_empty() {
+        ui.weak("No output nodes in the graph.");
+        return;
+    }
+    for id in endpoints {
+        let mut params = state.graph.params(id).cloned().unwrap_or_default();
+        let mut include = params.get_bool("build", true);
+        let name = node_display_name(&state.graph, id);
+        let path = params.get_str("path", "").to_string();
+        ui.horizontal(|ui| {
+            if ui.checkbox(&mut include, name).changed() {
+                params.insert("build".to_string(), ParamValue::Bool(include));
+                if let Err(err) = state.graph.set_params(id, params) {
+                    ui.colored_label(ui.visuals().error_fg_color, err.to_string());
+                }
+            }
+            if !path.is_empty() {
+                ui.weak(path);
+            }
+        });
+    }
 }
 
 fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {

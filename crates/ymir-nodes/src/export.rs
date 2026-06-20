@@ -26,11 +26,17 @@ impl Operator for ExportPng {
             tags: &["png", "export", "output", "endpoint"],
             inputs: vec![PortSpec::new("in")],
             outputs: Vec::new(),
-            params: vec![ParamSpec::new(
-                "path",
-                ParamKind::Text,
-                ParamValue::Text("out/heightmap.png".into()),
-            )],
+            params: vec![
+                ParamSpec::new(
+                    "path",
+                    ParamKind::Text,
+                    ParamValue::Text("out/heightmap.png".into()),
+                ),
+                // Whether a full Build includes this output. The operator itself
+                // ignores it (evaluating an export always writes); the build
+                // orchestrator reads it to choose which endpoints to run.
+                ParamSpec::new("build", ParamKind::Bool, ParamValue::Bool(true)),
+            ],
         }
     }
 
