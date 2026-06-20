@@ -39,9 +39,12 @@ pub(crate) struct GraphViewer<'a> {
     /// the local space the node rects live in. Output.
     pub(crate) to_global: egui::emath::TSTransform,
     /// The previewed node's handle and its preview-status colour, drawn as a small
-    /// dot at the left of that node's header. Only the previewed (selected) node has
-    /// a status, since the preview evaluates a single target. Input, read-only.
+    /// dot at the left of that node's header. Only the previewed node has a status,
+    /// since the preview evaluates a single target. Input, read-only.
     pub(crate) status: Option<(Handle, egui::Color32)>,
+    /// The node pinned as the preview target, if any (#39). It gets a ring around its
+    /// status dot so it reads as locked. Input, read-only.
+    pub(crate) pinned: Option<Handle>,
 }
 
 impl<'a> GraphViewer<'a> {
@@ -54,6 +57,7 @@ impl<'a> GraphViewer<'a> {
             node_rects: Vec::new(),
             to_global: egui::emath::TSTransform::IDENTITY,
             status: None,
+            pinned: None,
         }
     }
 }
@@ -136,6 +140,16 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
             {
                 ui.painter()
                     .circle_filled(rect.center(), diameter * 0.5, color);
+            }
+            // A ring around the dot marks the pinned node, so it reads as the locked
+            // preview target even as selection moves elsewhere. Painted (not
+            // allocated), so it never changes the node's width.
+            if handle.is_some() && handle == self.pinned {
+                ui.painter().circle_stroke(
+                    rect.center(),
+                    diameter * 0.5 + 1.5,
+                    egui::Stroke::new(1.5, ui.visuals().selection.stroke.color),
+                );
             }
             ui.add(egui::Label::new(text).selectable(false));
         });

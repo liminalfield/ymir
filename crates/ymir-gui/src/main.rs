@@ -112,9 +112,14 @@ struct AppState {
     /// view. `None` until the canvas has drawn once.
     canvas_view: Option<CanvasView>,
     /// The node selected on the canvas (its `stable_id`), whose parameters the
-    /// inspector edits and whose output the 2D preview shows. Refreshed each frame
-    /// from the canvas selection.
+    /// inspector edits. Refreshed each frame from the canvas selection. Drives the
+    /// preview only when no node is pinned (see `preview_pin`).
     selected: Option<Handle>,
+    /// The node pinned as the preview target, if any (GUI view-state, not core graph
+    /// data — issue #39). When set and still previewable, the 2D preview shows this
+    /// node instead of the selection, so selection can move upstream to edit while the
+    /// pinned downstream result keeps updating (the Houdini display-flag idea).
+    preview_pin: Option<Handle>,
     /// The global seed for evaluation, set by the ribbon control. Reseeds the whole
     /// world; each node stays internally stable across edits.
     seed: u64,
@@ -142,7 +147,26 @@ impl AppState {
             active_tab: None,
             search: String::new(),
             node_menu: None,
+            preview_pin: None,
         }
+    }
+
+    /// Whether `handle` resolves to a live node that produces an output, so it can be
+    /// previewed (an endpoint or a deleted node cannot).
+    fn is_previewable(&self, handle: Handle) -> bool {
+        self.graph
+            .node_id_of(handle)
+            .and_then(|id| self.graph.spec(id))
+            .is_some_and(|spec| !spec.outputs.is_empty())
+    }
+
+    /// The node whose output the 2D preview shows: the pinned node when one is set
+    /// and still previewable, otherwise the selected node. Decouples the preview
+    /// target from selection (#39).
+    fn preview_target(&self) -> Option<Handle> {
+        self.preview_pin
+            .filter(|&h| self.is_previewable(h))
+            .or_else(|| self.selected.filter(|&h| self.is_previewable(h)))
     }
 }
 
@@ -450,20 +474,43 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
         "{PREVIEW_RES}×{PREVIEW_RES} preview — an approximation, not the build"
     ));
 
-    let Some(id) = state.selected.and_then(|h| state.graph.node_id_of(h)) else {
+    // Drop a pin left pointing at a deleted node, so it never sticks the preview on
+    // nothing.
+    if state
+        .preview_pin
+        .is_some_and(|h| state.graph.node_id_of(h).is_none())
+    {
+        state.preview_pin = None;
+    }
+
+    // The preview shows the pinned node if one is set, else the selection. Only nodes
+    // with an output qualify; evaluating an endpoint would run its side effect.
+    let Some(target) = state.preview_target() else {
+        if state.selected.is_some() {
+            ui.weak("This node has no output to preview.");
+        } else {
+            ui.weak("Select a node to preview its output.");
+        }
+        return;
+    };
+    let Some(id) = state.graph.node_id_of(target) else {
         ui.weak("Select a node to preview its output.");
         return;
     };
-    // Only nodes with an output can be previewed; evaluating an endpoint would run
-    // its side effect (export writing a file) just from selecting it.
-    if state
-        .graph
-        .spec(id)
-        .is_none_or(|spec| spec.outputs.is_empty())
-    {
-        ui.weak("This node has no output to preview.");
-        return;
-    }
+
+    // Pin toggle: pinning locks the preview to this node while selection moves freely
+    // upstream to edit ancestors and watch this result respond.
+    let is_pinned = state.preview_pin == Some(target);
+    ui.horizontal(|ui| {
+        if is_pinned {
+            if ui.button("Unpin").clicked() {
+                state.preview_pin = None;
+            }
+            ui.weak("preview pinned");
+        } else if ui.button("Pin").clicked() {
+            state.preview_pin = Some(target);
+        }
+    });
 
     // Submit a snapshot for off-thread evaluation if the output changed, collect any
     // result, and render — none of which blocks the UI thread.
@@ -632,19 +679,13 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // click on a menu row does not also select or clear under it.
     let menu_open = state.node_menu.is_some();
 
-    // The previewed node's status dot, for its header. Only a previewable selected
-    // node has one (the preview evaluates a single target). Computed before the
-    // disjoint borrow below, from read-only fields.
+    // The previewed node's status dot, drawn on the node the preview is showing (the
+    // pinned node if any, else the selection). The pinned node also gets a ring
+    // marker. Both computed before the disjoint borrow below, from read-only fields.
     let status = state
-        .selected
-        .and_then(|h| state.graph.node_id_of(h).map(|id| (h, id)))
-        .filter(|(_, id)| {
-            state
-                .graph
-                .spec(*id)
-                .is_some_and(|spec| !spec.outputs.is_empty())
-        })
-        .map(|(h, _)| (h, state.preview.status_color(ui.visuals())));
+        .preview_target()
+        .map(|h| (h, state.preview.status_color(ui.visuals())));
+    let pinned = state.preview_pin.filter(|&h| state.is_previewable(h));
 
     // Disjoint borrows: the viewer holds the graph while snarl is rendered. Both
     // are distinct fields of the state, so this split is sound.
@@ -660,6 +701,7 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         node_rects: Vec::new(),
         to_global: egui::emath::TSTransform::IDENTITY,
         status,
+        pinned,
     };
     // The canvas's screen rect comes from the ui, not snarl's response: snarl
     // returns an unbounded `EVERYTHING` rect, so it cannot be used for hit-testing
@@ -1014,6 +1056,40 @@ mod tests {
         assert_eq!(menu_row_label(MenuRow::Back), "< back");
         assert!(menu_row_label(MenuRow::Category("adjust")).ends_with("  >"));
         assert_eq!(menu_row_label(MenuRow::Node("modifier.invert")), "Invert");
+    }
+
+    #[test]
+    fn preview_target_prefers_a_valid_pin_then_selection() {
+        let mut state = AppState::new();
+        let pos = egui::Pos2::ZERO;
+        let gen_id =
+            canvas::add_node(&mut state.graph, &mut state.snarl, "generator.fbm", pos).unwrap();
+        let out_id =
+            canvas::add_node(&mut state.graph, &mut state.snarl, "endpoint.export", pos).unwrap();
+        let generator = state.graph.stable_id(gen_id).unwrap();
+        let endpoint = state.graph.stable_id(out_id).unwrap();
+
+        // Nothing selected or pinned: no target.
+        assert_eq!(state.preview_target(), None);
+
+        // A previewable selection is the target; an endpoint (no output) is not.
+        state.selected = Some(generator);
+        assert_eq!(state.preview_target(), Some(generator));
+        state.selected = Some(endpoint);
+        assert_eq!(state.preview_target(), None);
+
+        // A valid pin wins over the selection.
+        state.preview_pin = Some(generator);
+        state.selected = Some(endpoint);
+        assert_eq!(state.preview_target(), Some(generator));
+
+        // An invalid pin (an endpoint, or a missing node) is ignored, falling back to
+        // the selection.
+        state.preview_pin = Some(endpoint);
+        state.selected = Some(generator);
+        assert_eq!(state.preview_target(), Some(generator));
+        state.preview_pin = Some(99_999);
+        assert_eq!(state.preview_target(), Some(generator));
     }
 
     #[test]
