@@ -15,6 +15,9 @@ use ymir_core::{CancelToken, Error, EvalCache, EvalRequest, Field, Graph, NodeId
 
 /// Worker-side persistent cache capacity, in cached node results.
 const WORKER_CACHE_CAP: usize = 64;
+/// Size (px) of the relief light dial. Also the reserved height of the shading
+/// controls row, so toggling Height/Relief never shifts the preview (#40).
+pub(crate) const LIGHT_DIAL_SIZE: f32 = 40.0;
 /// Minimum interval between preview submissions. A fast parameter drag throttles to
 /// this cadence instead of queuing a job every frame; the final, settled value is
 /// always submitted once the interval elapses (the trailing value wins).
@@ -288,32 +291,21 @@ impl PreviewEngine {
         }
     }
 
-    /// Draws the stoplight: a coloured dot plus a short label.
-    fn status_chip(ui: &mut egui::Ui, status: Status) {
-        let (color, label) = match status {
-            Status::UpToDate => (STATUS_OK, "Up to date"),
-            Status::Processing => (STATUS_BUSY, "Evaluating…"),
-            Status::Error => (ui.visuals().error_fg_color, "Error"),
-        };
-        ui.horizontal(|ui| {
-            let diameter = ui.text_style_height(&egui::TextStyle::Body) * 0.6;
-            let (rect, _) =
-                ui.allocate_exact_size(egui::vec2(diameter, diameter), egui::Sense::hover());
-            ui.painter()
-                .circle_filled(rect.center(), diameter * 0.5, color);
-            ui.label(label);
-        });
+    /// A short label for the current status, for the pane's status-dot tooltip.
+    pub(crate) fn status_label(&self) -> &'static str {
+        match self.status() {
+            Status::UpToDate => "Up to date",
+            Status::Processing => "Evaluating…",
+            Status::Error => "Error",
+        }
     }
 
-    /// Renders the current preview: a status stoplight, then either the error
-    /// message (when failed) or the most recent image. A processing state keeps the
-    /// last image visible while the refresh is in flight. In relief mode the image is
-    /// draggable to steer the light (#40).
+    /// Renders the preview body: the error message when failed, else the most recent
+    /// image (kept visible while a refresh is in flight). In relief mode the image is
+    /// draggable to steer the light (#40). The status and controls are drawn by the
+    /// pane around this.
     pub(crate) fn show(&mut self, ui: &mut egui::Ui) {
-        let status = self.status();
-        Self::status_chip(ui, status);
-
-        if status == Status::Error {
+        if self.status() == Status::Error {
             if let Some(err) = self.structural_error.as_ref().or(self.eval_error.as_ref()) {
                 ui.colored_label(ui.visuals().error_fg_color, err);
             }
@@ -357,7 +349,7 @@ impl PreviewEngine {
     /// azimuth and whose radius is the altitude — and lets you set it by dragging
     /// (sharing the image's mapping). Only meaningful in relief mode (#40).
     pub(crate) fn light_indicator(&mut self, ui: &mut egui::Ui) {
-        let size = 48.0;
+        let size = LIGHT_DIAL_SIZE;
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::drag());
         let center = rect.center();
         let radius = size * 0.5 - 3.0;

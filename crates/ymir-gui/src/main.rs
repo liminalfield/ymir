@@ -459,6 +459,18 @@ fn name_override(text: &str) -> Option<String> {
     (!text.trim().is_empty()).then(|| text.to_string())
 }
 
+/// A node's display name: its per-instance override if set (#59), else its type's
+/// name via `tr`. Mirrors the canvas title for the preview header.
+fn node_display_name(graph: &Graph, id: ymir_core::NodeId) -> String {
+    if let Some(name) = graph.name(id) {
+        return name.to_string();
+    }
+    graph.spec(id).map_or_else(
+        || "?".to_string(),
+        |spec| tr(&format!("node-{}", spec.type_id)).to_string(),
+    )
+}
+
 fn params_pane(ui: &mut egui::Ui, state: &mut AppState) {
     ui.heading("Parameters");
 
@@ -520,11 +532,6 @@ fn params_pane(ui: &mut egui::Ui, state: &mut AppState) {
 inventory::submit! { PaneKind { id: "params", draw: params_pane } }
 
 fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
-    ui.heading("2D preview");
-    ui.weak(format!(
-        "{PREVIEW_RES}×{PREVIEW_RES} preview — an approximation, not the build"
-    ));
-
     // Drop a pin left pointing at a deleted node, so it never sticks the preview on
     // nothing.
     if state
@@ -548,32 +555,49 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
         ui.weak("Select a node to preview its output.");
         return;
     };
-
-    // Pin toggle: pinning locks the preview to this node while selection moves freely
-    // upstream to edit ancestors and watch this result respond.
     let is_pinned = state.preview_pin == Some(target);
+
+    // Row 1: status dot (colour = up-to-date/evaluating/error, words on hover), the
+    // previewed node's name so it is always clear what is shown, a pinned marker, and
+    // the Pin/Unpin toggle right-aligned.
+    let name = node_display_name(&state.graph, id);
     ui.horizontal(|ui| {
+        let color = state.preview.status_color(ui.visuals());
+        let d = ui.text_style_height(&egui::TextStyle::Body) * 0.6;
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(d, d), egui::Sense::hover());
+        ui.painter().circle_filled(rect.center(), d * 0.5, color);
+        resp.on_hover_text(state.preview.status_label());
+
+        ui.label(name);
         if is_pinned {
-            if ui.button("Unpin").clicked() {
-                state.preview_pin = None;
-            }
-            ui.weak("preview pinned");
-        } else if ui.button("Pin").clicked() {
-            state.preview_pin = Some(target);
+            ui.weak("· pinned");
         }
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if is_pinned {
+                if ui.button("Unpin").clicked() {
+                    state.preview_pin = None;
+                }
+            } else if ui.button("Pin").clicked() {
+                state.preview_pin = Some(target);
+            }
+        });
     });
 
-    // Shading toggle: relief makes subtle height changes (erosion) legible (#40).
+    // Row 2: shading toggle (relief makes subtle height changes legible, #40) and, in
+    // relief, the light dial inline.
     let mut mode = state.preview.mode();
     ui.horizontal(|ui| {
+        // Reserve the dial's height in both modes so the image never jumps when
+        // toggling Height/Relief.
+        ui.set_min_height(preview::LIGHT_DIAL_SIZE);
         ui.selectable_value(&mut mode, preview::ShadeMode::Height, "Height");
         ui.selectable_value(&mut mode, preview::ShadeMode::Relief, "Relief");
+        if mode == preview::ShadeMode::Relief {
+            state.preview.light_indicator(ui);
+        }
     });
     state.preview.set_mode(mode);
-    if mode == preview::ShadeMode::Relief {
-        // The light-direction dial: shows the current light, and steers it on drag.
-        state.preview.light_indicator(ui);
-    }
 
     // Submit a snapshot for off-thread evaluation if the output changed, collect any
     // result, and render — none of which blocks the UI thread.
