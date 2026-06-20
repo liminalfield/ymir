@@ -747,6 +747,7 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         status,
         pinned,
         add_node_at: None,
+        select_after: None,
     };
     // The canvas's screen rect comes from the ui, not snarl's response: snarl
     // returns an unbounded `EVERYTHING` rect, so it cannot be used for hit-testing
@@ -780,6 +781,8 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     };
     // A graph-space spot from a right-click "Add node", if any (#60).
     let add_node_at = viewer.add_node_at;
+    // A node the viewer asks to select (e.g. a duplicate, #61).
+    let select_after = viewer.select_after;
 
     // Resolve selection from a plain click (snarl 0.10 only selects on shift-click).
     // A click is a press-and-release without movement, so drags — wiring from or to
@@ -826,6 +829,12 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // by CanvasView::center falling back to the screen centre, so placement stays
     // finite (a NaN position panics egui's layout) and on the canvas.
     state.canvas_view = view.rect.is_finite().then_some(view);
+
+    // Apply a viewer-requested selection (e.g. a duplicate) after the click-selection
+    // above, so it wins (#61).
+    if let Some(handle) = select_after {
+        state.selected = Some(handle);
+    }
 
     // Right-click "Add node" (snarl graph menu) opens the node menu at the clicked
     // graph spot, mapped back to screen for the anchor (#60).

@@ -49,6 +49,9 @@ pub(crate) struct GraphViewer<'a> {
     /// the user asked to add a node; the canvas reads it after the frame to open the
     /// node menu there (#60). Output.
     pub(crate) add_node_at: Option<egui::Pos2>,
+    /// A node the viewer asks the canvas to select after the frame (e.g. a duplicate),
+    /// keeping selection logic in one place. Output.
+    pub(crate) select_after: Option<Handle>,
 }
 
 impl<'a> GraphViewer<'a> {
@@ -63,6 +66,7 @@ impl<'a> GraphViewer<'a> {
             status: None,
             pinned: None,
             add_node_at: None,
+            select_after: None,
         }
     }
 }
@@ -106,6 +110,49 @@ impl GraphViewer<'_> {
             || "<missing>".to_string(),
             |spec| tr(&format!("node-{}", spec.type_id)).to_string(),
         )
+    }
+
+    /// Duplicates `node` (same type and params, a fresh `stable_id`, unconnected) at
+    /// a small offset, and asks the canvas to select it (#61). The name override is
+    /// not copied, so the copy is distinguishable and does not share a label.
+    fn duplicate_node(&mut self, node: SnarlNodeId, snarl: &mut Snarl<Handle>) {
+        let Some(src) = self.core_id_of_snarl(snarl, node) else {
+            return;
+        };
+        let Some(spec) = self.graph.spec(src) else {
+            return;
+        };
+        let Some(operator) = registry::make(spec.type_id) else {
+            return;
+        };
+        let params = self.graph.params(src).cloned().unwrap_or_default();
+        let new_id = self.graph.add_op(operator, params);
+        let Some(handle) = self.graph.stable_id(new_id) else {
+            return;
+        };
+        let pos = snarl
+            .get_node_info(node)
+            .map_or(Pos2::ZERO, |info| info.pos + egui::vec2(30.0, 30.0));
+        snarl.insert_node(pos, handle);
+        self.select_after = Some(handle);
+    }
+
+    /// Disconnects every wire touching `node` (inputs and outputs), in core and snarl
+    /// together so the two stay in sync (#61).
+    fn disconnect_all(&mut self, node: SnarlNodeId, snarl: &mut Snarl<Handle>) {
+        let touching: Vec<_> = snarl
+            .wires()
+            .filter(|(out_pin, in_pin)| out_pin.node == node || in_pin.node == node)
+            .collect();
+        for (out_pin, in_pin) in touching {
+            // Core holds the edge on the destination input; drop it there, then mirror
+            // into snarl, exactly as the per-wire `disconnect` hook does.
+            if let Some(dest) = self.core_id_of_snarl(snarl, in_pin.node)
+                && self.graph.disconnect(dest, in_pin.input).is_ok()
+            {
+                snarl.disconnect(out_pin, in_pin);
+            }
+        }
     }
 }
 
@@ -275,6 +322,14 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
         ui: &mut egui::Ui,
         snarl: &mut Snarl<Handle>,
     ) {
+        if ui.button("Duplicate").clicked() {
+            self.duplicate_node(node, snarl);
+            ui.close();
+        }
+        if ui.button("Delete all connections").clicked() {
+            self.disconnect_all(node, snarl);
+            ui.close();
+        }
         if ui.button("Delete node").clicked() {
             remove_snarl_node(self.graph, snarl, node);
             ui.close();
@@ -525,6 +580,65 @@ mod tests {
         // Clearing the override reverts to the type's name.
         viewer.graph.set_name(head, None).expect("clear name");
         assert_eq!(viewer.title(&handle), tr("node-generator.fbm"));
+    }
+
+    #[test]
+    fn duplicate_clones_type_and_params_with_a_fresh_id() {
+        use ymir_core::ParamValue;
+        let mut graph = Graph::new();
+        let mut snarl = Snarl::<Handle>::new();
+        let src = add_node(&mut graph, &mut snarl, THERMAL, Pos2::new(10.0, 20.0)).expect("src");
+        graph
+            .set_params(src, Params::new().with("talus", ParamValue::Float(0.05)))
+            .expect("set params");
+        let s_src = snarl_id(&snarl, &graph, src);
+        let src_handle = graph.stable_id(src).expect("handle");
+
+        GraphViewer::for_test(&mut graph).duplicate_node(s_src, &mut snarl);
+
+        assert_eq!(graph.node_count(), 2, "a node was added");
+        assert_eq!(snarl.nodes().count(), 2);
+        // The duplicate has a distinct handle, the same type, and the copied params.
+        let dup_handle = snarl
+            .node_ids()
+            .map(|(_, h)| *h)
+            .find(|&h| h != src_handle)
+            .expect("duplicate handle");
+        let dup_id = graph.node_id_of(dup_handle).expect("duplicate id");
+        assert_eq!(
+            graph.spec(dup_id).expect("spec").type_id,
+            "modifier.thermal_erosion"
+        );
+        assert!((graph.params(dup_id).expect("params").get_f64("talus", 0.0) - 0.05).abs() < 1e-9);
+        assert_in_sync(&graph, &snarl);
+    }
+
+    #[test]
+    fn delete_all_connections_clears_every_wire_touching_a_node() {
+        let mut graph = Graph::new();
+        let mut snarl = Snarl::<Handle>::new();
+        let a = add_node(&mut graph, &mut snarl, FBM, Pos2::ZERO).expect("a");
+        let b = add_node(&mut graph, &mut snarl, THERMAL, Pos2::ZERO).expect("b");
+        let c = add_node(&mut graph, &mut snarl, THERMAL, Pos2::ZERO).expect("c");
+        let (sa, sb, sc) = (
+            snarl_id(&snarl, &graph, a),
+            snarl_id(&snarl, &graph, b),
+            snarl_id(&snarl, &graph, c),
+        );
+        // a -> b -> c, so b has both an input and an output wire.
+        let (out, inp) = pins(&snarl, sa, sb);
+        GraphViewer::for_test(&mut graph).connect(&out, &inp, &mut snarl);
+        let (out, inp) = pins(&snarl, sb, sc);
+        GraphViewer::for_test(&mut graph).connect(&out, &inp, &mut snarl);
+        assert!(edge_exists(&graph, a, b) && edge_exists(&graph, b, c));
+
+        GraphViewer::for_test(&mut graph).disconnect_all(sb, &mut snarl);
+
+        assert!(!edge_exists(&graph, a, b), "input wire dropped");
+        assert!(!edge_exists(&graph, b, c), "output wire dropped");
+        assert_eq!(wires_into(&snarl, sb), 0);
+        assert_eq!(wires_into(&snarl, sc), 0);
+        assert_in_sync(&graph, &snarl);
     }
 
     #[test]
