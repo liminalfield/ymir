@@ -23,10 +23,12 @@ pub struct Inputs<'a> {
 }
 
 impl<'a> Inputs<'a> {
-    /// Builds the input set from the fields the evaluator gathered. Required inputs
-    /// are dense and all present; optional inputs carry one entry per optional port,
-    /// `None` when unconnected.
-    pub(crate) fn new(required: &'a [&'a Field], optional: &'a [Option<&'a Field>]) -> Self {
+    /// Builds the input set from required and optional fields. The evaluator uses
+    /// this; a driver or test calling an operator directly can too. Required inputs
+    /// are dense and all present; the optional slice carries one entry per optional
+    /// port, `None` when unconnected.
+    #[must_use]
+    pub fn new(required: &'a [&'a Field], optional: &'a [Option<&'a Field>]) -> Self {
         Self { required, optional }
     }
 

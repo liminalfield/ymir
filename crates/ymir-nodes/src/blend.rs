@@ -10,10 +10,12 @@
 //!
 //! so `opacity = 0` leaves the base untouched for every mode, `opacity = 1` applies
 //! the mode fully, and `Normal` (effect = overlay) makes the slider a base<->overlay
-//! crossfade. The base's `mask` layer localizes the effect per cell (soft-layer
-//! contract: an absent mask reads `1.0`, so the node never gates on a mask). The
-//! base's non-height layers pass through. The base and overlay are not symmetric:
-//! the base is what survives as opacity or mask fall to zero.
+//! crossfade. The optional `mask` input localizes the effect per cell: its height
+//! layer is the selection; when it is unwired the base's own `mask` layer is used by
+//! convention, and with neither the mask reads `1.0` (soft-layer contract: the node
+//! never gates on a mask). The base's non-height layers pass through. The base and
+//! overlay are not symmetric: the base is what survives as opacity or mask fall to
+//! zero.
 
 use std::sync::Arc;
 
@@ -65,7 +67,13 @@ impl Operator for Blend {
                 "multiply",
                 "modifier",
             ],
-            inputs: vec![PortSpec::new("base"), PortSpec::new("overlay")],
+            inputs: vec![
+                PortSpec::new("base"),
+                PortSpec::new("overlay"),
+                // Optional: a field whose height is the selection. When unwired, the
+                // base's own mask layer is used by convention, else apply everywhere.
+                PortSpec::optional("mask"),
+            ],
             outputs: vec![PortSpec::new("out")],
             params: vec![
                 ParamSpec::new(
@@ -94,9 +102,14 @@ impl Operator for Blend {
 
         let base = base_field.layer_or(layers::HEIGHT, 0.0);
         let overlay = overlay_field.layer_or(layers::HEIGHT, 0.0);
-        // Soft contract: the effect is localized by the base's mask if present, else
-        // a uniform 1.0.
-        let mask = base_field.layer_or(layers::MASK, 1.0);
+        // The mask localizes the effect. An explicit mask input wins (its height
+        // layer is the selection); with none, the base's own mask layer by
+        // convention; with neither, a uniform 1.0 (apply everywhere). Soft-layer
+        // contract either way: the node never gates on a mask.
+        let mask = match inputs.optional(0) {
+            Some(mask_field) => mask_field.layer_or(layers::HEIGHT, 1.0),
+            None => base_field.layer_or(layers::MASK, 1.0),
+        };
 
         let mode = params.get_str("mode", MODE_NORMAL);
         let opacity = params.get_f64("opacity", 1.0) as f32;
@@ -214,6 +227,30 @@ mod tests {
         let overlay = const_field(1.0);
         // t = opacity * mask = 0.5 * 0.5 = 0.25, so lerp(0, 1, 0.25) == 0.25 (normal).
         assert!((height_at(&blend(&base, &overlay, MODE_NORMAL, 0.5), 0, 0) - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_connected_mask_input_is_used_and_overrides_the_base_mask_layer() {
+        // The base carries a mask layer that says "apply nowhere"; a connected mask
+        // input must win, so its height (0.5) is the selection.
+        let mut base = const_field(0.0);
+        base.set_layer(layers::MASK, Arc::new(Layer::filled(8, 8, 0.0)));
+        let overlay = const_field(1.0);
+        let mask = const_field(0.5);
+
+        let params = Params::new()
+            .with("mode", ParamValue::Text(MODE_NORMAL.to_string()))
+            .with("opacity", ParamValue::Float(1.0));
+        let required = [&base, &overlay];
+        let optional = [Some(&mask)];
+        let out = Blend
+            .eval(Inputs::new(&required, &optional), &params, &ctx())
+            .unwrap()
+            .remove(0);
+
+        // t = opacity * mask_input = 1.0 * 0.5 = 0.5, so lerp(0, 1, 0.5) == 0.5 — not
+        // 0.0, which the base's own mask layer would have produced.
+        assert!((height_at(&out, 0, 0) - 0.5).abs() < 1e-6);
     }
 
     #[test]
