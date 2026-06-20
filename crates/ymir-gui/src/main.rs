@@ -675,6 +675,11 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         pin_fill: Some(wire_color),
         ..egui_snarl::ui::SnarlStyle::new()
     };
+    // Ports stack in snarl's top-down pin layout, so the gap between them is the
+    // canvas ui's vertical item spacing (~3px by default, which reads as jammed).
+    // Roughly double it for breathing room between ports and node rows (#58). Scoped
+    // to this ui, so it only affects the snarl widget, not other panes or the menu.
+    ui.spacing_mut().item_spacing.y = 6.0;
     SnarlWidget::new()
         .style(style)
         .id_salt("ymir-canvas")
