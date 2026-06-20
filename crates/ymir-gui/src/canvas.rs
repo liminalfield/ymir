@@ -13,7 +13,7 @@ use eframe::egui::{self, Pos2};
 use egui_snarl::ui::{PinInfo, SnarlPin, SnarlViewer};
 use egui_snarl::{InPin, NodeId as SnarlNodeId, OutPin, Snarl};
 
-use ymir_core::{Graph, NodeId, Params, registry};
+use ymir_core::{EvalRequest, Graph, NodeId, Params, Region, registry};
 use ymir_nodes::tr;
 
 /// Constant width for the right-click context menus, so they do not resize with
@@ -169,6 +169,15 @@ impl GraphViewer<'_> {
         ports.get(index).map(|p| p.name.clone())
     }
 
+    /// Whether `id` is structurally broken (a disconnected required input or a cycle).
+    /// A cheap check via the graph's output key, whose `Ok`/`Err` outcome is
+    /// independent of resolution and seed, so a throwaway request suffices.
+    fn is_broken(&self, id: NodeId) -> bool {
+        self.graph
+            .output_key(id, &EvalRequest::new(1, 1, Region::UNIT, 0))
+            .is_err()
+    }
+
     /// A node's display name: its per-instance override if set (#59), else its type's
     /// name resolved through [`tr`].
     fn display_label(&self, id: NodeId) -> String {
@@ -264,9 +273,22 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
             let diameter = ui.text_style_height(&egui::TextStyle::Body) * 0.55;
             let (rect, _) =
                 ui.allocate_exact_size(egui::vec2(diameter, diameter), egui::Sense::hover());
-            if let Some((status_handle, color)) = self.status
-                && handle == Some(status_handle)
-            {
+            // The dot's colour: the previewed node shows the preview status; any other
+            // structurally-broken node shows red, so a broken node (e.g. a Blend with
+            // a disconnected input) is visible even while the preview is pinned
+            // elsewhere (#43; a fuller per-node status is #44).
+            let dot = handle.and_then(|h| {
+                if let Some((status_handle, color)) = self.status
+                    && status_handle == h
+                {
+                    Some(color)
+                } else if self.core_id(h).is_some_and(|id| self.is_broken(id)) {
+                    Some(ui.visuals().error_fg_color)
+                } else {
+                    None
+                }
+            });
+            if let Some(color) = dot {
                 ui.painter()
                     .circle_filled(rect.center(), diameter * 0.5, color);
             }
