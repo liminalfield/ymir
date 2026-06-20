@@ -125,13 +125,15 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
             egui::RichText::new(title)
         };
         ui.horizontal(|ui| {
-            // Preview-status dot, left of the title, only for the previewed node.
+            // Always reserve the status dot's space so a node never changes width when
+            // it becomes the previewed node (a layout jump is jarring). Paint the
+            // colour only for the previewed node; the slot stays empty otherwise.
+            let diameter = ui.text_style_height(&egui::TextStyle::Body) * 0.55;
+            let (rect, _) =
+                ui.allocate_exact_size(egui::vec2(diameter, diameter), egui::Sense::hover());
             if let Some((status_handle, color)) = self.status
                 && handle == Some(status_handle)
             {
-                let diameter = ui.text_style_height(&egui::TextStyle::Body) * 0.55;
-                let (rect, _) =
-                    ui.allocate_exact_size(egui::vec2(diameter, diameter), egui::Sense::hover());
                 ui.painter()
                     .circle_filled(rect.center(), diameter * 0.5, color);
             }
