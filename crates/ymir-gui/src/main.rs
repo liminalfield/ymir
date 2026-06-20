@@ -795,6 +795,7 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         add_node_at: None,
         select_after: None,
         rename_request: None,
+        pin_request: None,
     };
     // The canvas's screen rect comes from the ui, not snarl's response: snarl
     // returns an unbounded `EVERYTHING` rect, so it cannot be used for hit-testing
@@ -832,6 +833,8 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     let select_after = viewer.select_after;
     // A node the viewer asks to rename (context-menu "Rename", #61).
     let rename_request = viewer.rename_request;
+    // A preview-pin change the viewer requests (context-menu Pin/Unpin, #39).
+    let pin_request = viewer.pin_request;
 
     // Resolve selection from a plain click (snarl 0.10 only selects on shift-click).
     // A click is a press-and-release without movement, so drags — wiring from or to
@@ -883,6 +886,11 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // above, so it wins (#61).
     if let Some(handle) = select_after {
         state.selected = Some(handle);
+    }
+
+    // Apply a viewer-requested preview-pin change (context-menu Pin/Unpin, #39).
+    if let Some(new_pin) = pin_request {
+        state.preview_pin = new_pin;
     }
 
     // Open the rename dialog for a node the context menu asked to rename (#61),

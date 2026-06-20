@@ -75,6 +75,9 @@ pub(crate) struct GraphViewer<'a> {
     /// A node the viewer asks the canvas to rename (context-menu "Rename"); the canvas
     /// opens the rename dialog for it after the frame (#61). Output.
     pub(crate) rename_request: Option<Handle>,
+    /// A preview-pin change the viewer requests (context-menu Pin/Unpin, #39): the
+    /// inner value is the new pin (`Some(node)` to pin, `None` to unpin). Output.
+    pub(crate) pin_request: Option<Option<Handle>>,
 }
 
 impl<'a> GraphViewer<'a> {
@@ -91,6 +94,7 @@ impl<'a> GraphViewer<'a> {
             add_node_at: None,
             select_after: None,
             rename_request: None,
+            pin_request: None,
         }
     }
 }
@@ -354,6 +358,25 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
         if ui.button("Rename").clicked() {
             self.rename_request = snarl.get_node(node).copied();
             ui.close();
+        }
+        // Pin/Unpin the 2D preview to this node (#39). Only previewable nodes (those
+        // with an output) qualify; an endpoint has nothing to preview.
+        if let Some(handle) = snarl.get_node(node).copied()
+            && self
+                .core_id(handle)
+                .and_then(|id| self.graph.spec(id))
+                .is_some_and(|spec| !spec.outputs.is_empty())
+        {
+            let is_pinned = self.pinned == Some(handle);
+            let label = if is_pinned {
+                "Unpin preview"
+            } else {
+                "Pin to preview"
+            };
+            if ui.button(label).clicked() {
+                self.pin_request = Some((!is_pinned).then_some(handle));
+                ui.close();
+            }
         }
         if ui.button("Delete all connections").clicked() {
             self.disconnect_all(node, snarl);
