@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use ymir_core::registry::OperatorEntry;
 use ymir_core::{
-    EvalContext, Field, Layer, NodeSpec, Operator, ParamKind, ParamSpec, ParamValue, Params,
-    PortSpec, Result, layers,
+    EvalContext, Field, Inputs, Layer, NodeSpec, Operator, ParamKind, ParamSpec, ParamValue,
+    Params, PortSpec, Result, layers,
 };
 
 /// Stable type identifier and registry key.
@@ -84,7 +84,7 @@ impl Operator for Blend {
         }
     }
 
-    fn eval(&self, inputs: &[&Field], params: &Params, _ctx: &EvalContext) -> Result<Vec<Field>> {
+    fn eval(&self, inputs: Inputs, params: &Params, _ctx: &EvalContext) -> Result<Vec<Field>> {
         // The evaluator gathers every input slot before calling eval, so both are
         // present; an unwired port would have failed upstream.
         let base_field = inputs[0];
@@ -152,7 +152,7 @@ mod tests {
             .with("mode", ParamValue::Text(mode.to_string()))
             .with("opacity", ParamValue::Float(opacity));
         Blend
-            .eval(&[base, overlay], &params, &ctx())
+            .eval(Inputs::required_only(&[base, overlay]), &params, &ctx())
             .unwrap()
             .remove(0)
     }

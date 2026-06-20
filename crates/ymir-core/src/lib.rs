@@ -45,7 +45,7 @@ pub use field::Field;
 pub use graph::{Graph, NodeId};
 pub use hash::ContentHash;
 pub use layer::Layer;
-pub use operator::{Operator, OperatorClone};
+pub use operator::{Inputs, Operator, OperatorClone};
 pub use param::{Curve, ParamKind, ParamSpec, ParamValue, Params};
 pub use region::Region;
 pub use spec::{NodeKind, NodeSpec, PortSpec};

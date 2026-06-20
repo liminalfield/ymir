@@ -5,8 +5,8 @@ use std::path::Path;
 use ymir_core::export::{HeightRange, export_png};
 use ymir_core::registry::OperatorEntry;
 use ymir_core::{
-    EvalContext, Field, NodeSpec, Operator, ParamKind, ParamSpec, ParamValue, Params, PortSpec,
-    Result,
+    EvalContext, Field, Inputs, NodeSpec, Operator, ParamKind, ParamSpec, ParamValue, Params,
+    PortSpec, Result,
 };
 
 /// Stable type identifier and registry key.
@@ -34,7 +34,7 @@ impl Operator for ExportPng {
         }
     }
 
-    fn eval(&self, inputs: &[&Field], params: &Params, _: &EvalContext) -> Result<Vec<Field>> {
+    fn eval(&self, inputs: Inputs, params: &Params, _: &EvalContext) -> Result<Vec<Field>> {
         let path = params.get_str("path", "out/heightmap.png");
 
         // Create the parent directory so a fresh checkout can export without a
@@ -74,7 +74,9 @@ mod tests {
         );
         let ctx = EvalContext::new(4, 4, Region::UNIT, 0);
 
-        let out = ExportPng.eval(&[&field], &params, &ctx).unwrap();
+        let out = ExportPng
+            .eval(Inputs::required_only(&[&field]), &params, &ctx)
+            .unwrap();
         assert!(out.is_empty(), "an endpoint yields no fields");
 
         // The file exists and is a 16-bit grayscale PNG.

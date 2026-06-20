@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use ymir_core::registry::OperatorEntry;
 use ymir_core::{
-    Curve, EvalContext, Field, Layer, NodeSpec, Operator, ParamKind, ParamSpec, ParamValue, Params,
-    PortSpec, Result, layers,
+    Curve, EvalContext, Field, Inputs, Layer, NodeSpec, Operator, ParamKind, ParamSpec, ParamValue,
+    Params, PortSpec, Result, layers,
 };
 
 /// Stable type identifier and registry key.
@@ -39,7 +39,7 @@ impl Operator for CurveNode {
         }
     }
 
-    fn eval(&self, inputs: &[&Field], params: &Params, _ctx: &EvalContext) -> Result<Vec<Field>> {
+    fn eval(&self, inputs: Inputs, params: &Params, _ctx: &EvalContext) -> Result<Vec<Field>> {
         let input = inputs[0];
         let width = input.width();
         let height = input.height();
@@ -88,7 +88,10 @@ mod tests {
 
     fn shape(input: &Field, curve: Curve) -> Field {
         let params = Params::new().with("curve", ParamValue::Curve(curve));
-        CurveNode.eval(&[input], &params, &ctx()).unwrap().remove(0)
+        CurveNode
+            .eval(Inputs::required_only(&[input]), &params, &ctx())
+            .unwrap()
+            .remove(0)
     }
 
     fn at(field: &Field, x: usize, y: usize) -> f32 {

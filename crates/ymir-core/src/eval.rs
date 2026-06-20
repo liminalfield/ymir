@@ -23,6 +23,7 @@ use crate::error::{Error, Result};
 use crate::field::Field;
 use crate::graph::{Graph, NodeId};
 use crate::hash::Fnv1a64;
+use crate::operator::Inputs;
 use crate::param::Params;
 use crate::region::Region;
 
@@ -197,23 +198,36 @@ impl Graph {
         }
 
         let node = self.node(id).ok_or(Error::NodeNotFound)?;
+        let required_count = node.required_input_count;
 
-        // Evaluate each input, collecting its output Arc, the consumed output
-        // index, and its cache key (for composing this node's key).
-        let mut upstream: Vec<(Arc<Vec<Field>>, usize, u64)> =
+        // Evaluate each connected input, collecting its output Arc and the consumed
+        // output index per port (`None` for an unconnected optional port), plus its
+        // cache key. A required port that is unconnected is an error.
+        let mut upstream: Vec<Option<(Arc<Vec<Field>>, usize)>> =
             Vec::with_capacity(node.inputs.len());
+        let mut input_keys: Vec<Option<u64>> = Vec::with_capacity(node.inputs.len());
         for (port, slot) in node.inputs.iter().enumerate() {
-            let conn = slot.as_ref().ok_or(Error::DisconnectedInput {
-                type_id: node.type_id,
-                port,
-            })?;
-            let outputs = self.pull(conn.source, request, cache, computed, in_progress)?;
-            let upstream_key = computed.get(&conn.source).map_or(0, |(key, _)| *key);
-            upstream.push((outputs, conn.output, upstream_key));
+            match slot {
+                Some(conn) => {
+                    let outputs = self.pull(conn.source, request, cache, computed, in_progress)?;
+                    let upstream_key = computed.get(&conn.source).map_or(0, |(key, _)| *key);
+                    upstream.push(Some((outputs, conn.output)));
+                    input_keys.push(Some(upstream_key));
+                }
+                None if port < required_count => {
+                    return Err(Error::DisconnectedInput {
+                        type_id: node.type_id,
+                        port,
+                    });
+                }
+                None => {
+                    upstream.push(None);
+                    input_keys.push(None);
+                }
+            }
         }
 
         let seed = derive_seed(request.seed, node.stable_id);
-        let input_keys: Vec<u64> = upstream.iter().map(|(_, _, key)| *key).collect();
         let key = compute_key(node.type_id, &node.params, &input_keys, request, seed);
 
         // An endpoint produces no field, so there is nothing to memoize: its job
@@ -229,19 +243,41 @@ impl Graph {
             return Ok(outputs);
         }
 
-        // Gather input field references for the operator.
-        let mut inputs: Vec<&Field> = Vec::with_capacity(upstream.len());
-        for (outputs, output_index, _) in &upstream {
-            let field = outputs.get(*output_index).ok_or(Error::InvalidPort {
-                type_id: node.type_id,
-                port: *output_index,
-            })?;
-            inputs.push(field);
+        // Resolve each port's consumed field, then split into the required inputs
+        // (dense, all present) and the optional ones (one entry per optional port,
+        // `None` when unconnected) for the operator.
+        let mut required: Vec<&Field> = Vec::with_capacity(required_count);
+        let mut optional: Vec<Option<&Field>> = Vec::with_capacity(upstream.len() - required_count);
+        for (port, slot) in upstream.iter().enumerate() {
+            let field = match slot {
+                Some((outputs, output_index)) => {
+                    Some(outputs.get(*output_index).ok_or(Error::InvalidPort {
+                        type_id: node.type_id,
+                        port: *output_index,
+                    })?)
+                }
+                None => None,
+            };
+            if port < required_count {
+                // Unconnected required ports erred above, so this is always present.
+                match field {
+                    Some(field) => required.push(field),
+                    None => {
+                        return Err(Error::DisconnectedInput {
+                            type_id: node.type_id,
+                            port,
+                        });
+                    }
+                }
+            } else {
+                optional.push(field);
+            }
         }
 
         let ctx = EvalContext::new(request.width, request.height, request.region, seed)
             .with_cancel(request.cancel.clone());
-        let outputs = Arc::new(node.operator.eval(&inputs, &node.params, &ctx)?);
+        let inputs = Inputs::new(&required, &optional);
+        let outputs = Arc::new(node.operator.eval(inputs, &node.params, &ctx)?);
 
         // Endpoints are neither pinned nor flushed to the persistent cache, so
         // they re-execute on every pull.
@@ -315,14 +351,27 @@ impl Graph {
             return Err(Error::Cycle);
         }
         let node = self.node(id).ok_or(Error::NodeNotFound)?;
+        let required_count = node.required_input_count;
 
-        let mut input_keys: Vec<u64> = Vec::with_capacity(node.inputs.len());
+        let mut input_keys: Vec<Option<u64>> = Vec::with_capacity(node.inputs.len());
         for (port, slot) in node.inputs.iter().enumerate() {
-            let conn = slot.as_ref().ok_or(Error::DisconnectedInput {
-                type_id: node.type_id,
-                port,
-            })?;
-            input_keys.push(self.node_key(conn.source, request, keys, in_progress)?);
+            match slot {
+                Some(conn) => {
+                    input_keys.push(Some(self.node_key(
+                        conn.source,
+                        request,
+                        keys,
+                        in_progress,
+                    )?));
+                }
+                None if port < required_count => {
+                    return Err(Error::DisconnectedInput {
+                        type_id: node.type_id,
+                        port,
+                    });
+                }
+                None => input_keys.push(None),
+            }
         }
 
         let seed = derive_seed(request.seed, node.stable_id);
@@ -351,7 +400,7 @@ fn derive_seed(global_seed: u64, stable_id: u64) -> u64 {
 fn compute_key(
     type_id: &str,
     params: &Params,
-    input_keys: &[u64],
+    input_keys: &[Option<u64>],
     request: &EvalRequest,
     seed: u64,
 ) -> u64 {
@@ -359,8 +408,16 @@ fn compute_key(
     h.write_str(type_id);
     h.write_u64(params.content_hash().to_u64());
     h.write_usize(input_keys.len());
-    for &key in input_keys {
-        h.write_u64(key);
+    for key in input_keys {
+        // A presence discriminant so a connected optional input (with its key) never
+        // collides with an unconnected one, and connecting/disconnecting invalidates.
+        match key {
+            Some(key) => {
+                h.write_u64(1);
+                h.write_u64(*key);
+            }
+            None => h.write_u64(0),
+        }
     }
     h.write_usize(request.width);
     h.write_usize(request.height);
@@ -398,7 +455,7 @@ mod tests {
             }
         }
 
-        fn eval(&self, _: &[&Field], _: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
+        fn eval(&self, _: Inputs, _: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             let value = (ctx.seed % 1000) as f32 / 1000.0;
             let layer = Layer::filled(ctx.width, ctx.height, value);
@@ -428,7 +485,7 @@ mod tests {
             }
         }
 
-        fn eval(&self, inputs: &[&Field], params: &Params, _: &EvalContext) -> Result<Vec<Field>> {
+        fn eval(&self, inputs: Inputs, params: &Params, _: &EvalContext) -> Result<Vec<Field>> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             let delta = params.get_f64("delta", 0.0) as f32;
             let input = inputs[0];
@@ -461,7 +518,7 @@ mod tests {
             }
         }
 
-        fn eval(&self, _: &[&Field], _: &Params, _: &EvalContext) -> Result<Vec<Field>> {
+        fn eval(&self, _: Inputs, _: &Params, _: &EvalContext) -> Result<Vec<Field>> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             Ok(Vec::new())
         }
@@ -487,7 +544,7 @@ mod tests {
             }
         }
 
-        fn eval(&self, inputs: &[&Field], _: &Params, _: &EvalContext) -> Result<Vec<Field>> {
+        fn eval(&self, inputs: Inputs, _: &Params, _: &EvalContext) -> Result<Vec<Field>> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             // The evaluator gathers every input slot before calling eval, so both
             // inputs are present here; an unwired port would have failed upstream.
@@ -497,6 +554,41 @@ mod tests {
                 a.get(x, y).unwrap_or(0.0) + b.get(x, y).unwrap_or(0.0)
             });
             let mut out = inputs[0].clone();
+            out.set_layer(layers::HEIGHT, Arc::new(layer));
+            Ok(vec![out])
+        }
+    }
+
+    /// A modifier with one required input and one optional input. Its output height
+    /// is the required input's height plus `1.0` when the optional input is
+    /// connected, and unchanged otherwise, so a test can observe optional presence.
+    #[derive(Clone)]
+    struct OptionalProbe;
+
+    impl Operator for OptionalProbe {
+        fn spec(&self) -> NodeSpec {
+            NodeSpec {
+                type_id: "test.optional",
+                category: "test",
+                tags: &[],
+                inputs: vec![PortSpec::new("in"), PortSpec::optional("extra")],
+                outputs: vec![PortSpec::new("out")],
+                params: Vec::new(),
+            }
+        }
+
+        fn eval(&self, inputs: Inputs, _: &Params, _: &EvalContext) -> Result<Vec<Field>> {
+            let base = inputs[0];
+            let bump = if inputs.optional(0).is_some() {
+                1.0
+            } else {
+                0.0
+            };
+            let src = base.layer_or(layers::HEIGHT, 0.0);
+            let layer = Layer::from_fn(base.width(), base.height(), |x, y| {
+                src.get(x, y).unwrap_or(0.0) + bump
+            });
+            let mut out = base.clone();
             out.set_layer(layers::HEIGHT, Arc::new(layer));
             Ok(vec![out])
         }
@@ -875,6 +967,80 @@ mod tests {
                 port: 0
             }
         ));
+    }
+
+    #[test]
+    fn an_unconnected_optional_input_is_not_an_error_and_is_observable() {
+        // Probe with only its required input wired: it evaluates (no
+        // DisconnectedInput), and the optional input reads as absent.
+        let build = || {
+            let mut g = Graph::new();
+            let head = g.add_op(
+                Box::new(CountingGen {
+                    calls: Arc::new(AtomicUsize::new(0)),
+                }),
+                Params::new(),
+            );
+            let probe = g.add_op(Box::new(OptionalProbe), Params::new());
+            g.connect(head, 0, probe, 0).unwrap();
+            (g, probe)
+        };
+
+        let (g, probe) = build();
+        let absent = g
+            .evaluate(probe, &request(), &mut EvalCache::new(8))
+            .unwrap()[0]
+            .layer(layers::HEIGHT)
+            .unwrap()
+            .as_slice()[0];
+
+        // Wire the optional input too: the probe now observes it (height bumps by 1).
+        let (mut g, probe) = build();
+        let extra = g.add_op(
+            Box::new(CountingGen {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new(),
+        );
+        g.connect(extra, 0, probe, 1).unwrap();
+        let present = g
+            .evaluate(probe, &request(), &mut EvalCache::new(8))
+            .unwrap()[0]
+            .layer(layers::HEIGHT)
+            .unwrap()
+            .as_slice()[0];
+
+        assert!(
+            (present - (absent + 1.0)).abs() < 1e-6,
+            "optional present must bump the output: {present} vs {absent}+1"
+        );
+    }
+
+    #[test]
+    fn connecting_an_optional_input_changes_the_output_key() {
+        // Presence of an optional input is part of the cache key, so wiring one
+        // invalidates the previewed output rather than silently reusing the old.
+        let mut g = Graph::new();
+        let head = g.add_op(
+            Box::new(CountingGen {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new(),
+        );
+        let probe = g.add_op(Box::new(OptionalProbe), Params::new());
+        g.connect(head, 0, probe, 0).unwrap();
+
+        let req = request();
+        let before = g.output_key(probe, &req).unwrap();
+
+        let extra = g.add_op(
+            Box::new(CountingGen {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new(),
+        );
+        g.connect(extra, 0, probe, 1).unwrap();
+        assert_ne!(before, g.output_key(probe, &req).unwrap());
     }
 
     #[test]

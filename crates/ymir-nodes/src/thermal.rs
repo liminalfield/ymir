@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use ymir_core::registry::OperatorEntry;
 use ymir_core::{
-    Error, EvalContext, Field, Layer, NodeSpec, Operator, ParamKind, ParamSpec, ParamValue, Params,
-    PortSpec, Result, layers,
+    Error, EvalContext, Field, Inputs, Layer, NodeSpec, Operator, ParamKind, ParamSpec, ParamValue,
+    Params, PortSpec, Result, layers,
 };
 
 /// Stable type identifier and registry key.
@@ -64,7 +64,7 @@ impl Operator for ThermalErosion {
         }
     }
 
-    fn eval(&self, inputs: &[&Field], params: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
+    fn eval(&self, inputs: Inputs, params: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
         let input = inputs[0];
         let width = input.width();
         let height = input.height();
@@ -212,7 +212,7 @@ mod tests {
         let input = spike_field(false);
         let before = total_height(&input);
         let out = ThermalErosion
-            .eval(&[&input], &Params::default(), &ctx())
+            .eval(Inputs::required_only(&[&input]), &Params::default(), &ctx())
             .unwrap();
         let after = total_height(&out[0]);
         // Material moves but is neither created nor destroyed (boundary holds it).
@@ -226,7 +226,7 @@ mod tests {
     fn erosion_spreads_the_spike() {
         let input = spike_field(false);
         let out = ThermalErosion
-            .eval(&[&input], &Params::default(), &ctx())
+            .eval(Inputs::required_only(&[&input]), &Params::default(), &ctx())
             .unwrap();
         let peak = out[0].layer(layers::HEIGHT).unwrap().get(16, 16).unwrap();
         // The peak sheds material to its neighbours, so it drops below 1.0.
@@ -244,7 +244,7 @@ mod tests {
         let input = spike_field(true);
         let before = input.layer(layers::HEIGHT).unwrap().content_hash();
         let out = ThermalErosion
-            .eval(&[&input], &Params::default(), &ctx())
+            .eval(Inputs::required_only(&[&input]), &Params::default(), &ctx())
             .unwrap();
         let after = out[0].layer(layers::HEIGHT).unwrap().content_hash();
         assert_eq!(before, after, "mask=0 everywhere must disable erosion");
@@ -257,7 +257,7 @@ mod tests {
         // each other and the four orthogonal neighbours equal to each other.
         let input = spike_field(false);
         let out = ThermalErosion
-            .eval(&[&input], &Params::default(), &ctx())
+            .eval(Inputs::required_only(&[&input]), &Params::default(), &ctx())
             .unwrap();
         let h = out[0].layer(layers::HEIGHT).unwrap();
         let orth = [h.get(15, 16), h.get(17, 16), h.get(16, 15), h.get(16, 17)];
@@ -278,7 +278,7 @@ mod tests {
         let ctx = EvalContext::new(32, 32, Region::UNIT, 0).with_cancel(cancel);
         let input = spike_field(false);
         let err = ThermalErosion
-            .eval(&[&input], &Params::default(), &ctx)
+            .eval(Inputs::required_only(&[&input]), &Params::default(), &ctx)
             .unwrap_err();
         assert!(matches!(err, Error::Cancelled));
     }

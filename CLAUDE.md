@@ -119,10 +119,14 @@ not, via `field.layer_or(layers::MASK, 1.0)`. Hold this on every node.
 
 - `Operator` is a trait: stateless behavior plus a `NodeSpec` schema. The engine
   depends only on this trait and holds `Box<dyn Operator>`. Signature:
-  `eval(&self, inputs: &[&Field], params: &Params, ctx: &EvalContext) -> Result<Vec<Field>, Error>`.
-- Inputs are an ordered, named list from the start. `eval` receives multiple inputs,
-  so combine and blend nodes with two or more inputs are first-class, never a retrofit.
-  The single-input modifier is just the common case, not a constraint.
+  `eval(&self, inputs: Inputs, params: &Params, ctx: &EvalContext) -> Result<Vec<Field>, Error>`.
+- Inputs are an ordered, named list from the start. `eval` receives multiple inputs
+  (`Inputs`: required ones by index, guaranteed present; optional ones via
+  `inputs.optional(i)`, returning `None` when unwired), so combine and blend nodes
+  with two or more inputs are first-class, never a retrofit, and a node can take an
+  optional input (a mask) that degrades gracefully when absent. Optional input ports
+  are declared after the required ones. The single-input modifier is just the common
+  case, not a constraint.
 - A graph node instance stores `(stable_id, type_id, params, connections)`. The
   `stable_id` is a persistent identity assigned at creation and serialized, distinct
   from the runtime slotmap `NodeId` used only for wiring and lookup. Seeding and any

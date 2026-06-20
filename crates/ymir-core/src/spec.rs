@@ -8,13 +8,32 @@ use crate::param::ParamSpec;
 pub struct PortSpec {
     /// Port name, used for wiring (and, in the GUI, as a localized label key).
     pub name: String,
+    /// Whether this input port may be left unconnected. Required ports (the common
+    /// case) error at evaluation when unwired; an optional port degrades gracefully,
+    /// reaching the operator as `None`. Ignored for output ports. Optional input
+    /// ports must be declared *after* all required ones (the evaluator and
+    /// [`Inputs`](crate::Inputs) split inputs at the first optional port).
+    pub optional: bool,
 }
 
 impl PortSpec {
-    /// Creates a port schema.
+    /// Creates a required port schema.
     #[must_use]
     pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into() }
+        Self {
+            name: name.into(),
+            optional: false,
+        }
+    }
+
+    /// Creates an optional input port schema. Optional ports must be declared after
+    /// all required ports.
+    #[must_use]
+    pub fn optional(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            optional: true,
+        }
     }
 }
 

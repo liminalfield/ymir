@@ -2,8 +2,8 @@
 
 use ymir_core::registry::OperatorEntry;
 use ymir_core::{
-    EvalContext, Field, NodeSpec, Operator, ParamKind, ParamSpec, ParamValue, Params, PortSpec,
-    Result,
+    EvalContext, Field, Inputs, NodeSpec, Operator, ParamKind, ParamSpec, ParamValue, Params,
+    PortSpec, Result,
 };
 
 use crate::noise::{FbmParams, fbm_field};
@@ -51,7 +51,7 @@ impl Operator for Fbm {
         }
     }
 
-    fn eval(&self, _inputs: &[&Field], params: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
+    fn eval(&self, _inputs: Inputs, params: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
         let fbm = FbmParams {
             frequency: params.get_f64("frequency", 2.0),
             // Range is advisory until the graph/UI validate; clamp defensively so
@@ -85,8 +85,8 @@ mod tests {
         let op = Fbm;
         let params = Params::default();
         let ctx = EvalContext::new(64, 64, Region::UNIT, 99);
-        let a = op.eval(&[], &params, &ctx).unwrap();
-        let b = op.eval(&[], &params, &ctx).unwrap();
+        let a = op.eval(Inputs::required_only(&[]), &params, &ctx).unwrap();
+        let b = op.eval(Inputs::required_only(&[]), &params, &ctx).unwrap();
         assert_eq!(a[0].content_hash(), b[0].content_hash());
     }
 
@@ -96,15 +96,33 @@ mod tests {
         // uses, so the operator path must reproduce the noise module's golden
         // fingerprint exactly. "Same bytes," not merely "still works".
         let op = Fbm;
-        let out = op.eval(&[], &Params::default(), &default_ctx()).unwrap();
+        let out = op
+            .eval(
+                Inputs::required_only(&[]),
+                &Params::default(),
+                &default_ctx(),
+            )
+            .unwrap();
         assert_eq!(out[0].content_hash().to_u64(), 0x6735_0dbf_a122_5544);
     }
 
     #[test]
     fn registry_make_matches_direct_construction() {
         let made = registry::make(TYPE_ID).expect("fbm operator is registered");
-        let via_registry = made.eval(&[], &Params::default(), &default_ctx()).unwrap();
-        let direct = Fbm.eval(&[], &Params::default(), &default_ctx()).unwrap();
+        let via_registry = made
+            .eval(
+                Inputs::required_only(&[]),
+                &Params::default(),
+                &default_ctx(),
+            )
+            .unwrap();
+        let direct = Fbm
+            .eval(
+                Inputs::required_only(&[]),
+                &Params::default(),
+                &default_ctx(),
+            )
+            .unwrap();
         assert_eq!(via_registry[0].content_hash(), direct[0].content_hash());
     }
 

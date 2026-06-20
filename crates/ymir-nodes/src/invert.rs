@@ -9,7 +9,9 @@
 use std::sync::Arc;
 
 use ymir_core::registry::OperatorEntry;
-use ymir_core::{EvalContext, Field, Layer, NodeSpec, Operator, Params, PortSpec, Result, layers};
+use ymir_core::{
+    EvalContext, Field, Inputs, Layer, NodeSpec, Operator, Params, PortSpec, Result, layers,
+};
 
 /// Stable type identifier and registry key.
 const TYPE_ID: &str = "modifier.invert";
@@ -30,7 +32,7 @@ impl Operator for Invert {
         }
     }
 
-    fn eval(&self, inputs: &[&Field], _params: &Params, _ctx: &EvalContext) -> Result<Vec<Field>> {
+    fn eval(&self, inputs: Inputs, _params: &Params, _ctx: &EvalContext) -> Result<Vec<Field>> {
         let input = inputs[0];
         let width = input.width();
         let height = input.height();
@@ -74,7 +76,7 @@ mod tests {
 
     fn invert(input: &Field) -> Field {
         Invert
-            .eval(&[input], &Params::new(), &ctx())
+            .eval(Inputs::required_only(&[input]), &Params::new(), &ctx())
             .unwrap()
             .remove(0)
     }

@@ -45,6 +45,10 @@ pub(crate) struct Node {
     pub(crate) params: Params,
     /// One slot per input port, in order; `None` is unconnected.
     pub(crate) inputs: Vec<Option<InputConn>>,
+    /// Number of leading required input ports. Ports `[0, required_input_count)` must
+    /// be connected to evaluate; `[required_input_count, inputs.len())` are optional.
+    /// (Optional ports are declared after required ones.)
+    pub(crate) required_input_count: usize,
     /// Number of output ports, for connection validation.
     pub(crate) output_count: usize,
 }
@@ -78,7 +82,18 @@ impl Graph {
         let spec = operator.spec();
         let type_id = spec.type_id;
         let input_count = spec.inputs.len();
+        let required_input_count = spec.inputs.iter().filter(|p| !p.optional).count();
         let output_count = spec.outputs.len();
+
+        // Optional ports must trail the required ones, so a single split point
+        // separates them (relied on by the evaluator and `Inputs`).
+        debug_assert!(
+            spec.inputs
+                .iter()
+                .enumerate()
+                .all(|(i, p)| p.optional == (i >= required_input_count)),
+            "operator {type_id:?} declares an optional input port before a required one"
+        );
 
         let stable_id = self.next_stable_id;
         // Monotonic and never reused, so a removed node's identity never returns.
@@ -90,6 +105,7 @@ impl Graph {
             operator,
             params,
             inputs: (0..input_count).map(|_| None).collect(),
+            required_input_count,
             output_count,
         })
     }
@@ -327,7 +343,7 @@ mod tests {
             }
         }
 
-        fn eval(&self, _: &[&Field], _: &Params, _: &EvalContext) -> Result<Vec<Field>> {
+        fn eval(&self, _: crate::Inputs, _: &Params, _: &EvalContext) -> Result<Vec<Field>> {
             Ok(Vec::new())
         }
     }

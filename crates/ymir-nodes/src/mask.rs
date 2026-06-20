@@ -16,8 +16,8 @@ use std::sync::Arc;
 
 use ymir_core::registry::OperatorEntry;
 use ymir_core::{
-    EvalContext, Field, Layer, NodeSpec, Operator, ParamKind, ParamSpec, ParamValue, Params,
-    PortSpec, Result, layers,
+    EvalContext, Field, Inputs, Layer, NodeSpec, Operator, ParamKind, ParamSpec, ParamValue,
+    Params, PortSpec, Result, layers,
 };
 
 /// Stable type identifier and registry key.
@@ -60,7 +60,7 @@ impl Operator for Mask {
         }
     }
 
-    fn eval(&self, inputs: &[&Field], params: &Params, _ctx: &EvalContext) -> Result<Vec<Field>> {
+    fn eval(&self, inputs: Inputs, params: &Params, _ctx: &EvalContext) -> Result<Vec<Field>> {
         let input = inputs[0];
         let width = input.width();
         let height = input.height();
@@ -145,7 +145,9 @@ mod tests {
             .with("mode", ParamValue::Text(mode.to_string()))
             .with("low", ParamValue::Float(f64::from(low)))
             .with("high", ParamValue::Float(f64::from(high)));
-        Mask.eval(&[input], &params, &ctx()).unwrap().remove(0)
+        Mask.eval(Inputs::required_only(&[input]), &params, &ctx())
+            .unwrap()
+            .remove(0)
     }
 
     #[test]
@@ -229,10 +231,10 @@ mod tests {
             .with("strength", ParamValue::Float(1.0))
             .with("iterations", ParamValue::Int(5));
         let selective = ThermalErosion
-            .eval(&[&masked], &erosion_params, &ctx())
+            .eval(Inputs::required_only(&[&masked]), &erosion_params, &ctx())
             .unwrap();
         let uniform = ThermalErosion
-            .eval(&[&input], &erosion_params, &ctx())
+            .eval(Inputs::required_only(&[&input]), &erosion_params, &ctx())
             .unwrap();
         assert_ne!(
             selective[0].layer(layers::HEIGHT).unwrap().content_hash(),
@@ -256,7 +258,7 @@ mod tests {
             .with("strength", ParamValue::Float(1.0))
             .with("iterations", ParamValue::Int(20));
         let eroded = ThermalErosion
-            .eval(&[&masked], &tp, &ctx())
+            .eval(Inputs::required_only(&[&masked]), &tp, &ctx())
             .unwrap()
             .remove(0);
 
