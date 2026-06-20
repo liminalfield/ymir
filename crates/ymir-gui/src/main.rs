@@ -26,6 +26,9 @@ mod curve_edit;
 // Background preview evaluation (GUI step 6b): off-thread, latest-wins.
 mod preview;
 use preview::PreviewEngine;
+// Off-thread full-resolution Build (#7).
+mod build;
+use build::BuildRunner;
 
 /// Resolution of the interactive 2D preview. Low for responsiveness; it is an
 /// approximation of the target-resolution build, never equal to it (erosion is
@@ -106,6 +109,10 @@ enum ParamTab {
 /// field itself accepts any custom value; these are just shortcuts.
 const BUILD_RES_PRESETS: &[usize] = &[256, 505, 512, 1009, 1024, 2017, 2048, 4033, 4096, 8129];
 
+/// A sanity cap on how many outputs one Build evaluates, so a stray graph can't spawn
+/// an unbounded run. Exceeding it is reported, never silently truncated.
+const MAX_BUILD_OUTPUTS: usize = 64;
+
 /// The canvas's pan/zoom view, captured each frame so other panes (the ribbon
 /// add) can place a node where the user is actually looking. The transform maps
 /// the canvas's local graph space to screen; `rect` is the canvas area on screen.
@@ -178,6 +185,8 @@ struct AppState {
     /// Background preview evaluation: submits graph snapshots and shows results
     /// without ever blocking the UI thread.
     preview: PreviewEngine,
+    /// The off-thread full-resolution Build (#7).
+    build: BuildRunner,
     /// The selected palette tab (defaults to the first category on first draw).
     active_tab: Option<ActiveTab>,
     /// The node-search query; when non-empty it overrides the active tab.
@@ -220,6 +229,7 @@ impl AppState {
             selected: None,
             seed: 0,
             preview: PreviewEngine::new(),
+            build: BuildRunner::new(),
             active_tab: None,
             search: String::new(),
             node_menu: None,
@@ -480,9 +490,30 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
         );
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            // Build is the full-resolution cook; wired in a later step. Seed and
-            // resolution now live in the Parameters pane's World tab.
-            ui.add_enabled(false, egui::Button::new("Build"));
+            // Build the selected outputs at the world-tab resolution, off-thread.
+            state.build.poll(ui.ctx());
+            let building = state.build.is_building();
+            if ui
+                .add_enabled(!building, egui::Button::new("Build"))
+                .clicked()
+            {
+                let targets = included_endpoints(state);
+                if targets.is_empty() {
+                    state
+                        .build
+                        .report("No outputs selected to build.".to_string());
+                } else if targets.len() > MAX_BUILD_OUTPUTS {
+                    state.build.report(format!(
+                        "Too many outputs ({}); the limit is {MAX_BUILD_OUTPUTS}.",
+                        targets.len()
+                    ));
+                } else {
+                    let res = state.build_res;
+                    let request = EvalRequest::new(res, res, Region::UNIT, state.seed);
+                    state.build.start(state.graph.clone(), targets, request);
+                }
+            }
+            state.build.show(ui);
         });
     });
 
@@ -515,9 +546,28 @@ fn name_override(text: &str) -> Option<String> {
     (!text.trim().is_empty()).then(|| text.to_string())
 }
 
+/// The `stable_id`s of the output endpoints a Build should write: nodes with no
+/// outputs whose `build` flag is on (default on). Reads from the canvas's snarl (it
+/// holds every node handle) since the core graph has no node iterator.
+fn included_endpoints(state: &AppState) -> Vec<u64> {
+    state
+        .snarl
+        .node_ids()
+        .filter_map(|(_, &handle)| state.graph.node_id_of(handle).map(|id| (handle, id)))
+        .filter(|(_, id)| state.graph.spec(*id).is_some_and(|s| s.outputs.is_empty()))
+        .filter(|(_, id)| {
+            state
+                .graph
+                .params(*id)
+                .is_none_or(|p| p.get_bool("build", true))
+        })
+        .map(|(handle, _)| handle)
+        .collect()
+}
+
 /// A node's display name: its per-instance override if set (#59), else its type's
 /// name via `tr`. Mirrors the canvas title for the preview header.
-fn node_display_name(graph: &Graph, id: ymir_core::NodeId) -> String {
+fn node_display_name(graph: &Graph, id: NodeId) -> String {
     if let Some(name) = graph.name(id) {
         return name.to_string();
     }
