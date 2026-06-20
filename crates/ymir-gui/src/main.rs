@@ -93,6 +93,19 @@ enum ActiveTab {
     Uncategorized,
 }
 
+/// Which tab of the Parameters pane is showing: the selected node's inspector, or the
+/// global world/build settings.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ParamTab {
+    Node,
+    World,
+}
+
+/// Build-resolution presets offered in the world settings: UE5 landscape sizes
+/// (component-based, `N·63 + 1`) and plain powers of two (for texture maps). The
+/// field itself accepts any custom value; these are just shortcuts.
+const BUILD_RES_PRESETS: &[usize] = &[256, 505, 512, 1009, 1024, 2017, 2048, 4033, 4096, 8129];
+
 /// The canvas's pan/zoom view, captured each frame so other panes (the ribbon
 /// add) can place a node where the user is actually looking. The transform maps
 /// the canvas's local graph space to screen; `rect` is the canvas area on screen.
@@ -179,6 +192,13 @@ struct AppState {
     /// fit is computed from this frame's node rects (collected during rendering) and
     /// applied via the canvas's `current_transform` override next frame.
     pending_view: Option<egui::emath::TSTransform>,
+    /// Which Parameters-pane tab is showing (the node inspector or world settings).
+    param_tab: ParamTab,
+    /// The resolution a full Build evaluates at (square). Custom, since UE5 landscapes
+    /// need specific sizes.
+    build_res: usize,
+    /// The interactive 2D preview resolution (square); low for responsiveness.
+    preview_res: usize,
 }
 
 /// The node-rename dialog (#61): edits a node's display-name override.
@@ -206,6 +226,9 @@ impl AppState {
             preview_pin: None,
             rename: None,
             pending_view: None,
+            param_tab: ParamTab::Node,
+            build_res: 1024,
+            preview_res: PREVIEW_RES,
         }
     }
 
@@ -457,15 +480,9 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
         );
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            // Build is the full-resolution cook; wired in a later step (6c).
+            // Build is the full-resolution cook; wired in a later step. Seed and
+            // resolution now live in the Parameters pane's World tab.
             ui.add_enabled(false, egui::Button::new("Build"));
-            ui.separator();
-            // Global seed: reseeds the whole world and re-evaluates the preview.
-            ui.add(
-                egui::DragValue::new(&mut state.seed)
-                    .prefix("seed: ")
-                    .speed(1),
-            );
         });
     });
 
@@ -511,8 +528,20 @@ fn node_display_name(graph: &Graph, id: ymir_core::NodeId) -> String {
 }
 
 fn params_pane(ui: &mut egui::Ui, state: &mut AppState) {
-    ui.heading("Parameters");
+    ui.horizontal(|ui| {
+        ui.selectable_value(&mut state.param_tab, ParamTab::Node, "Node");
+        ui.selectable_value(&mut state.param_tab, ParamTab::World, "World");
+    });
+    ui.separator();
+    match state.param_tab {
+        ParamTab::Node => node_inspector(ui, state),
+        ParamTab::World => world_settings(ui, state),
+    }
+}
+inventory::submit! { PaneKind { id: "params", draw: params_pane } }
 
+/// The selected node's inspector: its display-name override and parameter widgets.
+fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
     // Resolve the selected handle to a live node; nothing selected (or it was
     // deleted) shows a hint, not an error.
     let Some(id) = state.selected.and_then(|h| state.graph.node_id_of(h)) else {
@@ -568,7 +597,48 @@ fn params_pane(ui: &mut egui::Ui, state: &mut AppState) {
         ui.colored_label(ui.visuals().error_fg_color, err.to_string());
     }
 }
-inventory::submit! { PaneKind { id: "params", draw: params_pane } }
+
+/// The world/build settings: the global eval-request inputs (seed, resolutions) that
+/// apply to the whole graph. Outputs selection and the Build action land here in
+/// later steps.
+fn world_settings(ui: &mut egui::Ui, state: &mut AppState) {
+    ui.add_space(2.0);
+    ui.horizontal(|ui| {
+        ui.label("Seed");
+        ui.add(egui::DragValue::new(&mut state.seed).speed(1.0));
+    });
+
+    ui.separator();
+    ui.label("Build resolution");
+    ui.horizontal(|ui| {
+        // Custom value (UE5 landscapes need specific sizes), with presets as
+        // shortcuts.
+        ui.add(
+            egui::DragValue::new(&mut state.build_res)
+                .speed(8.0)
+                .range(16..=8192),
+        );
+        egui::ComboBox::from_id_salt("build-res-presets")
+            .selected_text("presets")
+            .show_ui(ui, |ui| {
+                for &preset in BUILD_RES_PRESETS {
+                    if ui.selectable_label(false, preset.to_string()).clicked() {
+                        state.build_res = preset;
+                    }
+                }
+            });
+    });
+
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.label("Preview resolution");
+        ui.add(
+            egui::DragValue::new(&mut state.preview_res)
+                .speed(4.0)
+                .range(32..=1024),
+        );
+    });
+}
 
 fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // Drop a pin left pointing at a deleted node, so it never sticks the preview on
@@ -640,7 +710,8 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
 
     // Submit a snapshot for off-thread evaluation if the output changed, collect any
     // result, and render — none of which blocks the UI thread.
-    let request = EvalRequest::new(PREVIEW_RES, PREVIEW_RES, Region::UNIT, state.seed);
+    let res = state.preview_res;
+    let request = EvalRequest::new(res, res, Region::UNIT, state.seed);
     let now = ui.input(|i| i.time);
     state.preview.sync(&state.graph, id, request, now);
     state.preview.poll(ui.ctx());
