@@ -421,7 +421,12 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
             let key = format!("node-{}", entry.type_id);
             if ui.button(tr(&key)).clicked() {
                 let pos = spawn_pos(state.canvas_view, state.graph.node_count());
-                canvas::add_node(&mut state.graph, &mut state.snarl, entry.type_id, pos);
+                if let Some(id) =
+                    canvas::add_node(&mut state.graph, &mut state.snarl, entry.type_id, pos)
+                {
+                    // Select the new node so the inspector shows it immediately (#62).
+                    state.selected = state.graph.stable_id(id);
+                }
             }
         }
     });
@@ -682,7 +687,11 @@ fn node_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
             }
             MenuRow::Node(type_id) => {
                 let pos = view.graph_pos_finite(anchor);
-                canvas::add_node(&mut state.graph, &mut state.snarl, type_id, pos);
+                if let Some(id) = canvas::add_node(&mut state.graph, &mut state.snarl, type_id, pos)
+                {
+                    // Select the new node so the inspector shows it immediately (#62).
+                    state.selected = state.graph.stable_id(id);
+                }
                 state.node_menu = None;
             }
         }
