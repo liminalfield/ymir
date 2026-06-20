@@ -665,7 +665,18 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // returns an unbounded `EVERYTHING` rect, so it cannot be used for hit-testing
     // or to locate the visible centre.
     let canvas_rect = ui.max_rect();
+    // Wires default to ~1px in a muted colour, which is hard to read; thicken them
+    // and tie their colour (and the pin fill, which wires inherit) to the active
+    // widget foreground so they stand out. Width/colour become user settings later
+    // (#57).
+    let wire_color = ui.visuals().widgets.active.fg_stroke.color;
+    let style = egui_snarl::ui::SnarlStyle {
+        wire_width: Some(2.5),
+        pin_fill: Some(wire_color),
+        ..egui_snarl::ui::SnarlStyle::new()
+    };
     SnarlWidget::new()
+        .style(style)
         .id_salt("ymir-canvas")
         .show(snarl, &mut viewer, ui);
 
