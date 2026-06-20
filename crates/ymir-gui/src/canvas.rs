@@ -78,6 +78,11 @@ pub(crate) struct GraphViewer<'a> {
     /// A preview-pin change the viewer requests (context-menu Pin/Unpin, #39): the
     /// inner value is the new pin (`Some(node)` to pin, `None` to unpin). Output.
     pub(crate) pin_request: Option<Option<Handle>>,
+    /// A one-shot pan/zoom override to apply this frame ("zoom to graph", #65). Input.
+    pub(crate) pending_view: Option<egui::emath::TSTransform>,
+    /// Set when the graph context menu's "Zoom to graph" was chosen; the canvas
+    /// computes the fit from the node rects after the frame (#65). Output.
+    pub(crate) frame_all_request: bool,
 }
 
 impl<'a> GraphViewer<'a> {
@@ -95,6 +100,8 @@ impl<'a> GraphViewer<'a> {
             select_after: None,
             rename_request: None,
             pin_request: None,
+            pending_view: None,
+            frame_all_request: false,
         }
     }
 }
@@ -263,8 +270,14 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
         to_global: &mut egui::emath::TSTransform,
         _snarl: &mut Snarl<Handle>,
     ) {
-        // Capture (do not change) the pan/zoom transform, so a screen click can be
-        // mapped into the local space the node rects are recorded in.
+        // Apply a one-shot "zoom to graph" view if requested (#65), overriding the
+        // pan/zoom snarl computed this frame. snarl persists this transform, so the
+        // framed view sticks until the user pans or zooms again.
+        if let Some(view) = self.pending_view {
+            *to_global = view;
+        }
+        // Capture the pan/zoom transform, so a screen click can be mapped into the
+        // local space the node rects are recorded in.
         self.to_global = *to_global;
     }
 
@@ -398,6 +411,10 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
         style_context_menu(ui);
         if ui.button("Add node").clicked() {
             self.add_node_at = Some(pos);
+            ui.close();
+        }
+        if ui.button("Zoom to graph").clicked() {
+            self.frame_all_request = true;
             ui.close();
         }
     }

@@ -32,6 +32,12 @@ use preview::PreviewEngine;
 /// resolution-dependent). The build resolution is decided later (step 6c).
 const PREVIEW_RES: usize = 256;
 
+/// Canvas zoom bounds (#65): how far the graph can shrink (out) or grow (in). The
+/// lower bound stops the graph becoming an unfindable speck; "zoom to graph" frames
+/// the whole graph within these.
+const CANVAS_MIN_SCALE: f32 = 0.4;
+const CANVAS_MAX_SCALE: f32 = 2.0;
+
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
@@ -136,6 +142,10 @@ struct AppState {
     /// The rename dialog (#61), open while the user edits a node's display name.
     /// `None` when closed.
     rename: Option<RenameDialog>,
+    /// A one-shot "zoom to graph" transform to apply on the next frame (#65). The
+    /// fit is computed from this frame's node rects (collected during rendering) and
+    /// applied via the canvas's `current_transform` override next frame.
+    pending_view: Option<egui::emath::TSTransform>,
 }
 
 /// The node-rename dialog (#61): edits a node's display-name override.
@@ -162,6 +172,7 @@ impl AppState {
             node_menu: None,
             preview_pin: None,
             rename: None,
+            pending_view: None,
         }
     }
 
@@ -751,6 +762,33 @@ fn menu_row(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Response {
     ui.add(egui::Button::selectable(selected, text))
 }
 
+/// The pan/zoom transform that frames every node within `canvas` (#65): the
+/// graph-space union of the node rects, scaled (with a little padding, clamped to the
+/// zoom bounds) and centred in the canvas. `None` for an empty or degenerate graph.
+fn fit_view(
+    node_rects: &[(Handle, egui::Rect)],
+    canvas: egui::Rect,
+    min_scale: f32,
+    max_scale: f32,
+) -> Option<egui::emath::TSTransform> {
+    let mut bounds: Option<egui::Rect> = None;
+    for (_, rect) in node_rects {
+        bounds = Some(bounds.map_or(*rect, |b| b.union(*rect)));
+    }
+    let bounds = bounds?;
+    if !bounds.is_finite() || bounds.width() <= 0.0 || bounds.height() <= 0.0 {
+        return None;
+    }
+
+    // Fit the bounds in the canvas with a little breathing room, within the zoom
+    // clamp, then translate so the bounds centre lands at the canvas centre.
+    let margin = 0.85;
+    let scale = ((canvas.width() / bounds.width()).min(canvas.height() / bounds.height()) * margin)
+        .clamp(min_scale, max_scale);
+    let translation = canvas.center().to_vec2() - scale * bounds.center().to_vec2();
+    Some(egui::emath::TSTransform::new(translation, scale))
+}
+
 /// A fresh node-creation menu anchored at `anchor` (screen space), placing into
 /// `view`. Shared by the Space gesture and the right-click "Add node" (#51, #60).
 fn open_node_menu(anchor: egui::Pos2, view: CanvasView) -> NodeMenu {
@@ -776,6 +814,9 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         .preview_target()
         .map(|h| (h, state.preview.status_color(ui.visuals())));
     let pinned = state.preview_pin.filter(|&h| state.is_previewable(h));
+    // A one-shot "zoom to graph" view to apply this frame (#65), Copy, read before
+    // the disjoint borrow.
+    let pending_view = state.pending_view;
 
     // Disjoint borrows: the viewer holds the graph while snarl is rendered. Both
     // are distinct fields of the state, so this split is sound.
@@ -796,6 +837,8 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         select_after: None,
         rename_request: None,
         pin_request: None,
+        pending_view,
+        frame_all_request: false,
     };
     // The canvas's screen rect comes from the ui, not snarl's response: snarl
     // returns an unbounded `EVERYTHING` rect, so it cannot be used for hit-testing
@@ -809,6 +852,11 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     let style = egui_snarl::ui::SnarlStyle {
         wire_width: Some(2.5),
         pin_fill: Some(wire_color),
+        // Clamp zoom so the graph can't shrink to an unfindable speck (snarl's
+        // default min is 0.2 = 5x out); "zoom to graph" handles seeing a big graph
+        // whole (#65).
+        min_scale: Some(CANVAS_MIN_SCALE),
+        max_scale: Some(CANVAS_MAX_SCALE),
         ..egui_snarl::ui::SnarlStyle::new()
     };
     // Ports stack in snarl's top-down pin layout, so the gap between them is the
@@ -835,6 +883,17 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     let rename_request = viewer.rename_request;
     // A preview-pin change the viewer requests (context-menu Pin/Unpin, #39).
     let pin_request = viewer.pin_request;
+    // If "zoom to graph" was chosen, compute the fit from this frame's node rects to
+    // apply next frame (#65). Done here, while the viewer (and its node rects) is
+    // still borrowed.
+    let frame_all_fit = viewer.frame_all_request.then(|| {
+        fit_view(
+            &viewer.node_rects,
+            canvas_rect,
+            CANVAS_MIN_SCALE,
+            CANVAS_MAX_SCALE,
+        )
+    });
 
     // Resolve selection from a plain click (snarl 0.10 only selects on shift-click).
     // A click is a press-and-release without movement, so drags — wiring from or to
@@ -881,6 +940,11 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // by CanvasView::center falling back to the screen centre, so placement stays
     // finite (a NaN position panics egui's layout) and on the canvas.
     state.canvas_view = view.rect.is_finite().then_some(view);
+
+    // The pending "zoom to graph" view was consumed by this frame's render; replace
+    // it with a freshly requested fit (or clear it). One-shot, so it does not fight
+    // subsequent pan/zoom (#65).
+    state.pending_view = frame_all_fit.flatten();
 
     // Apply a viewer-requested selection (e.g. a duplicate) after the click-selection
     // above, so it wins (#61).
@@ -1288,6 +1352,39 @@ mod tests {
         assert_eq!(state.preview_target(), Some(generator));
         state.preview_pin = Some(99_999);
         assert_eq!(state.preview_target(), Some(generator));
+    }
+
+    #[test]
+    fn fit_view_centres_and_scales_the_node_bounds() {
+        // Two 100x100 nodes spanning a 300x300 bounds centred at (150, 150).
+        let rects = [
+            (
+                1u64,
+                egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 100.0)),
+            ),
+            (
+                2u64,
+                egui::Rect::from_min_size(egui::pos2(200.0, 200.0), egui::vec2(100.0, 100.0)),
+            ),
+        ];
+        let canvas = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(600.0, 600.0));
+        let t = fit_view(&rects, canvas, 0.1, 4.0).expect("fit");
+
+        // scale = (600/300) * 0.85 margin = 1.7, within the clamp.
+        assert!((t.scaling - 1.7).abs() < 1e-4);
+        // The bounds centre maps to the canvas centre.
+        let mapped = t * egui::pos2(150.0, 150.0);
+        assert!((mapped - egui::pos2(300.0, 300.0)).length() < 1e-3);
+
+        // The clamp caps the scale for a tiny graph.
+        let tiny = [(
+            1u64,
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(10.0, 10.0)),
+        )];
+        assert_eq!(fit_view(&tiny, canvas, 0.1, 2.0).expect("fit").scaling, 2.0);
+
+        // No nodes: nothing to frame.
+        assert!(fit_view(&[], canvas, 0.1, 4.0).is_none());
     }
 
     #[test]
