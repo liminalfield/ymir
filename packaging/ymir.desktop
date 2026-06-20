@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Ymir
+GenericName=Terrain Generator
+Comment=Node-based procedural terrain generator
+Exec=ymir-gui
+Icon=ymir
+Terminal=false
+Categories=Graphics;3DGraphics;
+# Matches the Wayland app_id (set via ViewportBuilder::with_app_id) and the X11
+# WM_CLASS, so the compositor maps a running Ymir window to this entry's icon.
+StartupWMClass=ymir

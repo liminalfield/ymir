@@ -27,3 +27,7 @@ inventory = "0.3"
 # actively; upgrades are a deliberate, egui-lockstep step. 0.10.0 resolves against
 # the workspace's egui 0.34 with no duplicate egui in the tree.
 egui-snarl = "=0.10.0"
+# Decodes the embedded window-icon PNG into RGBA for eframe. Already in the tree via
+# ymir-core, so this reuses it rather than pulling eframe's heavier `image`-based
+# icon helper.
+png = "0.17"

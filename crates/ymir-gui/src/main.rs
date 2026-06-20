@@ -33,8 +33,18 @@ use preview::PreviewEngine;
 const PREVIEW_RES: usize = 256;
 
 fn main() -> eframe::Result {
+    // The window icon: `with_icon` is honoured on X11/Windows/macOS. On Wayland it is
+    // ignored (no runtime icon protocol); there the icon comes from a `.desktop` entry
+    // matched by `app_id`, so set a stable one. Falls back to eframe's default if the
+    // PNG can't be decoded (it is cosmetic, never worth failing startup over).
+    let viewport = egui::ViewportBuilder::default().with_app_id("ymir");
+    let viewport = match app_icon() {
+        Some(icon) => viewport.with_icon(icon),
+        None => viewport,
+    };
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
+        viewport,
         ..Default::default()
     };
     eframe::run_native(
@@ -42,6 +52,35 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| Ok(Box::new(YmirApp::new(cc)))),
     )
+}
+
+/// The application's window icon, decoded from the embedded PNG into RGBA. `None` if
+/// the PNG can't be decoded (then eframe uses its default icon). winit scales this
+/// single image for the titlebar/taskbar, so one size suffices.
+fn app_icon() -> Option<egui::IconData> {
+    let bytes = include_bytes!("../../../ymir-icon-512.png").as_slice();
+    let Ok(mut reader) = png::Decoder::new(bytes).read_info() else {
+        return None;
+    };
+    let mut buf = vec![0; reader.output_buffer_size()];
+    let Ok(info) = reader.next_frame(&mut buf) else {
+        return None;
+    };
+    buf.truncate(info.buffer_size());
+    // eframe wants RGBA; the icon is RGB, so give every pixel an opaque alpha.
+    let rgba = match info.color_type {
+        png::ColorType::Rgba => buf,
+        png::ColorType::Rgb => buf
+            .chunks_exact(3)
+            .flat_map(|p| [p[0], p[1], p[2], 255])
+            .collect(),
+        _ => return None,
+    };
+    Some(egui::IconData {
+        rgba,
+        width: info.width,
+        height: info.height,
+    })
 }
 
 // ---- application state ------------------------------------------------------
@@ -1466,5 +1505,15 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), total, "duplicate pane-kind id");
+    }
+}
+
+#[cfg(test)]
+mod icon_test {
+    #[test]
+    fn app_icon_decodes_to_rgba() {
+        let icon = super::app_icon().expect("icon decodes");
+        assert_eq!((icon.width, icon.height), (512, 512));
+        assert_eq!(icon.rgba.len(), 512 * 512 * 4);
     }
 }

@@ -3452,6 +3452,7 @@ dependencies = [
  "eframe",
  "egui-snarl",
  "inventory",
+ "png 0.17.16",
  "ymir-core",
  "ymir-nodes",
 ]
