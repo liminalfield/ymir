@@ -72,6 +72,9 @@ pub(crate) struct GraphViewer<'a> {
     /// A node the viewer asks the canvas to select after the frame (e.g. a duplicate),
     /// keeping selection logic in one place. Output.
     pub(crate) select_after: Option<Handle>,
+    /// A node the viewer asks the canvas to rename (context-menu "Rename"); the canvas
+    /// opens the rename dialog for it after the frame (#61). Output.
+    pub(crate) rename_request: Option<Handle>,
 }
 
 impl<'a> GraphViewer<'a> {
@@ -87,6 +90,7 @@ impl<'a> GraphViewer<'a> {
             pinned: None,
             add_node_at: None,
             select_after: None,
+            rename_request: None,
         }
     }
 }
@@ -345,6 +349,10 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
         style_context_menu(ui);
         if ui.button("Duplicate").clicked() {
             self.duplicate_node(node, snarl);
+            ui.close();
+        }
+        if ui.button("Rename").clicked() {
+            self.rename_request = snarl.get_node(node).copied();
             ui.close();
         }
         if ui.button("Delete all connections").clicked() {

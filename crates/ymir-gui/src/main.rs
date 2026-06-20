@@ -133,6 +133,19 @@ struct AppState {
     /// The cursor-anchored node-creation menu (issue #51), open only while the user
     /// is picking a node. `None` when closed.
     node_menu: Option<NodeMenu>,
+    /// The rename dialog (#61), open while the user edits a node's display name.
+    /// `None` when closed.
+    rename: Option<RenameDialog>,
+}
+
+/// The node-rename dialog (#61): edits a node's display-name override.
+struct RenameDialog {
+    /// The node being renamed (its `stable_id`).
+    target: Handle,
+    /// The editable name buffer, seeded from the current override.
+    text: String,
+    /// True only on the frame the dialog opened, so its field grabs focus once.
+    just_opened: bool,
 }
 
 impl AppState {
@@ -148,6 +161,7 @@ impl AppState {
             search: String::new(),
             node_menu: None,
             preview_pin: None,
+            rename: None,
         }
     }
 
@@ -433,6 +447,13 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
 }
 inventory::submit! { PaneKind { id: "ribbon", draw: ribbon_pane } }
 
+/// The display-name override for some edited text: `None` when the text is empty or
+/// whitespace (revert to the type name), else the raw text. Shared by the inspector
+/// Name field and the Rename dialog (#59, #61).
+fn name_override(text: &str) -> Option<String> {
+    (!text.trim().is_empty()).then(|| text.to_string())
+}
+
 fn params_pane(ui: &mut egui::Ui, state: &mut AppState) {
     ui.heading("Parameters");
 
@@ -459,12 +480,10 @@ fn params_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 .hint_text(type_name.as_str())
                 .desired_width(f32::INFINITY),
         );
-        if resp.changed() {
-            // Whitespace-only clears the override; otherwise store the raw text.
-            let override_name = (!name.trim().is_empty()).then(|| name.clone());
-            if let Err(err) = state.graph.set_name(id, override_name) {
-                ui.colored_label(ui.visuals().error_fg_color, err.to_string());
-            }
+        if resp.changed()
+            && let Err(err) = state.graph.set_name(id, name_override(&name))
+        {
+            ui.colored_label(ui.visuals().error_fg_color, err.to_string());
         }
     });
     ui.weak(type_name.as_str());
@@ -775,6 +794,7 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         pinned,
         add_node_at: None,
         select_after: None,
+        rename_request: None,
     };
     // The canvas's screen rect comes from the ui, not snarl's response: snarl
     // returns an unbounded `EVERYTHING` rect, so it cannot be used for hit-testing
@@ -810,6 +830,8 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     let add_node_at = viewer.add_node_at;
     // A node the viewer asks to select (e.g. a duplicate, #61).
     let select_after = viewer.select_after;
+    // A node the viewer asks to rename (context-menu "Rename", #61).
+    let rename_request = viewer.rename_request;
 
     // Resolve selection from a plain click (snarl 0.10 only selects on shift-click).
     // A click is a press-and-release without movement, so drags — wiring from or to
@@ -863,6 +885,24 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         state.selected = Some(handle);
     }
 
+    // Open the rename dialog for a node the context menu asked to rename (#61),
+    // seeding its field with the node's current override (empty if none).
+    if let Some(handle) = rename_request
+        && state.rename.is_none()
+    {
+        let text = state
+            .graph
+            .node_id_of(handle)
+            .and_then(|id| state.graph.name(id))
+            .map(str::to_string)
+            .unwrap_or_default();
+        state.rename = Some(RenameDialog {
+            target: handle,
+            text,
+            just_opened: true,
+        });
+    }
+
     // Right-click "Add node" (snarl graph menu) opens the node menu at the clicked
     // graph spot, mapped back to screen for the anchor (#60).
     if state.node_menu.is_none()
@@ -891,8 +931,61 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         }
     }
     node_menu_ui(ui, state);
+    rename_dialog_ui(ui, state);
 }
 inventory::submit! { PaneKind { id: "canvas", draw: canvas_pane } }
+
+/// Draws the node-rename dialog when open, and applies its result. A no-op when the
+/// dialog is closed (#61).
+fn rename_dialog_ui(ui: &mut egui::Ui, state: &mut AppState) {
+    let Some(dialog) = state.rename.as_mut() else {
+        return;
+    };
+
+    let mut apply = false;
+    let mut close = ui.input(|i| i.key_pressed(egui::Key::Escape));
+
+    egui::Window::new("Rename node")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ui.ctx(), |ui| {
+            ui.label("Display name (empty reverts to the type name):");
+            let resp = ui.add(egui::TextEdit::singleline(&mut dialog.text).desired_width(220.0));
+            if dialog.just_opened {
+                resp.request_focus();
+                dialog.just_opened = false;
+            }
+            // Enter in the field confirms.
+            if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                apply = true;
+            }
+            ui.horizontal(|ui| {
+                if ui.button("Rename").clicked() {
+                    apply = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    close = true;
+                }
+            });
+        });
+
+    if apply {
+        // Read out the Copy/clone values so the dialog borrow ends before the graph
+        // and the dialog state are mutated.
+        let target = dialog.target;
+        let name = name_override(&dialog.text);
+        if let Some(id) = state.graph.node_id_of(target)
+            && let Err(err) = state.graph.set_name(id, name)
+        {
+            // Unreachable (the node existed when the menu opened); surface, never swallow.
+            ui.colored_label(ui.visuals().error_fg_color, err.to_string());
+        }
+        state.rename = None;
+    } else if close {
+        state.rename = None;
+    }
+}
 
 fn viewport_3d_pane(ui: &mut egui::Ui, _state: &mut AppState) {
     ui.centered_and_justified(|ui| {
@@ -1187,6 +1280,18 @@ mod tests {
         assert_eq!(state.preview_target(), Some(generator));
         state.preview_pin = Some(99_999);
         assert_eq!(state.preview_target(), Some(generator));
+    }
+
+    #[test]
+    fn name_override_is_none_when_blank_else_the_raw_text() {
+        assert_eq!(name_override(""), None);
+        assert_eq!(name_override("   "), None);
+        assert_eq!(
+            name_override("Base Terrain"),
+            Some("Base Terrain".to_string())
+        );
+        // Non-blank text is stored raw (surrounding spaces preserved, not trimmed).
+        assert_eq!(name_override("  Hi "), Some("  Hi ".to_string()));
     }
 
     #[test]
