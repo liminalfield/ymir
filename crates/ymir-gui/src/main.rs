@@ -563,6 +563,14 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
         }
     });
 
+    // Shading toggle: relief makes subtle height changes (erosion) legible (#40).
+    let mut mode = state.preview.mode();
+    ui.horizontal(|ui| {
+        ui.selectable_value(&mut mode, preview::ShadeMode::Height, "Height");
+        ui.selectable_value(&mut mode, preview::ShadeMode::Relief, "Relief");
+    });
+    state.preview.set_mode(mode);
+
     // Submit a snapshot for off-thread evaluation if the output changed, collect any
     // result, and render — none of which blocks the UI thread.
     let request = EvalRequest::new(PREVIEW_RES, PREVIEW_RES, Region::UNIT, state.seed);

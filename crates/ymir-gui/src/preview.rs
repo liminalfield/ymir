@@ -47,6 +47,16 @@ impl Outcome {
     }
 }
 
+/// How the preview shades the height layer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShadeMode {
+    /// Raw height mapped to grayscale (clamped to `[0, 1]`), matching the export.
+    Height,
+    /// Relief: each cell shaded by its surface normal under a fixed light, so height
+    /// *changes* (slopes, carved valleys) are legible even when subtle (#40).
+    Relief,
+}
+
 /// The preview's coarse state, surfaced as a stoplight indicator. "Processing" is
 /// observable only because evaluation runs off the UI thread; a synchronous eval
 /// would freeze the frame and never show it.
@@ -88,8 +98,15 @@ pub(crate) struct PreviewEngine {
     structural_error: Option<String>,
     /// The last evaluation error reported by the worker.
     eval_error: Option<String>,
+    /// How to shade the preview (height vs relief), toggled in the pane (#40).
+    mode: ShadeMode,
+    /// The most recent evaluated field, kept so a mode toggle can re-render without
+    /// re-evaluating the graph.
+    last_field: Option<Field>,
     texture: Option<egui::TextureHandle>,
-    texture_hash: Option<u64>,
+    /// The (field hash, mode) the current texture was built from; the texture is
+    /// rebuilt when either changes.
+    texture_key: Option<(u64, ShadeMode)>,
 }
 
 impl PreviewEngine {
@@ -109,9 +126,21 @@ impl PreviewEngine {
             current_cancel: CancelToken::new(),
             structural_error: None,
             eval_error: None,
+            mode: ShadeMode::Height,
+            last_field: None,
             texture: None,
-            texture_hash: None,
+            texture_key: None,
         }
+    }
+
+    /// The current shading mode, for the pane's toggle.
+    pub(crate) fn mode(&self) -> ShadeMode {
+        self.mode
+    }
+
+    /// Sets the shading mode; the texture is rebuilt on the next `poll` if it changed.
+    pub(crate) fn set_mode(&mut self, mode: ShadeMode) {
+        self.mode = mode;
     }
 
     /// Submits a fresh evaluation if the previewed output would differ from the last
@@ -171,7 +200,7 @@ impl PreviewEngine {
     pub(crate) fn poll(&mut self, ctx: &egui::Context) {
         loop {
             match self.result_rx.try_recv() {
-                Ok(outcome) => self.apply(outcome, ctx),
+                Ok(outcome) => self.apply(outcome),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     self.eval_error = Some("preview worker stopped".to_string());
@@ -179,6 +208,9 @@ impl PreviewEngine {
                 }
             }
         }
+        // Build/refresh the texture for the latest field and shading mode (a no-op
+        // when neither changed), so a mode toggle re-renders without re-evaluating.
+        self.refresh_texture(ctx);
         // Keep ticking while a result is in flight or a debounced submit is due, so
         // the async update and the trailing submit both happen promptly even when
         // the UI would otherwise be idle.
@@ -187,7 +219,7 @@ impl PreviewEngine {
         }
     }
 
-    fn apply(&mut self, outcome: Outcome, ctx: &egui::Context) {
+    fn apply(&mut self, outcome: Outcome) {
         if outcome.generation() <= self.shown {
             return; // superseded
         }
@@ -195,23 +227,32 @@ impl PreviewEngine {
         match outcome {
             Outcome::Ready { field, .. } => {
                 self.eval_error = None;
-                // Re-upload only when the previewed field actually changed.
-                let hash = field.content_hash().to_u64();
-                if self.texture_hash != Some(hash) {
-                    self.texture = Some(ctx.load_texture(
-                        "preview",
-                        field_to_image(&field),
-                        egui::TextureOptions::LINEAR,
-                    ));
-                    self.texture_hash = Some(hash);
-                }
+                // Keep the field; `refresh_texture` re-uploads only when the field or
+                // the shading mode changed.
+                self.last_field = Some(field);
             }
             Outcome::Failed { message, .. } => {
                 self.eval_error = Some(message);
+                self.last_field = None;
                 self.texture = None;
-                self.texture_hash = None;
+                self.texture_key = None;
             }
         }
+    }
+
+    /// Rebuilds the preview texture from the last field when the field or the shading
+    /// mode has changed since the texture was uploaded. Cheap to call every frame.
+    fn refresh_texture(&mut self, ctx: &egui::Context) {
+        let Some(field) = self.last_field.as_ref() else {
+            return;
+        };
+        let key = (field.content_hash().to_u64(), self.mode);
+        if self.texture_key == Some(key) {
+            return;
+        }
+        let image = field_to_image(field, self.mode);
+        self.texture = Some(ctx.load_texture("preview", image, egui::TextureOptions::LINEAR));
+        self.texture_key = Some(key);
     }
 
     /// The coarse status, for the stoplight. A structural error is current
@@ -338,8 +379,37 @@ fn gray8(value: f32) -> u8 {
     (value.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
 }
 
-/// Builds a grayscale image from a field's `height` layer for the 2D preview.
-fn field_to_image(field: &Field) -> egui::ColorImage {
+/// Pre-normalized light direction for relief shading: from the upper-left, partway
+/// up (a conventional NW hillshade). `+x` is right, `+y` is down (image space).
+const RELIEF_LIGHT: [f32; 3] = [-0.5014, -0.6017, 0.6217];
+/// Vertical exaggeration for relief, so subtle height changes (erosion) are legible.
+const RELIEF_EXAGGERATION: f32 = 2.0;
+/// Ambient term so slopes facing away from the light are dim, not pure black.
+const RELIEF_AMBIENT: f32 = 0.25;
+
+/// Lambert shade in `[0, 1]` for a cell whose height gradient (per unit region) is
+/// `(gx, gy)`, lit from [`RELIEF_LIGHT`]. Flat ground reads a mid-tone; slopes facing
+/// the light brighten, those facing away darken. Pure: the normal/lambert math, kept
+/// separate from rendering so it is unit-testable.
+fn relief_shade(gx: f32, gy: f32) -> f32 {
+    // Surface normal of the height field is (-gx, -gy, 1), normalized.
+    let inv_len = 1.0 / (gx * gx + gy * gy + 1.0).sqrt();
+    let n = [-gx * inv_len, -gy * inv_len, inv_len];
+    let lambert =
+        (n[0] * RELIEF_LIGHT[0] + n[1] * RELIEF_LIGHT[1] + n[2] * RELIEF_LIGHT[2]).max(0.0);
+    RELIEF_AMBIENT + (1.0 - RELIEF_AMBIENT) * lambert
+}
+
+/// Builds the preview image from a field's `height` layer, in the chosen mode.
+fn field_to_image(field: &Field, mode: ShadeMode) -> egui::ColorImage {
+    match mode {
+        ShadeMode::Height => height_image(field),
+        ShadeMode::Relief => relief_image(field),
+    }
+}
+
+/// Raw height mapped straight to grayscale, matching the PNG export.
+fn height_image(field: &Field) -> egui::ColorImage {
     let layer = field.layer_or(layers::HEIGHT, 0.0);
     let mut rgba = Vec::with_capacity(layer.len() * 4);
     for &value in layer.as_slice() {
@@ -347,6 +417,30 @@ fn field_to_image(field: &Field) -> egui::ColorImage {
         rgba.extend_from_slice(&[g, g, g, 255]);
     }
     egui::ColorImage::from_rgba_unmultiplied([layer.width(), layer.height()], &rgba)
+}
+
+/// Relief (hillshade) image: each cell shaded by its surface normal. The gradient is
+/// per unit region (central difference scaled by the cell count), so the shading
+/// reads the same at any preview resolution.
+fn relief_image(field: &Field) -> egui::ColorImage {
+    let layer = field.layer_or(layers::HEIGHT, 0.0);
+    let (w, h) = (layer.width(), layer.height());
+    let at = |x: usize, y: usize| layer.get(x, y).unwrap_or(0.0);
+    let mut rgba = Vec::with_capacity(w * h * 4);
+    for y in 0..h {
+        for x in 0..w {
+            let (xm, xp) = (x.saturating_sub(1), (x + 1).min(w.saturating_sub(1)));
+            let (ym, yp) = (y.saturating_sub(1), (y + 1).min(h.saturating_sub(1)));
+            // d(height)/d(unit region) ≈ Δheight / (Δcells / cell_count), exaggerated.
+            let gx =
+                (at(xp, y) - at(xm, y)) * RELIEF_EXAGGERATION * w as f32 / (xp - xm).max(1) as f32;
+            let gy =
+                (at(x, yp) - at(x, ym)) * RELIEF_EXAGGERATION * h as f32 / (yp - ym).max(1) as f32;
+            let s = gray8(relief_shade(gx, gy));
+            rgba.extend_from_slice(&[s, s, s, 255]);
+        }
+    }
+    egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba)
 }
 
 #[cfg(test)]
@@ -360,6 +454,28 @@ mod tests {
         assert_eq!(gray8(-0.5), 0);
         assert_eq!(gray8(1.5), 255);
         assert_eq!(gray8(0.5), 128);
+    }
+
+    #[test]
+    fn relief_shade_is_lit_bounded_and_directional() {
+        // Flat ground reads a mid-tone (not black, not white).
+        let flat = relief_shade(0.0, 0.0);
+        assert!(
+            flat > 0.1 && flat < 0.9,
+            "flat shade {flat} should be mid-tone"
+        );
+
+        // A slope facing the light (upper-left) is brighter than one facing away.
+        let toward = relief_shade(0.6, 0.0);
+        let away = relief_shade(-0.6, 0.0);
+        assert!(
+            toward > away,
+            "{toward} (toward light) should exceed {away} (away)"
+        );
+
+        // Stays in range even for a near-vertical slope.
+        let steep = relief_shade(50.0, -50.0);
+        assert!((0.0..=1.0).contains(&steep), "shade {steep} out of range");
     }
 
     #[test]
