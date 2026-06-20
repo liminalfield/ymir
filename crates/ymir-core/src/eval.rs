@@ -1017,6 +1017,25 @@ mod tests {
     }
 
     #[test]
+    fn renaming_a_node_does_not_change_its_output_key() {
+        // A display-name override is cosmetic: it must never enter the cache key, or
+        // a rename would needlessly invalidate the preview (and risk affecting output).
+        let mut graph = Graph::new();
+        let head = graph.add_op(
+            Box::new(CountingGen {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new(),
+        );
+        let req = request();
+        let before = graph.output_key(head, &req).unwrap();
+        graph
+            .set_name(head, Some("Base Terrain".to_string()))
+            .unwrap();
+        assert_eq!(before, graph.output_key(head, &req).unwrap());
+    }
+
+    #[test]
     fn connecting_an_optional_input_changes_the_output_key() {
         // Presence of an optional input is part of the cache key, so wiring one
         // invalidates the previewed output rather than silently reusing the old.

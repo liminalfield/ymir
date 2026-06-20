@@ -95,12 +95,24 @@ impl GraphViewer<'_> {
         let ports = if input { &spec.inputs } else { &spec.outputs };
         ports.get(index).map(|p| p.name.clone())
     }
+
+    /// A node's display name: its per-instance override if set (#59), else its type's
+    /// name resolved through [`tr`].
+    fn display_label(&self, id: NodeId) -> String {
+        if let Some(name) = self.graph.name(id) {
+            return name.to_string();
+        }
+        self.graph.spec(id).map_or_else(
+            || "<missing>".to_string(),
+            |spec| tr(&format!("node-{}", spec.type_id)).to_string(),
+        )
+    }
 }
 
 impl SnarlViewer<Handle> for GraphViewer<'_> {
     fn title(&mut self, node: &Handle) -> String {
-        match self.core_id(*node).and_then(|id| self.graph.spec(id)) {
-            Some(spec) => tr(&format!("node-{}", spec.type_id)).to_string(),
+        match self.core_id(*node) {
+            Some(id) => self.display_label(id),
             None => "<missing>".to_string(),
         }
     }
@@ -116,11 +128,7 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
         let handle = snarl.get_node(node).copied();
         let title = handle
             .and_then(|h| self.core_id(h))
-            .and_then(|id| self.graph.spec(id))
-            .map_or_else(
-                || "<missing>".to_string(),
-                |spec| tr(&format!("node-{}", spec.type_id)).to_string(),
-            );
+            .map_or_else(|| "<missing>".to_string(), |id| self.display_label(id));
         // The title is purely visual; selection is handled over the whole node in
         // `final_node_rect`. Selection shows as bold accent text. `selectable(false)`
         // keeps the title from being text-selectable, so it shows the normal cursor
@@ -500,6 +508,23 @@ mod tests {
         assert!(!edge_exists(&graph, head, modr));
         assert_eq!(wires_into(&snarl, sm), 0);
         assert_in_sync(&graph, &snarl);
+    }
+
+    #[test]
+    fn title_uses_the_name_override_then_falls_back_to_the_type() {
+        let mut graph = Graph::new();
+        let mut snarl = Snarl::<Handle>::new();
+        let head = add_node(&mut graph, &mut snarl, FBM, Pos2::ZERO).expect("fbm");
+        let handle = graph.stable_id(head).expect("handle");
+        graph
+            .set_name(head, Some("Base Terrain".to_string()))
+            .expect("set name");
+
+        let mut viewer = GraphViewer::for_test(&mut graph);
+        assert_eq!(viewer.title(&handle), "Base Terrain");
+        // Clearing the override reverts to the type's name.
+        viewer.graph.set_name(head, None).expect("clear name");
+        assert_eq!(viewer.title(&handle), tr("node-generator.fbm"));
     }
 
     #[test]

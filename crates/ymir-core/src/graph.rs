@@ -43,6 +43,10 @@ pub(crate) struct Node {
     pub(crate) operator: Box<dyn Operator>,
     /// This instance's parameters.
     pub(crate) params: Params,
+    /// Optional per-instance display-name override, to tell instances of one type
+    /// apart. Cosmetic metadata: it is serialized with the graph but never enters a
+    /// cache key, the per-node seed, or evaluation, so a rename cannot change output.
+    pub(crate) name: Option<String>,
     /// One slot per input port, in order; `None` is unconnected.
     pub(crate) inputs: Vec<Option<InputConn>>,
     /// Number of leading required input ports. Ports `[0, required_input_count)` must
@@ -104,6 +108,7 @@ impl Graph {
             type_id,
             operator,
             params,
+            name: None,
             inputs: (0..input_count).map(|_| None).collect(),
             required_input_count,
             output_count,
@@ -118,6 +123,24 @@ impl Graph {
     pub fn set_params(&mut self, node: NodeId, params: Params) -> Result<()> {
         let node = self.nodes.get_mut(node).ok_or(Error::NodeNotFound)?;
         node.params = params;
+        Ok(())
+    }
+
+    /// A node's display-name override, or `None` if it uses its type's name.
+    #[must_use]
+    pub fn name(&self, node: NodeId) -> Option<&str> {
+        self.nodes.get(node).and_then(|n| n.name.as_deref())
+    }
+
+    /// Sets or clears a node's display-name override (cosmetic; never affects
+    /// evaluation). Pass `None` to revert to the type's name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NodeNotFound`] if `node` is not in the graph.
+    pub fn set_name(&mut self, node: NodeId, name: Option<String>) -> Result<()> {
+        let node = self.nodes.get_mut(node).ok_or(Error::NodeNotFound)?;
+        node.name = name;
         Ok(())
     }
 
@@ -368,6 +391,26 @@ mod tests {
         assert_eq!(spec.inputs.len(), 1);
         assert_eq!(spec.outputs.len(), 2);
         assert!(g.params(n).is_some());
+    }
+
+    #[test]
+    fn name_override_is_set_cleared_and_validated() {
+        let mut g = Graph::new();
+        let n = add(&mut g, "test.mod", 1, 1);
+        assert_eq!(g.name(n), None, "defaults to the type's name");
+        g.set_name(n, Some("My Node".to_string()))
+            .expect("node exists");
+        assert_eq!(g.name(n), Some("My Node"));
+        g.set_name(n, None).expect("node exists");
+        assert_eq!(g.name(n), None, "cleared back to the type's name");
+
+        // A missing node errors rather than panicking.
+        g.remove_node(n);
+        assert!(matches!(
+            g.set_name(n, Some("x".to_string())),
+            Err(Error::NodeNotFound)
+        ));
+        assert_eq!(g.name(n), None);
     }
 
     #[test]

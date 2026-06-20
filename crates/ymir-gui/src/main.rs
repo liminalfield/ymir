@@ -442,7 +442,29 @@ fn params_pane(ui: &mut egui::Ui, state: &mut AppState) {
         return;
     };
 
-    ui.label(tr(&format!("node-{}", spec.type_id)));
+    // Display-name override (#59): edit at the top. The type name is the hint, so an
+    // empty field shows what the node falls back to, and a weak line below always
+    // shows the underlying type even when renamed.
+    let type_name = tr(&format!("node-{}", spec.type_id)).to_string();
+    let mut name = state.graph.name(id).unwrap_or("").to_string();
+    ui.horizontal(|ui| {
+        ui.label("Name");
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut name)
+                .hint_text(type_name.as_str())
+                .desired_width(f32::INFINITY),
+        );
+        if resp.changed() {
+            // Whitespace-only clears the override; otherwise store the raw text.
+            let override_name = (!name.trim().is_empty()).then(|| name.clone());
+            if let Err(err) = state.graph.set_name(id, override_name) {
+                ui.colored_label(ui.visuals().error_fg_color, err.to_string());
+            }
+        }
+    });
+    ui.weak(type_name.as_str());
+    ui.separator();
+
     if spec.params.is_empty() {
         ui.weak("This node has no parameters.");
         return;
