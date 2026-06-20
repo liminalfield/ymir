@@ -20,6 +20,35 @@ use ymir_nodes::tr;
 /// their longest item (the wider node menu vs the narrow "Add node" graph menu).
 const CONTEXT_MENU_WIDTH: f32 = 200.0;
 
+/// Canvas zoom bounds (#65): the graph can't shrink to an unfindable speck or grow
+/// unboundedly. Used for snarl's clamp and our scroll-zoom.
+pub(crate) const MIN_SCALE: f32 = 0.4;
+pub(crate) const MAX_SCALE: f32 = 2.0;
+
+/// Zooms `to_global` by `factor` about `cursor` (screen space), keeping the graph
+/// point under the cursor fixed, within the zoom bounds. Mirrors egui `Scene`'s zoom
+/// so plain-scroll zoom (#36) matches ctrl-scroll zoom.
+///
+/// The `factor` is clamped *before* it is applied so the resulting scale lands within
+/// `[min, max]`. Clamping the scale *after* the zoom (as a first cut did) would leave
+/// the translation inconsistent — jumping the view — and push the scale out of range,
+/// triggering snarl's own clamp-around-screen-centre on the next frame.
+fn zoom_around(
+    to_global: egui::emath::TSTransform,
+    factor: f32,
+    cursor: Pos2,
+    min: f32,
+    max: f32,
+) -> egui::emath::TSTransform {
+    use egui::emath::TSTransform;
+    let factor = factor.clamp(min / to_global.scaling, max / to_global.scaling);
+    let in_scene = to_global.inverse() * cursor;
+    to_global
+        * TSTransform::from_translation(in_scene.to_vec2())
+        * TSTransform::from_scaling(factor)
+        * TSTransform::from_translation(-in_scene.to_vec2())
+}
+
 /// Styles a right-click context-menu ui to match the node-creation menu: taller
 /// rows, a constant width, and the blue selection highlight on hover (egui's default
 /// is a muted grey). Pointing the hovered/active widget fills at `selection.bg_fill`
@@ -83,6 +112,10 @@ pub(crate) struct GraphViewer<'a> {
     /// Set when the graph context menu's "Zoom to graph" was chosen; the canvas
     /// computes the fit from the node rects after the frame (#65). Output.
     pub(crate) frame_all_request: bool,
+    /// A scroll-wheel zoom to apply this frame: `(factor, cursor)` in screen space
+    /// (#36). snarl's Scene only zooms on ctrl-scroll, so plain scroll is applied
+    /// here instead of letting it pan. Input.
+    pub(crate) zoom: Option<(f32, Pos2)>,
 }
 
 impl<'a> GraphViewer<'a> {
@@ -102,6 +135,7 @@ impl<'a> GraphViewer<'a> {
             pin_request: None,
             pending_view: None,
             frame_all_request: false,
+            zoom: None,
         }
     }
 }
@@ -272,9 +306,13 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
     ) {
         // Apply a one-shot "zoom to graph" view if requested (#65), overriding the
         // pan/zoom snarl computed this frame. snarl persists this transform, so the
-        // framed view sticks until the user pans or zooms again.
+        // framed view sticks until the user pans or zooms again. Otherwise apply a
+        // scroll-wheel zoom about the cursor (#36), since snarl's Scene only zooms on
+        // ctrl-scroll and we suppressed its plain-scroll pan.
         if let Some(view) = self.pending_view {
             *to_global = view;
+        } else if let Some((factor, cursor)) = self.zoom {
+            *to_global = zoom_around(*to_global, factor, cursor, MIN_SCALE, MAX_SCALE);
         }
         // Capture the pan/zoom transform, so a screen click can be mapped into the
         // local space the node rects are recorded in.
@@ -709,6 +747,36 @@ mod tests {
         assert_eq!(wires_into(&snarl, sb), 0);
         assert_eq!(wires_into(&snarl, sc), 0);
         assert_in_sync(&graph, &snarl);
+    }
+
+    #[test]
+    fn zoom_around_keeps_the_cursor_point_fixed_and_clamps() {
+        use egui::emath::TSTransform;
+        let cursor = Pos2::new(100.0, 50.0);
+        let t = TSTransform::IDENTITY;
+        let in_scene = t.inverse() * cursor;
+
+        let zoomed = zoom_around(t, 2.0, cursor, 0.1, 4.0);
+        assert!((zoomed.scaling - 2.0).abs() < 1e-6);
+        // The graph point under the cursor stays under the cursor after zooming.
+        assert!(((zoomed * in_scene) - cursor).length() < 1e-3);
+
+        // Zoom in then out by the inverse returns to the original view (reversible).
+        let back = zoom_around(
+            zoom_around(t, 1.5, cursor, 0.1, 4.0),
+            1.0 / 1.5,
+            cursor,
+            0.1,
+            4.0,
+        );
+        assert!((back.scaling - 1.0).abs() < 1e-5);
+        assert!((back.translation - t.translation).length() < 1e-3);
+
+        // At the zoom limit the factor is clamped, so the scale stops at the bound and
+        // the cursor point still stays fixed (no jump to centre).
+        let at_max = zoom_around(t, 100.0, cursor, 0.1, 4.0);
+        assert!((at_max.scaling - 4.0).abs() < 1e-6);
+        assert!(((at_max * in_scene) - cursor).length() < 1e-3);
     }
 
     #[test]

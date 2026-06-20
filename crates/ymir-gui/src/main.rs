@@ -32,12 +32,6 @@ use preview::PreviewEngine;
 /// resolution-dependent). The build resolution is decided later (step 6c).
 const PREVIEW_RES: usize = 256;
 
-/// Canvas zoom bounds (#65): how far the graph can shrink (out) or grow (in). The
-/// lower bound stops the graph becoming an unfindable speck; "zoom to graph" frames
-/// the whole graph within these.
-const CANVAS_MIN_SCALE: f32 = 0.4;
-const CANVAS_MAX_SCALE: f32 = 2.0;
-
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
@@ -839,6 +833,7 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         pin_request: None,
         pending_view,
         frame_all_request: false,
+        zoom: None,
     };
     // The canvas's screen rect comes from the ui, not snarl's response: snarl
     // returns an unbounded `EVERYTHING` rect, so it cannot be used for hit-testing
@@ -855,8 +850,8 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         // Clamp zoom so the graph can't shrink to an unfindable speck (snarl's
         // default min is 0.2 = 5x out); "zoom to graph" handles seeing a big graph
         // whole (#65).
-        min_scale: Some(CANVAS_MIN_SCALE),
-        max_scale: Some(CANVAS_MAX_SCALE),
+        min_scale: Some(canvas::MIN_SCALE),
+        max_scale: Some(canvas::MAX_SCALE),
         ..egui_snarl::ui::SnarlStyle::new()
     };
     // Ports stack in snarl's top-down pin layout, so the gap between them is the
@@ -864,6 +859,24 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // Roughly double it for breathing room between ports and node rows (#58). Scoped
     // to this ui, so it only affects the snarl widget, not other panes or the menu.
     ui.spacing_mut().item_spacing.y = 6.0;
+
+    // Plain scroll wheel zooms the canvas about the cursor (#36). snarl's egui Scene
+    // would scroll-pan instead, so suppress its scroll-pan and hand the zoom to the
+    // viewer's `current_transform`. Only when the pointer is over the canvas, so other
+    // panes keep normal scroll-to-pan.
+    viewer.zoom = ui
+        .input(|i| i.pointer.hover_pos())
+        .filter(|p| canvas_rect.contains(*p))
+        .and_then(|cursor| {
+            let scroll = ui.input(|i| i.smooth_scroll_delta);
+            (scroll != egui::Vec2::ZERO).then(|| {
+                ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+                // Match egui Scene's exponential zoom feel (scroll_zoom_speed 1/200).
+                let factor = ((scroll.x + scroll.y) / 200.0).exp();
+                (factor, cursor)
+            })
+        });
+
     SnarlWidget::new()
         .style(style)
         .id_salt("ymir-canvas")
@@ -890,8 +903,8 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         fit_view(
             &viewer.node_rects,
             canvas_rect,
-            CANVAS_MIN_SCALE,
-            CANVAS_MAX_SCALE,
+            canvas::MIN_SCALE,
+            canvas::MAX_SCALE,
         )
     });
 
