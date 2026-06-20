@@ -16,6 +16,26 @@ use egui_snarl::{InPin, NodeId as SnarlNodeId, OutPin, Snarl};
 use ymir_core::{Graph, NodeId, Params, registry};
 use ymir_nodes::tr;
 
+/// Constant width for the right-click context menus, so they do not resize with
+/// their longest item (the wider node menu vs the narrow "Add node" graph menu).
+const CONTEXT_MENU_WIDTH: f32 = 200.0;
+
+/// Styles a right-click context-menu ui to match the node-creation menu: taller
+/// rows, a constant width, and the blue selection highlight on hover (egui's default
+/// is a muted grey). Pointing the hovered/active widget fills at `selection.bg_fill`
+/// gives the same blue a `Button::selectable` shows when selected.
+fn style_context_menu(ui: &mut egui::Ui) {
+    ui.spacing_mut().button_padding = egui::vec2(8.0, 6.0);
+    ui.set_min_width(CONTEXT_MENU_WIDTH);
+    let selection = ui.visuals().selection;
+    let widgets = &mut ui.visuals_mut().widgets;
+    for state in [&mut widgets.hovered, &mut widgets.active] {
+        state.weak_bg_fill = selection.bg_fill;
+        state.bg_fill = selection.bg_fill;
+        state.fg_stroke.color = selection.stroke.color;
+    }
+}
+
 /// A node's handle in the canvas: its persistent core `stable_id`. Storing the
 /// stable id (not the runtime [`NodeId`]) keeps canvas view-state valid across a
 /// reload, and keeps the snarl structure a pure view with no copy of node data.
@@ -322,6 +342,7 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
         ui: &mut egui::Ui,
         snarl: &mut Snarl<Handle>,
     ) {
+        style_context_menu(ui);
         if ui.button("Duplicate").clicked() {
             self.duplicate_node(node, snarl);
             ui.close();
@@ -343,6 +364,7 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
     fn show_graph_menu(&mut self, pos: egui::Pos2, ui: &mut egui::Ui, _snarl: &mut Snarl<Handle>) {
         // Record the clicked spot; the canvas opens the node-creation menu there
         // after the frame, reusing the Space menu (#60).
+        style_context_menu(ui);
         if ui.button("Add node").clicked() {
             self.add_node_at = Some(pos);
             ui.close();

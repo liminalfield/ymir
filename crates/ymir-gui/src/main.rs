@@ -615,6 +615,8 @@ fn node_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
     let area_resp = area.show(ui.ctx(), |ui| {
         egui::Frame::menu(ui.style()).show(ui, |ui| {
             ui.set_width(MENU_WIDTH);
+            // Taller rows make calmer, less-overshootable targets (#64).
+            ui.spacing_mut().button_padding = egui::vec2(8.0, 6.0);
 
             // A bare search field: a hint, not a label, so it costs no row after the
             // first use and vanishes the moment you type.
@@ -639,13 +641,38 @@ fn node_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
             // scroll area is the deliberate addition for when a category can overflow
             // the screen.
             ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
+                // The blue selection is the only row highlight; suppress egui's grey
+                // hover fill so it never competes with the blue when the content
+                // changes under a stationary pointer (e.g. just after drilling into a
+                // category). Hover still drives the blue highlight (below) on movement.
+                let hovered_vis = &mut ui.visuals_mut().widgets.hovered;
+                hovered_vis.weak_bg_fill = egui::Color32::TRANSPARENT;
+                hovered_vis.bg_fill = egui::Color32::TRANSPARENT;
                 if rows.is_empty() {
                     ui.weak("no matches");
                 }
+                // Pointer movement makes hover drive the single (blue) highlight, so it
+                // follows the mouse instead of a separate grey hover fighting the
+                // keyboard highlight. When the pointer is still, arrow keys own the
+                // highlight without hover stomping it.
+                let pointer_moved = ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO);
+                let mut hovered = None;
                 for (i, &row) in rows.iter().enumerate() {
-                    if menu_row(ui, &menu_row_label(row), i == menu.highlight) {
+                    let resp = menu_row(ui, &menu_row_label(row), i == menu.highlight);
+                    if resp.hovered() {
+                        hovered = Some(i);
+                    }
+                    if resp.clicked() {
                         activated = Some(i);
                     }
+                }
+                if pointer_moved
+                    && let Some(h) = hovered
+                    && h != menu.highlight
+                {
+                    menu.highlight = h;
+                    // Redraw so the highlight lands on the hovered row promptly.
+                    ui.ctx().request_repaint();
                 }
             });
         });
@@ -701,8 +728,8 @@ fn node_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
 /// A menu row: a borderless selectable button that fills the row width under the
 /// caller's justified layout (so it never queries `available_width`). `selected`
 /// draws the keyboard highlight.
-fn menu_row(ui: &mut egui::Ui, text: &str, selected: bool) -> bool {
-    ui.add(egui::Button::selectable(selected, text)).clicked()
+fn menu_row(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Response {
+    ui.add(egui::Button::selectable(selected, text))
 }
 
 /// A fresh node-creation menu anchored at `anchor` (screen space), placing into
@@ -930,7 +957,16 @@ struct YmirApp {
 }
 
 impl YmirApp {
-    fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // Calmer, more deliberate menus (#63, #64). Two global dials: a touch more
+        // animation so hover highlights glide and popups ease open/closed instead of
+        // snapping, and more menu inner margin so text is not jammed against the
+        // border (where the pointer's corner sits). Menu row height is set per-menu
+        // (button_padding) so the ribbon's buttons are not bloated.
+        cc.egui_ctx.global_style_mut(|style| {
+            style.animation_time = 0.15;
+            style.spacing.menu_margin = egui::Margin::same(8);
+        });
         Self {
             state: AppState::new(),
         }
