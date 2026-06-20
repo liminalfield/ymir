@@ -570,6 +570,10 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
         ui.selectable_value(&mut mode, preview::ShadeMode::Relief, "Relief");
     });
     state.preview.set_mode(mode);
+    if mode == preview::ShadeMode::Relief {
+        // The light-direction dial: shows the current light, and steers it on drag.
+        state.preview.light_indicator(ui);
+    }
 
     // Submit a snapshot for off-thread evaluation if the output changed, collect any
     // result, and render — none of which blocks the UI thread.

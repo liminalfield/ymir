@@ -345,28 +345,60 @@ impl PreviewEngine {
         }
     }
 
-    /// Steers the relief light from a drag at `pos` over the image `rect`: the cursor's
-    /// angle from the image centre sets the light's azimuth, and its distance sets the
-    /// altitude (centre = high/soft, edge = low/grazing), clamped to a sane range.
+    /// Steers the relief light from a drag at `pos` over `rect` (the image or the
+    /// indicator); the exact centre is ignored, keeping the current light.
     fn set_light_from_drag(&mut self, pos: egui::Pos2, rect: egui::Rect) {
-        let half = rect.size() * 0.5;
-        if half.x <= 0.0 || half.y <= 0.0 {
-            return;
+        if let Some(light) = light_from_drag(pos, rect) {
+            self.light = light;
         }
-        let (u, v) = (
-            (pos.x - rect.center().x) / half.x,
-            (pos.y - rect.center().y) / half.y,
-        );
-        let dist = (u * u + v * v).sqrt();
-        if dist < 1e-4 {
-            return; // exact centre has no direction; keep the current light
-        }
-        // Horizontal magnitude (and thus altitude) from the radius, clamped so the
-        // light is never fully overhead (washed out) or fully grazing (extreme).
-        let horizontal = dist.clamp(0.2, 0.95);
-        let lz = (1.0 - horizontal * horizontal).max(0.0).sqrt();
-        self.light = [u / dist * horizontal, v / dist * horizontal, lz];
     }
+
+    /// A small disk that shows the relief light direction — a dot whose angle is the
+    /// azimuth and whose radius is the altitude — and lets you set it by dragging
+    /// (sharing the image's mapping). Only meaningful in relief mode (#40).
+    pub(crate) fn light_indicator(&mut self, ui: &mut egui::Ui) {
+        let size = 48.0;
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::drag());
+        let center = rect.center();
+        let radius = size * 0.5 - 3.0;
+        let painter = ui.painter_at(rect);
+        let disk = ui.visuals().weak_text_color();
+        let sun = egui::Color32::from_rgb(0xf2, 0xc4, 0x4d);
+        painter.circle_stroke(center, radius, egui::Stroke::new(1.0, disk));
+        // The light's horizontal projection (lx, ly) maps straight onto the disk.
+        let dot = center + egui::vec2(self.light[0], self.light[1]) * radius;
+        painter.line_segment([center, dot], egui::Stroke::new(1.5, sun));
+        painter.circle_filled(dot, 3.5, sun);
+
+        let resp = resp.on_hover_text("Drag to set the relief light");
+        if resp.dragged()
+            && let Some(pos) = resp.interact_pointer_pos()
+        {
+            self.set_light_from_drag(pos, rect);
+        }
+    }
+}
+
+/// The relief light direction for a drag at `pos` over `rect`: the cursor's angle
+/// from the centre sets the azimuth, and its distance the altitude (centre =
+/// high/soft, edge = low/grazing), clamped so the light is never fully overhead nor
+/// fully grazing. `None` for the exact centre (no direction). Pure and unit-tested.
+fn light_from_drag(pos: egui::Pos2, rect: egui::Rect) -> Option<[f32; 3]> {
+    let half = rect.size() * 0.5;
+    if half.x <= 0.0 || half.y <= 0.0 {
+        return None;
+    }
+    let (u, v) = (
+        (pos.x - rect.center().x) / half.x,
+        (pos.y - rect.center().y) / half.y,
+    );
+    let dist = (u * u + v * v).sqrt();
+    if dist < 1e-4 {
+        return None;
+    }
+    let horizontal = dist.clamp(0.2, 0.95);
+    let lz = (1.0 - horizontal * horizontal).max(0.0).sqrt();
+    Some([u / dist * horizontal, v / dist * horizontal, lz])
 }
 
 /// The worker: evaluates submitted jobs with a persistent cache, skipping
@@ -523,6 +555,26 @@ mod tests {
         // Stays in range even for a near-vertical slope.
         let steep = relief_shade(50.0, -50.0, DEFAULT_LIGHT);
         assert!((0.0..=1.0).contains(&steep), "shade {steep} out of range");
+    }
+
+    #[test]
+    fn light_from_drag_maps_cursor_to_a_unit_light() {
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 100.0));
+
+        // Dragging to the right edge → light points right (+x), level (y ≈ 0).
+        let right = light_from_drag(egui::pos2(100.0, 50.0), rect).expect("direction");
+        assert!(right[0] > 0.0 && right[1].abs() < 1e-3);
+
+        // Upper-left → light points up-left (-x, -y).
+        let up_left = light_from_drag(egui::pos2(0.0, 0.0), rect).expect("direction");
+        assert!(up_left[0] < 0.0 && up_left[1] < 0.0);
+
+        // Always a unit vector.
+        let n = up_left[0] * up_left[0] + up_left[1] * up_left[1] + up_left[2] * up_left[2];
+        assert!((n.sqrt() - 1.0).abs() < 1e-4);
+
+        // The exact centre has no direction.
+        assert!(light_from_drag(egui::pos2(50.0, 50.0), rect).is_none());
     }
 
     #[test]
