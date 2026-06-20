@@ -78,22 +78,30 @@ refuses to special-case, breaking the uniform-`Field` promise `CLAUDE.md` is bui
 on. See [the mask & selection model note](mask-and-selection-model.md) for the
 creator/editor/attacher decomposition this rests on.
 
-## A node-vs-param decision: Combine stays one node
+## A node-vs-param decision: the Blend node stays one node
 
-The `combine` node keeps its operation (`add`, `subtract`, `multiply`, `min`,
-`max`, `mix`) as a parameter rather than splitting into one node per op. This was
+The `combine` line's node is a single **Blend** node (`modifier.blend`) on the
+Photoshop "blend mode + opacity" model, rather than one node per operation. It has
+a `mode` (`normal`, `add`, `subtract`, `multiply`, `max`, `min`, `difference`) and
+an `opacity`, computing `lerp(base, mode(base, overlay), opacity * mask)`. This was
 weighed against the node-readability principle and the principle does not apply
 here: its target is a node that hides genuinely *different behaviours* behind a
 mode (the canonical case is "an Invert node, not a remap with its range swapped",
-where range-swap is a non-obvious way to express invert). The combine ops are
-interchangeable variants of a single operation, binary field math: identical arity
-(2 to 1), identical mask contract, identical structure, differing only in the
-operator. That is genuine intra-node configuration, and one node with an operation
-selector is the universal idiom (World Machine's Combiner, Houdini, Nuke's Merge).
-The real cost, that the op is not visible in the wiring, is addressed by surfacing
-the chosen op in the node's canvas title, not by N thin nodes. So `combine` is a
-one-node tab for now and that is fine: it is the multi-input pointwise line, and it
-grows by gaining ops and a blend weight (issues #53, #54), not by fragmenting.
+where range-swap is a non-obvious way to express invert). The blend modes are
+interchangeable variants of a single operation, compositing two fields: identical
+arity (2 to 1), identical mask contract, identical structure, differing only in the
+per-cell function. That is genuine intra-node configuration, and "blend mode plus
+opacity" is the universally understood idiom (Photoshop, and the combiners in World
+Machine, Houdini, Nuke). It also makes the slider legible, where an op-dependent
+weight was not: `normal` plus opacity is a base/overlay crossfade, and every other
+mode eases its effect in. Only the terrain-meaningful modes are offered; the
+photographic ones (screen, overlay, dodge/burn, soft/hard light) assume colour in
+`[0, 1]` with a neutral midpoint a heightfield lacks. The remaining cost, that the
+mode is not visible in the wiring, is addressed by surfacing it in the node's canvas
+title, not by N thin nodes. So `combine` is a one-node tab for now and that is fine:
+it is the multi-input pointwise line, and it grows by gaining modes, not by
+fragmenting. (This supersedes the earlier op-list combine node and issues #53/#54,
+whose subtract op and blend weight became the `subtract` mode and `opacity`.)
 
 ## Deferred until populated
 

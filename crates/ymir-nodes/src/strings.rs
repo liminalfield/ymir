@@ -25,10 +25,11 @@ pub fn tr(key: &str) -> &str {
         "node-generator.fbm" => "fBm Noise",
         "node-generator.fbm-desc" => "Fractional Brownian motion of Perlin noise.",
 
-        // Combine / blend.
-        "node-modifier.combine" => "Combine",
-        "node-modifier.combine-desc" => {
-            "Merges two fields: add, subtract, multiply, min, max, or a mask-weighted mix."
+        // Blend.
+        "node-modifier.blend" => "Blend",
+        "node-modifier.blend-desc" => {
+            "Composites two fields by a mode (normal, add, subtract, multiply, max, min, \
+             difference) eased in by opacity."
         }
 
         // Mask generator.

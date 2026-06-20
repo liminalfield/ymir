@@ -10,8 +10,8 @@
 //! crate explicitly (`use ymir_nodes as _;`); merely calling the registry by
 //! string does not reference this crate and would let the linker drop it.
 
+mod blend;
 mod category;
-mod combine;
 mod curve;
 mod export;
 mod fbm;
@@ -21,8 +21,8 @@ mod noise;
 mod strings;
 mod thermal;
 
+pub use blend::Blend;
 pub use category::{CategoryDef, categories, find_category};
-pub use combine::Combine;
 pub use curve::CurveNode;
 pub use export::ExportPng;
 pub use fbm::Fbm;
