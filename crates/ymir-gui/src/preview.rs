@@ -100,13 +100,16 @@ pub(crate) struct PreviewEngine {
     eval_error: Option<String>,
     /// How to shade the preview (height vs relief), toggled in the pane (#40).
     mode: ShadeMode,
+    /// Relief light direction (unit vector), steered by dragging over the relief
+    /// image (#40).
+    light: [f32; 3],
     /// The most recent evaluated field, kept so a mode toggle can re-render without
     /// re-evaluating the graph.
     last_field: Option<Field>,
     texture: Option<egui::TextureHandle>,
-    /// The (field hash, mode) the current texture was built from; the texture is
-    /// rebuilt when either changes.
-    texture_key: Option<(u64, ShadeMode)>,
+    /// The (field hash, mode, light bits) the current texture was built from; the
+    /// texture is rebuilt when any changes.
+    texture_key: Option<(u64, ShadeMode, [u32; 3])>,
 }
 
 impl PreviewEngine {
@@ -127,6 +130,7 @@ impl PreviewEngine {
             structural_error: None,
             eval_error: None,
             mode: ShadeMode::Height,
+            light: DEFAULT_LIGHT,
             last_field: None,
             texture: None,
             texture_key: None,
@@ -246,11 +250,15 @@ impl PreviewEngine {
         let Some(field) = self.last_field.as_ref() else {
             return;
         };
-        let key = (field.content_hash().to_u64(), self.mode);
+        let key = (
+            field.content_hash().to_u64(),
+            self.mode,
+            self.light.map(f32::to_bits),
+        );
         if self.texture_key == Some(key) {
             return;
         }
-        let image = field_to_image(field, self.mode);
+        let image = field_to_image(field, self.mode, self.light);
         self.texture = Some(ctx.load_texture("preview", image, egui::TextureOptions::LINEAR));
         self.texture_key = Some(key);
     }
@@ -299,8 +307,9 @@ impl PreviewEngine {
 
     /// Renders the current preview: a status stoplight, then either the error
     /// message (when failed) or the most recent image. A processing state keeps the
-    /// last image visible while the refresh is in flight.
-    pub(crate) fn show(&self, ui: &mut egui::Ui) {
+    /// last image visible while the refresh is in flight. In relief mode the image is
+    /// draggable to steer the light (#40).
+    pub(crate) fn show(&mut self, ui: &mut egui::Ui) {
         let status = self.status();
         Self::status_chip(ui, status);
 
@@ -310,15 +319,53 @@ impl PreviewEngine {
             }
             return;
         }
-        if let Some(texture) = &self.texture {
-            let width = ui.available_width();
-            let sized = egui::load::SizedTexture::new(texture.id(), texture.size_vec2());
-            ui.add(
-                egui::Image::new(sized)
-                    .max_width(width)
-                    .maintain_aspect_ratio(true),
-            );
+        // Copy the texture's id/size so the immutable borrow of `self.texture` ends
+        // before the drag below mutates the light.
+        let Some(image) = self.texture.as_ref().map(|t| (t.id(), t.size_vec2())) else {
+            return;
+        };
+        let sized = egui::load::SizedTexture::new(image.0, image.1);
+        // Drag steers the light only in relief mode; height mode is non-interactive.
+        let sense = if self.mode == ShadeMode::Relief {
+            egui::Sense::drag()
+        } else {
+            egui::Sense::hover()
+        };
+        let resp = ui.add(
+            egui::Image::new(sized)
+                .max_width(ui.available_width())
+                .maintain_aspect_ratio(true)
+                .sense(sense),
+        );
+        if self.mode == ShadeMode::Relief
+            && resp.dragged()
+            && let Some(pos) = resp.interact_pointer_pos()
+        {
+            self.set_light_from_drag(pos, resp.rect);
         }
+    }
+
+    /// Steers the relief light from a drag at `pos` over the image `rect`: the cursor's
+    /// angle from the image centre sets the light's azimuth, and its distance sets the
+    /// altitude (centre = high/soft, edge = low/grazing), clamped to a sane range.
+    fn set_light_from_drag(&mut self, pos: egui::Pos2, rect: egui::Rect) {
+        let half = rect.size() * 0.5;
+        if half.x <= 0.0 || half.y <= 0.0 {
+            return;
+        }
+        let (u, v) = (
+            (pos.x - rect.center().x) / half.x,
+            (pos.y - rect.center().y) / half.y,
+        );
+        let dist = (u * u + v * v).sqrt();
+        if dist < 1e-4 {
+            return; // exact centre has no direction; keep the current light
+        }
+        // Horizontal magnitude (and thus altitude) from the radius, clamped so the
+        // light is never fully overhead (washed out) or fully grazing (extreme).
+        let horizontal = dist.clamp(0.2, 0.95);
+        let lz = (1.0 - horizontal * horizontal).max(0.0).sqrt();
+        self.light = [u / dist * horizontal, v / dist * horizontal, lz];
     }
 }
 
@@ -379,32 +426,32 @@ fn gray8(value: f32) -> u8 {
     (value.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
 }
 
-/// Pre-normalized light direction for relief shading: from the upper-left, partway
-/// up (a conventional NW hillshade). `+x` is right, `+y` is down (image space).
-const RELIEF_LIGHT: [f32; 3] = [-0.5014, -0.6017, 0.6217];
+/// Default relief light: from the upper-left, partway up (a conventional NW
+/// hillshade). `+x` is right, `+y` is down (image space). Pre-normalized. Steerable by
+/// dragging over the relief image (#40).
+const DEFAULT_LIGHT: [f32; 3] = [-0.5014, -0.6017, 0.6217];
 /// Vertical exaggeration for relief, so subtle height changes (erosion) are legible.
 const RELIEF_EXAGGERATION: f32 = 2.0;
 /// Ambient term so slopes facing away from the light are dim, not pure black.
 const RELIEF_AMBIENT: f32 = 0.25;
 
 /// Lambert shade in `[0, 1]` for a cell whose height gradient (per unit region) is
-/// `(gx, gy)`, lit from [`RELIEF_LIGHT`]. Flat ground reads a mid-tone; slopes facing
-/// the light brighten, those facing away darken. Pure: the normal/lambert math, kept
-/// separate from rendering so it is unit-testable.
-fn relief_shade(gx: f32, gy: f32) -> f32 {
+/// `(gx, gy)`, lit from `light` (a unit vector). Flat ground reads a mid-tone; slopes
+/// facing the light brighten, those facing away darken. Pure: the normal/lambert math,
+/// kept separate from rendering so it is unit-testable.
+fn relief_shade(gx: f32, gy: f32, light: [f32; 3]) -> f32 {
     // Surface normal of the height field is (-gx, -gy, 1), normalized.
     let inv_len = 1.0 / (gx * gx + gy * gy + 1.0).sqrt();
     let n = [-gx * inv_len, -gy * inv_len, inv_len];
-    let lambert =
-        (n[0] * RELIEF_LIGHT[0] + n[1] * RELIEF_LIGHT[1] + n[2] * RELIEF_LIGHT[2]).max(0.0);
+    let lambert = (n[0] * light[0] + n[1] * light[1] + n[2] * light[2]).max(0.0);
     RELIEF_AMBIENT + (1.0 - RELIEF_AMBIENT) * lambert
 }
 
 /// Builds the preview image from a field's `height` layer, in the chosen mode.
-fn field_to_image(field: &Field, mode: ShadeMode) -> egui::ColorImage {
+fn field_to_image(field: &Field, mode: ShadeMode, light: [f32; 3]) -> egui::ColorImage {
     match mode {
         ShadeMode::Height => height_image(field),
-        ShadeMode::Relief => relief_image(field),
+        ShadeMode::Relief => relief_image(field, light),
     }
 }
 
@@ -422,7 +469,7 @@ fn height_image(field: &Field) -> egui::ColorImage {
 /// Relief (hillshade) image: each cell shaded by its surface normal. The gradient is
 /// per unit region (central difference scaled by the cell count), so the shading
 /// reads the same at any preview resolution.
-fn relief_image(field: &Field) -> egui::ColorImage {
+fn relief_image(field: &Field, light: [f32; 3]) -> egui::ColorImage {
     let layer = field.layer_or(layers::HEIGHT, 0.0);
     let (w, h) = (layer.width(), layer.height());
     let at = |x: usize, y: usize| layer.get(x, y).unwrap_or(0.0);
@@ -436,7 +483,7 @@ fn relief_image(field: &Field) -> egui::ColorImage {
                 (at(xp, y) - at(xm, y)) * RELIEF_EXAGGERATION * w as f32 / (xp - xm).max(1) as f32;
             let gy =
                 (at(x, yp) - at(x, ym)) * RELIEF_EXAGGERATION * h as f32 / (yp - ym).max(1) as f32;
-            let s = gray8(relief_shade(gx, gy));
+            let s = gray8(relief_shade(gx, gy, light));
             rgba.extend_from_slice(&[s, s, s, 255]);
         }
     }
@@ -459,22 +506,22 @@ mod tests {
     #[test]
     fn relief_shade_is_lit_bounded_and_directional() {
         // Flat ground reads a mid-tone (not black, not white).
-        let flat = relief_shade(0.0, 0.0);
+        let flat = relief_shade(0.0, 0.0, DEFAULT_LIGHT);
         assert!(
             flat > 0.1 && flat < 0.9,
             "flat shade {flat} should be mid-tone"
         );
 
         // A slope facing the light (upper-left) is brighter than one facing away.
-        let toward = relief_shade(0.6, 0.0);
-        let away = relief_shade(-0.6, 0.0);
+        let toward = relief_shade(0.6, 0.0, DEFAULT_LIGHT);
+        let away = relief_shade(-0.6, 0.0, DEFAULT_LIGHT);
         assert!(
             toward > away,
             "{toward} (toward light) should exceed {away} (away)"
         );
 
         // Stays in range even for a near-vertical slope.
-        let steep = relief_shade(50.0, -50.0);
+        let steep = relief_shade(50.0, -50.0, DEFAULT_LIGHT);
         assert!((0.0..=1.0).contains(&steep), "shade {steep} out of range");
     }
 
