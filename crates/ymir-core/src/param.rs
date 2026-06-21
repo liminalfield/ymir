@@ -419,6 +419,8 @@ pub enum ParamKind {
 pub enum Unit {
     /// A world-unit length, in meters.
     Meters,
+    /// An angle, in degrees.
+    Degrees,
 }
 
 /// The schema for one parameter: its name, kind, default value, and optional unit.

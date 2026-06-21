@@ -19,6 +19,7 @@ mod fbm;
 mod invert;
 mod mask;
 mod noise;
+mod slope;
 mod strings;
 mod thermal;
 
@@ -30,5 +31,6 @@ pub use export::ExportPng;
 pub use fbm::Fbm;
 pub use invert::Invert;
 pub use mask::Mask;
+pub use slope::Slope;
 pub use strings::tr;
 pub use thermal::ThermalErosion;

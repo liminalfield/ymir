@@ -79,6 +79,7 @@ pub(crate) fn current_value(params: &Params, spec: &ParamSpec) -> ParamValue {
 fn unit_suffix(unit: Unit) -> &'static str {
     match unit {
         Unit::Meters => " m",
+        Unit::Degrees => "°",
     }
 }
 

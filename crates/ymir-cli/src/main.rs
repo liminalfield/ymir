@@ -72,6 +72,7 @@ mod tests {
                 "modifier.curve",
                 "modifier.invert",
                 "modifier.mask",
+                "modifier.slope",
                 "modifier.thermal_erosion"
             ],
         );

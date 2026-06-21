@@ -37,6 +37,13 @@ pub fn tr(key: &str) -> &str {
         "node-modifier.mask" => "Mask",
         "node-modifier.mask-desc" => "Derives a 0..1 mask from slope or height.",
 
+        // Slope selector.
+        "node-modifier.slope" => "Slope",
+        "node-modifier.slope-desc" => {
+            "Selects a band of steepness: high where the slope angle is within \
+             min..max degrees, softening over the falloff. Scale it with an upstream Blur."
+        }
+
         // Invert.
         "node-modifier.invert" => "Invert",
         "node-modifier.invert-desc" => "Flips the height layer (1 - height).",
