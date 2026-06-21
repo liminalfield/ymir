@@ -67,11 +67,13 @@ dedicated nodes). In Ymir a mask is just a `Layer` in `[0, 1]`, so mask operatio
 sort by what they mechanically are, not by the layer they happen to touch:
 
 - Mask **creators** (slope, height, curvature, occlusion, direction) derive a
-  selection from the terrain. They are `selector`s. The current `Mask` node is one.
+  selection from the terrain. They are `selector`s — the `Slope` and `Height`
+  selectors today (the bundled `Mask` node that once did both has been retired),
+  with more sources to come.
 - Mask **editors** (blur, expand/contract, remap, invert) are not mask-specific. A
   blur is a blur whether it runs on `height` or on `mask`. They are general nodes
-  that target a layer, living in `adjust` (pointwise) or a future `filter`
-  (spatial), not mask-flavoured clones.
+  that target a layer, living in `adjust` (pointwise) or `filter` (spatial, where the
+  Blur node now lives), not mask-flavoured clones.
 
 Keeping "Masks" as a tab would special-case a layer the engine deliberately
 refuses to special-case, breaking the uniform-`Field` promise `CLAUDE.md` is built

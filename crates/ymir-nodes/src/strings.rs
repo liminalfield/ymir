@@ -33,10 +33,6 @@ pub fn tr(key: &str) -> &str {
              difference) eased in by opacity."
         }
 
-        // Mask generator.
-        "node-modifier.mask" => "Mask",
-        "node-modifier.mask-desc" => "Derives a 0..1 mask from slope or height.",
-
         // Height selector.
         "node-modifier.height" => "Height",
         "node-modifier.height-desc" => {

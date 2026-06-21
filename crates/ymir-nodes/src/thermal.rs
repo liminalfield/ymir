@@ -363,6 +363,36 @@ mod tests {
     }
 
     #[test]
+    fn a_selection_drives_erosion_through_the_mask_input() {
+        // End-to-end replacement for the retired Mask node's erosion-integration
+        // tests: a Slope selection wired into the mask input localizes erosion, so it
+        // differs from eroding everywhere.
+        use crate::Slope;
+        use crate::noise::{FbmParams, fbm_field};
+
+        let input = fbm_field(64, 64, Region::UNIT, FbmParams::default(), 42);
+        let c = EvalContext::new(64, 64, Region::UNIT, 42);
+        let selection = Slope
+            .eval(Inputs::required_only(&[&input]), &Params::default(), &c)
+            .unwrap()
+            .remove(0);
+
+        let required = [&input];
+        let optional = [Some(&selection)];
+        let localized = ThermalErosion
+            .eval(Inputs::new(&required, &optional), &Params::default(), &c)
+            .unwrap();
+        let everywhere = ThermalErosion
+            .eval(Inputs::required_only(&[&input]), &Params::default(), &c)
+            .unwrap();
+        assert_ne!(
+            localized[0].layer(layers::HEIGHT).unwrap().content_hash(),
+            everywhere[0].layer(layers::HEIGHT).unwrap().content_hash(),
+            "a wired selection must localize erosion"
+        );
+    }
+
+    #[test]
     fn the_mask_input_overrides_the_mask_layer() {
         // The input carries a mask layer of 1.0 (erode), but a wired mask input of 0.0
         // (protect) wins: the field is unchanged, proving the input takes precedence.

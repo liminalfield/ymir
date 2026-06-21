@@ -1,9 +1,10 @@
 # Design note: the mask & selection model
 
-Status: **partly decided and built.** The enabling mechanism (optional input ports)
-and the first effect to use it (Blend) have landed; three of the open decisions below
-are now settled. See the update section. The rest of the decomposition is still the
-intended direction, not yet built.
+Status: **largely built.** The enabling mechanism (optional input ports), the Slope
+and Height selectors (grayscale on the `height` layer), thermal's optional `mask`
+input, and the Curve/Invert shapers have all landed, and the bundled `Mask` node has
+been **retired** in their favour. See the update section. Some decomposition (curvature
+and other selector sources, Set Mask) is still ahead.
 
 This note captures a decomposition that came out of building the mask node: how
 masks should be *created, manipulated, and applied* so the node graph stays
@@ -217,16 +218,19 @@ selection field is reusable, invertible, and combinable like any other data.
 
 ## Migration
 
-1. Keep the current `Mask` node working (no break). *(done — it still ships.)*
+1. Keep the current `Mask` node working (no break) during the migration. *(done, then
+   retired once its replacements landed — see step 5.)*
 2. Land `Curve`/`Invert` — the universal shaper; gives invert, threshold, band,
    levels on any field. *(done.)*
 3. Optional input ports + an explicit `mask` input on effects. *(done — engine
-   support plus Blend's `mask` input.)*
-4. Add `Slope` (selection source). With the `mask` input, a selection wires straight
-   into an effect, so `Set Mask` is only needed for the layer-convention path.
-5. Once a selection source exists, the bundled `Mask` node is just `Slope`/`Curve`
-   into an effect's mask input; decide whether to keep it as a convenience or retire
-   it.
+   support, Blend's `mask` input, and thermal's `mask` input.)*
+4. Add the selection sources, on the `height` layer. *(done — `Slope` (a steepness
+   band in degrees) and `Height` (an elevation band). With the `mask` input a
+   selection wires straight into an effect, so `Set Mask` is only needed for the
+   layer-convention path.)*
+5. Retire the bundled `Mask` node. *(done — `Slope`/`Height` for the criteria,
+   `Curve`/`Invert` for shaping, and effect `mask` inputs for application cover
+   everything it did.)*
 
 ## Decisions still open
 
