@@ -18,9 +18,17 @@ use ymir_nodes::tr;
 
 use crate::thumbnails::ThumbnailEngine;
 
-/// On-screen side of a node-body thumbnail (px). The thumbnail field is square, drawn
-/// scaled to this size in the node body.
+/// On-screen side of a node thumbnail (px). The thumbnail field is square, drawn
+/// scaled to this size in the node footer.
 const THUMB_DISPLAY_SIZE: f32 = 72.0;
+/// Whitespace above the thumbnail, separating it from the lowermost port.
+const THUMB_TOP_GAP: f32 = 6.0;
+/// Corner radius of the thumbnail and its border.
+const THUMB_CORNER_RADIUS: f32 = 4.0;
+/// Fixed node width (px). A uniform width keeps the canvas tidy and matters once a
+/// grid and snapping arrive. Applied as a minimum on the header and footer rows; an
+/// unusually long title is the only thing that can push a node wider.
+const NODE_WIDTH: f32 = 140.0;
 
 /// Constant width for the right-click context menus, so they do not resize with
 /// their longest item (the wider node menu vs the narrow "Add node" graph menu).
@@ -276,6 +284,8 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
         } else {
             egui::RichText::new(title)
         };
+        // Fixed node width: the header defines it, so every node is the same width.
+        ui.set_min_width(NODE_WIDTH);
         ui.horizontal(|ui| {
             // Always reserve the status dot's space so a node never changes width when
             // it becomes the previewed node (a layout jump is jarring). Paint the
@@ -374,17 +384,38 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
             return;
         };
         let size = egui::vec2(THUMB_DISPLAY_SIZE, THUMB_DISPLAY_SIZE);
-        match self.thumbnails.and_then(|t| t.texture(handle)) {
-            Some(texture) => {
-                let sized = egui::load::SizedTexture::new(texture.id(), size);
-                ui.add(egui::Image::new(sized));
-            }
-            None => {
-                let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-                ui.painter()
-                    .rect_filled(rect, 2.0, ui.visuals().extreme_bg_color);
-            }
-        }
+        // Span the fixed node width so the thumbnail centres within the whole node,
+        // not just its own content.
+        ui.set_min_width(NODE_WIDTH);
+        // A top-down centered layout gives the vertical gap (add_space) and horizontal
+        // centring in one go.
+        ui.vertical_centered(|ui| {
+            ui.add_space(THUMB_TOP_GAP);
+            let rect = match self.thumbnails.and_then(|t| t.texture(handle)) {
+                Some(texture) => {
+                    ui.add(
+                        egui::Image::new(egui::load::SizedTexture::new(texture.id(), size))
+                            .corner_radius(THUMB_CORNER_RADIUS),
+                    )
+                    .rect
+                }
+                None => {
+                    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                    ui.painter().rect_filled(
+                        rect,
+                        THUMB_CORNER_RADIUS,
+                        ui.visuals().extreme_bg_color,
+                    );
+                    rect
+                }
+            };
+            ui.painter().rect_stroke(
+                rect,
+                THUMB_CORNER_RADIUS,
+                egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+                egui::StrokeKind::Inside,
+            );
+        });
     }
 
     fn inputs(&mut self, node: &Handle) -> usize {
@@ -418,6 +449,10 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
         snarl: &mut Snarl<Handle>,
     ) -> impl SnarlPin + 'static {
         if let Some(label) = self.port_label(snarl, pin.id.node, false, pin.id.output) {
+            // snarl's output pin_ui is already right-to-left and reserves a pin slot,
+            // but the pin circle overhangs it, so reserve extra clearance on the right
+            // before the label so it sits clear of the circle, not under it (#55).
+            ui.add_space(ui.spacing().icon_width);
             ui.label(label);
         }
         PinInfo::circle()
