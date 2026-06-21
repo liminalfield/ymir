@@ -2,7 +2,10 @@
 //!
 //! Material on slopes steeper than the talus angle slides downhill to lower
 //! neighbours over several passes, forming the straight talus slopes of scree and
-//! softening sharp ridges. Each pass is Jacobi (it reads the previous full state
+//! softening sharp ridges. An optional `mask` input localizes the effect (its height
+//! layer is the selection); unwired, the input's own `mask` layer is used by
+//! convention, else erosion applies everywhere. Each pass is Jacobi (it reads the
+//! previous full state
 //! and writes a fresh delta), so the result is independent of cell iteration
 //! order, which determinism requires. Single-threaded for now; the per-cell
 //! independence means `rayon` drops in later unchanged.
@@ -42,7 +45,12 @@ impl Operator for ThermalErosion {
             type_id: TYPE_ID,
             category: "geology",
             tags: &["thermal", "talus", "erosion", "modifier"],
-            inputs: vec![PortSpec::new("in")],
+            inputs: vec![
+                PortSpec::new("in"),
+                // Optional: a field whose height is the selection. When unwired, the
+                // input's own mask layer is used by convention, else erode everywhere.
+                PortSpec::optional("mask"),
+            ],
             outputs: vec![PortSpec::new("out")],
             params: vec![
                 ParamSpec::new(
@@ -73,9 +81,15 @@ impl Operator for ThermalErosion {
         let strength = params.get_f64("strength", 0.5) as f32;
         let iterations = params.get_i64("iterations", 35).clamp(0, 100_000) as usize;
 
-        // Soft contract: erode everywhere when no mask is present (mask 1.0).
         let source = input.layer_or(layers::HEIGHT, 0.0);
-        let mask = input.layer_or(layers::MASK, 1.0);
+        // The mask localizes the erosion. An explicit mask input wins (its height
+        // layer is the selection); with none, the input's own mask layer by
+        // convention; with neither, a uniform 1.0 (erode everywhere). Soft-layer
+        // contract either way: the node never gates on a mask.
+        let mask = match inputs.optional(0) {
+            Some(mask_field) => mask_field.layer_or(layers::HEIGHT, 1.0),
+            None => input.layer_or(layers::MASK, 1.0),
+        };
 
         let mut heights = source.as_slice().to_vec();
         let mut delta = vec![0.0_f32; heights.len()];
@@ -248,6 +262,50 @@ mod tests {
             .unwrap();
         let after = out[0].layer(layers::HEIGHT).unwrap().content_hash();
         assert_eq!(before, after, "mask=0 everywhere must disable erosion");
+    }
+
+    #[test]
+    fn an_explicit_mask_input_localizes_erosion() {
+        // A selection wired into the mask input (its height layer is the selection),
+        // zero everywhere, protects the spike entirely just like a mask layer would,
+        // so the field is unchanged.
+        let input = spike_field(false);
+        let before = input.layer(layers::HEIGHT).unwrap().content_hash();
+        let mask = Field::new(32, 32, Region::UNIT)
+            .with_layer(layers::HEIGHT, Arc::new(Layer::filled(32, 32, 0.0)));
+        let required = [&input];
+        let optional = [Some(&mask)];
+        let out = ThermalErosion
+            .eval(
+                Inputs::new(&required, &optional),
+                &Params::default(),
+                &ctx(),
+            )
+            .unwrap();
+        let after = out[0].layer(layers::HEIGHT).unwrap().content_hash();
+        assert_eq!(before, after, "a zero mask input must disable erosion");
+    }
+
+    #[test]
+    fn the_mask_input_overrides_the_mask_layer() {
+        // The input carries a mask layer of 1.0 (erode), but a wired mask input of 0.0
+        // (protect) wins: the field is unchanged, proving the input takes precedence.
+        let mut input = spike_field(false);
+        input.set_layer(layers::MASK, Arc::new(Layer::filled(32, 32, 1.0)));
+        let before = input.layer(layers::HEIGHT).unwrap().content_hash();
+        let mask = Field::new(32, 32, Region::UNIT)
+            .with_layer(layers::HEIGHT, Arc::new(Layer::filled(32, 32, 0.0)));
+        let required = [&input];
+        let optional = [Some(&mask)];
+        let out = ThermalErosion
+            .eval(
+                Inputs::new(&required, &optional),
+                &Params::default(),
+                &ctx(),
+            )
+            .unwrap();
+        let after = out[0].layer(layers::HEIGHT).unwrap().content_hash();
+        assert_eq!(before, after, "the mask input must override the mask layer");
     }
 
     #[test]
