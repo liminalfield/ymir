@@ -107,8 +107,30 @@ pub(crate) fn edit(
     let name = spec.name.as_str();
     match (widget_for(spec), current) {
         (Widget::Slider { min, max }, ParamValue::Float(v)) => {
+            // egui's built-in slider value is a drag-value it won't let us configure,
+            // so it keeps smart-aim and snaps coarsely (about 1/100 of the range). Hide
+            // it and pair the handle with our own DragValue: smart-aim off on both for
+            // continuous values, a range-relative drag speed for fine control, and the
+            // number stays type-able. The handle gives the coarse visual position.
             let mut x = *v;
-            let resp = ui.add(egui::Slider::new(&mut x, min..=max).text(name));
+            let speed = (max - min) * 0.002;
+            let resp = ui
+                .horizontal(|ui| {
+                    let value = ui.add(
+                        egui::DragValue::new(&mut x)
+                            .range(min..=max)
+                            .speed(speed)
+                            .max_decimals(4),
+                    );
+                    let handle = ui.add(
+                        egui::Slider::new(&mut x, min..=max)
+                            .show_value(false)
+                            .smart_aim(false)
+                            .text(name),
+                    );
+                    value | handle
+                })
+                .inner;
             resp.changed().then_some(ParamValue::Float(x))
         }
         (Widget::Quantity { min, max, unit }, ParamValue::Float(v)) => {
