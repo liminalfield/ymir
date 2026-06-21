@@ -114,13 +114,27 @@ pub(crate) fn edit(
             // number stays type-able. The handle gives the coarse visual position.
             let mut x = *v;
             let speed = (max - min) * 0.002;
+
+            // Reserve a constant width for the number box, sized to the widest value at
+            // our fixed decimals, so neither the mantissa nor the integer digit count
+            // resizes it and the slider beside it never shifts as you drag.
+            let extreme = if min.abs() > max.abs() { min } else { max };
+            let font = egui::TextStyle::Body.resolve(ui.style());
+            let text_w = ui
+                .painter()
+                .layout_no_wrap(format!("{extreme:.3}"), font, egui::Color32::WHITE)
+                .rect
+                .width();
+            let box_w = text_w + 2.0 * ui.spacing().button_padding.x + 2.0;
+
             let resp = ui
                 .horizontal(|ui| {
-                    let value = ui.add(
+                    let value = ui.add_sized(
+                        egui::vec2(box_w, ui.spacing().interact_size.y),
                         egui::DragValue::new(&mut x)
                             .range(min..=max)
                             .speed(speed)
-                            .max_decimals(4),
+                            .fixed_decimals(3),
                     );
                     let handle = ui.add(
                         egui::Slider::new(&mut x, min..=max)
