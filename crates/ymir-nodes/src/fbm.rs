@@ -47,6 +47,34 @@ impl Operator for Fbm {
                     ParamKind::Float { min: 0.0, max: 1.0 },
                     ParamValue::Float(0.5),
                 ),
+                // Per-node seed: rerolls this generator's texture without a new node
+                // or touching the world seed. Mixed into the node's derived seed, so
+                // the world seed still reshuffles everything and instances still
+                // differ; 0 is the unchanged default.
+                ParamSpec::new(
+                    "seed",
+                    ParamKind::Int {
+                        min: 0,
+                        max: i64::from(i32::MAX),
+                    },
+                    ParamValue::Int(0),
+                ),
+                ParamSpec::new(
+                    "offset_x",
+                    ParamKind::Int {
+                        min: -10_000,
+                        max: 10_000,
+                    },
+                    ParamValue::Int(0),
+                ),
+                ParamSpec::new(
+                    "offset_y",
+                    ParamKind::Int {
+                        min: -10_000,
+                        max: 10_000,
+                    },
+                    ParamValue::Int(0),
+                ),
             ],
         }
     }
@@ -59,9 +87,14 @@ impl Operator for Fbm {
             octaves: params.get_i64("octaves", 5).clamp(0, 32) as u32,
             lacunarity: params.get_f64("lacunarity", 2.0),
             gain: params.get_f64("gain", 0.5) as f32,
+            // Integer region-width pan: a different region per step, no fractions.
+            offset_x: params.get_i64("offset_x", 0) as f64,
+            offset_y: params.get_i64("offset_y", 0) as f64,
         };
 
-        let field = fbm_field(ctx.width, ctx.height, ctx.region, fbm, ctx.seed);
+        // Offset the node's derived seed by the per-node seed param (0 = unchanged).
+        let seed = ctx.seed.wrapping_add(params.get_i64("seed", 0) as u64);
+        let field = fbm_field(ctx.width, ctx.height, ctx.region, fbm, seed);
         Ok(vec![field])
     }
 }
@@ -104,6 +137,42 @@ mod tests {
             )
             .unwrap();
         assert_eq!(out[0].content_hash().to_u64(), 0x6735_0dbf_a122_5544);
+    }
+
+    #[test]
+    fn the_seed_param_rerolls_just_this_node() {
+        // Bumping the per-node seed changes the texture, at the same context (same
+        // world seed and stable identity), with no new node.
+        let op = Fbm;
+        let ctx = default_ctx();
+        let base = op
+            .eval(Inputs::required_only(&[]), &Params::default(), &ctx)
+            .unwrap();
+        let rerolled = op
+            .eval(
+                Inputs::required_only(&[]),
+                &Params::new().with("seed", ParamValue::Int(1)),
+                &ctx,
+            )
+            .unwrap();
+        assert_ne!(base[0].content_hash(), rerolled[0].content_hash());
+    }
+
+    #[test]
+    fn the_offset_param_pans_the_texture() {
+        let op = Fbm;
+        let ctx = default_ctx();
+        let base = op
+            .eval(Inputs::required_only(&[]), &Params::default(), &ctx)
+            .unwrap();
+        let panned = op
+            .eval(
+                Inputs::required_only(&[]),
+                &Params::new().with("offset_x", ParamValue::Int(2)),
+                &ctx,
+            )
+            .unwrap();
+        assert_ne!(base[0].content_hash(), panned[0].content_hash());
     }
 
     #[test]

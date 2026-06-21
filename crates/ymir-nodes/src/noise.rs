@@ -32,6 +32,11 @@ pub(crate) struct FbmParams {
     pub lacunarity: f64,
     /// Amplitude multiplier between successive octaves (typically 0.5).
     pub gain: f32,
+    /// Pan of the sampling window along x, in region widths (0 = no pan): slides
+    /// across the infinite field to sample a different region.
+    pub offset_x: f64,
+    /// Pan of the sampling window along y, in region heights.
+    pub offset_y: f64,
 }
 
 impl Default for FbmParams {
@@ -41,6 +46,8 @@ impl Default for FbmParams {
             octaves: 5,
             lacunarity: 2.0,
             gain: 0.5,
+            offset_x: 0.0,
+            offset_y: 0.0,
         }
     }
 }
@@ -83,9 +90,10 @@ pub(crate) fn fbm_field(
     seed: u64,
 ) -> Field {
     let layer = Layer::from_fn(width, height, |x, y| {
-        // Cell centre as a normalized position within the region.
-        let u = (x as f64 + 0.5) / width as f64;
-        let v = (y as f64 + 0.5) / height as f64;
+        // Cell centre as a normalized position within the region, panned by the
+        // offset (in region widths) so a different region of the field is sampled.
+        let u = (x as f64 + 0.5) / width as f64 + params.offset_x;
+        let v = (y as f64 + 0.5) / height as f64 + params.offset_y;
         let wx = (region.min_x + u * region.width()) * params.frequency;
         let wy = (region.min_y + v * region.height()) * params.frequency;
 
@@ -189,6 +197,20 @@ mod tests {
         let a = fbm_field(64, 64, Region::UNIT, params, 42);
         let b = fbm_field(64, 64, Region::UNIT, params, 42);
         assert_eq!(a.content_hash(), b.content_hash());
+    }
+
+    #[test]
+    fn offset_pans_the_field() {
+        // Panning the sampling window samples a different region, so the output
+        // changes; a zero offset is the unchanged default (covered by the golden).
+        let base = FbmParams::default();
+        let shifted = FbmParams {
+            offset_x: 1.5,
+            ..base
+        };
+        let a = fbm_field(64, 64, Region::UNIT, base, 42);
+        let b = fbm_field(64, 64, Region::UNIT, shifted, 42);
+        assert_ne!(a.content_hash(), b.content_hash());
     }
 
     #[test]
