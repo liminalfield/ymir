@@ -26,6 +26,8 @@ mod curve_edit;
 // Background preview evaluation (GUI step 6b): off-thread, latest-wins.
 mod preview;
 use preview::PreviewEngine;
+
+mod shade;
 // Off-thread full-resolution Build (#7).
 mod build;
 use build::BuildRunner;
@@ -809,9 +811,9 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
         // Reserve the dial's height in both modes so the image never jumps when
         // toggling Height/Relief.
         ui.set_min_height(preview::LIGHT_DIAL_SIZE);
-        ui.selectable_value(&mut mode, preview::ShadeMode::Height, "Height");
-        ui.selectable_value(&mut mode, preview::ShadeMode::Relief, "Relief");
-        if mode == preview::ShadeMode::Relief {
+        ui.selectable_value(&mut mode, shade::ShadeMode::Height, "Height");
+        ui.selectable_value(&mut mode, shade::ShadeMode::Relief, "Relief");
+        if mode == shade::ShadeMode::Relief {
             state.preview.light_indicator(ui);
         }
     });
