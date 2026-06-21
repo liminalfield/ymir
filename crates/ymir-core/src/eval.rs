@@ -27,9 +27,10 @@ use crate::operator::Inputs;
 use crate::param::Params;
 use crate::region::Region;
 
-/// The global parameters of one evaluation request: resolution, region, and the
-/// global seed. The target node is a separate argument to [`Graph::evaluate`],
-/// since which node is requested is the evaluator's concern, not an operator's.
+/// The global parameters of one evaluation request: resolution, region, the
+/// global seed, and the world extent. The target node is a separate argument to
+/// [`Graph::evaluate`], since which node is requested is the evaluator's concern,
+/// not an operator's.
 #[derive(Clone, Debug)]
 pub struct EvalRequest {
     /// Requested grid width in cells.
@@ -40,6 +41,9 @@ pub struct EvalRequest {
     pub region: Region,
     /// Global seed; each node's seed is derived from this and its `stable_id`.
     pub seed: u64,
+    /// Physical size of the full `UNIT` region along x, in world units (meters);
+    /// threaded into each node's [`EvalContext`]. Defaults to `1.0`.
+    world_extent: f64,
     /// Cancellation signal, threaded into each node's context; defaults to
     /// never-cancel.
     cancel: CancelToken,
@@ -54,6 +58,7 @@ impl EvalRequest {
             height,
             region,
             seed,
+            world_extent: 1.0,
             cancel: CancelToken::new(),
         }
     }
@@ -65,6 +70,16 @@ impl EvalRequest {
     #[must_use]
     pub fn with_cancel(mut self, cancel: CancelToken) -> Self {
         self.cancel = cancel;
+        self
+    }
+
+    /// Sets the world's physical size along x, in world units (meters) across the
+    /// full `UNIT` region. Defaults to `1.0`. The evaluator threads this into each
+    /// node's [`EvalContext`], where scale-aware operators convert world-unit
+    /// parameters to cells.
+    #[must_use]
+    pub fn with_world_extent(mut self, world_extent: f64) -> Self {
+        self.world_extent = world_extent;
         self
     }
 }
@@ -275,7 +290,8 @@ impl Graph {
         }
 
         let ctx = EvalContext::new(request.width, request.height, request.region, seed)
-            .with_cancel(request.cancel.clone());
+            .with_cancel(request.cancel.clone())
+            .with_world_extent(request.world_extent);
         let inputs = Inputs::new(&required, &optional);
         let outputs = Arc::new(node.operator.eval(inputs, &node.params, &ctx)?);
 
@@ -396,7 +412,7 @@ fn derive_seed(global_seed: u64, stable_id: u64) -> u64 {
 }
 
 /// Composes a node's cache key from its type, params, upstream keys, and the
-/// request context (resolution, region, derived seed).
+/// request context (resolution, region, world extent, derived seed).
 fn compute_key(
     type_id: &str,
     params: &Params,
@@ -422,6 +438,7 @@ fn compute_key(
     h.write_usize(request.width);
     h.write_usize(request.height);
     request.region.hash_into(&mut h);
+    h.write_f64_bits(request.world_extent);
     h.write_u64(seed);
     h.finish().to_u64()
 }
@@ -594,6 +611,34 @@ mod tests {
         }
     }
 
+    /// A generator that stamps `ctx.meters_per_cell()` as its uniform height, so a
+    /// test can read back the world extent the evaluator threaded into the context.
+    #[derive(Clone)]
+    struct ProbeExtent;
+
+    impl Operator for ProbeExtent {
+        fn spec(&self) -> NodeSpec {
+            NodeSpec {
+                type_id: "test.probe_extent",
+                category: "test",
+                tags: &[],
+                inputs: Vec::new(),
+                outputs: vec![PortSpec::new("out")],
+                params: Vec::new(),
+            }
+        }
+
+        fn eval(&self, _: Inputs, _: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
+            let value = ctx.meters_per_cell() as f32;
+            Ok(vec![
+                Field::new(ctx.width, ctx.height, ctx.region).with_layer(
+                    layers::HEIGHT,
+                    Arc::new(Layer::filled(ctx.width, ctx.height, value)),
+                ),
+            ])
+        }
+    }
+
     fn request() -> EvalRequest {
         EvalRequest::new(16, 16, Region::UNIT, 42)
     }
@@ -729,6 +774,32 @@ mod tests {
             graph.output_key(lone, &req),
             Err(Error::DisconnectedInput { .. })
         ));
+    }
+
+    #[test]
+    fn world_extent_threads_into_the_operator_context() {
+        let mut graph = Graph::new();
+        let probe = graph.add_op(Box::new(ProbeExtent), Params::new());
+        let req = EvalRequest::new(4096, 4096, Region::UNIT, 0).with_world_extent(2000.0);
+        let mut cache = EvalCache::new(8);
+        let out = graph.evaluate(probe, &req, &mut cache).unwrap();
+        let height = out[0].layer(layers::HEIGHT).unwrap();
+        // The operator saw region.width() * extent / width = 2000 / 4096 per cell.
+        let expected = (2000.0_f64 / 4096.0) as f32;
+        assert!((height.as_slice()[0] - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn changing_world_extent_invalidates_the_cache() {
+        let mut graph = Graph::new();
+        let probe = graph.add_op(Box::new(ProbeExtent), Params::new());
+        let a = EvalRequest::new(64, 64, Region::UNIT, 0).with_world_extent(1000.0);
+        let b = EvalRequest::new(64, 64, Region::UNIT, 0).with_world_extent(2000.0);
+        // The extent is part of the cache key, so a different extent is a different key.
+        assert_ne!(
+            graph.output_key(probe, &a).unwrap(),
+            graph.output_key(probe, &b).unwrap()
+        );
     }
 
     #[test]
