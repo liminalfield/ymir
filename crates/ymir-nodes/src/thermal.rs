@@ -2,10 +2,13 @@
 //!
 //! Material on slopes steeper than the talus angle slides downhill to lower
 //! neighbours over several passes, forming the straight talus slopes of scree and
-//! softening sharp ridges. An optional `mask` input localizes the effect (its height
-//! layer is the selection); unwired, the input's own `mask` layer is used by
-//! convention, else erosion applies everywhere. Each pass is Jacobi (it reads the
-//! previous full state
+//! softening sharp ridges. The talus angle (in degrees) and the pass count are
+//! resolution-aware: the per-cell threshold scales with cell size and the passes
+//! scale with resolution, so the same terrain relaxes the same way at any resolution
+//! and the preview is representative of the build. An optional `mask` input localizes
+//! the effect (its height layer is the selection); unwired, the input's own `mask`
+//! layer is used by convention, else erosion applies everywhere. Each pass is Jacobi
+//! (it reads the previous full state
 //! and writes a fresh delta), so the result is independent of cell iteration
 //! order, which determinism requires. Single-threaded for now; the per-cell
 //! independence means `rayon` drops in later unchanged.
@@ -15,11 +18,19 @@ use std::sync::Arc;
 use ymir_core::registry::OperatorEntry;
 use ymir_core::{
     Error, EvalContext, Field, Inputs, Layer, NodeSpec, Operator, ParamKind, ParamSpec, ParamValue,
-    Params, PortSpec, Result, layers,
+    Params, PortSpec, Result, Unit, layers,
 };
 
 /// Stable type identifier and registry key.
 const TYPE_ID: &str = "modifier.thermal_erosion";
+
+/// Default talus (repose) angle in degrees; about 35 is typical for scree.
+const DEFAULT_TALUS_DEG: f64 = 35.0;
+/// Default erosion passes, expressed at the reference resolution.
+const DEFAULT_ITERATIONS: i64 = 35;
+/// Resolution the `iterations` param is expressed at; passes scale linearly with the
+/// actual resolution from here, so the world-scale amount of erosion is consistent.
+const ITERATION_REFERENCE_RES: f64 = 256.0;
 
 /// Eight-neighbour offsets with their distances. Diagonals are `sqrt(2)` away, so
 /// slope is height difference over true distance and the talus threshold scales
@@ -55,9 +66,13 @@ impl Operator for ThermalErosion {
             params: vec![
                 ParamSpec::new(
                     "talus",
-                    ParamKind::Float { min: 0.0, max: 1.0 },
-                    ParamValue::Float(0.006),
-                ),
+                    ParamKind::Float {
+                        min: 0.0,
+                        max: 90.0,
+                    },
+                    ParamValue::Float(DEFAULT_TALUS_DEG),
+                )
+                .with_unit(Unit::Degrees),
                 ParamSpec::new(
                     "strength",
                     ParamKind::Float { min: 0.0, max: 1.0 },
@@ -66,7 +81,7 @@ impl Operator for ThermalErosion {
                 ParamSpec::new(
                     "iterations",
                     ParamKind::Int { min: 0, max: 1000 },
-                    ParamValue::Int(35),
+                    ParamValue::Int(DEFAULT_ITERATIONS),
                 ),
             ],
         }
@@ -77,9 +92,30 @@ impl Operator for ThermalErosion {
         let width = input.width();
         let height = input.height();
 
-        let talus = params.get_f64("talus", 0.006) as f32;
         let strength = params.get_f64("strength", 0.5) as f32;
-        let iterations = params.get_i64("iterations", 35).clamp(0, 100_000) as usize;
+
+        // The talus angle as a per-cell height threshold, resolution-aware: tan(angle)
+        // is the slope, scaled by the world size of one cell, so the same terrain
+        // relaxes the same way at any resolution. A normalized-space angle until a
+        // vertical scale lands, matching the Slope selector (slope 1, one height unit
+        // per region unit, is 45 degrees).
+        let region = input.region();
+        let cell_size = (region.width() / width as f64) as f32;
+        let talus_deg = params.get_f64("talus", DEFAULT_TALUS_DEG) as f32;
+        let talus_per_cell = talus_deg.to_radians().tan() * cell_size;
+
+        // Passes scale with resolution: material moves one cell per pass, so to relax
+        // the same world distance a finer grid needs proportionally more passes, which
+        // keeps the preview representative of the build. At least one pass when asked.
+        let base = params
+            .get_i64("iterations", DEFAULT_ITERATIONS)
+            .clamp(0, 100_000);
+        let iterations = if base > 0 {
+            ((base as f64 * width as f64 / ITERATION_REFERENCE_RES).round() as i64)
+                .clamp(1, 1_000_000) as usize
+        } else {
+            0
+        };
 
         let source = input.layer_or(layers::HEIGHT, 0.0);
         // The mask localizes the erosion. An explicit mask input wins (its height
@@ -100,7 +136,14 @@ impl Operator for ThermalErosion {
             if ctx.is_cancelled() {
                 return Err(Error::Cancelled);
             }
-            erode_pass(&heights, &mut delta, width, height, talus, strength);
+            erode_pass(
+                &heights,
+                &mut delta,
+                width,
+                height,
+                talus_per_cell,
+                strength,
+            );
             for (h, d) in heights.iter_mut().zip(delta.iter()) {
                 *h += *d;
             }
@@ -136,7 +179,7 @@ fn erode_pass(
     delta: &mut [f32],
     width: usize,
     height: usize,
-    talus: f32,
+    talus_per_cell: f32,
     strength: f32,
 ) {
     for d in delta.iter_mut() {
@@ -161,9 +204,9 @@ fn erode_pass(
                 }
                 let nidx = ny as usize * width + nx as usize;
                 let diff = here - heights[nidx];
-                // Lower neighbours steeper than repose only; the threshold scales
-                // with distance so diagonals are not favoured.
-                let threshold = talus * dist;
+                // Lower neighbours steeper than repose only; the per-cell threshold
+                // scales with distance so diagonals are not favoured.
+                let threshold = talus_per_cell * dist;
                 if diff <= threshold {
                     continue;
                 }
@@ -250,6 +293,39 @@ mod tests {
         assert!(
             neighbour > 0.0,
             "neighbour should receive sediment, got {neighbour}"
+        );
+    }
+
+    #[test]
+    fn erosion_is_resolution_consistent() {
+        use crate::noise::{FbmParams, fbm_field};
+        // Mean absolute height change from eroding the same fBm terrain at a given
+        // resolution with the default params.
+        let mean_change = |res: usize| -> f64 {
+            let field = fbm_field(res, res, Region::UNIT, FbmParams::default(), 42);
+            let c = EvalContext::new(res, res, Region::UNIT, 42);
+            let out = ThermalErosion
+                .eval(Inputs::required_only(&[&field]), &Params::default(), &c)
+                .unwrap();
+            let before = field.layer(layers::HEIGHT).unwrap();
+            let after = out[0].layer(layers::HEIGHT).unwrap();
+            before
+                .as_slice()
+                .iter()
+                .zip(after.as_slice())
+                .map(|(a, b)| f64::from((a - b).abs()))
+                .sum::<f64>()
+                / (res * res) as f64
+        };
+        let lo = mean_change(128);
+        let hi = mean_change(512);
+        // Erosion is visible at both (the old raw threshold did nothing at high res),
+        // and the same terrain relaxes to a similar degree regardless of resolution.
+        assert!(lo > 1e-4, "erosion not visible at 128: {lo}");
+        assert!(hi > 1e-4, "erosion not visible at 512: {hi}");
+        assert!(
+            (lo / hi) < 3.0 && (hi / lo) < 3.0,
+            "erosion drifted with resolution: {lo} vs {hi}"
         );
     }
 

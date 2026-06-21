@@ -16,9 +16,11 @@ fn fbm_then_thermal_matches_golden() {
     let erosion = graph.add_op(
         Box::new(ThermalErosion),
         Params::new()
-            .with("talus", ParamValue::Float(0.01))
+            // talus is now a repose angle in degrees; iterations are at the 256
+            // reference, so 40 scales to 10 passes at this 64 resolution.
+            .with("talus", ParamValue::Float(35.0))
             .with("strength", ParamValue::Float(0.5))
-            .with("iterations", ParamValue::Int(10)),
+            .with("iterations", ParamValue::Int(40)),
     );
     graph.connect(generator, 0, erosion, 0).unwrap();
 
@@ -26,5 +28,5 @@ fn fbm_then_thermal_matches_golden() {
     let mut cache = EvalCache::new(16);
     let out = graph.evaluate(erosion, &request, &mut cache).unwrap();
 
-    assert_eq!(out[0].content_hash().to_u64(), 0x1b33_dc79_570d_269f);
+    assert_eq!(out[0].content_hash().to_u64(), 0x984c_33b2_7138_2e1e);
 }
