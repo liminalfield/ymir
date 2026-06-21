@@ -113,6 +113,11 @@ const BUILD_RES_PRESETS: &[usize] = &[256, 505, 512, 1009, 1024, 2017, 2048, 403
 /// an unbounded run. Exceeding it is reported, never silently truncated.
 const MAX_BUILD_OUTPUTS: usize = 64;
 
+/// Default physical size of the world along x, in meters. Pairs with the default
+/// build resolution to give a clean 1 m/cell, and is the meters-to-cells bridge for
+/// world-unit parameters (scale-aware nodes consume it via `EvalContext`).
+const DEFAULT_WORLD_EXTENT: f64 = 1024.0;
+
 /// The canvas's pan/zoom view, captured each frame so other panes (the ribbon
 /// add) can place a node where the user is actually looking. The transform maps
 /// the canvas's local graph space to screen; `rect` is the canvas area on screen.
@@ -208,6 +213,10 @@ struct AppState {
     build_res: usize,
     /// The interactive 2D preview resolution (square); low for responsiveness.
     preview_res: usize,
+    /// Physical size of the world along x, in meters. Threaded into the Build and
+    /// Preview requests so world-unit parameters resolve to cells consistently. Cells
+    /// are square, so the y extent follows the grid aspect.
+    world_extent: f64,
 }
 
 /// The node-rename dialog (#61): edits a node's display-name override.
@@ -239,6 +248,7 @@ impl AppState {
             param_tab: ParamTab::Node,
             build_res: 1024,
             preview_res: PREVIEW_RES,
+            world_extent: DEFAULT_WORLD_EXTENT,
         }
     }
 
@@ -509,7 +519,8 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
                     ));
                 } else {
                     let res = state.build_res;
-                    let request = EvalRequest::new(res, res, Region::UNIT, state.seed);
+                    let request = EvalRequest::new(res, res, Region::UNIT, state.seed)
+                        .with_world_extent(state.world_extent);
                     state.build.start(state.graph.clone(), targets, request);
                 }
             }
@@ -659,6 +670,21 @@ fn world_settings(ui: &mut egui::Ui, state: &mut AppState) {
     });
 
     ui.separator();
+    ui.label("World extent");
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::DragValue::new(&mut state.world_extent)
+                .speed(8.0)
+                .range(1.0..=1_000_000.0)
+                .suffix(" m"),
+        );
+        // The meters-to-cells bridge made tangible. Cells are square, so this is the
+        // size along both axes; it follows from extent / build resolution.
+        let m_per_cell = state.world_extent / state.build_res as f64;
+        ui.weak(format!("≈ {m_per_cell:.3} m/cell at build"));
+    });
+
+    ui.separator();
     ui.label("Build resolution");
     ui.horizontal(|ui| {
         // Custom value (UE5 landscapes need specific sizes), with presets as
@@ -794,7 +820,8 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // Submit a snapshot for off-thread evaluation if the output changed, collect any
     // result, and render — none of which blocks the UI thread.
     let res = state.preview_res;
-    let request = EvalRequest::new(res, res, Region::UNIT, state.seed);
+    let request =
+        EvalRequest::new(res, res, Region::UNIT, state.seed).with_world_extent(state.world_extent);
     let now = ui.input(|i| i.time);
     state.preview.sync(&state.graph, id, request, now);
     state.preview.poll(ui.ctx());
