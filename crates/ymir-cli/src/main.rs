@@ -70,6 +70,7 @@ mod tests {
                 "modifier.blend",
                 "modifier.blur",
                 "modifier.curve",
+                "modifier.height",
                 "modifier.invert",
                 "modifier.mask",
                 "modifier.slope",

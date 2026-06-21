@@ -37,6 +37,13 @@ pub fn tr(key: &str) -> &str {
         "node-modifier.mask" => "Mask",
         "node-modifier.mask-desc" => "Derives a 0..1 mask from slope or height.",
 
+        // Height selector.
+        "node-modifier.height" => "Height",
+        "node-modifier.height-desc" => {
+            "Selects a band of elevation: high where the normalized height is within \
+             min..max, softening over the falloff."
+        }
+
         // Slope selector.
         "node-modifier.slope" => "Slope",
         "node-modifier.slope-desc" => {
