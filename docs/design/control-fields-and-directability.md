@@ -354,6 +354,36 @@ name. Length params are named by geometry:
 Radius-first keeps the vocabulary self-consistent: a world *extent* (span) with operation
 *radii* (reach) into it, and "scale" never doing double duty.
 
+### Square cells, one extent, and non-square grids (decided)
+
+Two "non-square" questions have opposite answers, and separating them is what makes a
+single extent the right model rather than an artificial constraint:
+
+- **Non-square cells (anisotropic sampling, independent x/y extent): refused.** Stretched
+  cells distort everything (a circle samples as an ellipse, x and y slopes diverge for the
+  same ground, a radius reaches farther on one axis). A non-square *area* is represented by
+  a non-square *grid* with square cells, not a square grid with stretched cells. The only
+  natural source of anisotropic cells is importing geographic DEM data, which is out of
+  scope for a generator.
+- **Non-square grids (width != height in cells): legitimate, deferred, cheap to add
+  later.** Real cases exist outside game engines (a coastal strip, a river valley, a
+  ridge). The core already supports them: `width`/`height` are separate throughout
+  (`EvalRequest`, `EvalContext`, `Field`, `Region`). The square assumption lives only in
+  the GUI's single resolution slider, so lifting it later is a GUI-only change (paired
+  width/height fields, requests passing `(w, h)`, the 2D preview drawing at the field's
+  aspect) with no engine, node, or determinism impact.
+
+So the physical size is **one scalar, `world_extent`** (meters across the X span), with
+square cells enforced and the Y extent derived from the grid aspect
+(`extent_y = world_extent * height / width`). This is correct whether or not the grid is
+square: a single extent does *not* impose a square grid, it only forecloses anisotropic
+cells, which is the thing to foreclose. The `meters_per_cell` helper keys off `width` and
+`region.width()`, so it is isotropic by construction and already rectangular-grid-ready.
+
+The one habit that keeps the future cost at zero: keep "square" out of the data model and
+eval API (it already is), and when save/load lands, serialize resolution as width by
+height (the format is versioned regardless).
+
 ## Subtractive composition (the synthesis bridge)
 
 The subtractive instinct from audio transfers cleanly and does not need additive
