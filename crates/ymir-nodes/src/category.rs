@@ -35,13 +35,14 @@ pub fn find_category(id: &str) -> Option<&'static CategoryDef> {
 
 // The palette taxonomy. Two of these fall out of arity (generators have no input,
 // outputs no output); the rest subdivide the modifiers. The line between `adjust`
-// (pointwise, single input) and a future `filter` (spatial/neighborhood) is the one
-// teachable cut; `combine` is pointwise but multi-input. `geology` holds natural
-// processes, erosion included. Unpopulated buckets (filter, generator sub-tabs,
-// hydrology) are added when their nodes exist, not before.
+// (pointwise, single input) and `filter` (spatial/neighborhood, single input) is the
+// one teachable cut, so they sit adjacent; `combine` is pointwise but multi-input.
+// `geology` holds natural processes, erosion included. Unpopulated buckets (generator
+// sub-tabs, hydrology) are added when their nodes exist, not before.
 inventory::submit! { CategoryDef { id: "generator", icon: "grid", sort: 0 } }
 inventory::submit! { CategoryDef { id: "selector", icon: "target", sort: 10 } }
 inventory::submit! { CategoryDef { id: "adjust", icon: "sliders", sort: 20 } }
+inventory::submit! { CategoryDef { id: "filter", icon: "blur", sort: 25 } }
 inventory::submit! { CategoryDef { id: "combine", icon: "merge", sort: 30 } }
 inventory::submit! { CategoryDef { id: "geology", icon: "mountains", sort: 40 } }
 inventory::submit! { CategoryDef { id: "output", icon: "export", sort: 90 } }
@@ -57,6 +58,7 @@ mod tests {
             "generator",
             "selector",
             "adjust",
+            "filter",
             "combine",
             "geology",
             "output",

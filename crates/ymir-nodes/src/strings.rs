@@ -17,6 +17,7 @@ pub fn tr(key: &str) -> &str {
         "category-generator" => "Generators",
         "category-selector" => "Selectors",
         "category-adjust" => "Adjust",
+        "category-filter" => "Filters",
         "category-combine" => "Combine",
         "category-geology" => "Geology",
         "category-output" => "Outputs",
@@ -39,6 +40,13 @@ pub fn tr(key: &str) -> &str {
         // Invert.
         "node-modifier.invert" => "Invert",
         "node-modifier.invert-desc" => "Flips the height layer (1 - height).",
+
+        // Blur (spatial smoothing).
+        "node-modifier.blur" => "Blur",
+        "node-modifier.blur-desc" => {
+            "Gaussian-blurs the height layer by a world-unit radius (the scale knob for \
+             derived selectors, and feathers masks)."
+        }
 
         // Curve (height shaping).
         "node-modifier.curve" => "Curve",

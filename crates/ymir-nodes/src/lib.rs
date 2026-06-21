@@ -11,6 +11,7 @@
 //! string does not reference this crate and would let the linker drop it.
 
 mod blend;
+mod blur;
 mod category;
 mod curve;
 mod export;
@@ -22,6 +23,7 @@ mod strings;
 mod thermal;
 
 pub use blend::Blend;
+pub use blur::Blur;
 pub use category::{CategoryDef, categories, find_category};
 pub use curve::CurveNode;
 pub use export::ExportPng;
