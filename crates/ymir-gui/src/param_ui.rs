@@ -6,14 +6,19 @@
 //! are written back to the canonical graph by the caller via `Graph::set_params`.
 
 use eframe::egui;
-use ymir_core::{ParamKind, ParamSpec, ParamValue, Params};
+use ymir_core::{ParamKind, ParamSpec, ParamValue, Params, Unit};
 
 /// The editor widget a parameter kind maps to. Derived purely from the schema, so
 /// the mapping is unit-testable without egui.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Widget {
-    /// A slider over `[min, max]` for a float.
+    /// A slider over `[min, max]` for a bounded, unit-less float (a ratio).
     Slider { min: f64, max: f64 },
+    /// A value field over `[min, max]` for a float carrying a unit (an open physical
+    /// quantity, e.g. a world-unit length), shown with the unit as a suffix. A slider
+    /// over a wide world-unit range is too coarse and unlabelled; this is precise and
+    /// type-able instead.
+    Quantity { min: f64, max: f64, unit: Unit },
     /// A drag value over `[min, max]` for an integer.
     IntDrag { min: i64, max: i64 },
     /// A checkbox for a boolean.
@@ -30,12 +35,21 @@ pub(crate) enum Widget {
     ReadOnly,
 }
 
-/// Maps a parameter kind to its editor widget.
-pub(crate) fn widget_for(kind: &ParamKind) -> Widget {
-    match kind {
-        ParamKind::Float { min, max } => Widget::Slider {
-            min: *min,
-            max: *max,
+/// Maps a parameter schema to its editor widget. Takes the whole spec, since a
+/// float's widget depends on whether it carries a unit (an open quantity edits as a
+/// value field, a bare ratio as a slider).
+pub(crate) fn widget_for(spec: &ParamSpec) -> Widget {
+    match &spec.kind {
+        ParamKind::Float { min, max } => match spec.unit {
+            Some(unit) => Widget::Quantity {
+                min: *min,
+                max: *max,
+                unit,
+            },
+            None => Widget::Slider {
+                min: *min,
+                max: *max,
+            },
         },
         ParamKind::Int { min, max } => Widget::IntDrag {
             min: *min,
@@ -60,6 +74,14 @@ pub(crate) fn current_value(params: &Params, spec: &ParamSpec) -> ParamValue {
         .unwrap_or_else(|| spec.default.clone())
 }
 
+/// The display suffix for a unit, including a leading space (egui draws it abutting
+/// the number). Prose lives here in the GUI, never in the schema.
+fn unit_suffix(unit: Unit) -> &'static str {
+    match unit {
+        Unit::Meters => " m",
+    }
+}
+
 /// A short human display of a value, for the read-only fallback.
 pub(crate) fn value_text(value: &ParamValue) -> String {
     match value {
@@ -82,10 +104,28 @@ pub(crate) fn edit(
     current: &ParamValue,
 ) -> Option<ParamValue> {
     let name = spec.name.as_str();
-    match (widget_for(&spec.kind), current) {
+    match (widget_for(spec), current) {
         (Widget::Slider { min, max }, ParamValue::Float(v)) => {
             let mut x = *v;
             let resp = ui.add(egui::Slider::new(&mut x, min..=max).text(name));
+            resp.changed().then_some(ParamValue::Float(x))
+        }
+        (Widget::Quantity { min, max, unit }, ParamValue::Float(v)) => {
+            // An open physical quantity: a clamped, type-able value field with a 1-unit
+            // drag step and the unit shown, not a coarse wide slider.
+            let mut x = *v;
+            let resp = ui
+                .horizontal(|ui| {
+                    let r = ui.add(
+                        egui::DragValue::new(&mut x)
+                            .range(min..=max)
+                            .speed(1.0)
+                            .suffix(unit_suffix(unit)),
+                    );
+                    ui.label(name);
+                    r
+                })
+                .inner;
             resp.changed().then_some(ParamValue::Float(x))
         }
         (Widget::IntDrag { min, max }, ParamValue::Int(v)) => {
@@ -154,27 +194,74 @@ pub(crate) fn edit(
 mod tests {
     use super::*;
 
+    fn spec(kind: ParamKind, default: ParamValue) -> ParamSpec {
+        ParamSpec::new("p", kind, default)
+    }
+
     #[test]
     fn each_kind_maps_to_its_widget() {
         assert_eq!(
-            widget_for(&ParamKind::Float { min: 0.0, max: 1.0 }),
+            widget_for(&spec(
+                ParamKind::Float { min: 0.0, max: 1.0 },
+                ParamValue::Float(0.0)
+            )),
             Widget::Slider { min: 0.0, max: 1.0 }
         );
         assert_eq!(
-            widget_for(&ParamKind::Int { min: 1, max: 12 }),
+            widget_for(&spec(
+                ParamKind::Int { min: 1, max: 12 },
+                ParamValue::Int(1)
+            )),
             Widget::IntDrag { min: 1, max: 12 }
         );
-        assert_eq!(widget_for(&ParamKind::Bool), Widget::Checkbox);
-        assert_eq!(widget_for(&ParamKind::Text), Widget::Text);
         assert_eq!(
-            widget_for(&ParamKind::Enum {
-                options: &["add", "mix"]
-            }),
+            widget_for(&spec(ParamKind::Bool, ParamValue::Bool(false))),
+            Widget::Checkbox
+        );
+        assert_eq!(
+            widget_for(&spec(ParamKind::Text, ParamValue::Text(String::new()))),
+            Widget::Text
+        );
+        assert_eq!(
+            widget_for(&spec(
+                ParamKind::Enum {
+                    options: &["add", "mix"]
+                },
+                ParamValue::Text("add".into())
+            )),
             Widget::Dropdown {
                 options: &["add", "mix"]
             }
         );
-        assert_eq!(widget_for(&ParamKind::Curve), Widget::CurveEditor);
+        assert_eq!(
+            widget_for(&spec(
+                ParamKind::Curve,
+                ParamValue::Curve(ymir_core::Curve::identity())
+            )),
+            Widget::CurveEditor
+        );
+    }
+
+    #[test]
+    fn a_unit_bearing_float_is_a_quantity_not_a_slider() {
+        // A world-unit length edits as a quantity (value field + unit), where a bare
+        // ratio over the same kind would be a slider.
+        let length = spec(
+            ParamKind::Float {
+                min: 0.0,
+                max: 100.0,
+            },
+            ParamValue::Float(8.0),
+        )
+        .with_unit(Unit::Meters);
+        assert_eq!(
+            widget_for(&length),
+            Widget::Quantity {
+                min: 0.0,
+                max: 100.0,
+                unit: Unit::Meters
+            }
+        );
     }
 
     #[test]

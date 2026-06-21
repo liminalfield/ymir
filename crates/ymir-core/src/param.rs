@@ -411,7 +411,17 @@ pub enum ParamKind {
     Curve,
 }
 
-/// The schema for one parameter: its name, kind, and default value.
+/// A physical unit a numeric parameter can carry. Semantic, not prose: the display
+/// suffix (and any localization) is resolved downstream, so the schema stays free of
+/// presentation text. A unit also marks a float as an *open quantity* rather than a
+/// bounded ratio, which the inspector uses to choose a value field over a slider.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unit {
+    /// A world-unit length, in meters.
+    Meters,
+}
+
+/// The schema for one parameter: its name, kind, default value, and optional unit.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParamSpec {
     /// Parameter name, the key used in [`Params`].
@@ -420,6 +430,9 @@ pub struct ParamSpec {
     pub kind: ParamKind,
     /// The default value, used when a node instance does not set the parameter.
     pub default: ParamValue,
+    /// An optional physical unit for a numeric parameter (e.g. meters for a
+    /// world-unit length). `None` for a bare, unit-less ratio.
+    pub unit: Option<Unit>,
 }
 
 impl ParamSpec {
@@ -435,7 +448,17 @@ impl ParamSpec {
             name: name.into(),
             kind,
             default,
+            unit: None,
         }
+    }
+
+    /// Declares the parameter's physical unit (e.g. [`Unit::Meters`] for a world-unit
+    /// length). Marks it an open quantity, so the inspector edits it as a value field
+    /// with the unit shown rather than a bounded slider.
+    #[must_use]
+    pub fn with_unit(mut self, unit: Unit) -> Self {
+        self.unit = Some(unit);
+        self
     }
 }
 
