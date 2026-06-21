@@ -16,6 +16,12 @@ use egui_snarl::{InPin, NodeId as SnarlNodeId, OutPin, Snarl};
 use ymir_core::{EvalRequest, Graph, NodeId, Params, Region, registry};
 use ymir_nodes::tr;
 
+use crate::thumbnails::ThumbnailEngine;
+
+/// On-screen side of a node-body thumbnail (px). The thumbnail field is square, drawn
+/// scaled to this size in the node body.
+const THUMB_DISPLAY_SIZE: f32 = 72.0;
+
 /// Constant width for the right-click context menus, so they do not resize with
 /// their longest item (the wider node menu vs the narrow "Add node" graph menu).
 const CONTEXT_MENU_WIDTH: f32 = 200.0;
@@ -116,6 +122,9 @@ pub(crate) struct GraphViewer<'a> {
     /// (#36). snarl's Scene only zooms on ctrl-scroll, so plain scroll is applied
     /// here instead of letting it pan. Input.
     pub(crate) zoom: Option<(f32, Pos2)>,
+    /// Per-node heightmap thumbnails to draw in node bodies (#42). `None` in tests
+    /// that do not exercise rendering. Input, read-only.
+    pub(crate) thumbnails: Option<&'a ThumbnailEngine>,
 }
 
 impl<'a> GraphViewer<'a> {
@@ -136,6 +145,7 @@ impl<'a> GraphViewer<'a> {
             pending_view: None,
             frame_all_request: false,
             zoom: None,
+            thumbnails: None,
         }
     }
 }
@@ -339,6 +349,42 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
         // Capture the pan/zoom transform, so a screen click can be mapped into the
         // local space the node rects are recorded in.
         self.to_global = *to_global;
+    }
+
+    /// Output-producing nodes get a footer: a small heightmap thumbnail below the
+    /// ports (#42). Endpoints (no output) have nothing to preview, so no footer.
+    fn has_footer(&mut self, node: &Handle) -> bool {
+        self.core_id(*node)
+            .and_then(|id| self.graph.spec(id))
+            .is_some_and(|spec| !spec.outputs.is_empty())
+    }
+
+    /// Draws the node's thumbnail below its ports, or a muted placeholder of the same
+    /// size while it is still computing (so the node height does not jump when it
+    /// arrives).
+    fn show_footer(
+        &mut self,
+        node: SnarlNodeId,
+        _inputs: &[InPin],
+        _outputs: &[OutPin],
+        ui: &mut egui::Ui,
+        snarl: &mut Snarl<Handle>,
+    ) {
+        let Some(&handle) = snarl.get_node(node) else {
+            return;
+        };
+        let size = egui::vec2(THUMB_DISPLAY_SIZE, THUMB_DISPLAY_SIZE);
+        match self.thumbnails.and_then(|t| t.texture(handle)) {
+            Some(texture) => {
+                let sized = egui::load::SizedTexture::new(texture.id(), size);
+                ui.add(egui::Image::new(sized));
+            }
+            None => {
+                let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                ui.painter()
+                    .rect_filled(rect, 2.0, ui.visuals().extreme_bg_color);
+            }
+        }
     }
 
     fn inputs(&mut self, node: &Handle) -> usize {

@@ -28,6 +28,9 @@ mod preview;
 use preview::PreviewEngine;
 
 mod shade;
+
+mod thumbnails;
+use thumbnails::ThumbnailEngine;
 // Off-thread full-resolution Build (#7).
 mod build;
 use build::BuildRunner;
@@ -192,6 +195,8 @@ struct AppState {
     /// Background preview evaluation: submits graph snapshots and shows results
     /// without ever blocking the UI thread.
     preview: PreviewEngine,
+    /// Background per-node thumbnail evaluation, drawn in node bodies (#42).
+    thumbnails: ThumbnailEngine,
     /// The off-thread full-resolution Build (#7).
     build: BuildRunner,
     /// The selected palette tab (defaults to the first category on first draw).
@@ -240,6 +245,7 @@ impl AppState {
             selected: None,
             seed: 0,
             preview: PreviewEngine::new(),
+            thumbnails: ThumbnailEngine::new(),
             build: BuildRunner::new(),
             active_tab: None,
             search: String::new(),
@@ -1070,12 +1076,40 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // the disjoint borrow.
     let pending_view = state.pending_view;
 
+    // Per-node thumbnails (#42): evaluate every output-producing node at thumbnail
+    // resolution off-thread, and draw each result in its node body below.
+    let thumb_request = EvalRequest::new(
+        thumbnails::THUMB_RES,
+        thumbnails::THUMB_RES,
+        Region::UNIT,
+        state.seed,
+    )
+    .with_world_extent(state.world_extent);
+    let visible: Vec<canvas::Handle> = state
+        .snarl
+        .node_ids()
+        .filter_map(|(_, &h)| {
+            state
+                .graph
+                .node_id_of(h)
+                .and_then(|id| state.graph.spec(id))
+                .is_some_and(|spec| !spec.outputs.is_empty())
+                .then_some(h)
+        })
+        .collect();
+    let now = ui.input(|i| i.time);
+    state
+        .thumbnails
+        .sync(&state.graph, &visible, &thumb_request, now);
+    state.thumbnails.poll(ui.ctx());
+
     // Disjoint borrows: the viewer holds the graph while snarl is rendered. Both
     // are distinct fields of the state, so this split is sound.
     let AppState {
         graph,
         snarl,
         selected,
+        thumbnails,
         ..
     } = &mut *state;
     let mut viewer = canvas::GraphViewer {
@@ -1092,6 +1126,7 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         pending_view,
         frame_all_request: false,
         zoom: None,
+        thumbnails: Some(&*thumbnails),
     };
     // The canvas's screen rect comes from the ui, not snarl's response: snarl
     // returns an unbounded `EVERYTHING` rect, so it cannot be used for hit-testing
