@@ -27,9 +27,9 @@ use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
-use crate::Field;
 use crate::error::{Error, Result};
 use crate::layers;
+use crate::{Field, Layer};
 
 /// How `height` values map onto the 16-bit output range.
 ///
@@ -61,31 +61,15 @@ pub enum HeightRange {
 
 impl HeightRange {
     /// Resolves this mode to the concrete `(min, max)` mapped onto `0..=65535` for the
-    /// given height values. [`Auto`](Self::Auto) scans their actual extent; the other
-    /// modes ignore the values.
-    fn resolve(self, values: &[f32]) -> (f32, f32) {
+    /// given height layer. [`Auto`](Self::Auto) uses the layer's actual extent
+    /// ([`Layer::value_range`]); the other modes ignore the layer.
+    fn resolve(self, layer: &Layer) -> (f32, f32) {
         match self {
-            HeightRange::Auto => finite_extent(values),
+            HeightRange::Auto => layer.value_range(),
             HeightRange::Normalized => (0.0, 1.0),
             HeightRange::Explicit { min, max } => (min, max),
         }
     }
-}
-
-/// The `(min, max)` of the finite values, ignoring any non-finite sample. An empty
-/// run (or one with no finite values) yields `(0.0, 0.0)`, a zero-width range that
-/// [`sample`] maps to all-zero. min/max are order-independent, so this stays
-/// deterministic regardless of how the field was produced.
-fn finite_extent(values: &[f32]) -> (f32, f32) {
-    let mut min = f32::INFINITY;
-    let mut max = f32::NEG_INFINITY;
-    for &v in values {
-        if v.is_finite() {
-            min = min.min(v);
-            max = max.max(v);
-        }
-    }
-    if min <= max { (min, max) } else { (0.0, 0.0) }
 }
 
 /// Maps a height value to a 16-bit sample over the concrete range `[min, max]`,
@@ -139,7 +123,7 @@ fn write_png<W: Write>(field: &Field, writer: W, range: HeightRange) -> Result<(
 
     // Resolve the mode to a concrete range once (Auto scans the field), then map every
     // sample over it. PNG stores 16-bit samples big-endian (network byte order).
-    let (min, max) = range.resolve(layer.as_slice());
+    let (min, max) = range.resolve(layer);
     let mut data = Vec::with_capacity(layer.len() * 2);
     for &value in layer.as_slice() {
         data.extend_from_slice(&sample(value, min, max).to_be_bytes());

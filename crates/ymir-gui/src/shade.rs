@@ -11,7 +11,9 @@ use ymir_core::{Field, layers};
 /// How the height layer is shaded.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ShadeMode {
-    /// Raw height mapped to grayscale (clamped to `[0, 1]`), matching the export.
+    /// Height mapped to grayscale, auto-ranged to the field's actual extent so terrain
+    /// that ran outside `[0, 1]` is shown in full rather than clipped (matching the
+    /// export's auto-range).
     Height,
     /// Relief: each cell shaded by its surface normal under a fixed light, so height
     /// *changes* (slopes, carved valleys) are legible even when subtle (#40).
@@ -53,12 +55,24 @@ pub(crate) fn field_to_image(field: &Field, mode: ShadeMode, light: [f32; 3]) ->
     }
 }
 
-/// Raw height mapped straight to grayscale, matching the PNG export.
+/// Height mapped to grayscale, auto-ranged to the field's actual `[min, max]` so the
+/// whole shape is visible even when height ran outside `[0, 1]`, rather than clipping
+/// to a flat white/black. This mirrors the export's auto-range, so the preview reads
+/// like the exported image. A flat field maps to a single tone.
 pub(crate) fn height_image(field: &Field) -> egui::ColorImage {
     let layer = field.layer_or(layers::HEIGHT, 0.0);
+    let (min, max) = layer.value_range();
+    let span = max - min;
     let mut rgba = Vec::with_capacity(layer.len() * 4);
     for &value in layer.as_slice() {
-        let g = gray8(value);
+        // Normalize into the display range; a zero-width span (a flat field) reads as a
+        // single tone rather than dividing by zero.
+        let t = if span > 0.0 {
+            (value - min) / span
+        } else {
+            0.0
+        };
+        let g = gray8(t);
         rgba.extend_from_slice(&[g, g, g, 255]);
     }
     egui::ColorImage::from_rgba_unmultiplied([layer.width(), layer.height()], &rgba)
@@ -91,6 +105,43 @@ fn relief_image(field: &Field, light: [f32; 3]) -> egui::ColorImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use ymir_core::{Layer, Region};
+
+    fn height_field(values: &[f32]) -> Field {
+        let n = values.len();
+        Field::new(n, 1, Region::UNIT).with_layer(
+            layers::HEIGHT,
+            Arc::new(Layer::from_fn(n, 1, |x, _| values[x])),
+        )
+    }
+
+    #[test]
+    fn height_image_auto_ranges_to_the_field_extent() {
+        // A compressed range [0.4, 0.6] is stretched across the display: the min reads
+        // black and the max white, so the shape is visible rather than near-uniform gray.
+        let img = height_image(&height_field(&[0.4, 0.6]));
+        assert_eq!(img.pixels[0].r(), 0);
+        assert_eq!(img.pixels[1].r(), 255);
+    }
+
+    #[test]
+    fn height_image_shows_out_of_range_without_clipping() {
+        // Values below 0 and above 1 are no longer clamped to flat black/white: the
+        // extremes anchor the range and the middle stays distinct.
+        let img = height_image(&height_field(&[-0.5, 0.5, 2.0]));
+        assert_eq!(img.pixels[0].r(), 0); // -0.5 (min)
+        assert_eq!(img.pixels[2].r(), 255); // 2.0 (max)
+        let mid = img.pixels[1].r();
+        assert!(mid > 0 && mid < 255, "middle clipped: {mid}");
+    }
+
+    #[test]
+    fn height_image_of_a_flat_field_is_a_single_tone() {
+        let img = height_image(&height_field(&[0.7, 0.7, 0.7]));
+        assert_eq!(img.pixels[0], img.pixels[1]);
+        assert_eq!(img.pixels[1], img.pixels[2]);
+    }
 
     #[test]
     fn gray8_maps_and_clamps() {

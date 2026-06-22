@@ -85,6 +85,24 @@ impl Layer {
         &self.data
     }
 
+    /// The `(min, max)` of the layer's finite values, ignoring any non-finite cell.
+    /// An empty layer (or one with no finite values) yields `(0.0, 0.0)`, a zero-width
+    /// range. min/max are order-independent, so this is deterministic regardless of how
+    /// the layer was produced. Used to map a layer onto a fixed output range (the export
+    /// auto-range and the preview display) without clipping.
+    #[must_use]
+    pub fn value_range(&self) -> (f32, f32) {
+        let mut min = f32::INFINITY;
+        let mut max = f32::NEG_INFINITY;
+        for &v in &self.data {
+            if v.is_finite() {
+                min = min.min(v);
+                max = max.max(v);
+            }
+        }
+        if min <= max { (min, max) } else { (0.0, 0.0) }
+    }
+
     /// Mutable access to the row-major cell buffer, for hot per-cell loops.
     pub fn as_mut_slice(&mut self) -> &mut [f32] {
         &mut self.data
@@ -124,6 +142,18 @@ mod tests {
         assert_eq!(layer.as_slice(), &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
         assert_eq!(layer.get(2, 1), Some(5.0));
         assert_eq!(layer.get(0, 0), Some(0.0));
+    }
+
+    #[test]
+    fn value_range_is_the_finite_extent() {
+        // 0.0, 0.5, 1.0, 1.5 across the grid.
+        let layer = Layer::from_fn(2, 2, |x, y| (x + 2 * y) as f32 * 0.5);
+        assert_eq!(layer.value_range(), (0.0, 1.5));
+        // A flat layer has a zero-width range at its value.
+        assert_eq!(Layer::filled(3, 1, 0.7).value_range(), (0.7, 0.7));
+        // A non-finite cell is ignored, not folded into the range.
+        let with_nan = Layer::from_fn(3, 1, |x, _| [0.2, f32::NAN, 0.8][x]);
+        assert_eq!(with_nan.value_range(), (0.2, 0.8));
     }
 
     #[test]
