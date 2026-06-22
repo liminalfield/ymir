@@ -2,6 +2,8 @@
 
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
+
 use crate::hash::{ContentHash, Fnv1a64};
 
 /// A single parameter value.
@@ -12,7 +14,12 @@ use crate::hash::{ContentHash, Fnv1a64};
 /// key, and the determinism-critical hashing goes through [`hash_into`] instead.
 ///
 /// [`hash_into`]: ParamValue::hash_into
-#[derive(Clone, Debug)]
+///
+/// Serializes for project files with the variant tag in `snake_case` (`float`,
+/// `int`, `bool`, `text`, `curve`), so the on-disk format does not track the Rust
+/// identifier names.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ParamValue {
     /// A floating-point value.
     Float(f64),
@@ -115,6 +122,22 @@ impl Curve {
             h.write_u64(u64::from(canonical_f32_bits(x)));
             h.write_u64(u64::from(canonical_f32_bits(y)));
         }
+    }
+}
+
+/// A curve serializes as its list of `[x, y]` control points. Deserialization rebuilds
+/// it through [`Curve::new`], so a hand-edited or older file with out-of-range or
+/// unsorted points is sanitized to the same invariant the runtime enforces.
+impl Serialize for Curve {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.points.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Curve {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let points = Vec::<(f32, f32)>::deserialize(deserializer)?;
+        Ok(Self::new(points))
     }
 }
 
@@ -276,7 +299,10 @@ impl ParamValue {
 /// reason a field's layers are a `BTreeMap`. Typed accessors read a value and
 /// fall back to a default when the parameter is absent or the wrong kind, so
 /// operators never hand-match [`ParamValue`] variants.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+///
+/// Serializes as a JSON object keyed by parameter name; the `BTreeMap` keeps the
+/// keys sorted, so a saved project diffs cleanly.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Params(BTreeMap<String, ParamValue>);
 
 impl Params {
@@ -352,6 +378,13 @@ impl Params {
     /// Iterates the parameters in name order.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &ParamValue)> {
         self.0.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
+    /// Whether the set holds no parameters. Lets a project file omit an empty
+    /// `params` object rather than writing `{}` on every node.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 
     /// Canonical content hash of the whole parameter set, in name order. This

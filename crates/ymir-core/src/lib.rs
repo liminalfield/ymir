@@ -17,11 +17,14 @@
 //! - [`Graph`]/[`EvalCache`]/[`EvalRequest`]: the node graph and the pull-based,
 //!   memoized evaluator.
 //! - [`export`]: writing a field's height layer to disk (16-bit grayscale PNG).
+//! - [`project`]: the versioned, git-friendly on-disk form of a [`Graph`] and its
+//!   conversion to and from it.
 //!
 //! Concrete operators live in `ymir-nodes`, which depends on this crate.
 
 pub mod export;
 pub mod layers;
+pub mod project;
 pub mod registry;
 
 mod cancel;
@@ -47,5 +50,6 @@ pub use hash::ContentHash;
 pub use layer::Layer;
 pub use operator::{Inputs, Operator, OperatorClone};
 pub use param::{Curve, ParamKind, ParamSpec, ParamValue, Params, Unit};
+pub use project::{Connection, FORMAT_VERSION, NodeDocument, ProjectDocument};
 pub use region::Region;
 pub use spec::{NodeKind, NodeSpec, PortSpec};

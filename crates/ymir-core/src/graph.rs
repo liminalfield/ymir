@@ -11,6 +11,7 @@ use slotmap::{SlotMap, new_key_type};
 use crate::error::{Error, Result};
 use crate::operator::Operator;
 use crate::param::Params;
+use crate::project::{Connection, FORMAT_VERSION, NodeDocument, ProjectDocument};
 use crate::spec::NodeSpec;
 
 new_key_type! {
@@ -325,6 +326,59 @@ impl Graph {
     pub(crate) fn node(&self, id: NodeId) -> Option<&Node> {
         self.nodes.get(id)
     }
+
+    /// Serializes the graph into a [`ProjectDocument`]: its persistent state only
+    /// (`stable_id`, `type_id`, name, params, connections), never the live operators
+    /// or runtime `NodeId`s. Connection sources are translated from `NodeId` to the
+    /// source node's `stable_id`, the identity that survives a reload.
+    ///
+    /// Output is deterministically ordered (nodes by `stable_id`, connections by input
+    /// port; params are already name-ordered), so the same graph always produces the
+    /// same document and a saved project diffs cleanly.
+    #[must_use]
+    pub fn to_document(&self) -> ProjectDocument {
+        let mut nodes: Vec<NodeDocument> = self
+            .nodes
+            .values()
+            .map(|node| {
+                let mut connections: Vec<Connection> = node
+                    .inputs
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(input, slot)| {
+                        let conn = slot.as_ref()?;
+                        // A connection's source is always a live node: removing a node
+                        // cascades to clear edges into it (see `remove_node`). The
+                        // lookup is therefore infallible; a `None` would mean a broken
+                        // invariant, so assert it in debug and drop the dangling edge
+                        // in release rather than emit a reference to a missing node.
+                        let source = self.nodes.get(conn.source).map(|s| s.stable_id);
+                        debug_assert!(source.is_some(), "connection source must be live");
+                        Some(Connection {
+                            input,
+                            source: source?,
+                            output: conn.output,
+                        })
+                    })
+                    .collect();
+                connections.sort_by_key(|c| c.input);
+                NodeDocument {
+                    stable_id: node.stable_id,
+                    type_id: node.type_id.to_string(),
+                    name: node.name.clone(),
+                    params: node.params.clone(),
+                    connections,
+                }
+            })
+            .collect();
+        nodes.sort_by_key(|n| n.stable_id);
+
+        ProjectDocument {
+            format_version: FORMAT_VERSION,
+            next_stable_id: self.next_stable_id,
+            nodes,
+        }
+    }
 }
 
 impl Default for Graph {
@@ -491,6 +545,48 @@ mod tests {
         assert!(g.node(modr).expect("mod").inputs[0].is_none());
         // Removing an absent node is a no-op.
         assert!(!g.remove_node(head));
+    }
+
+    #[test]
+    fn to_document_captures_persistent_state_and_translates_sources() {
+        use crate::param::ParamValue;
+
+        let mut g = Graph::new();
+        let head = add(&mut g, "test.head", 0, 1);
+        let modr = add(&mut g, "test.mod", 1, 1);
+        g.connect(head, 0, modr, 0).expect("connect");
+        g.set_name(modr, Some("Shaper".to_string())).expect("name");
+        g.set_params(modr, Params::new().with("k", ParamValue::Int(3)))
+            .expect("params");
+
+        let sid_head = g.stable_id(head).expect("head sid");
+        let sid_mod = g.stable_id(modr).expect("mod sid");
+
+        let doc = g.to_document();
+        assert_eq!(doc.format_version, FORMAT_VERSION);
+        assert_eq!(doc.next_stable_id, 2);
+        // Nodes are emitted in stable_id order.
+        let ids: Vec<u64> = doc.nodes.iter().map(|n| n.stable_id).collect();
+        assert_eq!(ids, vec![sid_head, sid_mod]);
+
+        let head_doc = &doc.nodes[0];
+        assert_eq!(head_doc.type_id, "test.head");
+        assert_eq!(head_doc.name, None);
+        assert!(head_doc.connections.is_empty());
+
+        let mod_doc = &doc.nodes[1];
+        assert_eq!(mod_doc.type_id, "test.mod");
+        assert_eq!(mod_doc.name.as_deref(), Some("Shaper"));
+        assert_eq!(mod_doc.params.get("k"), Some(&ParamValue::Int(3)));
+        // The connection's source is the head node's stable_id, not its NodeId.
+        assert_eq!(
+            mod_doc.connections,
+            vec![Connection {
+                input: 0,
+                source: sid_head,
+                output: 0,
+            }]
+        );
     }
 
     #[test]
