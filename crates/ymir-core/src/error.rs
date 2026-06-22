@@ -57,6 +57,43 @@ pub enum Error {
     #[error("node not found in graph")]
     NodeNotFound,
 
+    /// A project file's format version is not one this build can load. The version
+    /// is preserved so a future migration can recognize and upgrade the file.
+    #[error("unsupported project format version {version} (this build expects {expected})")]
+    UnsupportedFormatVersion {
+        /// The version found in the file.
+        version: u32,
+        /// The version this build reads.
+        expected: u32,
+    },
+
+    /// A loaded node named a `type_id` that is not in the registry, so its operator
+    /// cannot be rebuilt (the node was removed from the build, or a plugin is absent).
+    #[error("unknown node type {type_id:?}")]
+    UnknownNodeType {
+        /// The unrecognized type id from the file.
+        type_id: String,
+    },
+
+    /// Two loaded nodes shared a `stable_id`, which must be unique. The file is
+    /// corrupt or was hand-edited incorrectly.
+    #[error("duplicate stable id {stable_id} in project")]
+    DuplicateStableId {
+        /// The id that appeared more than once.
+        stable_id: u64,
+    },
+
+    /// A loaded connection named a source `stable_id` that no node in the project
+    /// has, so the wire cannot be reattached.
+    #[error("connection into node {dest} references missing source node {source_id}")]
+    DanglingConnection {
+        /// The `stable_id` of the missing source node. (Named `source_id` rather than
+        /// `source` so `thiserror` does not treat it as the error's cause.)
+        source_id: u64,
+        /// The `stable_id` of the node whose input named it.
+        dest: u64,
+    },
+
     /// Evaluation was cancelled via a [`CancelToken`](crate::CancelToken) before
     /// it completed. The partial result is discarded; a completed evaluation is
     /// never affected, so this does not impact determinism.

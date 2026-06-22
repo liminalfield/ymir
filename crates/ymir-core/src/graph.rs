@@ -4,7 +4,7 @@
 //! input connections. Persistence (a later step) stores `type_id` and params and
 //! rebuilds via the registry; the runtime graph here holds the live operator.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use slotmap::{SlotMap, new_key_type};
 
@@ -379,6 +379,83 @@ impl Graph {
             nodes,
         }
     }
+
+    /// Rebuilds a graph from a [`ProjectDocument`], the inverse of
+    /// [`to_document`](Self::to_document).
+    ///
+    /// Each node's operator is reconstructed from its `type_id` through the registry,
+    /// so no concrete node type is named here; its params, name, and persistent
+    /// `stable_id` are restored, and `next_stable_id` is carried over so ids assigned
+    /// after the load cannot collide with loaded ones. Connections are reapplied by
+    /// `stable_id`. A reloaded graph evaluates identically to the saved one, since
+    /// seeding derives from `stable_id`, which is preserved.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::UnsupportedFormatVersion`] if the document's version is not the one
+    ///   this build understands.
+    /// - [`Error::UnknownNodeType`] if a node's `type_id` is not in the registry.
+    /// - [`Error::DuplicateStableId`] if two nodes share a `stable_id`.
+    /// - [`Error::DanglingConnection`] if a connection names a source `stable_id` no
+    ///   node has.
+    /// - [`Error::InvalidPort`] if a connection references a port the rebuilt operator
+    ///   does not have (e.g. its arity changed since the file was written).
+    pub fn from_document(doc: &ProjectDocument) -> Result<Self> {
+        if doc.format_version != FORMAT_VERSION {
+            return Err(Error::UnsupportedFormatVersion {
+                version: doc.format_version,
+                expected: FORMAT_VERSION,
+            });
+        }
+
+        let mut graph = Graph::new();
+        // stable_id -> runtime NodeId, for resolving connection sources in pass two.
+        let mut by_stable: HashMap<u64, NodeId> = HashMap::with_capacity(doc.nodes.len());
+        // The runtime id of each node, parallel to `doc.nodes`, so pass two need not
+        // look the destination up.
+        let mut node_ids: Vec<NodeId> = Vec::with_capacity(doc.nodes.len());
+
+        // Pass one: create every node, so a connection can resolve its source
+        // regardless of node order in the file.
+        for nd in &doc.nodes {
+            let operator =
+                crate::registry::make(&nd.type_id).ok_or_else(|| Error::UnknownNodeType {
+                    type_id: nd.type_id.clone(),
+                })?;
+            let id = graph.add_op(operator, nd.params.clone());
+            // `add_op` assigned a fresh stable_id; overwrite it with the persisted one
+            // so identity (and the seed derived from it) matches the saved project.
+            if let Some(node) = graph.nodes.get_mut(id) {
+                node.stable_id = nd.stable_id;
+                node.name = nd.name.clone();
+            }
+            if by_stable.insert(nd.stable_id, id).is_some() {
+                return Err(Error::DuplicateStableId {
+                    stable_id: nd.stable_id,
+                });
+            }
+            node_ids.push(id);
+        }
+
+        // `add_op` bumped the counter once per node; restore the saved value so the
+        // next id assigned matches the saved project.
+        graph.next_stable_id = doc.next_stable_id;
+
+        // Pass two: reapply connections by stable_id.
+        for (nd, &dest) in doc.nodes.iter().zip(&node_ids) {
+            for conn in &nd.connections {
+                let source = *by_stable
+                    .get(&conn.source)
+                    .ok_or(Error::DanglingConnection {
+                        source_id: conn.source,
+                        dest: nd.stable_id,
+                    })?;
+                graph.connect(source, conn.output, dest, conn.input)?;
+            }
+        }
+
+        Ok(graph)
+    }
 }
 
 impl Default for Graph {
@@ -435,6 +512,27 @@ mod tests {
             Params::default(),
         )
     }
+
+    // Two operators registered with the registry so `from_document` can rebuild them
+    // by `type_id`, the same path real nodes take. Scoped to this test binary.
+    fn make_test_gen() -> Box<dyn Operator> {
+        Box::new(Stub {
+            type_id: "test.gen",
+            inputs: 0,
+            outputs: 1,
+        })
+    }
+
+    fn make_test_mod() -> Box<dyn Operator> {
+        Box::new(Stub {
+            type_id: "test.mod",
+            inputs: 1,
+            outputs: 1,
+        })
+    }
+
+    inventory::submit! { crate::registry::OperatorEntry { type_id: "test.gen", make: make_test_gen } }
+    inventory::submit! { crate::registry::OperatorEntry { type_id: "test.mod", make: make_test_mod } }
 
     #[test]
     fn spec_and_params_are_readable_by_id() {
@@ -587,6 +685,115 @@ mod tests {
                 output: 0,
             }]
         );
+    }
+
+    #[test]
+    fn from_document_round_trips_a_graph_identically() {
+        use crate::param::ParamValue;
+
+        let mut g = Graph::new();
+        let head = g.add_op(make_test_gen(), Params::new());
+        let modr = g.add_op(make_test_mod(), Params::new().with("k", ParamValue::Int(3)));
+        g.connect(head, 0, modr, 0).expect("connect");
+        g.set_name(modr, Some("Shaper".to_string())).expect("name");
+
+        let doc = g.to_document();
+        let rebuilt = Graph::from_document(&doc).expect("rebuild");
+        // Document-level equality proves stable_ids, type_ids, params, names,
+        // connections, and next_stable_id all round-trip.
+        assert_eq!(rebuilt.to_document(), doc);
+    }
+
+    #[test]
+    fn from_document_preserves_the_id_counter() {
+        let mut g = Graph::new();
+        g.add_op(make_test_gen(), Params::new());
+        g.add_op(make_test_gen(), Params::new());
+        let doc = g.to_document();
+        assert_eq!(doc.next_stable_id, 2);
+
+        let mut rebuilt = Graph::from_document(&doc).expect("rebuild");
+        // A node added after loading continues the sequence rather than colliding.
+        let added = rebuilt.add_op(make_test_gen(), Params::new());
+        assert_eq!(rebuilt.stable_id(added), Some(2));
+    }
+
+    #[test]
+    fn from_document_rejects_an_unsupported_version() {
+        let doc = ProjectDocument {
+            format_version: FORMAT_VERSION + 1,
+            next_stable_id: 0,
+            nodes: Vec::new(),
+        };
+        assert!(matches!(
+            Graph::from_document(&doc),
+            Err(Error::UnsupportedFormatVersion { .. })
+        ));
+    }
+
+    #[test]
+    fn from_document_rejects_an_unknown_node_type() {
+        let doc = ProjectDocument {
+            format_version: FORMAT_VERSION,
+            next_stable_id: 1,
+            nodes: vec![NodeDocument {
+                stable_id: 0,
+                type_id: "test.nonesuch".to_string(),
+                name: None,
+                params: Params::new(),
+                connections: Vec::new(),
+            }],
+        };
+        assert!(matches!(
+            Graph::from_document(&doc),
+            Err(Error::UnknownNodeType { .. })
+        ));
+    }
+
+    #[test]
+    fn from_document_rejects_duplicate_stable_ids() {
+        let node = |stable_id| NodeDocument {
+            stable_id,
+            type_id: "test.gen".to_string(),
+            name: None,
+            params: Params::new(),
+            connections: Vec::new(),
+        };
+        let doc = ProjectDocument {
+            format_version: FORMAT_VERSION,
+            next_stable_id: 2,
+            nodes: vec![node(0), node(0)],
+        };
+        assert!(matches!(
+            Graph::from_document(&doc),
+            Err(Error::DuplicateStableId { stable_id: 0 })
+        ));
+    }
+
+    #[test]
+    fn from_document_rejects_a_dangling_connection() {
+        let doc = ProjectDocument {
+            format_version: FORMAT_VERSION,
+            next_stable_id: 1,
+            nodes: vec![NodeDocument {
+                stable_id: 0,
+                type_id: "test.mod".to_string(),
+                name: None,
+                params: Params::new(),
+                connections: vec![Connection {
+                    input: 0,
+                    source: 99,
+                    output: 0,
+                }],
+            }],
+        };
+        assert!(matches!(
+            Graph::from_document(&doc),
+            Err(Error::DanglingConnection {
+                source_id: 99,
+                dest: 0
+            })
+        ));
     }
 
     #[test]
