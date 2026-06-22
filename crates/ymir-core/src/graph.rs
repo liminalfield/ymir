@@ -5,6 +5,9 @@
 //! rebuilds via the registry; the runtime graph here holds the live operator.
 
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::{BufReader, BufWriter, Read, Write};
+use std::path::Path;
 
 use slotmap::{SlotMap, new_key_type};
 
@@ -456,6 +459,54 @@ impl Graph {
 
         Ok(graph)
     }
+
+    /// Writes the graph to `writer` as a pretty-printed JSON project document. Pretty
+    /// output (not minified) keeps a saved project human-readable and git-diffable, a
+    /// stated goal for sharing node networks.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Json`] if serialization or the underlying write fails.
+    pub fn save_to_writer(&self, writer: impl Write) -> Result<()> {
+        serde_json::to_writer_pretty(writer, &self.to_document())?;
+        Ok(())
+    }
+
+    /// Reads a graph from `reader`, parsing a JSON project document and rebuilding it
+    /// via [`from_document`](Self::from_document).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Json`] if the bytes are not a valid project document, or any
+    /// error from [`from_document`](Self::from_document) (unknown node type,
+    /// unsupported version, duplicate id, dangling connection).
+    pub fn load_from_reader(reader: impl Read) -> Result<Self> {
+        let doc: ProjectDocument = serde_json::from_reader(reader)?;
+        Self::from_document(&doc)
+    }
+
+    /// Saves the graph to a project file at `path` (pretty JSON), creating or
+    /// truncating it. The parent directory must already exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if the file cannot be created, or [`Error::Json`] if
+    /// writing the document fails.
+    pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
+        let file = File::create(path)?;
+        self.save_to_writer(BufWriter::new(file))
+    }
+
+    /// Loads a graph from a project file at `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if the file cannot be opened, or any error from
+    /// [`load_from_reader`](Self::load_from_reader).
+    pub fn load(path: impl AsRef<Path>) -> Result<Self> {
+        let file = File::open(path)?;
+        Self::load_from_reader(BufReader::new(file))
+    }
 }
 
 impl Default for Graph {
@@ -767,6 +818,32 @@ mod tests {
         assert!(matches!(
             Graph::from_document(&doc),
             Err(Error::DuplicateStableId { stable_id: 0 })
+        ));
+    }
+
+    #[test]
+    fn save_and_load_through_a_byte_buffer_round_trips() {
+        use crate::param::ParamValue;
+
+        let mut g = Graph::new();
+        let head = g.add_op(make_test_gen(), Params::new());
+        let modr = g.add_op(make_test_mod(), Params::new().with("k", ParamValue::Int(5)));
+        g.connect(head, 0, modr, 0).expect("connect");
+
+        let mut buf: Vec<u8> = Vec::new();
+        g.save_to_writer(&mut buf).expect("save");
+        assert!(buf.starts_with(b"{"), "output is JSON");
+
+        let loaded = Graph::load_from_reader(&buf[..]).expect("load");
+        assert_eq!(loaded.to_document(), g.to_document());
+    }
+
+    #[test]
+    fn load_reports_a_malformed_file() {
+        let bad = br#"{ "format_version": 1, "nodes": [ this is not json"#;
+        assert!(matches!(
+            Graph::load_from_reader(&bad[..]),
+            Err(Error::Json(_))
         ));
     }
 

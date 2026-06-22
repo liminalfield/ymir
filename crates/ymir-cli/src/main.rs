@@ -1,6 +1,7 @@
-//! Temporary step-6 runner: build a three-node graph (fBm generator -> thermal
-//! erosion -> PNG export endpoint) and evaluate the endpoint, so `cargo run`
-//! renders eroded terrain through the full engine. This will grow into a real
+//! Temporary runner: build a three-node graph (fBm generator -> thermal erosion ->
+//! PNG export endpoint), save it as a project file, then reload that file and render
+//! from the reloaded graph, so `cargo run` exercises the full save/load path end to
+//! end and leaves an inspectable `project.json`. This will grow into a real
 //! graph-driven CLI.
 
 use std::error::Error;
@@ -21,6 +22,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let size: usize = 512;
     let seed: u64 = 42;
     let path = "out/heightmap.png";
+    let project_path = "out/project.json";
 
     let mut graph = Graph::new();
     let generator = graph.add_op(make_op("generator.fbm")?, Params::default());
@@ -33,13 +35,28 @@ fn main() -> Result<(), Box<dyn Error>> {
     graph.connect(generator, 0, erosion, 0)?;
     graph.connect(erosion, 0, export, 0)?;
 
+    // Save the project, then reload it and render from the reloaded graph, so the run
+    // proves the full save/load round-trip rather than just evaluating in memory.
+    std::fs::create_dir_all("out")?;
+    graph.save(project_path)?;
+    let export_id = graph
+        .stable_id(export)
+        .ok_or("export node has no stable id")?;
+    let graph = Graph::load(project_path)?;
+    let export = graph
+        .node_id_of(export_id)
+        .ok_or("export node missing after reload")?;
+
     // Pulling the endpoint evaluates the chain and writes the file as a side
     // effect (endpoints are not memoized).
     let request = EvalRequest::new(size, size, Region::UNIT, seed);
     let mut cache = EvalCache::new(64);
     graph.evaluate(export, &request, &mut cache)?;
 
-    println!("wrote {path} ({size}x{size}, 16-bit grayscale, fBm + thermal erosion, seed {seed})");
+    println!("saved project to {project_path}");
+    println!(
+        "wrote {path} ({size}x{size}, 16-bit grayscale, fBm + thermal erosion, seed {seed}) from the reloaded project"
+    );
     Ok(())
 }
 

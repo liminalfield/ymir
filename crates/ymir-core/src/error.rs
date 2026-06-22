@@ -30,6 +30,11 @@ pub enum Error {
     #[error("PNG encoding failed: {0}")]
     PngEncode(#[from] png::EncodingError),
 
+    /// A project file could not be written or parsed as JSON (malformed file, or a
+    /// serialization failure).
+    #[error("project JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+
     /// Evaluation reached a node already on the current path: the graph has a
     /// cycle and cannot be pulled. Reported, never a panic or stack overflow.
     #[error("graph contains a cycle")]
