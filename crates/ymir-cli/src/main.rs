@@ -84,6 +84,7 @@ mod tests {
             [
                 "endpoint.export",
                 "generator.fbm",
+                "generator.radial",
                 "modifier.blend",
                 "modifier.blur",
                 "modifier.curve",

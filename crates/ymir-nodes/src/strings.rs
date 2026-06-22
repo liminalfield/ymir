@@ -26,6 +26,13 @@ pub fn tr(key: &str) -> &str {
         "node-generator.fbm" => "fBm Noise",
         "node-generator.fbm-desc" => "Fractional Brownian motion of Perlin noise.",
 
+        // Radial gradient generator.
+        "node-generator.radial" => "Radial Gradient",
+        "node-generator.radial-desc" => {
+            "A smooth radial dome (1 at the center, 0 at the radius): an envelope to \
+             multiply with detail, or shape downstream with a Curve."
+        }
+
         // Blend.
         "node-modifier.blend" => "Blend",
         "node-modifier.blend-desc" => {
