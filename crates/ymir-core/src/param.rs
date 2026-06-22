@@ -61,13 +61,14 @@ fn canonical_f32_bits(v: f32) -> u32 {
 /// (monotone cubic) interpolation. Shaping nodes (remap, levels) carry their
 /// transfer function as a single editable `Curve` value rather than a handful of
 /// opaque sliders, which is what makes the shape visible and controllable. Points
-/// are sanitized to `[0, 1]` and sorted by `x`; a value off the ends holds the
-/// nearest endpoint.
+/// are sanitized to `[0, 1]` and sorted by `x`; a value off the ends continues along
+/// the endpoint tangent (a linear extension), so an identity curve passes height
+/// outside `[0, 1]` through untouched rather than clipping it.
 ///
 /// The interpolation (Fritsch-Carlson) passes through every control point and never
-/// overshoots, so a two-point curve is exactly the straight line between them, a
-/// peak stays at its peak value, and the output stays within the control points'
-/// range.
+/// overshoots, so a two-point curve is exactly the straight line between them and a
+/// peak stays at its peak value. Within the control points' `x`-range the output
+/// stays within their `y`-range; beyond it the curve extends linearly.
 #[derive(Clone, Debug)]
 pub struct Curve {
     points: Vec<(f32, f32)>,
@@ -101,8 +102,8 @@ impl Curve {
 
     /// Returns a sampler that evaluates the curve with smooth (monotone cubic)
     /// interpolation. The per-point tangents are computed once, so evaluating over
-    /// a whole field does not recompute them per cell. A value off the ends holds
-    /// the nearest endpoint; an empty curve is the identity.
+    /// a whole field does not recompute them per cell. A value off the ends continues
+    /// along the endpoint tangent; an empty curve is the identity.
     pub fn sampler(&self) -> impl Fn(f32) -> f32 + '_ {
         let tangents = curve_tangents(&self.points);
         move |x| eval_hermite(&self.points, &tangents, x)
@@ -213,17 +214,22 @@ fn curve_tangents(points: &[(f32, f32)]) -> Vec<f32> {
 }
 
 /// Evaluates the cubic Hermite curve defined by `points` and their `tangents` at
-/// `x`, holding the nearest endpoint outside the point range.
+/// `x`. Outside the control-point range the curve continues along its endpoint
+/// tangent (a linear extension) rather than holding the endpoint flat: this keeps an
+/// identity curve a true pass-through for values beyond `[0, 1]`, so an unadjusted
+/// Curve never clips out-of-range height into a plateau, and keeps the mapping
+/// continuous. A deliberately flat endpoint (zero tangent) still plateaus.
 fn eval_hermite(points: &[(f32, f32)], tangents: &[f32], x: f32) -> f32 {
     let (Some(&(first_x, first_y)), Some(&(last_x, last_y))) = (points.first(), points.last())
     else {
         return x;
     };
+    // `tangents` shares the points' length, so both ends are in bounds here.
     if x <= first_x {
-        return first_y;
+        return first_y + tangents[0] * (x - first_x);
     }
     if x >= last_x {
-        return last_y;
+        return last_y + tangents[tangents.len() - 1] * (x - last_x);
     }
     for i in 0..points.len() - 1 {
         let (x0, y0) = points[i];
@@ -588,9 +594,6 @@ mod tests {
         assert!((c.sample(0.0) - 0.0).abs() < 1e-6);
         assert!((c.sample(0.5) - 1.0).abs() < 1e-6);
         assert!((c.sample(1.0) - 0.0).abs() < 1e-6);
-        // Off the ends holds the nearest endpoint.
-        assert_eq!(c.sample(-0.5), 0.0);
-        assert_eq!(c.sample(2.0), 0.0);
         // Monotone cubic never overshoots: the peak is the max, all stays in [0, 1],
         // and the first half rises monotonically.
         let mut prev = -1.0;
@@ -619,6 +622,33 @@ mod tests {
         for x in [0.0_f32, 0.3, 0.7, 1.0] {
             assert!((c.sample(x) - x).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn out_of_range_extends_along_the_endpoint_tangent() {
+        // The identity curve passes values outside [0, 1] straight through (slope 1 at
+        // both ends), so an unadjusted Curve never clips out-of-range height.
+        let id = Curve::identity();
+        assert!((id.sample(1.4) - 1.4).abs() < 1e-6);
+        assert!((id.sample(-0.3) - (-0.3)).abs() < 1e-6);
+
+        // A descending end (the peak curve) extends linearly past the endpoint rather
+        // than holding it flat: the extension is colinear with the endpoint and drops
+        // below it, so no plateau forms.
+        let peak = Curve::new([(0.0, 0.0), (0.5, 1.0), (1.0, 0.0)]);
+        let a = peak.sample(1.5);
+        let b = peak.sample(2.0);
+        assert!(a < 0.0 && b < a, "should descend, not hold flat: {a}, {b}");
+        // Colinear: equal x-steps give equal y-steps past the endpoint.
+        assert!(
+            ((b - a) - (a - 0.0)).abs() < 1e-5,
+            "extension is not linear"
+        );
+
+        // A deliberately flat top (zero end tangent) still plateaus, so an intended
+        // plateau is preserved.
+        let flat_top = Curve::new([(0.0, 0.0), (0.8, 1.0), (1.0, 1.0)]);
+        assert!((flat_top.sample(1.5) - 1.0).abs() < 1e-6);
     }
 
     #[test]

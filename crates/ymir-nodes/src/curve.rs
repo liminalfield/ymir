@@ -3,7 +3,9 @@
 //! This is height shaping done right (the remap/curve of #15): the transfer
 //! function is a visual curve you draw, not a handful of opaque sliders. Each
 //! height is mapped through the curve (with `[0, 1]` as the working domain; values
-//! off the ends hold the nearest endpoint). Mask-aware per the convention: the
+//! off the ends continue along the endpoint slope, so an identity curve passes
+//! out-of-range height through untouched and never clips it into a plateau).
+//! Mask-aware per the convention: the
 //! shaped height is composited over the original through the `mask` layer, so
 //! `mask = 1` is fully shaped and `mask = 0` is the original. Other layers pass
 //! through.
@@ -101,6 +103,17 @@ mod tests {
     #[test]
     fn identity_curve_passes_height_through() {
         assert!((at(&shape(&field_with(0.4, None), Curve::identity()), 0, 0) - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn identity_curve_passes_out_of_range_height_through() {
+        // Regression: an upstream Blend can push height above 1. An unadjusted (identity)
+        // Curve must leave it alone, not clip it to a 1.0 plateau. The identity extends
+        // y = x past the ends, so 1.4 stays 1.4 and a negative stays negative.
+        assert!((at(&shape(&field_with(1.4, None), Curve::identity()), 0, 0) - 1.4).abs() < 1e-6);
+        assert!(
+            (at(&shape(&field_with(-0.2, None), Curve::identity()), 0, 0) - (-0.2)).abs() < 1e-6
+        );
     }
 
     #[test]
