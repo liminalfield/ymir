@@ -37,8 +37,14 @@ use crate::layers;
 /// onto a node parameter when export becomes an endpoint operator.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum HeightRange {
-    /// Map the nominal `[0, 1]` height range to the full `0..=65535`. Values
-    /// outside `[0, 1]` are clamped. This is the default.
+    /// Map the field's actual `[min, max]` onto the full `0..=65535`, so the whole
+    /// output range is used and no value is clipped. A flat field (a zero-width range)
+    /// maps to all-zero. This is the export endpoint's default: it preserves terrain
+    /// that ran outside the nominal `[0, 1]` upstream instead of clamping it.
+    Auto,
+    /// Map the nominal `[0, 1]` height range to the full `0..=65535`. Values outside
+    /// `[0, 1]` are clamped. The fixed, range-independent mapping, for when a stable
+    /// output matters more than using the full range.
     #[default]
     Normalized,
     /// Map `[min, max]` to `0..=65535`, clamping values outside the range.
@@ -54,21 +60,45 @@ pub enum HeightRange {
 }
 
 impl HeightRange {
-    /// Maps a single height value to a 16-bit sample, clamping out-of-range input.
-    fn to_sample(self, value: f32) -> u16 {
-        let (min, max) = match self {
+    /// Resolves this mode to the concrete `(min, max)` mapped onto `0..=65535` for the
+    /// given height values. [`Auto`](Self::Auto) scans their actual extent; the other
+    /// modes ignore the values.
+    fn resolve(self, values: &[f32]) -> (f32, f32) {
+        match self {
+            HeightRange::Auto => finite_extent(values),
             HeightRange::Normalized => (0.0, 1.0),
             HeightRange::Explicit { min, max } => (min, max),
-        };
-        let span = max - min;
-        // A zero or inverted span has no meaningful mapping; collapse to 0.
-        let t = if span > 0.0 {
-            (value - min) / span
-        } else {
-            0.0
-        };
-        (t.clamp(0.0, 1.0) * f32::from(u16::MAX)).round() as u16
+        }
     }
+}
+
+/// The `(min, max)` of the finite values, ignoring any non-finite sample. An empty
+/// run (or one with no finite values) yields `(0.0, 0.0)`, a zero-width range that
+/// [`sample`] maps to all-zero. min/max are order-independent, so this stays
+/// deterministic regardless of how the field was produced.
+fn finite_extent(values: &[f32]) -> (f32, f32) {
+    let mut min = f32::INFINITY;
+    let mut max = f32::NEG_INFINITY;
+    for &v in values {
+        if v.is_finite() {
+            min = min.min(v);
+            max = max.max(v);
+        }
+    }
+    if min <= max { (min, max) } else { (0.0, 0.0) }
+}
+
+/// Maps a height value to a 16-bit sample over the concrete range `[min, max]`,
+/// clamping out-of-range input. A zero or inverted span has no meaningful mapping and
+/// collapses to `0`.
+fn sample(value: f32, min: f32, max: f32) -> u16 {
+    let span = max - min;
+    let t = if span > 0.0 {
+        (value - min) / span
+    } else {
+        0.0
+    };
+    (t.clamp(0.0, 1.0) * f32::from(u16::MAX)).round() as u16
 }
 
 /// Writes the field's `height` layer to `path` as a 16-bit grayscale PNG.
@@ -107,10 +137,12 @@ fn write_png<W: Write>(field: &Field, writer: W, range: HeightRange) -> Result<(
     let width = to_u32(layer.width())?;
     let height = to_u32(layer.height())?;
 
-    // PNG stores 16-bit samples big-endian (network byte order).
+    // Resolve the mode to a concrete range once (Auto scans the field), then map every
+    // sample over it. PNG stores 16-bit samples big-endian (network byte order).
+    let (min, max) = range.resolve(layer.as_slice());
     let mut data = Vec::with_capacity(layer.len() * 2);
     for &value in layer.as_slice() {
-        data.extend_from_slice(&range.to_sample(value).to_be_bytes());
+        data.extend_from_slice(&sample(value, min, max).to_be_bytes());
     }
 
     let mut encoder = png::Encoder::new(writer, width, height);
@@ -183,6 +215,36 @@ mod tests {
         assert_eq!(samples[1], 65535); // max
         assert_eq!(samples[2], 32768); // midpoint
         assert_eq!(samples[3], 65535); // above max, clamped
+    }
+
+    #[test]
+    fn auto_maps_the_actual_range_without_clipping() {
+        // Values running well outside [0, 1] map across the full output range instead
+        // of clamping: the min hits 0 and the max hits 65535, with the interior values
+        // strictly between, proving a real stretch rather than a clamp to the ends.
+        let field = field_with_heights(2, 2, &[-0.5, 0.5, 1.5, 2.0]);
+        let mut bytes = Vec::new();
+        write_png(&field, &mut bytes, HeightRange::Auto).unwrap();
+
+        let (_, _, s) = decode(&bytes);
+        assert_eq!(s[0], 0); // -0.5 is the min
+        assert_eq!(s[3], 65535); // 2.0 is the max
+        assert!(
+            s[1] > 0 && s[1] < s[2] && s[2] < 65535,
+            "interior not stretched"
+        );
+    }
+
+    #[test]
+    fn auto_on_a_flat_field_collapses_to_zero() {
+        // A field with no relief has a zero-width range; map it to all-zero rather than
+        // dividing by zero.
+        let field = field_with_heights(1, 3, &[0.7, 0.7, 0.7]);
+        let mut bytes = Vec::new();
+        write_png(&field, &mut bytes, HeightRange::Auto).unwrap();
+
+        let (_, _, s) = decode(&bytes);
+        assert_eq!(s, vec![0, 0, 0]);
     }
 
     #[test]

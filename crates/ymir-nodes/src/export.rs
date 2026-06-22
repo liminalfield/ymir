@@ -36,6 +36,11 @@ impl Operator for ExportPng {
                 // ignores it (evaluating an export always writes); the build
                 // orchestrator reads it to choose which endpoints to run.
                 ParamSpec::new("build", ParamKind::Bool, ParamValue::Bool(true)),
+                // Map the field's actual range onto the full 16-bit output (on), so
+                // height that ran outside [0, 1] upstream is preserved rather than
+                // clipped. Off uses the fixed [0, 1] mapping, which clamps but gives a
+                // stable, range-independent output.
+                ParamSpec::new("auto_range", ParamKind::Bool, ParamValue::Bool(true)),
             ],
         }
     }
@@ -51,7 +56,14 @@ impl Operator for ExportPng {
             std::fs::create_dir_all(parent)?;
         }
 
-        export_png(inputs[0], path, HeightRange::Normalized)?;
+        // Auto-range by default, so an export never silently clips terrain that ran
+        // outside [0, 1]; opting out uses the fixed [0, 1] mapping.
+        let range = if params.get_bool("auto_range", true) {
+            HeightRange::Auto
+        } else {
+            HeightRange::Normalized
+        };
+        export_png(inputs[0], path, range)?;
         Ok(Vec::new())
     }
 }
@@ -89,5 +101,43 @@ mod tests {
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
         let _ = std::fs::remove_file(&path); // shortcut-ok: best-effort cleanup
+    }
+
+    #[test]
+    fn auto_range_is_the_default_and_opt_out_uses_the_fixed_mapping() {
+        // A field reaching only 0.5: auto-range stretches that to full white, while the
+        // fixed [0, 1] mapping leaves it mid-gray. So default params (auto) and the
+        // opt-out must produce different files, proving the param selects the mode and
+        // that the default is auto.
+        let dir = std::env::temp_dir().join("ymir-export-range-test");
+        let field = Field::new(2, 1, Region::UNIT).with_layer(
+            layers::HEIGHT,
+            Arc::new(Layer::from_fn(2, 1, |x, _| x as f32 * 0.5)),
+        );
+        let ctx = EvalContext::new(2, 1, Region::UNIT, 0);
+
+        let export = |name: &str, params: Params| -> Vec<u8> {
+            let path = dir.join(name);
+            let params = params.with(
+                "path",
+                ParamValue::Text(path.to_string_lossy().into_owned()),
+            );
+            ExportPng
+                .eval(Inputs::required_only(&[&field]), &params, &ctx)
+                .unwrap();
+            let bytes = std::fs::read(&path).unwrap();
+            std::fs::remove_file(&path).expect("cleanup temp file");
+            bytes
+        };
+
+        let auto = export("auto.png", Params::new());
+        let fixed = export(
+            "fixed.png",
+            Params::new().with("auto_range", ParamValue::Bool(false)),
+        );
+        assert_ne!(
+            auto, fixed,
+            "auto-range and the fixed mapping should differ"
+        );
     }
 }
