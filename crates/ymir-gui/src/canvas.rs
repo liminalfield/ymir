@@ -29,6 +29,12 @@ const THUMB_CORNER_RADIUS: f32 = 4.0;
 /// grid and snapping arrive. Applied as a minimum on the header and footer rows; an
 /// unusually long title is the only thing that can push a node wider.
 const NODE_WIDTH: f32 = 140.0;
+/// Below this canvas zoom, thumbnails are skipped (#74): the nodes are too small on
+/// screen to be worth evaluating and uploading.
+pub(crate) const THUMB_MIN_SCALE: f32 = 0.6;
+/// Screen-space margin around the viewport for thumbnail culling (#74), so a node
+/// whose top-left is just off-screen but whose body is visible still gets one.
+pub(crate) const THUMB_CULL_MARGIN: f32 = 384.0;
 
 /// Constant width for the right-click context menus, so they do not resize with
 /// their longest item (the wider node menu vs the narrow "Add node" graph menu).
@@ -61,6 +67,28 @@ fn zoom_around(
         * TSTransform::from_translation(in_scene.to_vec2())
         * TSTransform::from_scaling(factor)
         * TSTransform::from_translation(-in_scene.to_vec2())
+}
+
+/// The handles of `nodes` (each paired with its graph-space top-left) whose node is on
+/// screen and large enough to warrant a thumbnail (#74): empty below `min_scale`, else
+/// those whose position falls within `viewport` expanded by `margin` (screen space).
+/// Pure, so the culling policy is unit-tested without the canvas.
+pub(crate) fn cull_to_viewport(
+    nodes: &[(Handle, Pos2)],
+    to_global: egui::emath::TSTransform,
+    viewport: egui::Rect,
+    min_scale: f32,
+    margin: f32,
+) -> Vec<Handle> {
+    if to_global.scaling < min_scale {
+        return Vec::new();
+    }
+    let bounds = viewport.expand(margin);
+    nodes
+        .iter()
+        .filter(|(_, pos)| bounds.contains(to_global * *pos))
+        .map(|(handle, _)| *handle)
+        .collect()
 }
 
 /// Styles a right-click context-menu ui to match the node-creation menu: taller
@@ -133,6 +161,9 @@ pub(crate) struct GraphViewer<'a> {
     /// Per-node heightmap thumbnails to draw in node bodies (#42). `None` in tests
     /// that do not exercise rendering. Input, read-only.
     pub(crate) thumbnails: Option<&'a ThumbnailEngine>,
+    /// Whether thumbnails are shown at all (the View-menu toggle, #74). When off, nodes
+    /// get no footer (not even a placeholder). Input, read-only.
+    pub(crate) show_thumbnails: bool,
 }
 
 impl<'a> GraphViewer<'a> {
@@ -154,6 +185,7 @@ impl<'a> GraphViewer<'a> {
             frame_all_request: false,
             zoom: None,
             thumbnails: None,
+            show_thumbnails: false,
         }
     }
 }
@@ -362,11 +394,14 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
     }
 
     /// Output-producing nodes get a footer: a small heightmap thumbnail below the
-    /// ports (#42). Endpoints (no output) have nothing to preview, so no footer.
+    /// ports (#42), unless thumbnails are toggled off (#74). Endpoints (no output) have
+    /// nothing to preview, so no footer.
     fn has_footer(&mut self, node: &Handle) -> bool {
-        self.core_id(*node)
-            .and_then(|id| self.graph.spec(id))
-            .is_some_and(|spec| !spec.outputs.is_empty())
+        self.show_thumbnails
+            && self
+                .core_id(*node)
+                .and_then(|id| self.graph.spec(id))
+                .is_some_and(|spec| !spec.outputs.is_empty())
     }
 
     /// Draws the node's thumbnail below its ports, or a muted placeholder of the same
@@ -387,28 +422,39 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
         // Span the fixed node width so the thumbnail centres within the whole node,
         // not just its own content.
         ui.set_min_width(NODE_WIDTH);
+        // snarl stores a node's size one frame behind its content, so on the frame a
+        // node first gains (or loses) this footer, the footer's rect is still degenerate
+        // because the node frame has not grown into it yet. We must still reserve the
+        // thumbnail's space (so snarl grows the node), but painting into that malformed
+        // rect spills above the frame for one frame, a flash under the header. Detect
+        // the unsettled frame (the footer region cannot fit the thumbnail) and skip the
+        // paint, repainting so the settled frame draws it cleanly.
+        let settled = ui.max_rect().height() >= size.y;
         // A top-down centered layout gives the vertical gap (add_space) and horizontal
         // centring in one go.
         ui.vertical_centered(|ui| {
             ui.add_space(THUMB_TOP_GAP);
-            let rect = match self.thumbnails.and_then(|t| t.texture(handle)) {
+            // Reserve the space unconditionally; this is what drives snarl to grow the
+            // node to include the footer on the next frame.
+            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+            if !settled {
+                ui.ctx().request_repaint();
+                return;
+            }
+            match self.thumbnails.and_then(|t| t.texture(handle)) {
                 Some(texture) => {
-                    ui.add(
-                        egui::Image::new(egui::load::SizedTexture::new(texture.id(), size))
-                            .corner_radius(THUMB_CORNER_RADIUS),
-                    )
-                    .rect
+                    egui::Image::new(egui::load::SizedTexture::new(texture.id(), size))
+                        .corner_radius(THUMB_CORNER_RADIUS)
+                        .paint_at(ui, rect);
                 }
                 None => {
-                    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
                     ui.painter().rect_filled(
                         rect,
                         THUMB_CORNER_RADIUS,
                         ui.visuals().extreme_bg_color,
                     );
-                    rect
                 }
-            };
+            }
             ui.painter().rect_stroke(
                 rect,
                 THUMB_CORNER_RADIUS,
@@ -890,5 +936,27 @@ mod tests {
         assert!(add_node(&mut graph, &mut snarl, "no.such.node", Pos2::ZERO).is_none());
         assert_eq!(graph.node_count(), 0);
         assert_eq!(snarl.nodes().count(), 0);
+    }
+
+    #[test]
+    fn cull_drops_everything_below_min_scale() {
+        let nodes = [(1u64, Pos2::ZERO), (2, Pos2::new(50.0, 50.0))];
+        let viewport = egui::Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let zoomed_out = egui::emath::TSTransform::from_scaling(0.3);
+        assert!(cull_to_viewport(&nodes, zoomed_out, viewport, THUMB_MIN_SCALE, 0.0).is_empty());
+    }
+
+    #[test]
+    fn cull_keeps_only_nodes_within_the_expanded_viewport() {
+        // Identity transform: graph space == screen space, so positions speak directly.
+        let id = egui::emath::TSTransform::IDENTITY;
+        let viewport = egui::Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let nodes = [
+            (1u64, Pos2::new(400.0, 300.0)), // inside
+            (2, Pos2::new(900.0, 300.0)),    // outside, but within a 384px margin
+            (3, Pos2::new(2000.0, 300.0)),   // far outside, beyond the margin
+        ];
+        let kept = cull_to_viewport(&nodes, id, viewport, THUMB_MIN_SCALE, THUMB_CULL_MARGIN);
+        assert_eq!(kept, vec![1, 2]);
     }
 }

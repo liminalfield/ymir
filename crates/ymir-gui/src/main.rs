@@ -197,6 +197,9 @@ struct AppState {
     preview: PreviewEngine,
     /// Background per-node thumbnail evaluation, drawn in node bodies (#42).
     thumbnails: ThumbnailEngine,
+    /// Whether node thumbnails are shown, toggled from the View menu (#74). When off,
+    /// no thumbnails are evaluated, uploaded, or drawn.
+    thumbnails_enabled: bool,
     /// The off-thread full-resolution Build (#7).
     build: BuildRunner,
     /// The selected palette tab (defaults to the first category on first draw).
@@ -246,6 +249,7 @@ impl AppState {
             seed: 0,
             preview: PreviewEngine::new(),
             thumbnails: ThumbnailEngine::new(),
+            thumbnails_enabled: true,
             build: BuildRunner::new(),
             active_tab: None,
             search: String::new(),
@@ -466,11 +470,15 @@ fn draw_pane(id: &str, ui: &mut egui::Ui, state: &mut AppState) {
     }
 }
 
-fn menu_bar_pane(ui: &mut egui::Ui, _state: &mut AppState) {
+fn menu_bar_pane(ui: &mut egui::Ui, state: &mut AppState) {
     egui::MenuBar::new().ui(ui, |ui| {
         for menu in ["File", "Edit", "View", "Graph", "Help"] {
             ui.menu_button(menu, |ui| {
-                ui.weak("(empty)");
+                if menu == "View" {
+                    ui.checkbox(&mut state.thumbnails_enabled, "Node thumbnails");
+                } else {
+                    ui.weak("(empty)");
+                }
             });
         }
     });
@@ -1075,6 +1083,9 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // A one-shot "zoom to graph" view to apply this frame (#65), Copy, read before
     // the disjoint borrow.
     let pending_view = state.pending_view;
+    // The thumbnail toggle (#74), read before the disjoint borrow. Gates whether nodes
+    // get a thumbnail footer at all.
+    let show_thumbnails = state.thumbnails_enabled;
 
     // Per-node thumbnails (#42): evaluate every output-producing node at thumbnail
     // resolution off-thread, and draw each result in its node body below.
@@ -1085,18 +1096,40 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         state.seed,
     )
     .with_world_extent(state.world_extent);
-    let visible: Vec<canvas::Handle> = state
-        .snarl
-        .node_ids()
-        .filter_map(|(_, &h)| {
-            state
-                .graph
-                .node_id_of(h)
-                .and_then(|id| state.graph.spec(id))
-                .is_some_and(|spec| !spec.outputs.is_empty())
-                .then_some(h)
-        })
-        .collect();
+    // The working set is culled to the last-frame view (#74): off-screen nodes and a
+    // zoomed-out canvas (where a thumbnail is too small to read) are skipped, so a
+    // large graph evaluates only what is on screen. Disabled entirely from the View
+    // menu.
+    let visible: Vec<canvas::Handle> = if state.thumbnails_enabled {
+        // Output-producing nodes paired with their canvas position.
+        let candidates: Vec<(canvas::Handle, egui::Pos2)> = state
+            .snarl
+            .node_ids()
+            .filter_map(|(snarl_id, &h)| {
+                let produces_output = state
+                    .graph
+                    .node_id_of(h)
+                    .and_then(|id| state.graph.spec(id))
+                    .is_some_and(|spec| !spec.outputs.is_empty());
+                let pos = state.snarl.get_node_info(snarl_id).map(|info| info.pos);
+                produces_output.then_some(()).and(pos).map(|p| (h, p))
+            })
+            .collect();
+        match state.canvas_view {
+            Some(view) => canvas::cull_to_viewport(
+                &candidates,
+                view.to_global,
+                view.rect,
+                canvas::THUMB_MIN_SCALE,
+                canvas::THUMB_CULL_MARGIN,
+            ),
+            // Before the canvas has reported a view (first frame), evaluate all, so
+            // thumbnails appear at once rather than after a blank frame.
+            None => candidates.into_iter().map(|(h, _)| h).collect(),
+        }
+    } else {
+        Vec::new()
+    };
     let now = ui.input(|i| i.time);
     state
         .thumbnails
@@ -1127,6 +1160,7 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         frame_all_request: false,
         zoom: None,
         thumbnails: Some(&*thumbnails),
+        show_thumbnails,
     };
     // The canvas's screen rect comes from the ui, not snarl's response: snarl
     // returns an unbounded `EVERYTHING` rect, so it cannot be used for hit-testing
@@ -1152,6 +1186,14 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // Roughly double it for breathing room between ports and node rows (#58). Scoped
     // to this ui, so it only affects the snarl widget, not other panes or the menu.
     ui.spacing_mut().item_spacing.y = 6.0;
+
+    // The canvas is a pan/zoom egui Scene, so node content sits at fractional,
+    // transform-dependent coordinates by design. egui's `show_unaligned` debug overlay
+    // (on by default in debug builds) flags any non-pixel-aligned widget edge with
+    // orange "Unaligned" lines, which is a false positive here: it briefly flashes on
+    // the thumbnail footer as a node resizes. The overlay earns its keep on the static
+    // panes (catching blurry text), so disable it only for this ui, not globally.
+    ui.style_mut().debug.show_unaligned = false;
 
     // Plain scroll wheel zooms the canvas about the cursor (#36). snarl's egui Scene
     // would scroll-pan instead, so suppress its scroll-pan and hand the zoom to the

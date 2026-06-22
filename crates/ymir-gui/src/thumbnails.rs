@@ -28,6 +28,9 @@ const THUMB_CACHE_CAP: usize = 128;
 /// Minimum interval between thumbnail submissions, so a fast parameter drag throttles
 /// instead of resubmitting every frame.
 const THUMB_DEBOUNCE_SECS: f64 = 0.08;
+/// Texture uploads applied per frame. Uploads are the UI-thread cost, so a large batch
+/// (e.g. the world seed changed, so every node's thumbnail did) is spread over frames.
+const THUMB_MAX_UPLOADS_PER_FRAME: usize = 6;
 
 /// A node to (re)evaluate for its thumbnail, tagged with the `output_key` it is being
 /// computed for, so a result can be matched against the node's current desired key.
@@ -151,11 +154,21 @@ impl ThumbnailEngine {
     }
 
     /// Collects worker results, uploading a texture for each whose key still matches
-    /// the node's desired output. Repaints while any thumbnail is still computing.
+    /// the node's desired output. Texture uploads are the UI-thread cost, so cap them
+    /// per frame and let the rest stream in over the next frames (a capped result keeps
+    /// its in-flight marker, so the repaint below keeps draining it). Stale results are
+    /// drained without counting against the cap.
     pub(crate) fn poll(&mut self, ctx: &egui::Context) {
-        // Drain every ready result; an empty or disconnected channel ends the loop.
-        while let Ok(shaded) = self.result_rx.try_recv() {
-            self.apply(shaded, ctx);
+        let mut uploaded = 0;
+        while uploaded < THUMB_MAX_UPLOADS_PER_FRAME {
+            match self.result_rx.try_recv() {
+                Ok(shaded) => {
+                    if self.apply(shaded, ctx) {
+                        uploaded += 1;
+                    }
+                }
+                Err(_) => break,
+            }
         }
         let waiting = self
             .entries
@@ -166,13 +179,16 @@ impl ThumbnailEngine {
         }
     }
 
-    fn apply(&mut self, shaded: Shaded, ctx: &egui::Context) {
+    /// Applies one result, returning whether it uploaded a texture (a stale,
+    /// superseded result does not, so it does not count against the per-frame cap).
+    fn apply(&mut self, shaded: Shaded, ctx: &egui::Context) -> bool {
         let Some(e) = self.entries.get_mut(&shaded.handle) else {
-            return;
+            return false;
         };
         // Apply only if this is still the node's desired output; otherwise a newer
         // change has superseded it and the result is stale.
-        if e.desired_key == Some(shaded.key) {
+        let uploaded = e.desired_key == Some(shaded.key);
+        if uploaded {
             let name = format!("thumb-{}", shaded.handle);
             e.texture = Some(ctx.load_texture(name, shaded.image, egui::TextureOptions::LINEAR));
             e.texture_key = Some(shaded.key);
@@ -180,6 +196,7 @@ impl ThumbnailEngine {
         if e.in_flight_key == Some(shaded.key) {
             e.in_flight_key = None;
         }
+        uploaded
     }
 
     /// The node's thumbnail texture, if one has been computed.
