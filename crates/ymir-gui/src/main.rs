@@ -530,6 +530,11 @@ fn menu_bar_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 save_project(state, None);
                 ui.close();
             }
+            ui.separator();
+            if ui.button("Save as Default Startup Graph").clicked() {
+                save_as_default(state);
+                ui.close();
+            }
         });
         ui.menu_button("Edit", |ui| {
             ui.weak("(empty)");
@@ -613,6 +618,94 @@ fn read_project(path: &std::path::Path) -> Result<project_file::RestoredProject,
 fn write_project(path: &std::path::Path, file: &project_file::ProjectFile) -> Result<(), String> {
     let json = serde_json::to_string_pretty(file).map_err(|e| e.to_string())?;
     std::fs::write(path, json).map_err(|e| e.to_string())
+}
+
+/// The path to the user's default startup graph (#76): `$XDG_CONFIG_HOME/ymir/
+/// default.ymir`, falling back to `$HOME/.config/ymir/default.ymir`. `None` if
+/// neither variable is set, in which case the default-graph feature is simply
+/// unavailable rather than an error. Reading env vars is safe in edition 2024; only
+/// `set_var` is the forbidden-unsafe one, which this never needs.
+fn default_project_path() -> Option<std::path::PathBuf> {
+    config_path(
+        std::env::var_os("XDG_CONFIG_HOME"),
+        std::env::var_os("HOME"),
+    )
+}
+
+/// Resolves the default-graph path from the XDG config base, given the
+/// `XDG_CONFIG_HOME` and `HOME` values. Pure (the env read lives in the caller), so
+/// the precedence is unit-tested without touching the process environment.
+fn config_path(
+    xdg: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Option<std::path::PathBuf> {
+    let base = xdg
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            home.filter(|s| !s.is_empty())
+                .map(|h| std::path::PathBuf::from(h).join(".config"))
+        })?;
+    Some(base.join("ymir").join("default.ymir"))
+}
+
+/// Saves the current session as the user's default startup graph (#76), at the
+/// fixed config path (no dialog, since the location is not the user's to pick).
+/// Creates the config directory if it does not exist. Reports the outcome on the
+/// status line.
+fn save_as_default(state: &mut AppState) {
+    let Some(path) = default_project_path() else {
+        state.status =
+            Some("Could not locate a config directory for the default graph.".to_string());
+        return;
+    };
+    if let Some(parent) = path.parent()
+        && let Err(err) = std::fs::create_dir_all(parent)
+    {
+        state.status = Some(format!("Could not create {}: {err}", parent.display()));
+        return;
+    }
+    let file = project_file::ProjectFile::capture(
+        &state.graph,
+        &state.snarl,
+        state.seed,
+        state.world_extent,
+    );
+    match write_project(&path, &file) {
+        Ok(()) => {
+            state.status = Some(format!(
+                "Saved as default startup graph ({})",
+                path.display()
+            ));
+        }
+        Err(err) => state.status = Some(format!("Could not save default: {err}")),
+    }
+}
+
+/// Overlays the user's saved default startup graph onto a fresh session, if one
+/// exists (#76), replacing the built-in starter. The default is a template, not the
+/// session's save target, so `project_path` stays `None` and the first `Save`
+/// prompts for a location. An absent default is the normal first-run case (the
+/// starter stands); a corrupt one is reported and the starter stands.
+fn apply_default(state: &mut AppState) {
+    let Some(path) = default_project_path() else {
+        return;
+    };
+    if !path.exists() {
+        return;
+    }
+    match read_project(&path) {
+        Ok(restored) => {
+            state.graph = restored.graph;
+            state.snarl = restored.snarl;
+            state.seed = restored.seed;
+            state.world_extent = restored.world_extent;
+            state.frame_to_graph_request = true;
+        }
+        Err(err) => {
+            state.status = Some(format!("Default startup graph could not be loaded: {err}"));
+        }
+    }
 }
 
 fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
@@ -1614,9 +1707,13 @@ impl YmirApp {
             style.animation_time = 0.15;
             style.spacing.menu_margin = egui::Margin::same(8);
         });
-        Self {
-            state: AppState::new(),
-        }
+        // Build the env-free initial state (the built-in starter), then overlay the
+        // user's saved default startup graph if one exists (#76). The overlay lives
+        // here, not in AppState::new, so the state the tests construct never reads the
+        // process environment or the filesystem.
+        let mut state = AppState::new();
+        apply_default(&mut state);
+        Self { state }
     }
 }
 
@@ -1881,6 +1978,54 @@ mod tests {
         );
         // Non-blank text is stored raw (surrounding spaces preserved, not trimmed).
         assert_eq!(name_override("  Hi "), Some("  Hi ".to_string()));
+    }
+
+    #[test]
+    fn config_path_prefers_xdg_then_home_then_none() {
+        use std::ffi::OsString;
+        use std::path::PathBuf;
+        // XDG_CONFIG_HOME wins when set and non-empty.
+        assert_eq!(
+            config_path(
+                Some(OsString::from("/xdg")),
+                Some(OsString::from("/home/u"))
+            ),
+            Some(PathBuf::from("/xdg/ymir/default.ymir"))
+        );
+        // An empty XDG value falls through to HOME/.config.
+        assert_eq!(
+            config_path(Some(OsString::new()), Some(OsString::from("/home/u"))),
+            Some(PathBuf::from("/home/u/.config/ymir/default.ymir"))
+        );
+        // No XDG: HOME/.config.
+        assert_eq!(
+            config_path(None, Some(OsString::from("/home/u"))),
+            Some(PathBuf::from("/home/u/.config/ymir/default.ymir"))
+        );
+        // Neither set (or both empty): no path, so the feature is unavailable.
+        assert_eq!(config_path(None, None), None);
+        assert_eq!(
+            config_path(Some(OsString::new()), Some(OsString::new())),
+            None
+        );
+    }
+
+    #[test]
+    fn write_then_read_project_round_trips_through_a_file() {
+        // Exercises the real file I/O wrappers (the in-memory serde path is covered in
+        // project_file): write a session to disk, read it back, confirm it matches.
+        let (graph, snarl) = starter::starter_graph();
+        let file = project_file::ProjectFile::capture(&graph, &snarl, 7, 2048.0);
+        let path =
+            std::env::temp_dir().join(format!("ymir-default-test-{}.ymir", std::process::id()));
+
+        write_project(&path, &file).expect("write project");
+        let restored = read_project(&path).expect("read project");
+        std::fs::remove_file(&path).expect("remove temp file");
+
+        assert_eq!(restored.graph.to_document(), graph.to_document());
+        assert_eq!(restored.seed, 7);
+        assert_eq!(restored.world_extent, 2048.0);
     }
 
     #[test]

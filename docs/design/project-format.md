@@ -93,3 +93,15 @@ The `view` section is keyed by `stable_id` and kept last so layout-only edits lo
 their diff. The headless CLI reads only `graph`; a graph-only file (no `view`, such as
 one the CLI wrote or a fragment imported from a git repo) opens in the GUI and
 auto-lays-out.
+
+## Default startup graph
+
+The GUI opens a fresh session with a built-in starter chain (a generator feeding
+erosion feeding an export endpoint) rather than a blank canvas. A user can override it
+with their own: "File > Save as Default Startup Graph" writes the current session, in
+the same envelope format above, to `$XDG_CONFIG_HOME/ymir/default.ymir` (falling back to
+`$HOME/.config/ymir/default.ymir`). On launch that file, if present, opens in place of
+the built-in starter. It is loaded as a template, not bound as the session's save
+target, so the first `Save` still prompts for a location and does not overwrite the
+default. A missing default is the normal first-run case; a corrupt one is reported and
+the built-in starter stands.
