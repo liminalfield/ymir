@@ -31,3 +31,15 @@ egui-snarl = "=0.10.0"
 # ymir-core, so this reuses it rather than pulling eframe's heavier `image`-based
 # icon helper.
 png = "0.17"
+# The GUI project file wraps ymir-core's graph document with canvas view-state (node
+# positions) and world settings in one git-friendly JSON file. serde/serde_json are
+# already in the tree via ymir-core; declared here for the envelope types.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Native Save/Open dialogs, each platform's own: Win32 on Windows, Cocoa on macOS,
+# and the XDG desktop portal on Linux (the default backend), which yields the real
+# KDE/GNOME picker instead of an in-process GTK dialog that rendered poorly on KDE.
+# The portal path is Linux-only (ashpd/async-std/pollster are gated to Linux/BSD and
+# never compile on Windows/macOS); we use rfd's blocking sync API, so no async reaches
+# our code (the project is no-async by policy).
+rfd = "0.15"

@@ -33,6 +33,8 @@ mod thumbnails;
 use thumbnails::ThumbnailEngine;
 // Off-thread full-resolution Build (#7).
 mod build;
+// The GUI project file: graph + canvas view-state, save/open (#75).
+mod project_file;
 use build::BuildRunner;
 
 /// Resolution of the interactive 2D preview. Low for responsiveness; it is an
@@ -227,6 +229,16 @@ struct AppState {
     /// Preview requests so world-unit parameters resolve to cells consistently. Cells
     /// are square, so the y extent follows the grid aspect.
     world_extent: f64,
+    /// The project file the session is bound to, if any (#75). `Save` writes here;
+    /// `None` until the project is first saved or opened, when `Save` falls back to
+    /// `Save As`.
+    project_path: Option<std::path::PathBuf>,
+    /// A one-shot request to frame the canvas to the whole graph on the next render,
+    /// set after opening a project so its layout comes into view.
+    frame_to_graph_request: bool,
+    /// A transient status line shown in the menu bar (e.g. the result of a save or
+    /// open). Replaced by the next action.
+    status: Option<String>,
 }
 
 /// The node-rename dialog (#61): edits a node's display-name override.
@@ -261,7 +273,33 @@ impl AppState {
             build_res: 1024,
             preview_res: PREVIEW_RES,
             world_extent: DEFAULT_WORLD_EXTENT,
+            project_path: None,
+            frame_to_graph_request: false,
+            status: None,
         }
+    }
+
+    /// Installs a project opened from disk (#75): swaps in the rebuilt graph, canvas,
+    /// and world settings, and clears view-state that referenced the old graph's
+    /// handles (selection, preview pin, open dialogs). Requests a frame-to-graph so the
+    /// loaded layout is visible. The background engines pick up the new graph on the
+    /// next frame, so no explicit reset is needed.
+    fn install_project(
+        &mut self,
+        restored: project_file::RestoredProject,
+        path: std::path::PathBuf,
+    ) {
+        self.graph = restored.graph;
+        self.snarl = restored.snarl;
+        self.seed = restored.seed;
+        self.world_extent = restored.world_extent;
+        self.selected = None;
+        self.preview_pin = None;
+        self.node_menu = None;
+        self.rename = None;
+        self.frame_to_graph_request = true;
+        self.status = Some(format!("Opened {}", path.display()));
+        self.project_path = Some(path);
     }
 
     /// Whether `handle` resolves to a live node that produces an output, so it can be
@@ -472,18 +510,103 @@ fn draw_pane(id: &str, ui: &mut egui::Ui, state: &mut AppState) {
 
 fn menu_bar_pane(ui: &mut egui::Ui, state: &mut AppState) {
     egui::MenuBar::new().ui(ui, |ui| {
-        for menu in ["File", "Edit", "View", "Graph", "Help"] {
-            ui.menu_button(menu, |ui| {
-                if menu == "View" {
-                    ui.checkbox(&mut state.thumbnails_enabled, "Node thumbnails");
-                } else {
-                    ui.weak("(empty)");
-                }
-            });
+        ui.menu_button("File", |ui| {
+            if ui.button("Open...").clicked() {
+                open_project(state);
+                ui.close();
+            }
+            if ui.button("Save").clicked() {
+                save_project(state, state.project_path.clone());
+                ui.close();
+            }
+            if ui.button("Save As...").clicked() {
+                save_project(state, None);
+                ui.close();
+            }
+        });
+        ui.menu_button("Edit", |ui| {
+            ui.weak("(empty)");
+        });
+        ui.menu_button("View", |ui| {
+            ui.checkbox(&mut state.thumbnails_enabled, "Node thumbnails");
+        });
+        ui.menu_button("Graph", |ui| {
+            ui.weak("(empty)");
+        });
+        ui.menu_button("Help", |ui| {
+            ui.weak("(empty)");
+        });
+        if let Some(status) = &state.status {
+            ui.separator();
+            ui.weak(status);
         }
     });
 }
 inventory::submit! { PaneKind { id: "menu-bar", draw: menu_bar_pane } }
+
+/// File filter shared by the open and save dialogs.
+const PROJECT_EXTENSIONS: &[&str] = &["ymir", "json"];
+
+/// Prompts for a project file and opens it (#75). A cancelled dialog is a no-op; a
+/// failed read or parse leaves the current project untouched and reports the reason
+/// in the status line.
+fn open_project(state: &mut AppState) {
+    let Some(path) = rfd::FileDialog::new()
+        .add_filter("Ymir project", PROJECT_EXTENSIONS)
+        .pick_file()
+    else {
+        return;
+    };
+    match read_project(&path) {
+        Ok(restored) => state.install_project(restored, path),
+        Err(err) => state.status = Some(format!("Could not open {}: {err}", path.display())),
+    }
+}
+
+/// Saves the project to `path`, or prompts for one (Save As) when `path` is `None`.
+/// On success the path becomes the session's project path so a later `Save` reuses it.
+fn save_project(state: &mut AppState, path: Option<std::path::PathBuf>) {
+    let path = match path.or_else(prompt_save_path) {
+        Some(path) => path,
+        None => return,
+    };
+    let file = project_file::ProjectFile::capture(
+        &state.graph,
+        &state.snarl,
+        state.seed,
+        state.world_extent,
+    );
+    match write_project(&path, &file) {
+        Ok(()) => {
+            state.status = Some(format!("Saved {}", path.display()));
+            state.project_path = Some(path);
+        }
+        Err(err) => state.status = Some(format!("Could not save {}: {err}", path.display())),
+    }
+}
+
+/// Prompts for a save location, defaulting the name and extension.
+fn prompt_save_path() -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new()
+        .add_filter("Ymir project", PROJECT_EXTENSIONS)
+        .set_file_name("untitled.ymir")
+        .save_file()
+}
+
+/// Reads and rebuilds a project from `path`. Errors are surfaced as a message for the
+/// status line rather than a typed error, since the only consumer is the GUI.
+fn read_project(path: &std::path::Path) -> Result<project_file::RestoredProject, String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let file: project_file::ProjectFile =
+        serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    file.restore().map_err(|e| e.to_string())
+}
+
+/// Writes `file` to `path` as pretty JSON.
+fn write_project(path: &std::path::Path, file: &project_file::ProjectFile) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(file).map_err(|e| e.to_string())?;
+    std::fs::write(path, json).map_err(|e| e.to_string())
+}
 
 fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
     let cats = categories_sorted();
@@ -1086,6 +1209,10 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // The thumbnail toggle (#74), read before the disjoint borrow. Gates whether nodes
     // get a thumbnail footer at all.
     let show_thumbnails = state.thumbnails_enabled;
+    // A one-shot request to frame the whole graph this frame (#75), set after opening a
+    // project. Taken so it fires once; the canvas computes the fit from this frame's
+    // node rects.
+    let frame_to_graph = std::mem::take(&mut state.frame_to_graph_request);
 
     // Per-node thumbnails (#42): evaluate every output-producing node at thumbnail
     // resolution off-thread, and draw each result in its node body below.
@@ -1157,7 +1284,7 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         rename_request: None,
         pin_request: None,
         pending_view,
-        frame_all_request: false,
+        frame_all_request: frame_to_graph,
         zoom: None,
         thumbnails: Some(&*thumbnails),
         show_thumbnails,
