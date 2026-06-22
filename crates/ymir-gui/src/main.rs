@@ -35,6 +35,8 @@ use thumbnails::ThumbnailEngine;
 mod build;
 // The GUI project file: graph + canvas view-state, save/open (#75).
 mod project_file;
+// The built-in starter graph a fresh session opens with (#76).
+mod starter;
 use build::BuildRunner;
 
 /// Resolution of the interactive 2D preview. Low for responsiveness; it is an
@@ -253,9 +255,14 @@ struct RenameDialog {
 
 impl AppState {
     fn new() -> Self {
+        // Open with the built-in starter chain (#76), so a fresh session has a real
+        // graph to preview, build, and edit rather than a blank canvas. Frame it into
+        // view on the first render (the same one-shot the open path uses), so its
+        // placement does not depend on the canvas's initial transform.
+        let (graph, snarl) = starter::starter_graph();
         Self {
-            graph: Graph::new(),
-            snarl: Snarl::new(),
+            graph,
+            snarl,
             canvas_view: None,
             selected: None,
             seed: 0,
