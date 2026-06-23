@@ -35,6 +35,15 @@ pub(crate) fn center_cell(
     (cell_x, cell_y)
 }
 
+/// Rotates `offset` by `angle` radians. To bring a cell offset into the local frame of a
+/// shape rotated by `rotation`, pass `-rotation` (undo the shape's rotation). Shared by
+/// the oriented shapes (rect, polygon) so the rotation math lives once.
+pub(crate) fn rotate(offset: (f64, f64), angle: f64) -> (f64, f64) {
+    let (x, y) = offset;
+    let (s, c) = angle.sin_cos();
+    (x * c - y * s, x * s + y * c)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,5 +83,14 @@ mod tests {
         let region = Region::new(0.5, 0.0, 1.0, 1.0);
         assert_eq!(center_cell((0.75, 0.0), region, 64, 64).0, 32.0);
         assert_eq!(center_cell((0.5, 0.0), region, 64, 64).0, 0.0);
+    }
+
+    #[test]
+    fn rotate_turns_the_axes() {
+        // +90 degrees sends the +x axis to +y (in the grid's y-down coordinates).
+        let (x, y) = rotate((1.0, 0.0), std::f64::consts::FRAC_PI_2);
+        assert!(x.abs() < 1e-9 && (y - 1.0).abs() < 1e-9);
+        // Rotating by zero is the identity.
+        assert_eq!(rotate((0.3, -0.7), 0.0), (0.3, -0.7));
     }
 }

@@ -87,6 +87,7 @@ mod tests {
                 "generator.fbm",
                 "generator.gradient",
                 "generator.radial",
+                "generator.rect",
                 "generator.ridged",
                 "generator.ring",
                 "modifier.blend",

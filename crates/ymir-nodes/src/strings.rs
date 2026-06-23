@@ -61,6 +61,13 @@ pub fn tr(key: &str) -> &str {
              a crater rim, caldera wall, or atoll."
         }
 
+        // Rectangle generator.
+        "node-generator.rect" => "Rectangle",
+        "node-generator.rect-desc" => {
+            "A flat-topped rectangular footprint with soft, rounded flanks: the envelope \
+             for a plateau, mesa, or rectangular landmass. Turn it with rotation."
+        }
+
         // Blend.
         "node-modifier.blend" => "Blend",
         "node-modifier.blend-desc" => {
