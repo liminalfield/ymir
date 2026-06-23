@@ -2087,16 +2087,18 @@ fn handle_marquee(
     menu_open: bool,
 ) {
     let pointer = ui.input(|i| PointerDrag {
-        primary_down: i.pointer.primary_down(),
+        primary_pressed: i.pointer.primary_pressed(),
         primary_released: i.pointer.primary_released(),
         press_origin: i.pointer.press_origin(),
         current: i.pointer.interact_pos(),
     });
 
-    // Begin a marquee only when a fresh primary press lands on empty canvas (no node, no
-    // menu). Holding `marquee_start` across frames distinguishes a drag from a click.
+    // Decide whether to begin a marquee once, on the press-down edge, while the node is
+    // still under the cursor. Testing every frame instead would misfire: dragging a node
+    // moves it out from under the fixed press origin, so `node_at(origin)` would flip to
+    // false mid-drag and start a marquee over the node being moved (#84).
     if state.marquee_start.is_none()
-        && pointer.primary_down
+        && pointer.primary_pressed
         && !menu_open
         && let Some(origin) = pointer.press_origin
         && canvas_rect.contains(origin)
@@ -2151,7 +2153,7 @@ fn handle_marquee(
 /// Snapshot of the pointer state a marquee needs in one frame, read in a single
 /// `ui.input` closure.
 struct PointerDrag {
-    primary_down: bool,
+    primary_pressed: bool,
     primary_released: bool,
     press_origin: Option<egui::Pos2>,
     current: Option<egui::Pos2>,
