@@ -91,6 +91,7 @@ mod tests {
                 "modifier.curve",
                 "modifier.height",
                 "modifier.invert",
+                "modifier.levels",
                 "modifier.slope",
                 "modifier.thermal_erosion"
             ],

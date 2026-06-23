@@ -72,6 +72,13 @@ pub fn tr(key: &str) -> &str {
              derived selectors, and feathers masks)."
         }
 
+        // Levels (range rescaling).
+        "node-modifier.levels" => "Levels",
+        "node-modifier.levels-desc" => {
+            "Rescales the height range: stretch an input window to full, bias the midtones \
+             with gamma, map into an output window. Normalize, set amplitude, or clamp."
+        }
+
         // Curve (height shaping).
         "node-modifier.curve" => "Curve",
         "node-modifier.curve-desc" => "Reshapes height through an editable transfer curve.",
