@@ -13,6 +13,10 @@
 //! interaction (a slider drag, a node move) into a single undo step rather than one per
 //! frame: while the interaction is in flight the GUI does not call `record`, and when it
 //! settles the one net change is captured.
+//!
+//! A *run* of position-only edits coalesces further (see [`EditHistory::record`]): moving
+//! nodes around while thinking amends one step instead of pushing one per drop, so layout
+//! fiddling does not bury the meaningful edits.
 
 use std::collections::VecDeque;
 
@@ -60,14 +64,31 @@ impl EditHistory {
     /// baseline becomes an undo step and the redo stack is cleared (a fresh edit forks
     /// history). A no-op when nothing changed, which is what coalesces a continuous
     /// interaction into one step. Returns whether a step was recorded.
+    ///
+    /// Layout-only changes (a node moved, with the graph and world untouched) coalesce
+    /// further: a *run* of them amends one step rather than pushing one per drop, so
+    /// fiddling with node positions while thinking does not flood the history. The run
+    /// still opens with a step, so a move is undoable back to where it started; a
+    /// semantic edit (structure, params, world) closes the run.
     pub(crate) fn record(&mut self, current: &ProjectFile) -> bool {
         if current == &self.baseline {
             return false;
         }
-        let previous = std::mem::replace(&mut self.baseline, current.clone());
-        self.undo.push_back(previous);
-        if self.undo.len() > MAX_HISTORY {
-            self.undo.pop_front();
+        // Continue an in-progress layout run when this change touches only positions and
+        // the current step does too: amend the baseline in place instead of pushing.
+        let continues_layout_run = current.differs_only_in_layout(&self.baseline)
+            && self
+                .undo
+                .back()
+                .is_some_and(|previous| previous.differs_only_in_layout(&self.baseline));
+        if continues_layout_run {
+            self.baseline = current.clone();
+        } else {
+            let previous = std::mem::replace(&mut self.baseline, current.clone());
+            self.undo.push_back(previous);
+            if self.undo.len() > MAX_HISTORY {
+                self.undo.pop_front();
+            }
         }
         self.redo.clear();
         true
@@ -113,6 +134,14 @@ mod tests {
     /// the tests can drive the history without building real graphs.
     fn snap(seed: u64) -> ProjectFile {
         ProjectFile::capture(&Graph::new(), &Snarl::<Handle>::new(), seed, 1024.0)
+    }
+
+    /// `base` with node 0 placed at `(x, 0)`: a layout-only variation, with the same
+    /// graph and world but a different node position.
+    fn moved(base: &ProjectFile, x: f32) -> ProjectFile {
+        let mut snapshot = base.clone();
+        snapshot.view.nodes.insert(0, [x, 0.0]);
+        snapshot
     }
 
     #[test]
@@ -166,6 +195,30 @@ mod tests {
         assert!(!h.can_redo());
         // The new baseline is the anchor: an identical snapshot records nothing.
         assert!(!h.record(&snap(9)));
+    }
+
+    #[test]
+    fn a_run_of_layout_only_edits_coalesces_to_one_step() {
+        let base = snap(0);
+        let mut h = EditHistory::new(base.clone());
+        // The first move opens a step; further moves amend it rather than piling up.
+        assert!(h.record(&moved(&base, 1.0)));
+        assert!(h.record(&moved(&base, 2.0)));
+        assert!(h.record(&moved(&base, 3.0)));
+        // One undo returns to the pre-fiddle layout, with nothing more to undo.
+        assert_eq!(h.undo(), Some(base));
+        assert!(!h.can_undo());
+    }
+
+    #[test]
+    fn a_semantic_edit_closes_a_layout_run() {
+        let base = snap(0);
+        let mut h = EditHistory::new(base.clone());
+        h.record(&moved(&base, 1.0)); // a layout step
+        h.record(&snap(7)); // a semantic change (different world): a separate step
+        // The two are distinct steps: the move is not folded into the semantic edit.
+        assert_eq!(h.undo(), Some(moved(&base, 1.0)));
+        assert_eq!(h.undo(), Some(base));
     }
 
     #[test]

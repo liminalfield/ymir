@@ -96,6 +96,13 @@ impl ProjectFile {
         }
     }
 
+    /// Whether `self` and `other` describe the same graph and world, so any difference
+    /// between them is in view-state (node positions) alone. The undo history uses this
+    /// to coalesce a run of layout-only edits into a single step (#82).
+    pub(crate) fn differs_only_in_layout(&self, other: &Self) -> bool {
+        self.world == other.world && self.graph == other.graph
+    }
+
     /// Rebuilds the session from this project file: the engine graph via the registry,
     /// and the canvas with each node at its saved position (or a cascade fallback) and
     /// its wires reattached from the document's connections.
