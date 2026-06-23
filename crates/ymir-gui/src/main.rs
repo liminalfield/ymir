@@ -131,6 +131,10 @@ const MAX_BUILD_OUTPUTS: usize = 64;
 /// bar or the node tabs.
 const MENU_VPAD: f32 = 4.0;
 
+/// Minimum drag (px) before a left-press on empty canvas counts as a marquee rather than
+/// a click; below it, the press is the click that selects/clears (#84).
+const MARQUEE_MIN_DRAG: f32 = 4.0;
+
 /// Default physical size of the world along x, in meters. Pairs with the default
 /// build resolution to give a clean 1 m/cell, and is the meters-to-cells bridge for
 /// world-unit parameters (scale-aware nodes consume it via `EvalContext`).
@@ -200,6 +204,9 @@ struct AppState {
     /// whose output drives the preview when no node is pinned (see `preview_pin`). Kept in
     /// sync with `selection`: it is always a member of the set, or `None` when it is empty.
     primary: Option<Handle>,
+    /// The screen-space origin of an in-progress marquee box-select (a left-drag begun on
+    /// empty canvas), or `None` when not marqueeing (#84).
+    marquee_start: Option<egui::Pos2>,
     /// The node pinned as the preview target, if any (GUI view-state, not core graph
     /// data — issue #39). When set and still previewable, the 2D preview shows this
     /// node instead of the selection, so selection can move upstream to edit while the
@@ -312,6 +319,7 @@ impl AppState {
             canvas_view: None,
             selection: HashSet::new(),
             primary: None,
+            marquee_start: None,
             seed: 0,
             preview: PreviewEngine::new(),
             thumbnails: ThumbnailEngine::new(),
@@ -521,6 +529,21 @@ impl AppState {
     fn clear_selection(&mut self) {
         self.selection.clear();
         self.primary = None;
+    }
+
+    /// Sets the selection to `hits` (a marquee result), or adds them to it when `additive`
+    /// (#84). The primary stays if still selected, else becomes the last hit.
+    fn marquee_select(&mut self, hits: &[Handle], additive: bool) {
+        if !additive {
+            self.selection.clear();
+        }
+        self.selection.extend(hits.iter().copied());
+        if self.primary.is_none_or(|p| !self.selection.contains(&p)) {
+            self.primary = hits
+                .last()
+                .copied()
+                .or_else(|| self.selection.iter().copied().next());
+        }
     }
 
     /// Selects every node in the graph (Ctrl/Cmd-A). Keeps the current primary if it is
@@ -1905,6 +1928,12 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         )
     });
 
+    // Take the node rects and transform out of the viewer for the click and marquee
+    // handling below; this is the viewer's (and the disjoint borrow's) last use, so the
+    // selection can then be edited through the state.
+    let to_global = viewer.to_global;
+    let node_rects = std::mem::take(&mut viewer.node_rects);
+
     // Resolve selection from a plain click (snarl 0.10 only selects on shift-click).
     // A click is a press-and-release without movement, so drags — wiring from or to
     // a pin, and node moves — are excluded automatically and keep their behavior.
@@ -1919,20 +1948,15 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         })
         .flatten();
     // Hit-test the click into a node body (excluding the collapse chevron) or empty
-    // canvas, while the viewer's node rects are still borrowed. The selection change is
-    // applied below, after the borrow, through the state.
+    // canvas. The selection change is applied below, through the state.
     let click_hit = click
         .filter(|_| !menu_open)
         .filter(|p| canvas_rect.contains(*p))
         .and_then(|screen_pos| {
             // Node rects are in the canvas's local space; map the screen click back into
             // it through the inverse pan/zoom transform before hit-testing.
-            let pos = viewer.to_global.inverse() * screen_pos;
-            match viewer
-                .node_rects
-                .iter()
-                .find(|(_, rect)| rect.contains(pos))
-            {
+            let pos = to_global.inverse() * screen_pos;
+            match node_rects.iter().find(|(_, rect)| rect.contains(pos)) {
                 Some((handle, rect)) => {
                     // The collapse chevron toggles the node; a click there is not a select.
                     let chevron = egui::Rect::from_min_size(
@@ -1970,6 +1994,11 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     if let Some(handle) = select_after {
         state.select_only(handle);
     }
+
+    // Marquee box-select on left-drag over empty canvas (panning moved to middle-mouse
+    // by the snarl patch, #84). Runs after the click so a drag that began on a node
+    // (a move) is excluded by the node_at test at its origin.
+    handle_marquee(ui, state, canvas_rect, to_global, &node_rects, menu_open);
 
     // Keep the selection consistent with the graph: a node deleted this frame (e.g. via
     // the context menu's Delete) is dropped from the set and the primary (#84).
@@ -2032,6 +2061,101 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     rename_dialog_ui(ui, state);
 }
 inventory::submit! { PaneKind { id: "canvas", draw: canvas_pane } }
+
+/// True if `screen_pos` lands on a node body, given the canvas node rects (in graph
+/// space) and the graph-to-screen transform. Used to keep a marquee from starting on a
+/// node (that left-drag is a node move).
+fn node_at(
+    screen_pos: egui::Pos2,
+    node_rects: &[(Handle, egui::Rect)],
+    to_global: egui::emath::TSTransform,
+) -> bool {
+    let graph_pos = to_global.inverse() * screen_pos;
+    node_rects.iter().any(|(_, rect)| rect.contains(graph_pos))
+}
+
+/// Drives the marquee box-select on the canvas: a left-drag that begins on empty canvas
+/// draws a selection rectangle and, on release, selects every node it intersects (#84).
+/// Ctrl/Cmd held adds to the existing selection rather than replacing it. Panning is on
+/// the middle button (the snarl patch), so left-drag here is unambiguous.
+fn handle_marquee(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    canvas_rect: egui::Rect,
+    to_global: egui::emath::TSTransform,
+    node_rects: &[(Handle, egui::Rect)],
+    menu_open: bool,
+) {
+    let pointer = ui.input(|i| PointerDrag {
+        primary_down: i.pointer.primary_down(),
+        primary_released: i.pointer.primary_released(),
+        press_origin: i.pointer.press_origin(),
+        current: i.pointer.interact_pos(),
+    });
+
+    // Begin a marquee only when a fresh primary press lands on empty canvas (no node, no
+    // menu). Holding `marquee_start` across frames distinguishes a drag from a click.
+    if state.marquee_start.is_none()
+        && pointer.primary_down
+        && !menu_open
+        && let Some(origin) = pointer.press_origin
+        && canvas_rect.contains(origin)
+        && !node_at(origin, node_rects, to_global)
+    {
+        state.marquee_start = Some(origin);
+    }
+
+    let Some(origin) = state.marquee_start else {
+        return;
+    };
+    let Some(current) = pointer.current.or(Some(origin)) else {
+        return;
+    };
+
+    // The marquee is only a marquee once the pointer has actually moved; below the
+    // threshold it stays a (possibly aborted) click and draws nothing.
+    let rect = egui::Rect::from_two_pos(origin, current);
+    let is_drag = rect.width() > MARQUEE_MIN_DRAG || rect.height() > MARQUEE_MIN_DRAG;
+    if is_drag {
+        let visible = rect.intersect(canvas_rect);
+        let painter = ui.painter_at(canvas_rect);
+        let stroke = egui::Stroke::new(1.0, ui.visuals().selection.stroke.color);
+        painter.rect_filled(
+            visible,
+            0.0,
+            ui.visuals().selection.bg_fill.gamma_multiply(0.25),
+        );
+        painter.rect_stroke(visible, 0.0, stroke, egui::StrokeKind::Inside);
+    }
+
+    if pointer.primary_released {
+        if is_drag {
+            // Map the screen-space marquee into graph space and select every node whose
+            // rect it overlaps.
+            let graph_rect = egui::Rect::from_two_pos(
+                to_global.inverse() * origin,
+                to_global.inverse() * current,
+            );
+            let hits: Vec<Handle> = node_rects
+                .iter()
+                .filter(|(_, r)| graph_rect.intersects(*r))
+                .map(|(h, _)| *h)
+                .collect();
+            let additive = ui.input(|i| i.modifiers.command);
+            state.marquee_select(&hits, additive);
+        }
+        state.marquee_start = None;
+    }
+}
+
+/// Snapshot of the pointer state a marquee needs in one frame, read in a single
+/// `ui.input` closure.
+struct PointerDrag {
+    primary_down: bool,
+    primary_released: bool,
+    press_origin: Option<egui::Pos2>,
+    current: Option<egui::Pos2>,
+}
 
 /// Draws the node-rename dialog when open, and applies its result. A no-op when the
 /// dialog is closed (#61).
@@ -2595,6 +2719,32 @@ mod tests {
         assert_eq!(state.selection.len(), 1);
         assert!(state.selection.contains(&9));
         assert_eq!(state.primary, Some(9));
+    }
+
+    #[test]
+    fn marquee_select_replaces_or_adds() {
+        let mut state = AppState::new();
+        // A non-additive marquee replaces the whole selection with its hits.
+        state.select_only(1);
+        state.marquee_select(&[5, 6], false);
+        assert_eq!(state.selection.len(), 2);
+        assert!(state.selection.contains(&5) && state.selection.contains(&6));
+        assert!(!state.selection.contains(&1));
+        // The primary becomes the last hit.
+        assert_eq!(state.primary, Some(6));
+
+        // An additive marquee unions its hits into the existing set, keeping the
+        // primary when it stays selected.
+        state.marquee_select(&[7], true);
+        assert_eq!(state.selection.len(), 3);
+        assert!(state.selection.contains(&7));
+        assert_eq!(state.primary, Some(6));
+
+        // An empty marquee with no prior primary picks nothing.
+        state.clear_selection();
+        state.marquee_select(&[], false);
+        assert!(state.selection.is_empty());
+        assert_eq!(state.primary, None);
     }
 
     #[test]
