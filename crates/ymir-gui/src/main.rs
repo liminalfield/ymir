@@ -125,6 +125,10 @@ const BUILD_RES_PRESETS: &[usize] = &[256, 505, 512, 1009, 1024, 2017, 2048, 403
 /// an unbounded run. Exceeding it is reported, never silently truncated.
 const MAX_BUILD_OUTPUTS: usize = 64;
 
+/// Vertical padding above and below the menu bar, so it is not jammed against the title
+/// bar or the node tabs.
+const MENU_VPAD: f32 = 4.0;
+
 /// Default physical size of the world along x, in meters. Pairs with the default
 /// build resolution to give a clean 1 m/cell, and is the meters-to-cells bridge for
 /// world-unit parameters (scale-aware nodes consume it via `EvalContext`).
@@ -268,6 +272,10 @@ struct AppState {
 enum PendingAction {
     /// Open another project (prompts for a file once resolved).
     Open,
+    /// Replace the session with a fresh starter graph.
+    New,
+    /// Close the project to an empty canvas.
+    Close,
     /// Close the app window (quit).
     Quit,
 }
@@ -349,6 +357,36 @@ impl AppState {
         // freshly opened session is clean.
         self.reset_history();
         self.mark_clean();
+    }
+
+    /// Replaces the session with a fresh untitled one built from `graph`/`snarl`: resets
+    /// world settings and view-state, drops the project path, and re-anchors undo and the
+    /// clean point. Shared by New (a starter graph) and Close (an empty graph).
+    fn install_fresh(&mut self, graph: Graph, snarl: Snarl<Handle>, status: &str) {
+        self.graph = graph;
+        self.snarl = snarl;
+        self.seed = 0;
+        self.world_extent = DEFAULT_WORLD_EXTENT;
+        self.selected = None;
+        self.preview_pin = None;
+        self.node_menu = None;
+        self.rename = None;
+        self.project_path = None;
+        self.frame_to_graph_request = true;
+        self.status = Some(status.to_string());
+        self.reset_history();
+        self.mark_clean();
+    }
+
+    /// Starts a fresh project on the built-in starter graph (#76), untitled.
+    fn new_project(&mut self) {
+        let (graph, snarl) = starter::starter_graph();
+        self.install_fresh(graph, snarl, "New project");
+    }
+
+    /// Closes the project to an empty canvas, untitled.
+    fn close_project(&mut self) {
+        self.install_fresh(Graph::new(), Snarl::new(), "Closed project");
     }
 
     /// A snapshot of the current session (graph, canvas positions, world settings),
@@ -639,12 +677,19 @@ fn draw_pane(id: &str, ui: &mut egui::Ui, state: &mut AppState) {
 }
 
 fn menu_bar_pane(ui: &mut egui::Ui, state: &mut AppState) {
+    // A little breathing room under the title bar and above the node tabs.
+    ui.add_space(MENU_VPAD);
     egui::MenuBar::new().ui(ui, |ui| {
         ui.menu_button("File", |ui| {
+            if ui.button("New").clicked() {
+                request_new(state);
+                ui.close();
+            }
             if ui.button("Open...").clicked() {
                 request_open(state);
                 ui.close();
             }
+            ui.separator();
             if ui.button("Save").clicked() {
                 save_project(state, state.project_path.clone());
                 ui.close();
@@ -653,9 +698,17 @@ fn menu_bar_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 save_project(state, None);
                 ui.close();
             }
-            ui.separator();
             if ui.button("Save as Default Startup Graph").clicked() {
                 save_as_default(state);
+                ui.close();
+            }
+            ui.separator();
+            if ui.button("Close").clicked() {
+                request_close(state);
+                ui.close();
+            }
+            if ui.button("Exit").clicked() {
+                request_quit(ui.ctx(), state);
                 ui.close();
             }
         });
@@ -703,6 +756,7 @@ fn menu_bar_pane(ui: &mut egui::Ui, state: &mut AppState) {
             ui.weak(status);
         }
     });
+    ui.add_space(MENU_VPAD);
 }
 inventory::submit! { PaneKind { id: "menu-bar", draw: menu_bar_pane } }
 
@@ -716,6 +770,36 @@ fn request_open(state: &mut AppState) {
         state.pending_action = Some(PendingAction::Open);
     } else {
         open_project(state);
+    }
+}
+
+/// Begins a fresh project (the starter graph), guarded by the unsaved-changes prompt.
+fn request_new(state: &mut AppState) {
+    if state.modified {
+        state.pending_action = Some(PendingAction::New);
+    } else {
+        state.new_project();
+    }
+}
+
+/// Closes the project to an empty canvas, guarded by the unsaved-changes prompt.
+fn request_close(state: &mut AppState) {
+    if state.modified {
+        state.pending_action = Some(PendingAction::Close);
+    } else {
+        state.close_project();
+    }
+}
+
+/// Requests quitting the app (the File menu's Exit), guarded by the unsaved-changes
+/// prompt; a clean session closes immediately. Shares the close path with the window's
+/// own close button (#83).
+fn request_quit(ctx: &egui::Context, state: &mut AppState) {
+    if state.modified {
+        state.pending_action = Some(PendingAction::Quit);
+    } else {
+        state.allow_close = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 }
 
@@ -777,6 +861,8 @@ fn unsaved_changes_dialog(ctx: &egui::Context, state: &mut AppState) {
     }
     match action {
         PendingAction::Open => open_project(state),
+        PendingAction::New => state.new_project(),
+        PendingAction::Close => state.close_project(),
         PendingAction::Quit => {
             // Allow the close that follows through, then request it.
             state.allow_close = true;
@@ -2336,6 +2422,34 @@ mod tests {
         state.modified = true;
         request_open(&mut state);
         assert_eq!(state.pending_action, Some(PendingAction::Open));
+    }
+
+    #[test]
+    fn new_with_unsaved_changes_defers_to_the_prompt() {
+        let mut state = AppState::new();
+        state.modified = true;
+        request_new(&mut state);
+        assert_eq!(state.pending_action, Some(PendingAction::New));
+    }
+
+    #[test]
+    fn new_project_installs_the_starter_untitled_and_clean() {
+        let mut state = AppState::new();
+        state.modified = true;
+        state.project_path = Some(std::path::PathBuf::from("somewhere.ymir"));
+        state.new_project();
+        assert_eq!(state.graph.node_count(), 3); // the starter chain
+        assert!(state.project_path.is_none());
+        assert!(!state.modified);
+    }
+
+    #[test]
+    fn close_project_clears_to_an_empty_untitled_canvas() {
+        let mut state = AppState::new();
+        state.close_project();
+        assert_eq!(state.graph.node_count(), 0);
+        assert!(state.project_path.is_none());
+        assert!(!state.modified);
     }
 
     #[test]
