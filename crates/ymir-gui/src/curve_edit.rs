@@ -18,6 +18,17 @@ const MAX_WIDTH: f32 = 260.0;
 const HANDLE_RADIUS: f32 = 4.0;
 /// Pointer grab radius around a control point.
 const GRAB_RADIUS: f32 = 8.0;
+/// Side length of the corner pop-out icon, in points.
+const ICON_SIZE: f32 = 16.0;
+
+/// What the inline curve editor reports back: the edited curve when it changed this
+/// frame, and whether the pop-out icon was clicked (a request to open the larger window).
+pub(crate) struct InlineCurveResult {
+    /// The edited curve when a point moved, was added, or removed this frame.
+    pub changed: Option<Curve>,
+    /// True on the frame the corner pop-out icon was clicked.
+    pub popout_clicked: bool,
+}
 
 /// Maps a unit-square point `(0..1, 0..1)` to a screen position in `rect`, with `y`
 /// pointing up (so `y = 1` is the top).
@@ -37,29 +48,38 @@ fn unit_from_screen(pos: egui::Pos2, rect: egui::Rect) -> (f32, f32) {
     )
 }
 
-/// Renders the editable curve at the inspector's compact inline size and returns the
-/// edited curve when it changed this frame. `histogram` (normalized bin heights over the
-/// `[0, 1]` domain) is drawn faintly behind the curve, so the transfer function can be
-/// shaped against where the input data actually sits (#15).
+/// Renders the editable curve at the inspector's compact inline size, with a corner
+/// pop-out icon. Returns the edited curve when it changed this frame and whether the
+/// pop-out icon was clicked. `histogram` (normalized bin heights over the `[0, 1]`
+/// domain) is drawn faintly behind the curve, so the transfer function can be shaped
+/// against where the input data actually sits (#15).
 pub(crate) fn curve_editor(
     ui: &mut egui::Ui,
     curve: &Curve,
     histogram: Option<&[f32]>,
-) -> Option<Curve> {
+) -> InlineCurveResult {
     let size = egui::vec2(ui.available_width().min(MAX_WIDTH), HEIGHT);
-    curve_editor_sized(ui, curve, histogram, size, false)
+    let mut popout = false;
+    let changed = curve_editor_sized(ui, curve, histogram, size, false, Some(&mut popout));
+    InlineCurveResult {
+        changed,
+        popout_clicked: popout,
+    }
 }
 
 /// Renders the editable curve into a rect of `size`, used both for the inline inspector
 /// widget and the larger pop-out window. With `show_readout`, the coordinates of the
 /// hovered or dragged control point are drawn in the corner, so the bigger window can be
-/// precise; the compact inline view leaves it off to stay uncluttered.
+/// precise; the compact inline view leaves it off to stay uncluttered. When `popout` is
+/// `Some`, a pop-out icon is drawn in the top-right corner and its click is reported
+/// through the flag; the window itself passes `None` (no nested pop-out).
 pub(crate) fn curve_editor_sized(
     ui: &mut egui::Ui,
     curve: &Curve,
     histogram: Option<&[f32]>,
     size: egui::Vec2,
     show_readout: bool,
+    popout: Option<&mut bool>,
 ) -> Option<Curve> {
     let mut points: Vec<(f32, f32)> = curve.points().to_vec();
     if points.len() < 2 {
@@ -154,6 +174,23 @@ pub(crate) fn curve_editor_sized(
         }
     }
 
+    // The corner pop-out icon (inline editor only), interacted here so it sits on top of
+    // the background and takes its own click before the empty-space "add a point" test
+    // below sees it. Drawn later, over the curve.
+    let icon_rect = egui::Rect::from_min_size(
+        egui::pos2(rect.right() - ICON_SIZE - 4.0, rect.top() + 4.0),
+        egui::Vec2::splat(ICON_SIZE),
+    );
+    let icon_resp = popout.is_some().then(|| {
+        ui.interact(icon_rect, bg.id.with("popout"), egui::Sense::click())
+            .on_hover_text("Open in a larger window")
+    });
+    if let (Some(flag), Some(resp)) = (popout, icon_resp.as_ref())
+        && resp.clicked()
+    {
+        *flag = true;
+    }
+
     if let Some(i) = to_delete {
         points.remove(i);
         changed = true;
@@ -209,7 +246,48 @@ pub(crate) fn curve_editor_sized(
         painter.galley(pos + pad, galley, visuals.strong_text_color());
     }
 
+    // The pop-out icon on top of everything (inline editor only). Brightens on hover.
+    if let Some(resp) = &icon_resp {
+        let color = if resp.hovered() {
+            visuals.strong_text_color()
+        } else {
+            visuals.weak_text_color()
+        };
+        paint_popout_icon(&painter, icon_rect, color);
+    }
+
     changed.then(|| Curve::new(points))
+}
+
+/// Paints the standard "open externally" glyph into `rect`: a square with its top-right
+/// corner open and a diagonal arrow shooting out through the gap. Drawn from line
+/// segments so it needs no icon font and stays crisp at any size.
+fn paint_popout_icon(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
+    // Local unit coordinates (y down) mapped into the icon rect.
+    let p = |ux: f32, uy: f32| {
+        egui::pos2(
+            rect.left() + ux * rect.width(),
+            rect.top() + uy * rect.height(),
+        )
+    };
+    let stroke = egui::Stroke::new(1.5, color);
+    // The window square, drawn as an open polyline so the top-right corner is left open
+    // for the arrow: top edge from the gap leftward, down the left side, across the
+    // bottom, up the right side, stopping short of the corner.
+    painter.add(egui::Shape::line(
+        vec![
+            p(0.44, 0.26),
+            p(0.10, 0.26),
+            p(0.10, 0.90),
+            p(0.74, 0.90),
+            p(0.74, 0.56),
+        ],
+        stroke,
+    ));
+    // The diagonal arrow through the gap, with a symmetric corner arrowhead at the tip.
+    painter.line_segment([p(0.48, 0.52), p(0.92, 0.10)], stroke);
+    painter.line_segment([p(0.66, 0.10), p(0.92, 0.10)], stroke);
+    painter.line_segment([p(0.92, 0.10), p(0.92, 0.36)], stroke);
 }
 
 #[cfg(test)]

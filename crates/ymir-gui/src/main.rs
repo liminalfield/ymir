@@ -1332,15 +1332,16 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
     let mut changed = false;
     for pspec in &spec.params {
         let current = param_ui::current_value(&params, pspec);
-        if let Some(new_value) = param_ui::edit(ui, pspec, &current, histogram.as_deref()) {
+        // The curve editor's corner pop-out icon (#70-style) reports through this flag,
+        // opening the larger, draggable window for this node's curve param.
+        let mut popout = false;
+        if let Some(new_value) =
+            param_ui::edit(ui, pspec, &current, histogram.as_deref(), &mut popout)
+        {
             params.insert(pspec.name.clone(), new_value);
             changed = true;
         }
-        // A curve param gets a button to open the larger, draggable editor window, where
-        // there is room to shape precisely and a coordinate readout (#70-style pop-out).
-        if matches!(pspec.kind, ymir_core::ParamKind::Curve)
-            && ui.small_button("Edit in window").clicked()
-        {
+        if popout {
             state.curve_popout = Some(CurvePopout {
                 node: handle,
                 param: pspec.name.clone(),
@@ -2373,7 +2374,7 @@ fn curve_popout_window(ctx: &egui::Context, state: &mut AppState) {
             let side = ui.available_width().clamp(280.0, 720.0);
             let size = egui::vec2(side, (side * 0.8).max(240.0));
             if let Some(new_curve) =
-                curve_edit::curve_editor_sized(ui, &curve, histogram.as_deref(), size, true)
+                curve_edit::curve_editor_sized(ui, &curve, histogram.as_deref(), size, true, None)
             {
                 let mut next = params.clone();
                 next.insert(popout.param.clone(), ParamValue::Curve(new_curve));

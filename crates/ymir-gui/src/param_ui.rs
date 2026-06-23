@@ -104,6 +104,7 @@ pub(crate) fn edit(
     spec: &ParamSpec,
     current: &ParamValue,
     histogram: Option<&[f32]>,
+    popout: &mut bool,
 ) -> Option<ParamValue> {
     let name = spec.name.as_str();
     match (widget_for(spec), current) {
@@ -216,7 +217,9 @@ pub(crate) fn edit(
         }
         (Widget::CurveEditor, ParamValue::Curve(curve)) => {
             ui.label(name);
-            crate::curve_edit::curve_editor(ui, curve, histogram).map(ParamValue::Curve)
+            let result = crate::curve_edit::curve_editor(ui, curve, histogram);
+            *popout = result.popout_clicked;
+            result.changed.map(ParamValue::Curve)
         }
         _ => {
             ui.horizontal(|ui| {
