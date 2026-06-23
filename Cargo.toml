@@ -28,3 +28,9 @@ eframe = { version = "0.34", default-features = false, features = [
 [workspace.lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
+
+# egui-snarl is vendored with a one-line change (pan on middle-mouse, freeing left-drag
+# for the canvas marquee, #84). The change and the re-apply-on-upgrade workflow are in
+# patches/. The version in vendor/egui-snarl/Cargo.toml must match the pinned `=0.10.0`.
+[patch.crates-io]
+egui-snarl = { path = "vendor/egui-snarl" }

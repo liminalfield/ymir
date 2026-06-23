@@ -1,0 +1,22 @@
+--- a/src/ui.rs
++++ b/src/ui.rs
+@@ -3,7 +3,8 @@
+ use std::{collections::HashMap, hash::Hash};
+ 
+ use egui::{
+-    Align, Color32, CornerRadius, Frame, Id, LayerId, Layout, Margin, Modifiers, PointerButton,
++    Align, Color32, CornerRadius, DragPanButtons, Frame, Id, LayerId, Layout, Margin, Modifiers,
++    PointerButton,
+     Pos2, Rect, Scene, Sense, Shape, Stroke, StrokeKind, Style, Ui, UiBuilder, UiKind, UiStackInfo,
+     Vec2,
+     collapsing_header::paint_default_icon,
+@@ -991,6 +992,9 @@
+     let mut snarl_resp = ui.response();
+     Scene::new()
+         .zoom_range(min_scale..=max_scale)
++        // Ymir patch: pan on middle-mouse only, freeing left-drag on empty canvas for the
++        // app's own marquee box-select (#84). See patches/egui-snarl-middle-pan.patch.
++        .drag_pan_buttons(DragPanButtons::MIDDLE)
+         .register_pan_and_zoom(&ui, &mut snarl_resp, &mut to_global);
+ 
+     if snarl_resp.changed() {

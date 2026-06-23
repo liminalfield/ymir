@@ -738,8 +738,6 @@ dependencies = [
 [[package]]
 name = "egui-snarl"
 version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92c653b5af7844f50cc7a1f0e9b095845cee7c379702636f63ada519b8388a76"
 dependencies = [
  "egui",
  "egui-scale",

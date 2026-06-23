@@ -29,13 +29,14 @@ case "$mode" in
     ;;
 esac
 
-# List the Rust files to scan, NUL-safe, depending on mode.
+# List the Rust files to scan, NUL-safe, depending on mode. Vendored third-party crates
+# under vendor/ are excluded: they are not ours to hold to the no-shortcuts rule.
 changed_files() {
   if [ "$mode" = "--staged" ]; then
-    git diff --cached --name-only --diff-filter=ACM -z -- '*.rs'
+    git diff --cached --name-only --diff-filter=ACM -z -- '*.rs' ':!vendor/'
   else
-    git diff HEAD --name-only --diff-filter=ACM -z -- '*.rs'
-    git ls-files --others --exclude-standard -z -- '*.rs'
+    git diff HEAD --name-only --diff-filter=ACM -z -- '*.rs' ':!vendor/'
+    git ls-files --others --exclude-standard -z -- '*.rs' ':!vendor/'
   fi
 }
 
