@@ -247,6 +247,29 @@ struct AppState {
     /// Snapshot-based undo/redo over the session (#82). Edits are recorded at a settled
     /// moment (no drag or text edit in flight), so a continuous interaction is one step.
     history: EditHistory,
+    /// The session snapshot as of the last save or open: the "clean" point (#83).
+    /// `modified` is whether the current session differs from it.
+    saved_snapshot: project_file::ProjectFile,
+    /// Whether the session has unsaved changes (the current snapshot differs from
+    /// `saved_snapshot`). Recomputed at each settled frame; drives the dirty indicator
+    /// and the unsaved-changes prompt.
+    modified: bool,
+    /// A discarding action awaiting the unsaved-changes prompt's outcome (#83). `Some`
+    /// while the prompt is open; the action runs once the user chooses Save or Discard.
+    pending_action: Option<PendingAction>,
+    /// Set once the user has confirmed quitting (saved or discarded), so the next window
+    /// close request is allowed through instead of re-raising the prompt (#83).
+    allow_close: bool,
+}
+
+/// An action that would discard unsaved changes, deferred behind the unsaved-changes
+/// prompt until the user resolves it (#83).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PendingAction {
+    /// Open another project (prompts for a file once resolved).
+    Open,
+    /// Close the app window (quit).
+    Quit,
 }
 
 /// The node-rename dialog (#61): edits a node's display-name override.
@@ -266,14 +289,10 @@ impl AppState {
         // view on the first render (the same one-shot the open path uses), so its
         // placement does not depend on the canvas's initial transform.
         let (graph, snarl) = starter::starter_graph();
-        // Anchor the undo history at this initial session, so the first edit records a
-        // step back to the starter.
-        let history = EditHistory::new(project_file::ProjectFile::capture(
-            &graph,
-            &snarl,
-            0,
-            DEFAULT_WORLD_EXTENT,
-        ));
+        // Anchor the undo history and the clean point at this initial session, so the
+        // first edit records an undo step and marks the session modified.
+        let initial = project_file::ProjectFile::capture(&graph, &snarl, 0, DEFAULT_WORLD_EXTENT);
+        let history = EditHistory::new(initial.clone());
         Self {
             graph,
             snarl,
@@ -298,6 +317,10 @@ impl AppState {
             frame_to_graph_request: false,
             status: None,
             history,
+            saved_snapshot: initial,
+            modified: false,
+            pending_action: None,
+            allow_close: false,
         }
     }
 
@@ -322,8 +345,10 @@ impl AppState {
         self.frame_to_graph_request = true;
         self.status = Some(format!("Opened {}", path.display()));
         self.project_path = Some(path);
-        // Undo must not reach back across an Open into the previous project.
+        // Undo must not reach back across an Open into the previous project, and the
+        // freshly opened session is clean.
         self.reset_history();
+        self.mark_clean();
     }
 
     /// A snapshot of the current session (graph, canvas positions, world settings),
@@ -337,6 +362,13 @@ impl AppState {
     fn reset_history(&mut self) {
         let snapshot = self.snapshot();
         self.history.reset(snapshot);
+    }
+
+    /// Marks the session saved: the current snapshot becomes the clean point, so it
+    /// reads as unmodified until the next edit (#83). Called on save, open, and default.
+    fn mark_clean(&mut self) {
+        self.saved_snapshot = self.snapshot();
+        self.modified = false;
     }
 
     /// Restores a session snapshot from undo/redo: swaps in its graph, canvas, and world
@@ -393,6 +425,9 @@ impl AppState {
         let busy = ctx.input(|i| i.pointer.any_down()) || ctx.egui_wants_keyboard_input();
         if !busy {
             let snapshot = self.snapshot();
+            // Dirty state is a comparison to the clean point, so undoing back to the saved
+            // state clears the modified flag (#83).
+            self.modified = snapshot != self.saved_snapshot;
             self.history.record(&snapshot);
         }
     }
@@ -607,7 +642,7 @@ fn menu_bar_pane(ui: &mut egui::Ui, state: &mut AppState) {
     egui::MenuBar::new().ui(ui, |ui| {
         ui.menu_button("File", |ui| {
             if ui.button("Open...").clicked() {
-                open_project(state);
+                request_open(state);
                 ui.close();
             }
             if ui.button("Save").clicked() {
@@ -649,6 +684,20 @@ fn menu_bar_pane(ui: &mut egui::Ui, state: &mut AppState) {
         ui.menu_button("Help", |ui| {
             ui.weak("(empty)");
         });
+        // Persistent file indicator: the project name (or "untitled"), with a dot when
+        // there are unsaved changes (#83).
+        ui.separator();
+        let name = state
+            .project_path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "untitled".to_string());
+        ui.weak(if state.modified {
+            format!("{name} •")
+        } else {
+            name
+        });
         if let Some(status) = &state.status {
             ui.separator();
             ui.weak(status);
@@ -659,6 +708,82 @@ inventory::submit! { PaneKind { id: "menu-bar", draw: menu_bar_pane } }
 
 /// File filter shared by the open and save dialogs.
 const PROJECT_EXTENSIONS: &[&str] = &["ymir", "json"];
+
+/// Begins opening another project, guarded by the unsaved-changes prompt (#83): with
+/// unsaved changes it defers to the prompt, otherwise it opens straight away.
+fn request_open(state: &mut AppState) {
+    if state.modified {
+        state.pending_action = Some(PendingAction::Open);
+    } else {
+        open_project(state);
+    }
+}
+
+/// The user's choice in the unsaved-changes prompt.
+enum UnsavedChoice {
+    Save,
+    SaveAs,
+    Discard,
+    Cancel,
+}
+
+/// Draws the unsaved-changes prompt while a discarding action is pending (#83), and
+/// applies the choice: Save (or Save As) then carry out the action, Discard and carry it
+/// out, or Cancel and stay. A failed or cancelled save aborts the action so no changes
+/// are lost. A no-op when nothing is pending.
+fn unsaved_changes_dialog(ctx: &egui::Context, state: &mut AppState) {
+    let Some(action) = state.pending_action else {
+        return;
+    };
+    let mut choice = None;
+    egui::Window::new("Unsaved changes")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.label("This project has unsaved changes.");
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui.button("Save").clicked() {
+                    choice = Some(UnsavedChoice::Save);
+                }
+                if ui.button("Save As...").clicked() {
+                    choice = Some(UnsavedChoice::SaveAs);
+                }
+                if ui.button("Discard").clicked() {
+                    choice = Some(UnsavedChoice::Discard);
+                }
+                if ui.button("Cancel").clicked() {
+                    choice = Some(UnsavedChoice::Cancel);
+                }
+            });
+        });
+
+    // Whether to carry out the pending action. A save must actually write; a cancelled
+    // Save As or a write error keeps the changes and aborts, so nothing is lost.
+    let proceed = match choice {
+        None => return, // still open, no choice yet
+        Some(UnsavedChoice::Cancel) => {
+            state.pending_action = None;
+            return;
+        }
+        Some(UnsavedChoice::Discard) => true,
+        Some(UnsavedChoice::Save) => save_project(state, state.project_path.clone()),
+        Some(UnsavedChoice::SaveAs) => save_project(state, None),
+    };
+    state.pending_action = None;
+    if !proceed {
+        return;
+    }
+    match action {
+        PendingAction::Open => open_project(state),
+        PendingAction::Quit => {
+            // Allow the close that follows through, then request it.
+            state.allow_close = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+}
 
 /// Prompts for a project file and opens it (#75). A cancelled dialog is a no-op; a
 /// failed read or parse leaves the current project untouched and reports the reason
@@ -677,11 +802,14 @@ fn open_project(state: &mut AppState) {
 }
 
 /// Saves the project to `path`, or prompts for one (Save As) when `path` is `None`.
-/// On success the path becomes the session's project path so a later `Save` reuses it.
-fn save_project(state: &mut AppState, path: Option<std::path::PathBuf>) {
+/// On success the path becomes the session's project path so a later `Save` reuses it,
+/// and the session is marked clean. Returns whether the project was written (a cancelled
+/// Save As dialog or a write error returns `false`), so the caller can decide whether a
+/// pending discard action is safe to proceed.
+fn save_project(state: &mut AppState, path: Option<std::path::PathBuf>) -> bool {
     let path = match path.or_else(prompt_save_path) {
         Some(path) => path,
-        None => return,
+        None => return false,
     };
     let file = project_file::ProjectFile::capture(
         &state.graph,
@@ -693,8 +821,13 @@ fn save_project(state: &mut AppState, path: Option<std::path::PathBuf>) {
         Ok(()) => {
             state.status = Some(format!("Saved {}", path.display()));
             state.project_path = Some(path);
+            state.mark_clean();
+            true
         }
-        Err(err) => state.status = Some(format!("Could not save {}: {err}", path.display())),
+        Err(err) => {
+            state.status = Some(format!("Could not save {}: {err}", path.display()));
+            false
+        }
     }
 }
 
@@ -802,8 +935,9 @@ fn apply_default(state: &mut AppState) {
             state.seed = restored.seed;
             state.world_extent = restored.world_extent;
             state.frame_to_graph_request = true;
-            // Anchor undo at the default, not the starter it replaced.
+            // Anchor undo and the clean point at the default, not the starter it replaced.
             state.reset_history();
+            state.mark_clean();
         }
         Err(err) => {
             state.status = Some(format!("Default startup graph could not be loaded: {err}"));
@@ -1827,6 +1961,19 @@ impl eframe::App for YmirApp {
         // Ctrl+Z keeps editing text there instead of undoing the graph.
         handle_undo_shortcuts(ui.ctx(), &mut self.state);
         mount(&default_layout(), ui, &mut self.state);
+        // Intercept a window close with unsaved changes: cancel it and raise the prompt
+        // (#83). An already-confirmed close (allow_close) or a clean session goes through.
+        if ui.ctx().input(|i| i.viewport().close_requested())
+            && self.state.modified
+            && !self.state.allow_close
+        {
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.state.pending_action = Some(PendingAction::Quit);
+        }
+        // The unsaved-changes prompt draws on top of the panes when a discard action is
+        // pending (#83).
+        unsaved_changes_dialog(ui.ctx(), &mut self.state);
         // Record an edit at the end of the frame, once the panes have applied it.
         self.state.sync_history(ui.ctx());
     }
@@ -2154,6 +2301,25 @@ mod tests {
         assert_eq!(restored.graph.to_document(), graph.to_document());
         assert_eq!(restored.seed, 7);
         assert_eq!(restored.world_extent, 2048.0);
+    }
+
+    #[test]
+    fn opening_with_unsaved_changes_defers_to_the_prompt() {
+        // With unsaved changes, Open does not open immediately; it raises the prompt.
+        let mut state = AppState::new();
+        state.modified = true;
+        request_open(&mut state);
+        assert_eq!(state.pending_action, Some(PendingAction::Open));
+    }
+
+    #[test]
+    fn mark_clean_resets_the_modified_state() {
+        let mut state = AppState::new();
+        state.modified = true;
+        state.mark_clean();
+        assert!(!state.modified);
+        // The clean point now equals the current session, so it reads as unmodified.
+        assert_eq!(state.saved_snapshot, state.snapshot());
     }
 
     #[test]
