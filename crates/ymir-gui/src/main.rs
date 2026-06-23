@@ -11,8 +11,8 @@
 use std::collections::HashSet;
 
 use eframe::egui;
-use egui_snarl::Snarl;
 use egui_snarl::ui::SnarlWidget;
+use egui_snarl::{NodeId as SnarlNodeId, Snarl};
 use ymir_core::registry;
 use ymir_core::{EvalRequest, Graph, NodeId, ParamValue, Region};
 use ymir_nodes::{CategoryDef, categories, find_category, tr};
@@ -521,6 +521,34 @@ impl AppState {
     fn clear_selection(&mut self) {
         self.selection.clear();
         self.primary = None;
+    }
+
+    /// Selects every node in the graph (Ctrl/Cmd-A). Keeps the current primary if it is
+    /// still a node, otherwise picks an arbitrary one.
+    fn select_all(&mut self) {
+        self.selection = self.snarl.node_ids().map(|(_, &h)| h).collect();
+        if self.primary.is_none_or(|p| !self.selection.contains(&p)) {
+            self.primary = self.selection.iter().copied().next();
+        }
+    }
+
+    /// Deletes every selected node from the graph and canvas (the Delete key), then
+    /// clears the selection.
+    fn delete_selection(&mut self) {
+        if self.selection.is_empty() {
+            return;
+        }
+        // Collect the selected nodes' snarl ids first, since removing mutates the snarl.
+        let ids: Vec<SnarlNodeId> = self
+            .snarl
+            .node_ids()
+            .filter(|(_, h)| self.selection.contains(*h))
+            .map(|(id, _)| id)
+            .collect();
+        for id in ids {
+            canvas::remove_snarl_node(&mut self.graph, &mut self.snarl, id);
+        }
+        self.clear_selection();
     }
 
     /// The node whose output the 2D preview shows: the pinned node when one is set
@@ -2145,7 +2173,7 @@ impl eframe::App for YmirApp {
         // Undo/redo shortcuts run before the panes draw, so a restore is reflected in
         // this frame's render (#82). They are suppressed while a text field has focus, so
         // Ctrl+Z keeps editing text there instead of undoing the graph.
-        handle_undo_shortcuts(ui.ctx(), &mut self.state);
+        handle_shortcuts(ui.ctx(), &mut self.state);
         mount(&default_layout(), ui, &mut self.state);
         // Intercept a window close with unsaved changes: cancel it and raise the prompt
         // (#83). An already-confirmed close (allow_close) or a clean session goes through.
@@ -2165,10 +2193,10 @@ impl eframe::App for YmirApp {
     }
 }
 
-/// Applies the undo/redo keyboard shortcuts: Ctrl/Cmd+Z to undo, Ctrl/Cmd+Shift+Z or
-/// Ctrl/Cmd+Y to redo. A no-op while a text field has keyboard focus, so it does not
-/// steal that field's own editing shortcuts.
-fn handle_undo_shortcuts(ctx: &egui::Context, state: &mut AppState) {
+/// Applies the global keyboard shortcuts: undo/redo (Ctrl/Cmd+Z, +Shift or +Y),
+/// Select All (Ctrl/Cmd+A), and Delete/Backspace to remove the selection. A no-op while
+/// a text field has keyboard focus, so it never steals that field's own editing keys.
+fn handle_shortcuts(ctx: &egui::Context, state: &mut AppState) {
     if ctx.egui_wants_keyboard_input() {
         return;
     }
@@ -2176,11 +2204,19 @@ fn handle_undo_shortcuts(ctx: &egui::Context, state: &mut AppState) {
     let undo = KeyboardShortcut::new(Modifiers::COMMAND, Key::Z);
     let redo_z = KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
     let redo_y = KeyboardShortcut::new(Modifiers::COMMAND, Key::Y);
+    let select_all = KeyboardShortcut::new(Modifiers::COMMAND, Key::A);
     // Check redo first: its Shift+Z would otherwise also satisfy the plain-Z undo.
     if ctx.input_mut(|i| i.consume_shortcut(&redo_z) || i.consume_shortcut(&redo_y)) {
         state.redo();
     } else if ctx.input_mut(|i| i.consume_shortcut(&undo)) {
         state.undo();
+    }
+    if ctx.input_mut(|i| i.consume_shortcut(&select_all)) {
+        state.select_all();
+    }
+    // Delete and Backspace both remove the selected nodes.
+    if ctx.input(|i| i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace)) {
+        state.delete_selection();
     }
 }
 
@@ -2559,6 +2595,29 @@ mod tests {
         assert_eq!(state.selection.len(), 1);
         assert!(state.selection.contains(&9));
         assert_eq!(state.primary, Some(9));
+    }
+
+    #[test]
+    fn select_all_then_delete_clears_the_graph() {
+        let mut state = AppState::new(); // the starter chain: 3 nodes
+        state.select_all();
+        assert_eq!(state.selection.len(), 3);
+        assert!(state.primary.is_some());
+
+        state.delete_selection();
+        assert_eq!(state.graph.node_count(), 0);
+        assert!(state.selection.is_empty());
+        assert!(state.primary.is_none());
+    }
+
+    #[test]
+    fn delete_selection_removes_only_selected_nodes() {
+        let mut state = AppState::new(); // 3 nodes
+        let one = state.snarl.node_ids().next().map(|(_, &h)| h).unwrap();
+        state.select_only(one);
+        state.delete_selection();
+        assert_eq!(state.graph.node_count(), 2);
+        assert!(state.selection.is_empty());
     }
 
     #[test]
