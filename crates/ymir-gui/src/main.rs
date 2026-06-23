@@ -37,7 +37,10 @@ mod build;
 mod project_file;
 // The built-in starter graph a fresh session opens with (#76).
 mod starter;
+// Snapshot-based undo/redo over the session (#82).
+mod history;
 use build::BuildRunner;
+use history::EditHistory;
 
 /// Resolution of the interactive 2D preview. Low for responsiveness; it is an
 /// approximation of the target-resolution build, never equal to it (erosion is
@@ -241,6 +244,9 @@ struct AppState {
     /// A transient status line shown in the menu bar (e.g. the result of a save or
     /// open). Replaced by the next action.
     status: Option<String>,
+    /// Snapshot-based undo/redo over the session (#82). Edits are recorded at a settled
+    /// moment (no drag or text edit in flight), so a continuous interaction is one step.
+    history: EditHistory,
 }
 
 /// The node-rename dialog (#61): edits a node's display-name override.
@@ -260,6 +266,14 @@ impl AppState {
         // view on the first render (the same one-shot the open path uses), so its
         // placement does not depend on the canvas's initial transform.
         let (graph, snarl) = starter::starter_graph();
+        // Anchor the undo history at this initial session, so the first edit records a
+        // step back to the starter.
+        let history = EditHistory::new(project_file::ProjectFile::capture(
+            &graph,
+            &snarl,
+            0,
+            DEFAULT_WORLD_EXTENT,
+        ));
         Self {
             graph,
             snarl,
@@ -283,6 +297,7 @@ impl AppState {
             project_path: None,
             frame_to_graph_request: false,
             status: None,
+            history,
         }
     }
 
@@ -307,6 +322,79 @@ impl AppState {
         self.frame_to_graph_request = true;
         self.status = Some(format!("Opened {}", path.display()));
         self.project_path = Some(path);
+        // Undo must not reach back across an Open into the previous project.
+        self.reset_history();
+    }
+
+    /// A snapshot of the current session (graph, canvas positions, world settings),
+    /// the unit the undo history and the project file both work in.
+    fn snapshot(&self) -> project_file::ProjectFile {
+        project_file::ProjectFile::capture(&self.graph, &self.snarl, self.seed, self.world_extent)
+    }
+
+    /// Re-anchors the undo history at the current session and clears its stacks, after
+    /// the session is replaced wholesale (open a project, load the default).
+    fn reset_history(&mut self) {
+        let snapshot = self.snapshot();
+        self.history.reset(snapshot);
+    }
+
+    /// Restores a session snapshot from undo/redo: swaps in its graph, canvas, and world
+    /// settings, keeping the current pan/zoom (no reframe) and dropping any selection or
+    /// pin that the restored graph no longer contains. The history baseline already
+    /// tracks this snapshot, so the end-of-frame record sees no change.
+    fn apply_snapshot(&mut self, snapshot: &project_file::ProjectFile) {
+        match snapshot.restore() {
+            Ok(restored) => {
+                self.graph = restored.graph;
+                self.snarl = restored.snarl;
+                self.seed = restored.seed;
+                self.world_extent = restored.world_extent;
+                self.selected = self
+                    .selected
+                    .filter(|&h| self.graph.node_id_of(h).is_some());
+                self.preview_pin = self
+                    .preview_pin
+                    .filter(|&h| self.graph.node_id_of(h).is_some());
+                self.node_menu = None;
+                self.rename = None;
+            }
+            // A snapshot we captured ourselves cannot fail to restore; surface it rather
+            // than swallow it if the impossible happens.
+            Err(err) => self.status = Some(format!("Undo failed: {err}")),
+        }
+    }
+
+    /// Steps the session back one undo step, if any.
+    fn undo(&mut self) {
+        if let Some(snapshot) = self.history.undo() {
+            self.apply_snapshot(&snapshot);
+            self.status = Some("Undo".to_string());
+        }
+    }
+
+    /// Steps the session forward one redo step, if any.
+    fn redo(&mut self) {
+        if let Some(snapshot) = self.history.redo() {
+            self.apply_snapshot(&snapshot);
+            self.status = Some("Redo".to_string());
+        }
+    }
+
+    /// Records an undo step at a settled moment. Called once per frame after the panes
+    /// have applied this frame's edits. While a pointer drag or a text edit is in flight
+    /// the snapshot changes every frame, and recording then would make one step per
+    /// frame; holding until the interaction settles coalesces it into a single step.
+    /// `record` is a no-op when nothing changed, so a settled frame with no edit (or one
+    /// just after an undo) costs only a comparison. This also catches keyboard-only edits,
+    /// which never register as a pointer interaction. (If the per-settled-frame snapshot
+    /// ever shows up in a profile on large graphs, gate it on a cheap content hash.)
+    fn sync_history(&mut self, ctx: &egui::Context) {
+        let busy = ctx.input(|i| i.pointer.any_down()) || ctx.egui_wants_keyboard_input();
+        if !busy {
+            let snapshot = self.snapshot();
+            self.history.record(&snapshot);
+        }
     }
 
     /// Whether `handle` resolves to a live node that produces an output, so it can be
@@ -537,7 +625,20 @@ fn menu_bar_pane(ui: &mut egui::Ui, state: &mut AppState) {
             }
         });
         ui.menu_button("Edit", |ui| {
-            ui.weak("(empty)");
+            if ui
+                .add_enabled(state.history.can_undo(), egui::Button::new("Undo"))
+                .clicked()
+            {
+                state.undo();
+                ui.close();
+            }
+            if ui
+                .add_enabled(state.history.can_redo(), egui::Button::new("Redo"))
+                .clicked()
+            {
+                state.redo();
+                ui.close();
+            }
         });
         ui.menu_button("View", |ui| {
             ui.checkbox(&mut state.thumbnails_enabled, "Node thumbnails");
@@ -701,6 +802,8 @@ fn apply_default(state: &mut AppState) {
             state.seed = restored.seed;
             state.world_extent = restored.world_extent;
             state.frame_to_graph_request = true;
+            // Anchor undo at the default, not the starter it replaced.
+            state.reset_history();
         }
         Err(err) => {
             state.status = Some(format!("Default startup graph could not be loaded: {err}"));
@@ -1719,7 +1822,32 @@ impl YmirApp {
 
 impl eframe::App for YmirApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Undo/redo shortcuts run before the panes draw, so a restore is reflected in
+        // this frame's render (#82). They are suppressed while a text field has focus, so
+        // Ctrl+Z keeps editing text there instead of undoing the graph.
+        handle_undo_shortcuts(ui.ctx(), &mut self.state);
         mount(&default_layout(), ui, &mut self.state);
+        // Record an edit at the end of the frame, once the panes have applied it.
+        self.state.sync_history(ui.ctx());
+    }
+}
+
+/// Applies the undo/redo keyboard shortcuts: Ctrl/Cmd+Z to undo, Ctrl/Cmd+Shift+Z or
+/// Ctrl/Cmd+Y to redo. A no-op while a text field has keyboard focus, so it does not
+/// steal that field's own editing shortcuts.
+fn handle_undo_shortcuts(ctx: &egui::Context, state: &mut AppState) {
+    if ctx.egui_wants_keyboard_input() {
+        return;
+    }
+    use egui::{Key, KeyboardShortcut, Modifiers};
+    let undo = KeyboardShortcut::new(Modifiers::COMMAND, Key::Z);
+    let redo_z = KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
+    let redo_y = KeyboardShortcut::new(Modifiers::COMMAND, Key::Y);
+    // Check redo first: its Shift+Z would otherwise also satisfy the plain-Z undo.
+    if ctx.input_mut(|i| i.consume_shortcut(&redo_z) || i.consume_shortcut(&redo_y)) {
+        state.redo();
+    } else if ctx.input_mut(|i| i.consume_shortcut(&undo)) {
+        state.undo();
     }
 }
 
