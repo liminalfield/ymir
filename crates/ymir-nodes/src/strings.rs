@@ -73,6 +73,13 @@ pub fn tr(key: &str) -> &str {
         "node-modifier.invert" => "Invert",
         "node-modifier.invert-desc" => "Flips the height layer (1 - height).",
 
+        // Domain Warp (spatial displacement).
+        "node-modifier.warp" => "Warp",
+        "node-modifier.warp-desc" => {
+            "Domain warp: pushes the height layer sideways by a noise field so straight \
+             features wander and regular shapes turn natural. Amount is in world units."
+        }
+
         // Blur (spatial smoothing).
         "node-modifier.blur" => "Blur",
         "node-modifier.blur-desc" => {

@@ -132,6 +132,14 @@ pub(crate) fn ridged_field(
     Field::new(width, height, region).with_layer(layers::HEIGHT, Arc::new(layer))
 }
 
+/// Samples raw fBm (roughly `[-1, 1]`) at the given coordinates, for callers that need
+/// the signed noise directly rather than a mapped `[0, 1]` height field (a domain-warp
+/// displacement, say). The base frequency is applied by the caller scaling the
+/// coordinates, exactly as [`fbm_field`] does, so `params.frequency` is not read here.
+pub(crate) fn fbm_sample(seed: u64, x: f32, y: f32, params: FbmParams) -> f32 {
+    fbm2(seed, x, y, params)
+}
+
 /// Sums Perlin octaves, returning a value in roughly `[-1, 1]`.
 fn fbm2(seed: u64, x: f32, y: f32, params: FbmParams) -> f32 {
     let mut frequency = 1.0_f32;

@@ -26,6 +26,7 @@ mod ridged;
 mod slope;
 mod strings;
 mod thermal;
+mod warp;
 
 pub use blend::Blend;
 pub use blur::Blur;
@@ -42,3 +43,4 @@ pub use ridged::Ridged;
 pub use slope::Slope;
 pub use strings::tr;
 pub use thermal::ThermalErosion;
+pub use warp::Warp;
