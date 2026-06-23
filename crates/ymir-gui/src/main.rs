@@ -8,6 +8,8 @@
 //! ([`preview`]) evaluates the selected node's output on a worker thread. All
 //! display strings resolve through `tr(key)`, so this crate holds no node prose.
 
+use std::collections::HashSet;
+
 use eframe::egui;
 use egui_snarl::Snarl;
 use egui_snarl::ui::SnarlWidget;
@@ -191,10 +193,13 @@ struct AppState {
     /// The canvas's pan/zoom view from the last frame, for placing new nodes in
     /// view. `None` until the canvas has drawn once.
     canvas_view: Option<CanvasView>,
-    /// The node selected on the canvas (its `stable_id`), whose parameters the
-    /// inspector edits. Refreshed each frame from the canvas selection. Drives the
-    /// preview only when no node is pinned (see `preview_pin`).
-    selected: Option<Handle>,
+    /// The set of nodes selected on the canvas (their `stable_id`s), highlighted there
+    /// and acted on together by Delete and the like (#84).
+    selection: HashSet<Handle>,
+    /// The primary (last-clicked) selected node, whose parameters the inspector edits and
+    /// whose output drives the preview when no node is pinned (see `preview_pin`). Kept in
+    /// sync with `selection`: it is always a member of the set, or `None` when it is empty.
+    primary: Option<Handle>,
     /// The node pinned as the preview target, if any (GUI view-state, not core graph
     /// data — issue #39). When set and still previewable, the 2D preview shows this
     /// node instead of the selection, so selection can move upstream to edit while the
@@ -305,7 +310,8 @@ impl AppState {
             graph,
             snarl,
             canvas_view: None,
-            selected: None,
+            selection: HashSet::new(),
+            primary: None,
             seed: 0,
             preview: PreviewEngine::new(),
             thumbnails: ThumbnailEngine::new(),
@@ -346,7 +352,7 @@ impl AppState {
         self.snarl = restored.snarl;
         self.seed = restored.seed;
         self.world_extent = restored.world_extent;
-        self.selected = None;
+        self.clear_selection();
         self.preview_pin = None;
         self.node_menu = None;
         self.rename = None;
@@ -368,7 +374,7 @@ impl AppState {
         self.snarl = snarl;
         self.seed = seed;
         self.world_extent = world_extent;
-        self.selected = None;
+        self.clear_selection();
         self.preview_pin = None;
         self.node_menu = None;
         self.rename = None;
@@ -432,9 +438,9 @@ impl AppState {
                 self.snarl = restored.snarl;
                 self.seed = restored.seed;
                 self.world_extent = restored.world_extent;
-                self.selected = self
-                    .selected
-                    .filter(|&h| self.graph.node_id_of(h).is_some());
+                self.selection
+                    .retain(|&h| self.graph.node_id_of(h).is_some());
+                self.primary = self.primary.filter(|h| self.selection.contains(h));
                 self.preview_pin = self
                     .preview_pin
                     .filter(|&h| self.graph.node_id_of(h).is_some());
@@ -491,13 +497,39 @@ impl AppState {
             .is_some_and(|spec| !spec.outputs.is_empty())
     }
 
+    /// Selects exactly `handle`, replacing any prior selection, and makes it primary.
+    fn select_only(&mut self, handle: Handle) {
+        self.selection.clear();
+        self.selection.insert(handle);
+        self.primary = Some(handle);
+    }
+
+    /// Toggles `handle` in the selection (Ctrl-click): adding it makes it primary,
+    /// removing it moves primary to another selected node or clears it when empty.
+    fn toggle_selection(&mut self, handle: Handle) {
+        if self.selection.remove(&handle) {
+            if self.primary == Some(handle) {
+                self.primary = self.selection.iter().copied().next();
+            }
+        } else {
+            self.selection.insert(handle);
+            self.primary = Some(handle);
+        }
+    }
+
+    /// Clears the selection.
+    fn clear_selection(&mut self) {
+        self.selection.clear();
+        self.primary = None;
+    }
+
     /// The node whose output the 2D preview shows: the pinned node when one is set
-    /// and still previewable, otherwise the selected node. Decouples the preview
+    /// and still previewable, otherwise the primary selected node. Decouples the preview
     /// target from selection (#39).
     fn preview_target(&self) -> Option<Handle> {
         self.preview_pin
             .filter(|&h| self.is_previewable(h))
-            .or_else(|| self.selected.filter(|&h| self.is_previewable(h)))
+            .or_else(|| self.primary.filter(|&h| self.is_previewable(h)))
     }
 }
 
@@ -1116,9 +1148,10 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 let pos = spawn_pos(state.canvas_view, state.graph.node_count());
                 if let Some(id) =
                     canvas::add_node(&mut state.graph, &mut state.snarl, entry.type_id, pos)
+                    && let Some(handle) = state.graph.stable_id(id)
                 {
                     // Select the new node so the inspector shows it immediately (#62).
-                    state.selected = state.graph.stable_id(id);
+                    state.select_only(handle);
                 }
             }
         }
@@ -1179,9 +1212,9 @@ inventory::submit! { PaneKind { id: "params", draw: params_pane } }
 
 /// The selected node's inspector: its display-name override and parameter widgets.
 fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
-    // Resolve the selected handle to a live node; nothing selected (or it was
-    // deleted) shows a hint, not an error.
-    let Some(id) = state.selected.and_then(|h| state.graph.node_id_of(h)) else {
+    // The inspector edits the primary (last-clicked) selected node; nothing selected (or
+    // it was deleted) shows a hint, not an error.
+    let Some(id) = state.primary.and_then(|h| state.graph.node_id_of(h)) else {
         ui.weak("Select a node to edit its parameters.");
         return;
     };
@@ -1220,7 +1253,7 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
     // an owned buffer so it does not borrow `state.preview` across the params write below.
     // `None` unless this node is the one being previewed, so the histogram matches.
     let histogram: Option<Vec<f32>> = state
-        .selected
+        .primary
         .and_then(|h| state.preview.input_histogram(h).map(|h| h.to_vec()));
 
     // Edit against a clone of the current params, then write back once if anything
@@ -1345,7 +1378,7 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // The preview shows the pinned node if one is set, else the selection. Only nodes
     // with an output qualify; evaluating an endpoint would run its side effect.
     let Some(target) = state.preview_target() else {
-        if state.selected.is_some() {
+        if state.primary.is_some() {
             ui.weak("This node has no output to preview.");
         } else {
             ui.weak("Select a node to preview its output.");
@@ -1597,9 +1630,10 @@ fn node_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
             MenuRow::Node(type_id) => {
                 let pos = view.graph_pos_finite(anchor);
                 if let Some(id) = canvas::add_node(&mut state.graph, &mut state.snarl, type_id, pos)
+                    && let Some(handle) = state.graph.stable_id(id)
                 {
                     // Select the new node so the inspector shows it immediately (#62).
-                    state.selected = state.graph.stable_id(id);
+                    state.select_only(handle);
                 }
                 state.node_menu = None;
             }
@@ -1652,6 +1686,14 @@ fn open_node_menu(anchor: egui::Pos2, view: CanvasView) -> NodeMenu {
         highlight: 0,
         focus_search: true,
     }
+}
+
+/// What a canvas click landed on, resolved during rendering (while the node rects are
+/// borrowed) and applied to the selection after the viewer borrow ends. A click on a
+/// node's collapse chevron yields no hit, so it toggles the node without selecting it.
+enum ClickHit {
+    Node(Handle),
+    Empty,
 }
 
 fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
@@ -1726,18 +1768,20 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         .sync(&state.graph, &visible, &thumb_request, now);
     state.thumbnails.poll(ui.ctx());
 
+    // The selection to highlight this frame, cloned so the click handling below can apply
+    // changes through the state after the disjoint borrow ends.
+    let selection = state.selection.clone();
     // Disjoint borrows: the viewer holds the graph while snarl is rendered. Both
     // are distinct fields of the state, so this split is sound.
     let AppState {
         graph,
         snarl,
-        selected,
         thumbnails,
         ..
     } = &mut *state;
     let mut viewer = canvas::GraphViewer {
         graph,
-        selected: *selected,
+        selection,
         node_rects: Vec::new(),
         to_global: egui::emath::TSTransform::IDENTITY,
         status,
@@ -1846,33 +1890,32 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 .then(|| i.pointer.interact_pos())
         })
         .flatten();
-    if let Some(screen_pos) = click
+    // Hit-test the click into a node body (excluding the collapse chevron) or empty
+    // canvas, while the viewer's node rects are still borrowed. The selection change is
+    // applied below, after the borrow, through the state.
+    let click_hit = click
         .filter(|_| !menu_open)
         .filter(|p| canvas_rect.contains(*p))
-    {
-        // Node rects are in the canvas's local space; map the screen click back into
-        // it through the inverse pan/zoom transform before hit-testing.
-        let pos = viewer.to_global.inverse() * screen_pos;
-        match viewer
-            .node_rects
-            .iter()
-            .find(|(_, rect)| rect.contains(pos))
-        {
-            Some((handle, rect)) => {
-                // The collapse chevron sits at the header's top-left and toggles the
-                // node; a click there must not also select. Exclude that corner.
-                let chevron = egui::Rect::from_min_size(
-                    rect.min,
-                    egui::Vec2::splat(ui.spacing().icon_width + 12.0),
-                );
-                if !chevron.contains(pos) {
-                    *selected = Some(*handle);
+        .and_then(|screen_pos| {
+            // Node rects are in the canvas's local space; map the screen click back into
+            // it through the inverse pan/zoom transform before hit-testing.
+            let pos = viewer.to_global.inverse() * screen_pos;
+            match viewer
+                .node_rects
+                .iter()
+                .find(|(_, rect)| rect.contains(pos))
+            {
+                Some((handle, rect)) => {
+                    // The collapse chevron toggles the node; a click there is not a select.
+                    let chevron = egui::Rect::from_min_size(
+                        rect.min,
+                        egui::Vec2::splat(ui.spacing().icon_width + 12.0),
+                    );
+                    (!chevron.contains(pos)).then_some(ClickHit::Node(*handle))
                 }
+                None => Some(ClickHit::Empty),
             }
-            // A click on empty canvas clears the selection.
-            None => *selected = None,
-        }
-    }
+        });
 
     // Keep the view as long as its rect is finite; a degenerate transform is handled
     // by CanvasView::center falling back to the screen centre, so placement stays
@@ -1884,11 +1927,28 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // subsequent pan/zoom (#65).
     state.pending_view = frame_all_fit.flatten();
 
-    // Apply a viewer-requested selection (e.g. a duplicate) after the click-selection
-    // above, so it wins (#61).
-    if let Some(handle) = select_after {
-        state.selected = Some(handle);
+    // Apply the click to the selection: a plain click selects one node (or clears on
+    // empty canvas), Ctrl/Cmd-click toggles a node in or out of the set (#84).
+    if let Some(hit) = click_hit {
+        let additive = ui.input(|i| i.modifiers.command);
+        match hit {
+            ClickHit::Node(handle) if additive => state.toggle_selection(handle),
+            ClickHit::Node(handle) => state.select_only(handle),
+            ClickHit::Empty if !additive => state.clear_selection(),
+            ClickHit::Empty => {}
+        }
     }
+    // A viewer-requested selection (e.g. a duplicate) wins over the click (#61).
+    if let Some(handle) = select_after {
+        state.select_only(handle);
+    }
+
+    // Keep the selection consistent with the graph: a node deleted this frame (e.g. via
+    // the context menu's Delete) is dropped from the set and the primary (#84).
+    state
+        .selection
+        .retain(|h| state.graph.node_id_of(*h).is_some());
+    state.primary = state.primary.filter(|h| state.selection.contains(h));
 
     // Apply a viewer-requested preview-pin change (context-menu Pin/Unpin, #39).
     if let Some(new_pin) = pin_request {
@@ -2317,20 +2377,20 @@ mod tests {
         assert_eq!(state.preview_target(), None);
 
         // A previewable selection is the target; an endpoint (no output) is not.
-        state.selected = Some(generator);
+        state.select_only(generator);
         assert_eq!(state.preview_target(), Some(generator));
-        state.selected = Some(endpoint);
+        state.select_only(endpoint);
         assert_eq!(state.preview_target(), None);
 
         // A valid pin wins over the selection.
         state.preview_pin = Some(generator);
-        state.selected = Some(endpoint);
+        state.select_only(endpoint);
         assert_eq!(state.preview_target(), Some(generator));
 
         // An invalid pin (an endpoint, or a missing node) is ignored, falling back to
         // the selection.
         state.preview_pin = Some(endpoint);
-        state.selected = Some(generator);
+        state.select_only(generator);
         assert_eq!(state.preview_target(), Some(generator));
         state.preview_pin = Some(99_999);
         assert_eq!(state.preview_target(), Some(generator));
@@ -2467,6 +2527,38 @@ mod tests {
         state.open_default();
         assert!(state.project_path.is_none());
         assert!(!state.modified);
+    }
+
+    #[test]
+    fn selection_set_and_primary_track_clicks() {
+        let mut state = AppState::new();
+        // A plain click selects exactly one node and makes it primary.
+        state.select_only(1);
+        assert!(state.selection.contains(&1));
+        assert_eq!(state.primary, Some(1));
+
+        // Ctrl-click adds another and makes it the primary.
+        state.toggle_selection(2);
+        assert!(state.selection.contains(&1) && state.selection.contains(&2));
+        assert_eq!(state.primary, Some(2));
+
+        // Ctrl-click the primary removes it; primary moves to a remaining member.
+        state.toggle_selection(2);
+        assert!(!state.selection.contains(&2));
+        assert_eq!(state.primary, Some(1));
+
+        // Removing the last selected node clears the primary.
+        state.toggle_selection(1);
+        assert!(state.selection.is_empty());
+        assert_eq!(state.primary, None);
+
+        // A plain click replaces the whole set.
+        state.toggle_selection(5);
+        state.toggle_selection(6);
+        state.select_only(9);
+        assert_eq!(state.selection.len(), 1);
+        assert!(state.selection.contains(&9));
+        assert_eq!(state.primary, Some(9));
     }
 
     #[test]

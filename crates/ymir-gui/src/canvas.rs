@@ -9,6 +9,8 @@
 //! accepted edges to core first, mutating snarl's wires only to mirror what core
 //! holds. Node add and delete sync to core the same way.
 
+use std::collections::HashSet;
+
 use eframe::egui::{self, Pos2};
 use egui_snarl::ui::{PinInfo, SnarlPin, SnarlViewer};
 use egui_snarl::{InPin, NodeId as SnarlNodeId, OutPin, Snarl};
@@ -117,8 +119,10 @@ pub(crate) type Handle = u64;
 /// graph before snarl is touched, so core stays the single source of truth.
 pub(crate) struct GraphViewer<'a> {
     pub(crate) graph: &'a mut Graph,
-    /// The currently selected node, for the header highlight. Input, read-only.
-    pub(crate) selected: Option<Handle>,
+    /// The set of selected nodes, for the header highlight. A per-frame copy, so the
+    /// canvas can apply selection changes through the state after this borrow. Input,
+    /// read-only.
+    pub(crate) selection: HashSet<Handle>,
     /// Each node's final rect with its handle, collected during rendering. These
     /// are in the canvas's local (graph) space, not screen space. The canvas
     /// resolves a plain click to a node from these after the frame, rather than
@@ -172,7 +176,7 @@ impl<'a> GraphViewer<'a> {
     fn for_test(graph: &'a mut Graph) -> Self {
         Self {
             graph,
-            selected: None,
+            selection: HashSet::new(),
             node_rects: Vec::new(),
             to_global: egui::emath::TSTransform::IDENTITY,
             status: None,
@@ -282,6 +286,29 @@ impl GraphViewer<'_> {
             }
         }
     }
+
+    /// Deletes `node`, or the whole selection when `node` is part of it (#84), from core
+    /// and snarl together. The caller prunes the stale handles from the app's selection
+    /// after the frame.
+    fn delete_node_or_selection(&mut self, node: SnarlNodeId, snarl: &mut Snarl<Handle>) {
+        let in_selection = snarl
+            .get_node(node)
+            .is_some_and(|h| self.selection.contains(h));
+        if in_selection {
+            // Collect the snarl ids of every selected node first, since removing mutates
+            // the snarl.
+            let ids: Vec<SnarlNodeId> = snarl
+                .node_ids()
+                .filter(|(_, h)| self.selection.contains(h))
+                .map(|(id, _)| id)
+                .collect();
+            for id in ids {
+                remove_snarl_node(self.graph, snarl, id);
+            }
+        } else {
+            remove_snarl_node(self.graph, snarl, node);
+        }
+    }
 }
 
 impl SnarlViewer<Handle> for GraphViewer<'_> {
@@ -308,7 +335,7 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
         // `final_node_rect`. Selection shows as bold accent text. `selectable(false)`
         // keeps the title from being text-selectable, so it shows the normal cursor
         // (not a text I-beam) and reads as a node title, not editable text.
-        let is_selected = handle.is_some() && handle == self.selected;
+        let is_selected = handle.is_some_and(|h| self.selection.contains(&h));
         let text = if is_selected {
             egui::RichText::new(title)
                 .strong()
@@ -582,8 +609,19 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
             self.disconnect_all(node, snarl);
             ui.close();
         }
-        if ui.button("Delete node").clicked() {
-            remove_snarl_node(self.graph, snarl, node);
+        // Delete the clicked node, or the whole selection when the clicked node is part
+        // of it (#84).
+        let selected_count = snarl
+            .get_node(node)
+            .filter(|h| self.selection.contains(h))
+            .map_or(0, |_| self.selection.len());
+        let delete_label = if selected_count > 1 {
+            format!("Delete {selected_count} nodes")
+        } else {
+            "Delete node".to_string()
+        };
+        if ui.button(delete_label).clicked() {
+            self.delete_node_or_selection(node, snarl);
             ui.close();
         }
     }
@@ -897,6 +935,52 @@ mod tests {
         assert_eq!(wires_into(&snarl, sb), 0);
         assert_eq!(wires_into(&snarl, sc), 0);
         assert_in_sync(&graph, &snarl);
+    }
+
+    #[test]
+    fn delete_removes_the_whole_selection_when_the_clicked_node_is_in_it() {
+        let mut graph = Graph::new();
+        let mut snarl = Snarl::<Handle>::new();
+        let a = add_node(&mut graph, &mut snarl, FBM, Pos2::ZERO).expect("a");
+        let b = add_node(&mut graph, &mut snarl, FBM, Pos2::ZERO).expect("b");
+        let c = add_node(&mut graph, &mut snarl, FBM, Pos2::ZERO).expect("c");
+        let (ha, hb, hc) = (
+            graph.stable_id(a).unwrap(),
+            graph.stable_id(b).unwrap(),
+            graph.stable_id(c).unwrap(),
+        );
+        let sa = snarl_id(&snarl, &graph, a);
+
+        // Select a and b; deleting via a (which is selected) removes both, leaving c.
+        {
+            let mut viewer = GraphViewer::for_test(&mut graph);
+            viewer.selection.insert(ha);
+            viewer.selection.insert(hb);
+            viewer.delete_node_or_selection(sa, &mut snarl);
+        }
+        assert!(graph.node_id_of(ha).is_none(), "selected a deleted");
+        assert!(graph.node_id_of(hb).is_none(), "selected b deleted");
+        assert!(graph.node_id_of(hc).is_some(), "unselected c survives");
+        assert_in_sync(&graph, &snarl);
+    }
+
+    #[test]
+    fn delete_on_an_unselected_node_removes_only_that_node() {
+        let mut graph = Graph::new();
+        let mut snarl = Snarl::<Handle>::new();
+        let a = add_node(&mut graph, &mut snarl, FBM, Pos2::ZERO).expect("a");
+        let b = add_node(&mut graph, &mut snarl, FBM, Pos2::ZERO).expect("b");
+        let (ha, hb) = (graph.stable_id(a).unwrap(), graph.stable_id(b).unwrap());
+        let sb = snarl_id(&snarl, &graph, b);
+
+        // a is selected, but the delete is invoked on b (not selected): only b goes.
+        {
+            let mut viewer = GraphViewer::for_test(&mut graph);
+            viewer.selection.insert(ha);
+            viewer.delete_node_or_selection(sb, &mut snarl);
+        }
+        assert!(graph.node_id_of(hb).is_none(), "clicked b deleted");
+        assert!(graph.node_id_of(ha).is_some(), "selected a untouched");
     }
 
     #[test]
