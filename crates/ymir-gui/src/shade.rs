@@ -11,13 +11,23 @@ use ymir_core::{Field, layers};
 /// How the height layer is shaded.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ShadeMode {
-    /// Height mapped to grayscale, auto-ranged to the field's actual extent so terrain
-    /// that ran outside `[0, 1]` is shown in full rather than clipped (matching the
-    /// export's auto-range).
+    /// Height mapped to grayscale, scaled per [`HeightScale`] (auto-ranged to the
+    /// field's extent, or a fixed `[0, 1]`).
     Height,
     /// Relief: each cell shaded by its surface normal under a fixed light, so height
     /// *changes* (slopes, carved valleys) are legible even when subtle (#40).
     Relief,
+}
+
+/// How Height shading maps values to grey (#83).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HeightScale {
+    /// Map the field's actual `[min, max]` to black/white. Always shows the shape, but
+    /// hides absolute amplitude: every field, tall or flat, fills the range.
+    Auto,
+    /// Map a fixed `[0, 1]` to black/white. Shows true height (a low field reads dark, a
+    /// tall one bright) and clips values outside `[0, 1]`.
+    Fixed,
 }
 
 /// Default relief light: from the upper-left, partway up (a conventional NW
@@ -47,21 +57,29 @@ fn relief_shade(gx: f32, gy: f32, light: [f32; 3]) -> f32 {
     RELIEF_AMBIENT + (1.0 - RELIEF_AMBIENT) * lambert
 }
 
-/// Builds an image from a field's `height` layer, in the chosen mode.
-pub(crate) fn field_to_image(field: &Field, mode: ShadeMode, light: [f32; 3]) -> egui::ColorImage {
+/// Builds an image from a field's `height` layer, in the chosen mode and (for Height)
+/// scale.
+pub(crate) fn field_to_image(
+    field: &Field,
+    mode: ShadeMode,
+    scale: HeightScale,
+    light: [f32; 3],
+) -> egui::ColorImage {
     match mode {
-        ShadeMode::Height => height_image(field),
+        ShadeMode::Height => height_image(field, scale),
         ShadeMode::Relief => relief_image(field, light),
     }
 }
 
-/// Height mapped to grayscale, auto-ranged to the field's actual `[min, max]` so the
-/// whole shape is visible even when height ran outside `[0, 1]`, rather than clipping
-/// to a flat white/black. This mirrors the export's auto-range, so the preview reads
-/// like the exported image. A flat field maps to a single tone.
-pub(crate) fn height_image(field: &Field) -> egui::ColorImage {
+/// Height mapped to grayscale over the chosen [`HeightScale`]: the field's actual
+/// `[min, max]` (Auto), or a fixed `[0, 1]` that shows true amplitude and clips
+/// out-of-range (Fixed). A flat field, or any zero-width range, maps to a single tone.
+pub(crate) fn height_image(field: &Field, scale: HeightScale) -> egui::ColorImage {
     let layer = field.layer_or(layers::HEIGHT, 0.0);
-    let (min, max) = layer.value_range();
+    let (min, max) = match scale {
+        HeightScale::Auto => layer.value_range(),
+        HeightScale::Fixed => (0.0, 1.0),
+    };
     let span = max - min;
     let mut rgba = Vec::with_capacity(layer.len() * 4);
     for &value in layer.as_slice() {
@@ -117,19 +135,19 @@ mod tests {
     }
 
     #[test]
-    fn height_image_auto_ranges_to_the_field_extent() {
+    fn auto_ranges_to_the_field_extent() {
         // A compressed range [0.4, 0.6] is stretched across the display: the min reads
         // black and the max white, so the shape is visible rather than near-uniform gray.
-        let img = height_image(&height_field(&[0.4, 0.6]));
+        let img = height_image(&height_field(&[0.4, 0.6]), HeightScale::Auto);
         assert_eq!(img.pixels[0].r(), 0);
         assert_eq!(img.pixels[1].r(), 255);
     }
 
     #[test]
-    fn height_image_shows_out_of_range_without_clipping() {
-        // Values below 0 and above 1 are no longer clamped to flat black/white: the
-        // extremes anchor the range and the middle stays distinct.
-        let img = height_image(&height_field(&[-0.5, 0.5, 2.0]));
+    fn auto_shows_out_of_range_without_clipping() {
+        // Values below 0 and above 1 are not clamped: the extremes anchor the range and
+        // the middle stays distinct.
+        let img = height_image(&height_field(&[-0.5, 0.5, 2.0]), HeightScale::Auto);
         assert_eq!(img.pixels[0].r(), 0); // -0.5 (min)
         assert_eq!(img.pixels[2].r(), 255); // 2.0 (max)
         let mid = img.pixels[1].r();
@@ -137,8 +155,19 @@ mod tests {
     }
 
     #[test]
-    fn height_image_of_a_flat_field_is_a_single_tone() {
-        let img = height_image(&height_field(&[0.7, 0.7, 0.7]));
+    fn fixed_shows_true_amplitude_and_clips() {
+        // Fixed maps [0, 1] to black/white regardless of the field: a field that only
+        // reaches 0.5 reads mid-grey (true amplitude, not stretched to white), and a
+        // value past 1 clips to white.
+        let img = height_image(&height_field(&[0.0, 0.5, 2.0]), HeightScale::Fixed);
+        assert_eq!(img.pixels[0].r(), 0); // 0.0
+        assert_eq!(img.pixels[1].r(), 128); // 0.5 stays mid-grey, not stretched
+        assert_eq!(img.pixels[2].r(), 255); // 2.0 clips
+    }
+
+    #[test]
+    fn a_flat_field_is_a_single_tone() {
+        let img = height_image(&height_field(&[0.7, 0.7, 0.7]), HeightScale::Auto);
         assert_eq!(img.pixels[0], img.pixels[1]);
         assert_eq!(img.pixels[1], img.pixels[2]);
     }

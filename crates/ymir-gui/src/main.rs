@@ -1278,9 +1278,10 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
         });
     });
 
-    // Row 2: shading toggle (relief makes subtle height changes legible, #40) and, in
-    // relief, the light dial inline.
+    // Row 2: shading toggle (relief makes subtle height changes legible, #40); in relief
+    // the light dial, in height the Auto/Fixed scale toggle; and the range readout (#83).
     let mut mode = state.preview.mode();
+    let mut scale = state.preview.scale();
     ui.horizontal(|ui| {
         // Reserve the dial's height in both modes so the image never jumps when
         // toggling Height/Relief.
@@ -1289,9 +1290,27 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
         ui.selectable_value(&mut mode, shade::ShadeMode::Relief, "Relief");
         if mode == shade::ShadeMode::Relief {
             state.preview.light_indicator(ui);
+        } else {
+            // Auto stretches the actual range (shape); Fixed maps [0, 1] (true
+            // amplitude, clips out of range).
+            ui.separator();
+            ui.selectable_value(&mut scale, shade::HeightScale::Auto, "Auto")
+                .on_hover_text("Stretch the field's actual range to black/white");
+            ui.selectable_value(&mut scale, shade::HeightScale::Fixed, "Fixed")
+                .on_hover_text("Map a fixed [0, 1]: true height, clips out of range");
+        }
+        // The field's actual min–max, right-aligned, so amplitude and out-of-range are
+        // visible as numbers whatever the display mode.
+        if let Some((lo, hi)) = state.preview.range() {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let strong = ui.visuals().strong_text_color();
+                ui.label(egui::RichText::new(format!("{lo:.2} – {hi:.2}")).color(strong))
+                    .on_hover_text("Actual value range of the previewed field");
+            });
         }
     });
     state.preview.set_mode(mode);
+    state.preview.set_scale(scale);
 
     // Submit a snapshot for off-thread evaluation if the output changed, collect any
     // result, and render — none of which blocks the UI thread.

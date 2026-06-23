@@ -17,7 +17,7 @@ use eframe::egui;
 use ymir_core::{CancelToken, EvalCache, EvalRequest, Graph};
 
 use crate::canvas::Handle;
-use crate::shade::height_image;
+use crate::shade::{HeightScale, height_image};
 
 /// Thumbnail evaluation resolution. Small enough that even erosion is cheap per node;
 /// the canvas only ever draws these scaled down into a node body.
@@ -262,7 +262,9 @@ fn evaluate_thumb_job(job: &Job, cache: &mut EvalCache) -> Vec<Shaded> {
             out.push(Shaded {
                 handle: t.handle,
                 key: t.key,
-                image: height_image(field),
+                // Thumbnails always auto-range, so each node's shape is legible at a
+                // glance regardless of its amplitude.
+                image: height_image(field, HeightScale::Auto),
             });
         }
     }

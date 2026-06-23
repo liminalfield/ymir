@@ -11,9 +11,9 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::thread::{self, JoinHandle};
 
 use eframe::egui;
-use ymir_core::{CancelToken, Error, EvalCache, EvalRequest, Field, Graph, NodeId};
+use ymir_core::{CancelToken, Error, EvalCache, EvalRequest, Field, Graph, NodeId, layers};
 
-use crate::shade::{DEFAULT_LIGHT, ShadeMode, field_to_image};
+use crate::shade::{DEFAULT_LIGHT, HeightScale, ShadeMode, field_to_image};
 
 /// Worker-side persistent cache capacity, in cached node results.
 const WORKER_CACHE_CAP: usize = 64;
@@ -95,6 +95,9 @@ pub(crate) struct PreviewEngine {
     eval_error: Option<String>,
     /// How to shade the preview (height vs relief), toggled in the pane (#40).
     mode: ShadeMode,
+    /// How Height shading maps values (auto-range vs fixed [0, 1]), toggled in the pane
+    /// (#83). Ignored in relief mode.
+    scale: HeightScale,
     /// Relief light direction (unit vector), steered by dragging over the relief
     /// image (#40).
     light: [f32; 3],
@@ -102,9 +105,9 @@ pub(crate) struct PreviewEngine {
     /// re-evaluating the graph.
     last_field: Option<Field>,
     texture: Option<egui::TextureHandle>,
-    /// The (field hash, mode, light bits) the current texture was built from; the
+    /// The (field hash, mode, scale, light bits) the current texture was built from; the
     /// texture is rebuilt when any changes.
-    texture_key: Option<(u64, ShadeMode, [u32; 3])>,
+    texture_key: Option<(u64, ShadeMode, HeightScale, [u32; 3])>,
 }
 
 impl PreviewEngine {
@@ -125,6 +128,7 @@ impl PreviewEngine {
             structural_error: None,
             eval_error: None,
             mode: ShadeMode::Height,
+            scale: HeightScale::Auto,
             light: DEFAULT_LIGHT,
             last_field: None,
             texture: None,
@@ -140,6 +144,26 @@ impl PreviewEngine {
     /// Sets the shading mode; the texture is rebuilt on the next `poll` if it changed.
     pub(crate) fn set_mode(&mut self, mode: ShadeMode) {
         self.mode = mode;
+    }
+
+    /// The current Height display scale, for the pane's toggle.
+    pub(crate) fn scale(&self) -> HeightScale {
+        self.scale
+    }
+
+    /// Sets the Height display scale; the texture is rebuilt on the next `poll` if it
+    /// changed.
+    pub(crate) fn set_scale(&mut self, scale: HeightScale) {
+        self.scale = scale;
+    }
+
+    /// The actual `(min, max)` of the previewed field's `height` layer, for the range
+    /// readout, or `None` when nothing has been evaluated yet. Always the true range,
+    /// independent of the display scale, so amplitude and out-of-range read as numbers.
+    pub(crate) fn range(&self) -> Option<(f32, f32)> {
+        self.last_field
+            .as_ref()
+            .map(|f| f.layer_or(layers::HEIGHT, 0.0).value_range())
     }
 
     /// Submits a fresh evaluation if the previewed output would differ from the last
@@ -248,12 +272,13 @@ impl PreviewEngine {
         let key = (
             field.content_hash().to_u64(),
             self.mode,
+            self.scale,
             self.light.map(f32::to_bits),
         );
         if self.texture_key == Some(key) {
             return;
         }
-        let image = field_to_image(field, self.mode, self.light);
+        let image = field_to_image(field, self.mode, self.scale, self.light);
         self.texture = Some(ctx.load_texture("preview", image, egui::TextureOptions::LINEAR));
         self.texture_key = Some(key);
     }
