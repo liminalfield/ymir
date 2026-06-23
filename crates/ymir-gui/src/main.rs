@@ -272,10 +272,10 @@ struct AppState {
 enum PendingAction {
     /// Open another project (prompts for a file once resolved).
     Open,
-    /// Replace the session with a fresh starter graph.
+    /// Start a new, empty canvas.
     New,
-    /// Close the project to an empty canvas.
-    Close,
+    /// Open the default startup graph (the saved default, or the built-in starter).
+    OpenDefault,
     /// Close the app window (quit).
     Quit,
 }
@@ -351,7 +351,8 @@ impl AppState {
         self.node_menu = None;
         self.rename = None;
         self.frame_to_graph_request = true;
-        self.status = Some(format!("Opened {}", path.display()));
+        // The name indicator shows which file; the status only needs the action.
+        self.status = Some("Opened".to_string());
         self.project_path = Some(path);
         // Undo must not reach back across an Open into the previous project, and the
         // freshly opened session is clean.
@@ -362,31 +363,42 @@ impl AppState {
     /// Replaces the session with a fresh untitled one built from `graph`/`snarl`: resets
     /// world settings and view-state, drops the project path, and re-anchors undo and the
     /// clean point. Shared by New (a starter graph) and Close (an empty graph).
-    fn install_fresh(&mut self, graph: Graph, snarl: Snarl<Handle>, status: &str) {
+    fn install_fresh(&mut self, graph: Graph, snarl: Snarl<Handle>, seed: u64, world_extent: f64) {
         self.graph = graph;
         self.snarl = snarl;
-        self.seed = 0;
-        self.world_extent = DEFAULT_WORLD_EXTENT;
+        self.seed = seed;
+        self.world_extent = world_extent;
         self.selected = None;
         self.preview_pin = None;
         self.node_menu = None;
         self.rename = None;
         self.project_path = None;
         self.frame_to_graph_request = true;
-        self.status = Some(status.to_string());
+        // No status line: the visible canvas change is feedback enough, and a transient
+        // "New"/"Closed" message only clutters the menu bar.
+        self.status = None;
         self.reset_history();
         self.mark_clean();
     }
 
-    /// Starts a fresh project on the built-in starter graph (#76), untitled.
+    /// Starts a new, empty project: a blank canvas, untitled.
     fn new_project(&mut self) {
-        let (graph, snarl) = starter::starter_graph();
-        self.install_fresh(graph, snarl, "New project");
+        self.install_fresh(Graph::new(), Snarl::new(), 0, DEFAULT_WORLD_EXTENT);
     }
 
-    /// Closes the project to an empty canvas, untitled.
-    fn close_project(&mut self) {
-        self.install_fresh(Graph::new(), Snarl::new(), "Closed project");
+    /// Opens the default startup graph (the saved default if one exists, else the
+    /// built-in starter), untitled, the same state as on launch.
+    fn open_default(&mut self) {
+        let loaded = default_project_path()
+            .filter(|p| p.exists())
+            .and_then(|p| read_project(&p).ok());
+        match loaded {
+            Some(r) => self.install_fresh(r.graph, r.snarl, r.seed, r.world_extent),
+            None => {
+                let (graph, snarl) = starter::starter_graph();
+                self.install_fresh(graph, snarl, 0, DEFAULT_WORLD_EXTENT);
+            }
+        }
     }
 
     /// A snapshot of the current session (graph, canvas positions, world settings),
@@ -689,6 +701,10 @@ fn menu_bar_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 request_open(state);
                 ui.close();
             }
+            if ui.button("Open Default Graph").clicked() {
+                request_open_default(state);
+                ui.close();
+            }
             ui.separator();
             if ui.button("Save").clicked() {
                 save_project(state, state.project_path.clone());
@@ -703,10 +719,6 @@ fn menu_bar_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 ui.close();
             }
             ui.separator();
-            if ui.button("Close").clicked() {
-                request_close(state);
-                ui.close();
-            }
             if ui.button("Exit").clicked() {
                 request_quit(ui.ctx(), state);
                 ui.close();
@@ -737,24 +749,26 @@ fn menu_bar_pane(ui: &mut egui::Ui, state: &mut AppState) {
         ui.menu_button("Help", |ui| {
             ui.weak("(empty)");
         });
-        // Persistent file indicator: the project name (or "untitled"), with a dot when
-        // there are unsaved changes (#83).
-        ui.separator();
-        let name = state
-            .project_path
-            .as_ref()
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "untitled".to_string());
-        ui.weak(if state.modified {
-            format!("{name} •")
-        } else {
-            name
+        // The project name and a transient status, pushed to the right so they read as a
+        // status area rather than trailing menu items (#83, #87). The name is the current
+        // file (or "untitled"), with a marker when there are unsaved changes.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let name = state
+                .project_path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "untitled".to_string());
+            ui.label(if state.modified {
+                format!("{name} ●")
+            } else {
+                name
+            });
+            if let Some(status) = &state.status {
+                ui.separator();
+                ui.weak(status);
+            }
         });
-        if let Some(status) = &state.status {
-            ui.separator();
-            ui.weak(status);
-        }
     });
     ui.add_space(MENU_VPAD);
 }
@@ -782,12 +796,12 @@ fn request_new(state: &mut AppState) {
     }
 }
 
-/// Closes the project to an empty canvas, guarded by the unsaved-changes prompt.
-fn request_close(state: &mut AppState) {
+/// Opens the default startup graph, guarded by the unsaved-changes prompt.
+fn request_open_default(state: &mut AppState) {
     if state.modified {
-        state.pending_action = Some(PendingAction::Close);
+        state.pending_action = Some(PendingAction::OpenDefault);
     } else {
-        state.close_project();
+        state.open_default();
     }
 }
 
@@ -862,7 +876,7 @@ fn unsaved_changes_dialog(ctx: &egui::Context, state: &mut AppState) {
     match action {
         PendingAction::Open => open_project(state),
         PendingAction::New => state.new_project(),
-        PendingAction::Close => state.close_project(),
+        PendingAction::OpenDefault => state.open_default(),
         PendingAction::Quit => {
             // Allow the close that follows through, then request it.
             state.allow_close = true;
@@ -905,7 +919,7 @@ fn save_project(state: &mut AppState, path: Option<std::path::PathBuf>) -> bool 
     );
     match write_project(&path, &file) {
         Ok(()) => {
-            state.status = Some(format!("Saved {}", path.display()));
+            state.status = Some("Saved".to_string());
             state.project_path = Some(path);
             state.mark_clean();
             true
@@ -2433,21 +2447,24 @@ mod tests {
     }
 
     #[test]
-    fn new_project_installs_the_starter_untitled_and_clean() {
+    fn new_project_yields_an_empty_untitled_canvas() {
         let mut state = AppState::new();
         state.modified = true;
         state.project_path = Some(std::path::PathBuf::from("somewhere.ymir"));
         state.new_project();
-        assert_eq!(state.graph.node_count(), 3); // the starter chain
+        assert_eq!(state.graph.node_count(), 0); // a blank canvas
         assert!(state.project_path.is_none());
         assert!(!state.modified);
     }
 
     #[test]
-    fn close_project_clears_to_an_empty_untitled_canvas() {
+    fn open_default_is_untitled_and_clean() {
+        // Open Default loads the default startup graph, whose contents depend on the
+        // machine's saved default, so only the untitled/clean properties are asserted.
         let mut state = AppState::new();
-        state.close_project();
-        assert_eq!(state.graph.node_count(), 0);
+        state.modified = true;
+        state.project_path = Some(std::path::PathBuf::from("somewhere.ymir"));
+        state.open_default();
         assert!(state.project_path.is_none());
         assert!(!state.modified);
     }
