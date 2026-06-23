@@ -26,6 +26,13 @@ pub fn tr(key: &str) -> &str {
         "node-generator.fbm" => "fBm Noise",
         "node-generator.fbm-desc" => "Fractional Brownian motion of Perlin noise.",
 
+        // Ridged-multifractal generator.
+        "node-generator.ridged" => "Ridged Noise",
+        "node-generator.ridged-desc" => {
+            "Ridged multifractal noise: sharp mountain ridgelines instead of fBm's rolling \
+             hills. Multiply with a Shape envelope to place a massif."
+        }
+
         // Radial gradient generator.
         "node-generator.radial" => "Radial Gradient",
         "node-generator.radial-desc" => {

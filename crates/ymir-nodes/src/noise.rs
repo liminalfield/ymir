@@ -105,6 +105,33 @@ pub(crate) fn fbm_field(
     Field::new(width, height, region).with_layer(layers::HEIGHT, Arc::new(layer))
 }
 
+/// Generates a field whose `height` layer is ridged-multifractal noise in `[0, 1]`.
+///
+/// Shares the octave-layering parameters with [`fbm_field`] (frequency, octaves,
+/// lacunarity, gain, offset); only the per-octave folding differs (sharp ridges instead
+/// of a plain sum). Sampled across `region` in world space like the fBm path, so it is
+/// resolution-independent.
+pub(crate) fn ridged_field(
+    width: usize,
+    height: usize,
+    region: Region,
+    params: FbmParams,
+    seed: u64,
+) -> Field {
+    let layer = Layer::from_fn(width, height, |x, y| {
+        // Same world-space sampling as fbm_field, so the two generators register against
+        // the same coordinates and stay resolution-independent.
+        let u = (x as f64 + 0.5) / width as f64 + params.offset_x;
+        let v = (y as f64 + 0.5) / height as f64 + params.offset_y;
+        let wx = (region.min_x + u * region.width()) * params.frequency;
+        let wy = (region.min_y + v * region.height()) * params.frequency;
+
+        ridged2(seed, wx as f32, wy as f32, params)
+    });
+
+    Field::new(width, height, region).with_layer(layers::HEIGHT, Arc::new(layer))
+}
+
 /// Sums Perlin octaves, returning a value in roughly `[-1, 1]`.
 fn fbm2(seed: u64, x: f32, y: f32, params: FbmParams) -> f32 {
     let mut frequency = 1.0_f32;
@@ -124,6 +151,46 @@ fn fbm2(seed: u64, x: f32, y: f32, params: FbmParams) -> f32 {
 
     if total_amplitude > 0.0 {
         sum / total_amplitude
+    } else {
+        0.0
+    }
+}
+
+/// Sums ridged-multifractal octaves, returning a value in `[0, 1]`.
+///
+/// Each octave folds the Perlin value to a ridge (`1 - |n|`, squared to sharpen the
+/// crest), so the noise's zero-crossings become sharp ridgelines and its extremes become
+/// valleys. The running `weight`, driven by the coarser octaves, then suppresses each
+/// finer octave in the valleys, so detail concentrates on the ridges: the characteristic
+/// eroded-mountain look (Musgrave's multifractal weighting). Normalized by the total
+/// amplitude so the result fills `[0, 1]`.
+fn ridged2(seed: u64, x: f32, y: f32, params: FbmParams) -> f32 {
+    let mut frequency = 1.0_f32;
+    let mut amplitude = 1.0_f32;
+    let mut sum = 0.0_f32;
+    let mut total_amplitude = 0.0_f32;
+    let mut weight = 1.0_f32;
+
+    for octave in 0..params.octaves {
+        // Decorrelate octaves with the same per-octave seed salt as the fBm path.
+        let octave_seed = seed ^ 0x9E37_79B9_7F4A_7C15_u64.wrapping_mul(u64::from(octave) + 1);
+        let n = perlin2(octave_seed, x * frequency, y * frequency);
+        // Fold to a ridge (high at the zero-crossing, zero at the extremes) and sharpen.
+        let mut ridge = 1.0 - n.abs();
+        ridge *= ridge;
+        // Multifractal weighting: this octave contributes only where the coarser octaves
+        // are already high, so finer detail rides on the established ridges.
+        ridge *= weight;
+        weight = (ridge * 2.0).clamp(0.0, 1.0);
+
+        sum += ridge * amplitude;
+        total_amplitude += amplitude;
+        frequency *= params.lacunarity as f32;
+        amplitude *= params.gain;
+    }
+
+    if total_amplitude > 0.0 {
+        (sum / total_amplitude).clamp(0.0, 1.0)
     } else {
         0.0
     }
