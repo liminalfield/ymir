@@ -87,6 +87,7 @@ mod tests {
                 "generator.gradient",
                 "generator.radial",
                 "generator.ridged",
+                "generator.ring",
                 "modifier.blend",
                 "modifier.blur",
                 "modifier.curvature",

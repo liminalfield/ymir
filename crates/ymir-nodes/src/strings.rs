@@ -47,6 +47,13 @@ pub fn tr(key: &str) -> &str {
              for a coast-to-highland trend or a dune-field direction."
         }
 
+        // Ring (annulus) generator.
+        "node-generator.ring" => "Ring",
+        "node-generator.ring-desc" => {
+            "A smooth circular ridge (1 on the radius, 0 on each flank): the envelope for \
+             a crater rim, caldera wall, or atoll."
+        }
+
         // Blend.
         "node-modifier.blend" => "Blend",
         "node-modifier.blend-desc" => {
