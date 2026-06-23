@@ -150,22 +150,42 @@ pub(crate) fn edit(
             resp.changed().then_some(ParamValue::Float(x))
         }
         (Widget::Quantity { min, max, unit }, ParamValue::Float(v)) => {
-            // An open physical quantity: a clamped, type-able value field with a 1-unit
-            // drag step and the unit shown, not a coarse wide slider.
             let mut x = *v;
-            let resp = ui
-                .horizontal(|ui| {
-                    let r = ui.add(
-                        egui::DragValue::new(&mut x)
-                            .range(min..=max)
-                            .speed(1.0)
-                            .suffix(unit_suffix(unit)),
-                    );
-                    ui.label(name);
-                    r
-                })
-                .inner;
-            resp.changed().then_some(ParamValue::Float(x))
+            if matches!(unit, Unit::Degrees) {
+                // Angles wrap rather than clamp: dragging below 0 rolls to 359.9 (a small
+                // counter-clockwise turn) instead of sticking at 0, and one decimal gives
+                // fine control. The stored value is kept in [0, 360) by the wrap below.
+                let resp = ui
+                    .horizontal(|ui| {
+                        let r = ui.add(
+                            egui::DragValue::new(&mut x)
+                                .speed(0.5)
+                                .fixed_decimals(1)
+                                .suffix(unit_suffix(unit)),
+                        );
+                        ui.label(name);
+                        r
+                    })
+                    .inner;
+                resp.changed()
+                    .then(|| ParamValue::Float(x.rem_euclid(360.0)))
+            } else {
+                // An open physical quantity: a clamped, type-able value field with a
+                // 1-unit drag step and the unit shown, not a coarse wide slider.
+                let resp = ui
+                    .horizontal(|ui| {
+                        let r = ui.add(
+                            egui::DragValue::new(&mut x)
+                                .range(min..=max)
+                                .speed(1.0)
+                                .suffix(unit_suffix(unit)),
+                        );
+                        ui.label(name);
+                        r
+                    })
+                    .inner;
+                resp.changed().then_some(ParamValue::Float(x))
+            }
         }
         (Widget::IntDrag { min, max }, ParamValue::Int(v)) => {
             let mut x = *v;
