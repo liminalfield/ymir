@@ -13,6 +13,7 @@
 mod blend;
 mod blur;
 mod category;
+mod curvature;
 mod curve;
 mod export;
 mod fbm;
@@ -29,6 +30,7 @@ mod thermal;
 pub use blend::Blend;
 pub use blur::Blur;
 pub use category::{CategoryDef, categories, find_category};
+pub use curvature::Curvature;
 pub use curve::CurveNode;
 pub use export::ExportPng;
 pub use fbm::Fbm;

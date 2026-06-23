@@ -88,6 +88,7 @@ mod tests {
                 "generator.ridged",
                 "modifier.blend",
                 "modifier.blur",
+                "modifier.curvature",
                 "modifier.curve",
                 "modifier.height",
                 "modifier.invert",
