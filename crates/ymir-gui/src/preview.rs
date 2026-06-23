@@ -17,6 +17,8 @@ use crate::shade::{DEFAULT_LIGHT, HeightScale, ShadeMode, field_to_image};
 
 /// Worker-side persistent cache capacity, in cached node results.
 const WORKER_CACHE_CAP: usize = 64;
+/// Number of bins in the input histogram drawn behind the curve/levels editors (#15).
+const HISTOGRAM_BINS: usize = 64;
 /// Size (px) of the relief light dial. Also the reserved height of the shading
 /// controls row, so toggling Height/Relief never shifts the preview (#40).
 pub(crate) const LIGHT_DIAL_SIZE: f32 = 40.0;
@@ -40,8 +42,21 @@ struct Job {
 
 /// The worker's reply for one job.
 enum Outcome {
-    Ready { generation: u64, field: Field },
-    Failed { generation: u64, message: String },
+    Ready {
+        generation: u64,
+        /// The previewed node's `stable_id`, so the histogram can be matched to the node
+        /// the inspector is editing.
+        target: u64,
+        field: Field,
+        /// Normalized bin heights of the node's *input* distribution (the field feeding
+        /// it), for the editor histogram. `None` for a generator (no input) or a failed
+        /// input eval.
+        histogram: Option<Vec<f32>>,
+    },
+    Failed {
+        generation: u64,
+        message: String,
+    },
 }
 
 impl Outcome {
@@ -104,6 +119,10 @@ pub(crate) struct PreviewEngine {
     /// The most recent evaluated field, kept so a mode toggle can re-render without
     /// re-evaluating the graph.
     last_field: Option<Field>,
+    /// The input histogram of the most recent result, and the node it is for. Surfaced
+    /// to the curve/levels editors via [`input_histogram`](Self::input_histogram).
+    last_histogram: Option<Vec<f32>>,
+    histogram_target: Option<u64>,
     texture: Option<egui::TextureHandle>,
     /// The (field hash, mode, scale, light bits) the current texture was built from; the
     /// texture is rebuilt when any changes.
@@ -131,6 +150,8 @@ impl PreviewEngine {
             scale: HeightScale::Auto,
             light: DEFAULT_LIGHT,
             last_field: None,
+            last_histogram: None,
+            histogram_target: None,
             texture: None,
             texture_key: None,
         }
@@ -164,6 +185,17 @@ impl PreviewEngine {
         self.last_field
             .as_ref()
             .map(|f| f.layer_or(layers::HEIGHT, 0.0).value_range())
+    }
+
+    /// The input distribution (normalized bin heights over `[0, 1]`) of `node`, for the
+    /// histogram behind its curve/levels editor (#15). `None` unless the most recent
+    /// preview result is for that node, so the histogram always matches the editor.
+    pub(crate) fn input_histogram(&self, node: u64) -> Option<&[f32]> {
+        if self.histogram_target == Some(node) {
+            self.last_histogram.as_deref()
+        } else {
+            None
+        }
     }
 
     /// Submits a fresh evaluation if the previewed output would differ from the last
@@ -248,15 +280,24 @@ impl PreviewEngine {
         }
         self.shown = outcome.generation();
         match outcome {
-            Outcome::Ready { field, .. } => {
+            Outcome::Ready {
+                field,
+                target,
+                histogram,
+                ..
+            } => {
                 self.eval_error = None;
                 // Keep the field; `refresh_texture` re-uploads only when the field or
                 // the shading mode changed.
                 self.last_field = Some(field);
+                self.last_histogram = histogram;
+                self.histogram_target = Some(target);
             }
             Outcome::Failed { message, .. } => {
                 self.eval_error = Some(message);
                 self.last_field = None;
+                self.last_histogram = None;
+                self.histogram_target = None;
                 self.texture = None;
                 self.texture_key = None;
             }
@@ -444,7 +485,11 @@ fn evaluate_job(job: &Job, cache: &mut EvalCache) -> Option<Outcome> {
         Ok(outputs) => Some(match outputs.first() {
             Some(field) => Outcome::Ready {
                 generation,
+                target: job.target,
                 field: field.clone(),
+                // The node's input source is upstream of the target, so it is already in
+                // the cache from the eval above; this re-eval is a cheap hit.
+                histogram: input_histogram(&job.graph, target, &job.request, cache),
             },
             None => Outcome::Failed {
                 generation,
@@ -457,6 +502,37 @@ fn evaluate_job(job: &Job, cache: &mut EvalCache) -> Option<Outcome> {
             message: err.to_string(),
         }),
     }
+}
+
+/// The distribution of `target`'s first input field, as normalized histogram bins, or
+/// `None` when the node has no wired input (a generator) or the input cannot be
+/// evaluated. Best-effort: a display aid, never the cause of a preview failure.
+fn input_histogram(
+    graph: &Graph,
+    target: NodeId,
+    request: &EvalRequest,
+    cache: &mut EvalCache,
+) -> Option<Vec<f32>> {
+    let (source, port) = graph.input_source(target, 0)?;
+    let fields = graph.evaluate(source, request, cache).ok()?;
+    let field = fields.get(port)?;
+    Some(field_histogram(field, HISTOGRAM_BINS))
+}
+
+/// Bins a field's `height` layer into `bins` buckets over `[0, 1]`, returning each
+/// bin's count normalized to the tallest bin (so heights are in `[0, 1]` for drawing).
+/// Values outside `[0, 1]` clamp into the end bins, so out-of-range data shows as a
+/// spike against the edge. Order-independent, so it is deterministic.
+fn field_histogram(field: &Field, bins: usize) -> Vec<f32> {
+    let layer = field.layer_or(layers::HEIGHT, 0.0);
+    let mut counts = vec![0u32; bins];
+    for &value in layer.as_slice() {
+        let t = value.clamp(0.0, 1.0);
+        let idx = ((t * bins as f32) as usize).min(bins - 1);
+        counts[idx] += 1;
+    }
+    let max = counts.iter().copied().max().unwrap_or(0).max(1);
+    counts.iter().map(|&c| c as f32 / max as f32).collect()
 }
 
 #[cfg(test)]
@@ -481,6 +557,23 @@ mod tests {
 
         // The exact centre has no direction.
         assert!(light_from_drag(egui::pos2(50.0, 50.0), rect).is_none());
+    }
+
+    #[test]
+    fn field_histogram_bins_clamps_and_normalizes() {
+        use std::sync::Arc;
+        use ymir_core::{Layer, Region, layers};
+
+        // Values 0.0, 0.5, 2.0 (clamps to 1.0), -1.0 (clamps to 0.0) across a 4-bin range.
+        let field = Field::new(2, 2, Region::UNIT).with_layer(
+            layers::HEIGHT,
+            Arc::new(Layer::from_fn(2, 2, |x, y| {
+                [0.0, 0.5, 2.0, -1.0][y * 2 + x]
+            })),
+        );
+        // bin 0: 0.0 and the clamped -1.0 (count 2); bin 2: 0.5; bin 3: the clamped 2.0.
+        // Normalized to the tallest bin (count 2): [1.0, 0.0, 0.5, 0.5].
+        assert_eq!(field_histogram(&field, 4), vec![1.0, 0.0, 0.5, 0.5]);
     }
 
     #[test]

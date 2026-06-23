@@ -1116,13 +1116,20 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
         return;
     }
 
+    // The input distribution for the histogram behind the curve editor (#15), copied to
+    // an owned buffer so it does not borrow `state.preview` across the params write below.
+    // `None` unless this node is the one being previewed, so the histogram matches.
+    let histogram: Option<Vec<f32>> = state
+        .selected
+        .and_then(|h| state.preview.input_histogram(h).map(|h| h.to_vec()));
+
     // Edit against a clone of the current params, then write back once if anything
     // changed. The graph stays the single source of truth.
     let mut params = state.graph.params(id).cloned().unwrap_or_default();
     let mut changed = false;
     for pspec in &spec.params {
         let current = param_ui::current_value(&params, pspec);
-        if let Some(new_value) = param_ui::edit(ui, pspec, &current) {
+        if let Some(new_value) = param_ui::edit(ui, pspec, &current, histogram.as_deref()) {
             params.insert(pspec.name.clone(), new_value);
             changed = true;
         }

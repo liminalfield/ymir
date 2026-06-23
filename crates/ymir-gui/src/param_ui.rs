@@ -103,6 +103,7 @@ pub(crate) fn edit(
     ui: &mut egui::Ui,
     spec: &ParamSpec,
     current: &ParamValue,
+    histogram: Option<&[f32]>,
 ) -> Option<ParamValue> {
     let name = spec.name.as_str();
     match (widget_for(spec), current) {
@@ -215,7 +216,7 @@ pub(crate) fn edit(
         }
         (Widget::CurveEditor, ParamValue::Curve(curve)) => {
             ui.label(name);
-            crate::curve_edit::curve_editor(ui, curve).map(ParamValue::Curve)
+            crate::curve_edit::curve_editor(ui, curve, histogram).map(ParamValue::Curve)
         }
         _ => {
             ui.horizontal(|ui| {

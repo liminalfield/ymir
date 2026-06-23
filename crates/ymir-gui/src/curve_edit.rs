@@ -38,8 +38,14 @@ fn unit_from_screen(pos: egui::Pos2, rect: egui::Rect) -> (f32, f32) {
 }
 
 /// Renders the editable curve and returns the edited curve when it changed this
-/// frame.
-pub(crate) fn curve_editor(ui: &mut egui::Ui, curve: &Curve) -> Option<Curve> {
+/// frame. `histogram` (normalized bin heights over the `[0, 1]` domain) is drawn faintly
+/// behind the curve, so the transfer function can be shaped against where the input data
+/// actually sits (#15).
+pub(crate) fn curve_editor(
+    ui: &mut egui::Ui,
+    curve: &Curve,
+    histogram: Option<&[f32]>,
+) -> Option<Curve> {
     let mut points: Vec<(f32, f32)> = curve.points().to_vec();
     if points.len() < 2 {
         points = Curve::identity().points().to_vec();
@@ -58,6 +64,24 @@ pub(crate) fn curve_editor(ui: &mut egui::Ui, curve: &Curve) -> Option<Curve> {
         visuals.widgets.noninteractive.bg_stroke,
         egui::StrokeKind::Inside,
     );
+    // The input histogram, drawn faintly behind everything so the curve can be shaped
+    // against where the data sits. Bins span the [0, 1] domain left to right; a spike at
+    // the right edge means data above 1 (clamped in), i.e. normalize first.
+    if let Some(bins) = histogram.filter(|h| !h.is_empty()) {
+        let bar_color = visuals.weak_text_color().gamma_multiply(0.5);
+        let bar_w = rect.width() / bins.len() as f32;
+        for (i, &h) in bins.iter().enumerate() {
+            if h <= 0.0 {
+                continue;
+            }
+            let x0 = rect.left() + i as f32 * bar_w;
+            let bar = egui::Rect::from_min_max(
+                egui::pos2(x0, rect.bottom() - h * rect.height()),
+                egui::pos2(x0 + bar_w, rect.bottom()),
+            );
+            painter.rect_filled(bar, 0, bar_color);
+        }
+    }
     // Quarter grid.
     let grid = visuals.widgets.noninteractive.bg_stroke;
     for i in 1..4 {
