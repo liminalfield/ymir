@@ -86,6 +86,7 @@ mod tests {
                 "generator.falloff",
                 "generator.fbm",
                 "generator.gradient",
+                "generator.polygon",
                 "generator.radial",
                 "generator.rect",
                 "generator.ridged",

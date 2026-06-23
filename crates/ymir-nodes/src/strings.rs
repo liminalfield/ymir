@@ -68,6 +68,13 @@ pub fn tr(key: &str) -> &str {
              for a plateau, mesa, or rectangular landmass. Turn it with rotation."
         }
 
+        // Polygon (regular n-gon) generator.
+        "node-generator.polygon" => "Polygon",
+        "node-generator.polygon-desc" => {
+            "A flat-topped regular polygon with soft flanks: the envelope for an angular \
+             plateau or faceted mesa. Set the number of sides and turn it with rotation."
+        }
+
         // Blend.
         "node-modifier.blend" => "Blend",
         "node-modifier.blend-desc" => {

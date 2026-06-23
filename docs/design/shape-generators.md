@@ -149,9 +149,11 @@ proposed last and is droppable if it does not earn its place against rect + rota
 - `rotation` (degrees).
 - `falloff` (m): the soft outside band.
 
-Math: a standard regular-polygon SDF (fold the angle into one wedge, distance to the
-edge line); `value = 1 - smoothstep(0, falloff_cells, outside_dist)`. `sides < 3`
-degrades to the radial dome (a polygon with no facets is a circle).
+Math: the polygon is the intersection of its edge half-planes; the outside distance is
+the largest signed distance to any edge line (flat across the interior, gently rounding
+the vertices); `value = 1 - smoothstep(0, falloff_cells, outside_dist)`. `sides` below 3
+clamps to 3 (a polygon needs at least three sides); the param minimum enforces this in
+the UI, and the clamp guards a hand-edited project file.
 
 ## Build order
 
@@ -164,9 +166,12 @@ one each step.
 1. **gradient** (built) — simplest math, highest value (the non-centered envelope).
    First, so the shared `shape.rs` module is extracted here and radial moves onto it.
 2. **ring** (built) — reuses the radial distance; small.
-3. **rect** — box SDF plus rotation; introduces the rotate-into-local-frame helper.
-4. **falloff** — the radial profile workhorse; unlocks crater/caldera/etc as Curve
-   subgraphs rather than nodes. Small (linear distance), high leverage.
-5. **polygon** — Oluf wants it; build after rect so it reuses the rotate helper.
+3. **rect** (built) — box SDF plus rotation; introduced the rotate-into-local-frame
+   helper.
+4. **falloff** (built) — the radial profile workhorse; unlocks crater/caldera/etc as
+   Curve subgraphs rather than nodes. Small (linear distance), high leverage.
+5. **polygon** (built) — reuses the rotate helper; the half-plane intersection form.
 
-Each step pauses for review before the next.
+The Shape generator family is complete.
+
+Each step paused for review before the next.
