@@ -2363,6 +2363,10 @@ fn curve_popout_window(ctx: &egui::Context, state: &mut AppState) {
 
     let mut open = true;
     egui::Window::new(title)
+        // A stable id so the window keeps its position when the title changes (the title
+        // carries the node's name, which is live-editable in the inspector; without this
+        // each keystroke would read as a new window and re-auto-place it).
+        .id(egui::Id::new("curve-popout-window"))
         .open(&mut open)
         .resizable(true)
         .default_size(egui::vec2(480.0, 520.0))
