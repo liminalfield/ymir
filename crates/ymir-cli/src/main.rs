@@ -83,6 +83,7 @@ mod tests {
             type_ids,
             [
                 "endpoint.export",
+                "generator.falloff",
                 "generator.fbm",
                 "generator.gradient",
                 "generator.radial",

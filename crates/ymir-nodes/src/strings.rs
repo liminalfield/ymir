@@ -40,6 +40,13 @@ pub fn tr(key: &str) -> &str {
              multiply with detail, or shape downstream with a Curve."
         }
 
+        // Radial falloff generator.
+        "node-generator.falloff" => "Radial Falloff",
+        "node-generator.falloff-desc" => {
+            "A linear radial distance ramp (0 at the center, 1 at the radius): feed a \
+             Curve to draw any radial cross-section, a dome, crater, caldera, or terraces."
+        }
+
         // Directional gradient generator.
         "node-generator.gradient" => "Gradient",
         "node-generator.gradient-desc" => {
