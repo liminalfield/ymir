@@ -96,11 +96,37 @@ impl ProjectFile {
         }
     }
 
-    /// Whether `self` and `other` describe the same graph and world, so any difference
-    /// between them is in view-state (node positions) alone. The undo history uses this
-    /// to coalesce a run of layout-only edits into a single step (#82).
-    pub(crate) fn differs_only_in_layout(&self, other: &Self) -> bool {
-        self.world == other.world && self.graph == other.graph
+    /// If `self` and `other` describe the same graph and world and differ in the
+    /// position of exactly one node, returns that node's stable id. `None` for a
+    /// semantic change (graph or world), or a layout change touching no or several nodes
+    /// (an added/removed node, or a multi-node move). The undo history uses this to
+    /// coalesce a run of moves to a *single* node into one step, while a move of a
+    /// different node opens a fresh step (#82).
+    pub(crate) fn single_moved_node(&self, other: &Self) -> Option<u64> {
+        if self.world != other.world || self.graph != other.graph {
+            return None;
+        }
+        let here = &self.view.nodes;
+        let there = &other.view.nodes;
+        if here.len() != there.len() {
+            return None;
+        }
+        let mut moved = None;
+        for (id, pos) in here {
+            match there.get(id) {
+                Some(other_pos) if other_pos == pos => {}
+                // A differing position: the moved node, unless a second one already was.
+                Some(_) => {
+                    if moved.is_some() {
+                        return None;
+                    }
+                    moved = Some(*id);
+                }
+                // A key present here but not there: the node sets differ, not a move.
+                None => return None,
+            }
+        }
+        moved
     }
 
     /// Rebuilds the session from this project file: the engine graph via the registry,

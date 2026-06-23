@@ -14,9 +14,10 @@
 //! frame: while the interaction is in flight the GUI does not call `record`, and when it
 //! settles the one net change is captured.
 //!
-//! A *run* of position-only edits coalesces further (see [`EditHistory::record`]): moving
-//! nodes around while thinking amends one step instead of pushing one per drop, so layout
-//! fiddling does not bury the meaningful edits.
+//! A run of moves to a *single* node coalesces further (see [`EditHistory::record`]):
+//! shifting one node around while thinking amends one step instead of pushing one per
+//! drop, so layout fiddling does not bury the meaningful edits. Moving a different node
+//! opens a new step, so unrelated moves are never bundled into one undo.
 
 use std::collections::VecDeque;
 
@@ -65,23 +66,25 @@ impl EditHistory {
     /// history). A no-op when nothing changed, which is what coalesces a continuous
     /// interaction into one step. Returns whether a step was recorded.
     ///
-    /// Layout-only changes (a node moved, with the graph and world untouched) coalesce
-    /// further: a *run* of them amends one step rather than pushing one per drop, so
-    /// fiddling with node positions while thinking does not flood the history. The run
-    /// still opens with a step, so a move is undoable back to where it started; a
-    /// semantic edit (structure, params, world) closes the run.
+    /// Moves of a single node coalesce: a *run* of moves to the same node amends one
+    /// step rather than pushing one per drop, so fiddling with a node's position while
+    /// thinking does not flood the history. The run still opens with a step, so a move is
+    /// undoable back to where it started; moving a *different* node, or any semantic edit
+    /// (structure, params, world), opens a new step, so unrelated moves are never bundled
+    /// into one undo.
     pub(crate) fn record(&mut self, current: &ProjectFile) -> bool {
         if current == &self.baseline {
             return false;
         }
-        // Continue an in-progress layout run when this change touches only positions and
-        // the current step does too: amend the baseline in place instead of pushing.
-        let continues_layout_run = current.differs_only_in_layout(&self.baseline)
-            && self
-                .undo
-                .back()
-                .is_some_and(|previous| previous.differs_only_in_layout(&self.baseline));
-        if continues_layout_run {
+        // The node this change repositions (if it is a single-node move), and the node
+        // the current step is already a run on (derived from the step's start state). The
+        // run continues only when they are the same node.
+        let moved_node = current.single_moved_node(&self.baseline);
+        let run_node = self
+            .undo
+            .back()
+            .and_then(|start| self.baseline.single_moved_node(start));
+        if moved_node.is_some() && moved_node == run_node {
             self.baseline = current.clone();
         } else {
             let previous = std::mem::replace(&mut self.baseline, current.clone());
@@ -136,12 +139,20 @@ mod tests {
         ProjectFile::capture(&Graph::new(), &Snarl::<Handle>::new(), seed, 1024.0)
     }
 
-    /// `base` with node 0 placed at `(x, 0)`: a layout-only variation, with the same
-    /// graph and world but a different node position.
-    fn moved(base: &ProjectFile, x: f32) -> ProjectFile {
-        let mut snapshot = base.clone();
-        snapshot.view.nodes.insert(0, [x, 0.0]);
-        snapshot
+    /// A base snapshot with two nodes already positioned, so a "move" changes an existing
+    /// position rather than adding a view entry (which a real move never does).
+    fn base() -> ProjectFile {
+        let mut f = snap(0);
+        f.view.nodes.insert(0, [0.0, 0.0]);
+        f.view.nodes.insert(1, [0.0, 0.0]);
+        f
+    }
+
+    /// `from` with node `id` repositioned to `(x, 0)`: a single-node layout change.
+    fn move_node(from: &ProjectFile, id: u64, x: f32) -> ProjectFile {
+        let mut s = from.clone();
+        s.view.nodes.insert(id, [x, 0.0]);
+        s
     }
 
     #[test]
@@ -198,27 +209,41 @@ mod tests {
     }
 
     #[test]
-    fn a_run_of_layout_only_edits_coalesces_to_one_step() {
-        let base = snap(0);
-        let mut h = EditHistory::new(base.clone());
-        // The first move opens a step; further moves amend it rather than piling up.
-        assert!(h.record(&moved(&base, 1.0)));
-        assert!(h.record(&moved(&base, 2.0)));
-        assert!(h.record(&moved(&base, 3.0)));
+    fn a_run_of_moves_to_one_node_coalesces_to_one_step() {
+        let b = base();
+        let mut h = EditHistory::new(b.clone());
+        // The first move of node 0 opens a step; further moves of node 0 amend it.
+        assert!(h.record(&move_node(&b, 0, 1.0)));
+        assert!(h.record(&move_node(&b, 0, 2.0)));
+        assert!(h.record(&move_node(&b, 0, 3.0)));
         // One undo returns to the pre-fiddle layout, with nothing more to undo.
-        assert_eq!(h.undo(), Some(base));
+        assert_eq!(h.undo(), Some(b));
         assert!(!h.can_undo());
     }
 
     #[test]
+    fn moving_a_different_node_opens_a_new_step() {
+        let b = base();
+        let after_0 = move_node(&b, 0, 1.0);
+        let mut h = EditHistory::new(b.clone());
+        h.record(&after_0); // a run on node 0
+        h.record(&move_node(&after_0, 1, 5.0)); // node 1 moves: a separate step
+        h.record(&move_node(&after_0, 1, 6.0)); // more node-1 moves: amend that step
+        // Undo reverts node 1's run only, leaving node 0 where it was moved to.
+        assert_eq!(h.undo(), Some(after_0));
+        // Undo again reverts node 0.
+        assert_eq!(h.undo(), Some(b));
+    }
+
+    #[test]
     fn a_semantic_edit_closes_a_layout_run() {
-        let base = snap(0);
-        let mut h = EditHistory::new(base.clone());
-        h.record(&moved(&base, 1.0)); // a layout step
+        let b = base();
+        let mut h = EditHistory::new(b.clone());
+        h.record(&move_node(&b, 0, 1.0)); // a layout step
         h.record(&snap(7)); // a semantic change (different world): a separate step
         // The two are distinct steps: the move is not folded into the semantic edit.
-        assert_eq!(h.undo(), Some(moved(&base, 1.0)));
-        assert_eq!(h.undo(), Some(base));
+        assert_eq!(h.undo(), Some(move_node(&b, 0, 1.0)));
+        assert_eq!(h.undo(), Some(b));
     }
 
     #[test]
