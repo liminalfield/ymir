@@ -26,6 +26,8 @@ use ymir_core::{
     Params, PortSpec, Region, Result, Unit, layers,
 };
 
+use crate::shape::{center_cell, smoothstep};
+
 /// Stable type identifier and registry key.
 const TYPE_ID: &str = "generator.radial";
 
@@ -92,20 +94,12 @@ impl Operator for Radial {
         let radius_cells = ctx.world_to_cells(radius_m);
 
         // The center is normalized over the whole world; map it into this region's cell
-        // grid. For an untiled build (region UNIT) this is just center * resolution; for
-        // a tile it lands at the same ground as the untiled build.
+        // grid through the shared helper (handles tiles, not just the untiled build).
         let center_x = params.get_f64("center_x", 0.5);
         let center_y = params.get_f64("center_y", 0.5);
-        let center_cell_x = (center_x - region.min_x) / region.width() * width as f64;
-        let center_cell_y = (center_y - region.min_y) / region.height() * height as f64;
+        let center = center_cell((center_x, center_y), region, width, height);
 
-        let field = radial_field(
-            width,
-            height,
-            region,
-            (center_cell_x, center_cell_y),
-            radius_cells,
-        );
+        let field = radial_field(width, height, region, center, radius_cells);
         Ok(vec![field])
     }
 }
@@ -143,17 +137,6 @@ fn radial_field(
     });
 
     Field::new(width, height, region).with_layer(layers::HEIGHT, Arc::new(layer))
-}
-
-/// Smooth Hermite interpolation of `x` between `low` and `high`, clamped to `[0, 1]`.
-/// `low == high` degrades to a hard step at that threshold.
-fn smoothstep(low: f32, high: f32, x: f32) -> f32 {
-    let t = if (high - low).abs() < 1e-9 {
-        if x >= high { 1.0 } else { 0.0 }
-    } else {
-        ((x - low) / (high - low)).clamp(0.0, 1.0)
-    };
-    t * t * (3.0 - 2.0 * t)
 }
 
 #[cfg(test)]

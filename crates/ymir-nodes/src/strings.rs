@@ -40,6 +40,13 @@ pub fn tr(key: &str) -> &str {
              multiply with detail, or shape downstream with a Curve."
         }
 
+        // Directional gradient generator.
+        "node-generator.gradient" => "Gradient",
+        "node-generator.gradient-desc" => {
+            "A smooth directional ramp (0 to 1 across a band): the non-centered envelope \
+             for a coast-to-highland trend or a dune-field direction."
+        }
+
         // Blend.
         "node-modifier.blend" => "Blend",
         "node-modifier.blend-desc" => {
