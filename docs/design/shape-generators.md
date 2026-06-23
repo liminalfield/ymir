@@ -47,13 +47,45 @@ The falloff helper (`smoothstep`) and the center-to-cell mapping are identical t
 radial's; when the second shape lands, those move to a small shared `shape` module
 (`crates/ymir-nodes/src/shape.rs`) that radial also adopts, so the math lives once.
 
+## Landforms are subgraphs, not nodes
+
+A decision that governs this whole family (Oluf, 2026-06): named landforms (crater,
+caldera, volcano, terraces) are NOT implemented as dedicated nodes. A crater node would
+be one opinionated crater, it bloats the palette, and it hides the structure the graph is
+supposed to make readable. Instead the project ships the **primitives and shaping tools**
+to build any of them, plus **example subgraphs/presets** (#79) that can be instantiated
+and scattered.
+
+The model for radial landforms: a **Radial Falloff** generator (below) feeds a **Curve**,
+and the curve's profile is the landform's swept cross-section. Dome, crater, caldera,
+ring, volcano, and terraces are all just different curves on the same falloff.
+Generation (the profile) and distribution (the Scatter node, `scatter.md`) stay separate
+concerns. `radial` and `ring` remain as convenience primitives with their profile baked
+in; they are not the only way to get a dome or a ring.
+
 ## The members
 
 ### generator.radial (built)
 
 The circular dome: 1 at `center`, easing to 0 at `radius` through a smoothstep, 0
-beyond. Seeds the island / massif landform. Params: `radius` (m), `center_x`,
-`center_y`.
+beyond. Seeds the island / massif landform. A convenience primitive: the same shape is a
+Radial Falloff plus a falling Curve. Params: `radius` (m), `center_x`, `center_y`.
+
+### generator.falloff — the radial profile workhorse (planned)
+
+The general radial primitive, and the one that makes "landforms are subgraphs" practical.
+It outputs the **normalized radial distance**: 0 at `center`, rising linearly to 1 at
+`radius`, clamped to 1 beyond. On its own it is a smooth cone carrying no shape opinion,
+"how far out am I as a fraction of the radius." Fed into a Curve, the curve's X axis
+becomes distance-from-center and its Y axis becomes height, so drawing the curve draws
+the landform's cross-section, swept around one center with nothing to align.
+
+- `radius` (m), `center_x`, `center_y` (normalized).
+
+Math: `value = (distance(cell, center) / radius_cells).min(1.0)`; a non-positive radius
+yields a flat field of 1 (every cell is at or beyond the collapsed edge). Linear on
+purpose (unlike radial's smoothstep), so the Curve's X axis is true radial fraction and a
+rim drawn at x=0.7 lands at 0.7 of the radius.
 
 ### generator.gradient — the directional trend
 
@@ -129,10 +161,12 @@ clean, with a golden-value test captured from real output, following radial's te
 round-trip, generator-kind, golden). The ymir-cli registry smoke-test node list grows by
 one each step.
 
-1. **gradient** — simplest math, highest value (the non-centered envelope). First, so
-   the shared `shape.rs` module is extracted here and radial moves onto it.
-2. **ring** — reuses the radial distance; small.
+1. **gradient** (built) — simplest math, highest value (the non-centered envelope).
+   First, so the shared `shape.rs` module is extracted here and radial moves onto it.
+2. **ring** (built) — reuses the radial distance; small.
 3. **rect** — box SDF plus rotation; introduces the rotate-into-local-frame helper.
-4. **polygon** — optional; only if it earns its place after rect.
+4. **falloff** — the radial profile workhorse; unlocks crater/caldera/etc as Curve
+   subgraphs rather than nodes. Small (linear distance), high leverage.
+5. **polygon** — Oluf wants it; build after rect so it reuses the rotate helper.
 
 Each step pauses for review before the next.
