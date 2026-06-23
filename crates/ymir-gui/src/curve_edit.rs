@@ -37,22 +37,36 @@ fn unit_from_screen(pos: egui::Pos2, rect: egui::Rect) -> (f32, f32) {
     )
 }
 
-/// Renders the editable curve and returns the edited curve when it changed this
-/// frame. `histogram` (normalized bin heights over the `[0, 1]` domain) is drawn faintly
-/// behind the curve, so the transfer function can be shaped against where the input data
-/// actually sits (#15).
+/// Renders the editable curve at the inspector's compact inline size and returns the
+/// edited curve when it changed this frame. `histogram` (normalized bin heights over the
+/// `[0, 1]` domain) is drawn faintly behind the curve, so the transfer function can be
+/// shaped against where the input data actually sits (#15).
 pub(crate) fn curve_editor(
     ui: &mut egui::Ui,
     curve: &Curve,
     histogram: Option<&[f32]>,
+) -> Option<Curve> {
+    let size = egui::vec2(ui.available_width().min(MAX_WIDTH), HEIGHT);
+    curve_editor_sized(ui, curve, histogram, size, false)
+}
+
+/// Renders the editable curve into a rect of `size`, used both for the inline inspector
+/// widget and the larger pop-out window. With `show_readout`, the coordinates of the
+/// hovered or dragged control point are drawn in the corner, so the bigger window can be
+/// precise; the compact inline view leaves it off to stay uncluttered.
+pub(crate) fn curve_editor_sized(
+    ui: &mut egui::Ui,
+    curve: &Curve,
+    histogram: Option<&[f32]>,
+    size: egui::Vec2,
+    show_readout: bool,
 ) -> Option<Curve> {
     let mut points: Vec<(f32, f32)> = curve.points().to_vec();
     if points.len() < 2 {
         points = Curve::identity().points().to_vec();
     }
 
-    let width = ui.available_width().min(MAX_WIDTH);
-    let (rect, bg) = ui.allocate_exact_size(egui::vec2(width, HEIGHT), egui::Sense::click());
+    let (rect, bg) = ui.allocate_exact_size(size, egui::Sense::click());
 
     let visuals = ui.visuals();
     let radius = egui::CornerRadius::same(2);
@@ -100,6 +114,8 @@ pub(crate) fn curve_editor(
 
     let mut changed = false;
     let mut to_delete = None;
+    // The control point under the pointer (hovered or dragged), shown in the readout.
+    let mut readout: Option<(f32, f32)> = None;
     let n = points.len();
 
     // Per-point handles, allocated after the background so they sit on top and take
@@ -128,6 +144,10 @@ pub(crate) fn curve_editor(
             };
             points[i] = (x, ny);
             changed = true;
+        }
+        // A dragged point wins the readout; otherwise a hovered one shows.
+        if resp.dragged() || (readout.is_none() && resp.hovered()) {
+            readout = Some(points[i]);
         }
         if resp.secondary_clicked() && n > 2 {
             to_delete = Some(i);
@@ -170,6 +190,23 @@ pub(crate) fn curve_editor(
             HANDLE_RADIUS,
             egui::Stroke::new(1.0, visuals.extreme_bg_color),
         );
+    }
+
+    // The coordinate readout for the active point (pop-out only): x is distance and y is
+    // height, both in the curve's [0, 1] domain, drawn in the top-left over a faint chip
+    // so it stays legible against the curve.
+    if show_readout && let Some((x, y)) = readout {
+        let text = format!("x {x:.3}   y {y:.3}");
+        let pos = rect.left_top() + egui::vec2(6.0, 6.0);
+        let galley = painter.layout_no_wrap(
+            text,
+            egui::FontId::monospace(12.0),
+            visuals.strong_text_color(),
+        );
+        let pad = egui::vec2(4.0, 2.0);
+        let chip = egui::Rect::from_min_size(pos, galley.size() + pad * 2.0);
+        painter.rect_filled(chip, 3, visuals.extreme_bg_color.gamma_multiply(0.85));
+        painter.galley(pos + pad, galley, visuals.strong_text_color());
     }
 
     changed.then(|| Curve::new(points))

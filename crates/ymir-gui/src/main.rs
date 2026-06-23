@@ -235,6 +235,9 @@ struct AppState {
     /// The rename dialog (#61), open while the user edits a node's display name.
     /// `None` when closed.
     rename: Option<RenameDialog>,
+    /// The popped-out curve editor: a larger, draggable window for shaping a curve
+    /// param with room to be precise and a coordinate readout. `None` when closed.
+    curve_popout: Option<CurvePopout>,
     /// A one-shot "zoom to graph" transform to apply on the next frame (#65). The
     /// fit is computed from this frame's node rects (collected during rendering) and
     /// applied via the canvas's `current_transform` override next frame.
@@ -302,6 +305,17 @@ struct RenameDialog {
     just_opened: bool,
 }
 
+/// Identifies the curve param shown in the popped-out editor window: a specific node
+/// and the param name on it. Tied to the node, not the current selection, so the window
+/// keeps editing the same curve even after another node is selected.
+#[derive(Clone)]
+struct CurvePopout {
+    /// The node whose curve is being edited (its `stable_id`).
+    node: Handle,
+    /// The curve param's name on that node.
+    param: String,
+}
+
 impl AppState {
     fn new() -> Self {
         // Open with the built-in starter chain (#76), so a fresh session has a real
@@ -330,6 +344,7 @@ impl AppState {
             node_menu: None,
             preview_pin: None,
             rename: None,
+            curve_popout: None,
             pending_view: None,
             param_tab: ParamTab::Node,
             build_res: 1024,
@@ -1265,7 +1280,11 @@ inventory::submit! { PaneKind { id: "params", draw: params_pane } }
 fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
     // The inspector edits the primary (last-clicked) selected node; nothing selected (or
     // it was deleted) shows a hint, not an error.
-    let Some(id) = state.primary.and_then(|h| state.graph.node_id_of(h)) else {
+    let Some(handle) = state.primary else {
+        ui.weak("Select a node to edit its parameters.");
+        return;
+    };
+    let Some(id) = state.graph.node_id_of(handle) else {
         ui.weak("Select a node to edit its parameters.");
         return;
     };
@@ -1316,6 +1335,16 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
         if let Some(new_value) = param_ui::edit(ui, pspec, &current, histogram.as_deref()) {
             params.insert(pspec.name.clone(), new_value);
             changed = true;
+        }
+        // A curve param gets a button to open the larger, draggable editor window, where
+        // there is room to shape precisely and a coordinate readout (#70-style pop-out).
+        if matches!(pspec.kind, ymir_core::ParamKind::Curve)
+            && ui.small_button("Edit in window").clicked()
+        {
+            state.curve_popout = Some(CurvePopout {
+                node: handle,
+                param: pspec.name.clone(),
+            });
         }
     }
 
@@ -2294,6 +2323,71 @@ impl YmirApp {
     }
 }
 
+/// Draws the popped-out curve editor as a floating, draggable, resizable window when one
+/// is open (#70-style pop-out). It edits the specific node and param it was opened for,
+/// independent of the current selection, and applies changes through the graph exactly
+/// like the inline editor, so the same undo/preview machinery picks them up. A no-op when
+/// closed; closing the window (or the node vanishing) clears the pop-out.
+fn curve_popout_window(ctx: &egui::Context, state: &mut AppState) {
+    let Some(popout) = state.curve_popout.clone() else {
+        return;
+    };
+    let Some(id) = state.graph.node_id_of(popout.node) else {
+        state.curve_popout = None;
+        return;
+    };
+
+    // Title from the node's display-name override, else its translated type name.
+    let title = match state.graph.spec(id) {
+        Some(spec) => {
+            let name = state
+                .graph
+                .name(id)
+                .map(str::to_string)
+                .unwrap_or_else(|| tr(&format!("node-{}", spec.type_id)).to_string());
+            format!("Curve — {name}")
+        }
+        None => "Curve".to_string(),
+    };
+
+    // Snapshot the current curve and the previewed input histogram (owned, so neither
+    // borrows `state` across the apply below).
+    let identity = ymir_core::Curve::identity();
+    let params = state.graph.params(id).cloned().unwrap_or_default();
+    let curve = params.get_curve(&popout.param, &identity).clone();
+    let histogram: Option<Vec<f32>> = state
+        .preview
+        .input_histogram(popout.node)
+        .map(|h| h.to_vec());
+
+    let mut open = true;
+    egui::Window::new(title)
+        .open(&mut open)
+        .resizable(true)
+        .default_size(egui::vec2(480.0, 520.0))
+        .show(ctx, |ui| {
+            ui.weak("Drag a point to move it. Click empty space to add one, right-click a point to remove it.");
+            ui.add_space(6.0);
+            // A near-square editor that grows with the window, so there is real room to be
+            // precise. Clamped so it never collapses or overruns a small window.
+            let side = ui.available_width().clamp(280.0, 720.0);
+            let size = egui::vec2(side, (side * 0.8).max(240.0));
+            if let Some(new_curve) =
+                curve_edit::curve_editor_sized(ui, &curve, histogram.as_deref(), size, true)
+            {
+                let mut next = params.clone();
+                next.insert(popout.param.clone(), ParamValue::Curve(new_curve));
+                if let Err(err) = state.graph.set_params(id, next) {
+                    ui.colored_label(ui.visuals().error_fg_color, err.to_string());
+                }
+            }
+        });
+
+    if !open {
+        state.curve_popout = None;
+    }
+}
+
 impl eframe::App for YmirApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // Undo/redo shortcuts run before the panes draw, so a restore is reflected in
@@ -2301,6 +2395,8 @@ impl eframe::App for YmirApp {
         // Ctrl+Z keeps editing text there instead of undoing the graph.
         handle_shortcuts(ui.ctx(), &mut self.state);
         mount(&default_layout(), ui, &mut self.state);
+        // The popped-out curve editor floats over the panes when open (#70-style).
+        curve_popout_window(ui.ctx(), &mut self.state);
         // Intercept a window close with unsaved changes: cancel it and raise the prompt
         // (#83). An already-confirmed close (allow_close) or a clean session goes through.
         if ui.ctx().input(|i| i.viewport().close_requested())
