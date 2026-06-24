@@ -51,6 +51,10 @@ pub(crate) struct Node {
     /// apart. Cosmetic metadata: it is serialized with the graph but never enters a
     /// cache key, the per-node seed, or evaluation, so a rename cannot change output.
     pub(crate) name: Option<String>,
+    /// When set, the node is transparent: the evaluator skips its operator and forwards
+    /// its input 0 instead, so a node with no input 0 (a generator) emits nothing. A fast
+    /// way to toggle a node off without unwiring it. Serialized with the graph.
+    pub(crate) bypassed: bool,
     /// One slot per input port, in order; `None` is unconnected.
     pub(crate) inputs: Vec<Option<InputConn>>,
     /// Number of leading required input ports. Ports `[0, required_input_count)` must
@@ -113,6 +117,7 @@ impl Graph {
             operator,
             params,
             name: None,
+            bypassed: false,
             inputs: (0..input_count).map(|_| None).collect(),
             required_input_count,
             output_count,
@@ -145,6 +150,24 @@ impl Graph {
     pub fn set_name(&mut self, node: NodeId, name: Option<String>) -> Result<()> {
         let node = self.nodes.get_mut(node).ok_or(Error::NodeNotFound)?;
         node.name = name;
+        Ok(())
+    }
+
+    /// Whether a node is bypassed (transparent: the evaluator forwards its input 0 and
+    /// skips its operator). `false` for an absent node.
+    #[must_use]
+    pub fn is_bypassed(&self, node: NodeId) -> bool {
+        self.nodes.get(node).is_some_and(|n| n.bypassed)
+    }
+
+    /// Sets a node's bypass state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NodeNotFound`] if `node` is not in the graph.
+    pub fn set_bypassed(&mut self, node: NodeId, bypassed: bool) -> Result<()> {
+        let node = self.nodes.get_mut(node).ok_or(Error::NodeNotFound)?;
+        node.bypassed = bypassed;
         Ok(())
     }
 

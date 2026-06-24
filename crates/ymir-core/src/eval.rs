@@ -215,18 +215,53 @@ impl Graph {
         let node = self.node(id).ok_or(Error::NodeNotFound)?;
         let required_count = node.required_input_count;
 
+        // A bypassed node is transparent: its output is its input 0's field, forwarded
+        // unchanged, with the operator never run. A node with no input 0 (a bypassed
+        // generator, or an unconnected input 0) forwards nothing. Its key is the resolved
+        // source's, so a downstream diamond reuses and a source change recomputes.
+        if node.bypassed {
+            let resolved = self.resolve_source(id, 0)?;
+            let outputs = match resolved {
+                Some((src, out)) => {
+                    let upstream = self.pull(src, request, cache, computed, in_progress)?;
+                    let field = upstream
+                        .get(out)
+                        .ok_or(Error::InvalidPort {
+                            type_id: node.type_id,
+                            port: out,
+                        })?
+                        .clone();
+                    Arc::new(vec![field])
+                }
+                None => Arc::new(Vec::new()),
+            };
+            let key = resolved
+                .and_then(|(src, _)| computed.get(&src).map(|(key, _)| *key))
+                .unwrap_or(0);
+            computed.insert(id, (key, Arc::clone(&outputs)));
+            in_progress.remove(&id);
+            return Ok(outputs);
+        }
+
         // Evaluate each connected input, collecting its output Arc and the consumed
         // output index per port (`None` for an unconnected optional port), plus its
-        // cache key. A required port that is unconnected is an error.
+        // cache key. The source is resolved through any bypassed nodes first, so a
+        // bypassed node is seen through to the field it forwards; a dead-ended bypass (a
+        // bypassed generator upstream) reads as unconnected. A required port that is
+        // unconnected is an error.
         let mut upstream: Vec<Option<(Arc<Vec<Field>>, usize)>> =
             Vec::with_capacity(node.inputs.len());
         let mut input_keys: Vec<Option<u64>> = Vec::with_capacity(node.inputs.len());
         for (port, slot) in node.inputs.iter().enumerate() {
-            match slot {
-                Some(conn) => {
-                    let outputs = self.pull(conn.source, request, cache, computed, in_progress)?;
-                    let upstream_key = computed.get(&conn.source).map_or(0, |(key, _)| *key);
-                    upstream.push(Some((outputs, conn.output)));
+            let resolved = match slot {
+                Some(conn) => self.resolve_source(conn.source, conn.output)?,
+                None => None,
+            };
+            match resolved {
+                Some((src, out)) => {
+                    let outputs = self.pull(src, request, cache, computed, in_progress)?;
+                    let upstream_key = computed.get(&src).map_or(0, |(key, _)| *key);
+                    upstream.push(Some((outputs, out)));
                     input_keys.push(Some(upstream_key));
                 }
                 None if port < required_count => {
@@ -367,18 +402,32 @@ impl Graph {
             return Err(Error::Cycle);
         }
         let node = self.node(id).ok_or(Error::NodeNotFound)?;
+
+        // A bypassed node's output is its resolved source's field, so its key is that
+        // source's key (0 for a dead bypass), mirroring `pull`.
+        if node.bypassed {
+            let key = match self.resolve_source(id, 0)? {
+                Some((src, _)) => self.node_key(src, request, keys, in_progress)?,
+                None => 0,
+            };
+            keys.insert(id, key);
+            in_progress.remove(&id);
+            return Ok(key);
+        }
+
         let required_count = node.required_input_count;
 
         let mut input_keys: Vec<Option<u64>> = Vec::with_capacity(node.inputs.len());
         for (port, slot) in node.inputs.iter().enumerate() {
-            match slot {
-                Some(conn) => {
-                    input_keys.push(Some(self.node_key(
-                        conn.source,
-                        request,
-                        keys,
-                        in_progress,
-                    )?));
+            // Resolve through bypassed nodes, exactly as `pull` does, so the key tracks
+            // the field actually consumed.
+            let resolved = match slot {
+                Some(conn) => self.resolve_source(conn.source, conn.output)?,
+                None => None,
+            };
+            match resolved {
+                Some((src, _)) => {
+                    input_keys.push(Some(self.node_key(src, request, keys, in_progress)?));
                 }
                 None if port < required_count => {
                     return Err(Error::DisconnectedInput {
@@ -395,6 +444,34 @@ impl Graph {
         keys.insert(id, key);
         in_progress.remove(&id);
         Ok(key)
+    }
+
+    /// Resolves an edge `(source, output)` through any chain of bypassed nodes to the
+    /// node that actually produces the field, or `None` if the chain dead-ends at a
+    /// bypassed node with no input 0 (a bypassed generator, or an unconnected input 0):
+    /// an absent edge. Bypassed nodes forward their input 0 regardless of which output
+    /// port was requested, so the requested `output` is replaced as the walk follows.
+    fn resolve_source(
+        &self,
+        mut source: NodeId,
+        mut output: usize,
+    ) -> Result<Option<(NodeId, usize)>> {
+        // Input-0 edges form a sub-DAG, so the walk terminates; bound it by the node
+        // count anyway, so a cycle among bypassed nodes reports rather than spins.
+        for _ in 0..=self.node_count() {
+            let node = self.node(source).ok_or(Error::NodeNotFound)?;
+            if !node.bypassed {
+                return Ok(Some((source, output)));
+            }
+            match node.inputs.first() {
+                Some(Some(conn)) => {
+                    source = conn.source;
+                    output = conn.output;
+                }
+                _ => return Ok(None),
+            }
+        }
+        Err(Error::Cycle)
     }
 }
 
@@ -1215,5 +1292,163 @@ mod tests {
         let status = graph.cache_status(add, &req, &cache).unwrap();
         assert!(status[&head], "unchanged upstream stays cached");
         assert!(!status[&add], "changed node is stale");
+    }
+
+    /// First height-layer cell of an evaluated output, for terse assertions.
+    fn first_height(out: &[Field]) -> f32 {
+        out[0].layer(layers::HEIGHT).unwrap().as_slice()[0]
+    }
+
+    #[test]
+    fn bypassed_modifier_forwards_its_input_unchanged() {
+        let mut graph = Graph::new();
+        let add_calls = Arc::new(AtomicUsize::new(0));
+        let head = graph.add_op(
+            Box::new(CountingGen {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new(),
+        );
+        let add = graph.add_op(
+            Box::new(CountingAdd {
+                calls: Arc::clone(&add_calls),
+            }),
+            Params::new().with("delta", ParamValue::Float(0.25)),
+        );
+        graph.connect(head, 0, add, 0).unwrap();
+        graph.set_bypassed(add, true).unwrap();
+
+        let head_value = {
+            let mut cache = EvalCache::new(8);
+            first_height(&graph.evaluate(head, &request(), &mut cache).unwrap())
+        };
+        let mut cache = EvalCache::new(8);
+        let out = graph.evaluate(add, &request(), &mut cache).unwrap();
+        // The head's value comes through with no delta, and the operator never ran.
+        assert!((first_height(&out) - head_value).abs() < 1e-6);
+        assert_eq!(
+            add_calls.load(Ordering::Relaxed),
+            0,
+            "a bypassed operator must not be evaluated"
+        );
+    }
+
+    #[test]
+    fn bypassing_a_generator_drops_an_optional_input() {
+        let mut graph = Graph::new();
+        let base = graph.add_op(
+            Box::new(CountingGen {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new(),
+        );
+        let extra = graph.add_op(
+            Box::new(CountingGen {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new(),
+        );
+        let probe = graph.add_op(Box::new(OptionalProbe), Params::new());
+        graph.connect(base, 0, probe, 0).unwrap();
+        graph.connect(extra, 0, probe, 1).unwrap();
+
+        let with_optional = {
+            let mut cache = EvalCache::new(8);
+            first_height(&graph.evaluate(probe, &request(), &mut cache).unwrap())
+        };
+        // Bypassing the generator on the optional port makes it read as unconnected, so
+        // the probe degrades (no +1) instead of failing.
+        graph.set_bypassed(extra, true).unwrap();
+        let without_optional = {
+            let mut cache = EvalCache::new(8);
+            first_height(&graph.evaluate(probe, &request(), &mut cache).unwrap())
+        };
+        assert!((with_optional - without_optional - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn bypassing_a_generator_red_outs_a_required_consumer() {
+        let mut graph = Graph::new();
+        let head = graph.add_op(
+            Box::new(CountingGen {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new(),
+        );
+        let add = graph.add_op(
+            Box::new(CountingAdd {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new(),
+        );
+        graph.connect(head, 0, add, 0).unwrap();
+        graph.set_bypassed(head, true).unwrap();
+
+        // The required input is now fed by nothing, exactly as if unwired.
+        let mut cache = EvalCache::new(8);
+        let result = graph.evaluate(add, &request(), &mut cache);
+        assert!(matches!(result, Err(Error::DisconnectedInput { .. })));
+    }
+
+    #[test]
+    fn bypass_sees_through_a_chain_of_modifiers() {
+        let mut graph = Graph::new();
+        let head = graph.add_op(
+            Box::new(CountingGen {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new(),
+        );
+        let a1 = graph.add_op(
+            Box::new(CountingAdd {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new().with("delta", ParamValue::Float(0.1)),
+        );
+        let a2 = graph.add_op(
+            Box::new(CountingAdd {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new().with("delta", ParamValue::Float(0.1)),
+        );
+        graph.connect(head, 0, a1, 0).unwrap();
+        graph.connect(a1, 0, a2, 0).unwrap();
+        graph.set_bypassed(a1, true).unwrap();
+        graph.set_bypassed(a2, true).unwrap();
+
+        let head_value = {
+            let mut cache = EvalCache::new(8);
+            first_height(&graph.evaluate(head, &request(), &mut cache).unwrap())
+        };
+        let mut cache = EvalCache::new(8);
+        let out = graph.evaluate(a2, &request(), &mut cache).unwrap();
+        // Both modifiers are seen through: the head's value reaches the end untouched.
+        assert!((first_height(&out) - head_value).abs() < 1e-6);
+    }
+
+    #[test]
+    fn toggling_bypass_changes_the_output_key() {
+        let mut graph = Graph::new();
+        let head = graph.add_op(
+            Box::new(CountingGen {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new(),
+        );
+        let add = graph.add_op(
+            Box::new(CountingAdd {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new().with("delta", ParamValue::Float(0.25)),
+        );
+        graph.connect(head, 0, add, 0).unwrap();
+
+        let active = graph.output_key(add, &request()).unwrap();
+        graph.set_bypassed(add, true).unwrap();
+        let bypassed = graph.output_key(add, &request()).unwrap();
+        assert_ne!(
+            active, bypassed,
+            "a bypass toggle must invalidate the cache key"
+        );
     }
 }
