@@ -135,7 +135,7 @@ mod tests {
                 &default_ctx(),
             )
             .unwrap();
-        assert_eq!(out[0].content_hash().to_u64(), 0x6735_0dbf_a122_5544);
+        assert_eq!(out[0].content_hash().to_u64(), 0xb075_6620_1b58_4592);
     }
 
     #[test]

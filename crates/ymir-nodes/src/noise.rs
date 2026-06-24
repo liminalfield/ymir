@@ -1,10 +1,12 @@
 //! Coherent-noise terrain math, used by the fBm generator operator.
 //!
-//! A hand-rolled 2D Perlin generator with fractional Brownian motion (fBm)
-//! layering. The algorithm is specified here rather than pulled from a crate on
-//! purpose: byte-identical output for a given seed is a core promise, and an
-//! external noise crate does not contract to keep its output stable across
-//! versions. The same reasoning drives the hand-rolled hashing in `ymir-core`.
+//! A hand-rolled 2D simplex generator with fractional Brownian motion (fBm)
+//! layering. Simplex uses a triangular lattice with no preferred axes, so it avoids
+//! the horizontal/vertical/diagonal banding of a square-lattice (Perlin) basis. The
+//! algorithm is specified here rather than pulled from a crate on purpose:
+//! byte-identical output for a given seed is a core promise, and an external noise
+//! crate does not contract to keep its output stable across versions. The same
+//! reasoning drives the hand-rolled hashing in `ymir-core`.
 //!
 //! Gradients are derived by hashing integer lattice coordinates together with the
 //! seed, so there is no permutation table and the function is fully stateless and
@@ -21,7 +23,7 @@ use std::sync::Arc;
 
 use ymir_core::{Field, Layer, Region, layers};
 
-/// Parameters for fractional Brownian motion layering of Perlin noise.
+/// Parameters for fractional Brownian motion layering of simplex noise.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct FbmParams {
     /// Base feature frequency: how many noise cycles span one unit of the region.
@@ -52,32 +54,35 @@ impl Default for FbmParams {
     }
 }
 
-/// Eight unit gradient directions (axes plus diagonals), selected per lattice
-/// point by the low bits of the coordinate hash.
-const GRADIENTS: [(f32, f32); 8] = [
+/// Twelve unit gradient directions, evenly spaced around the circle (every 30 degrees),
+/// selected per lattice point by the coordinate hash. More directions than a square
+/// lattice's axes-and-diagonals set, which keeps the noise isotropic.
+const SIMPLEX_GRADIENTS: [(f32, f32); 12] = [
     (1.0, 0.0),
-    (-1.0, 0.0),
+    (0.866_025_4, 0.5),
+    (0.5, 0.866_025_4),
     (0.0, 1.0),
+    (-0.5, 0.866_025_4),
+    (-0.866_025_4, 0.5),
+    (-1.0, 0.0),
+    (-0.866_025_4, -0.5),
+    (-0.5, -0.866_025_4),
     (0.0, -1.0),
-    (
-        core::f32::consts::FRAC_1_SQRT_2,
-        core::f32::consts::FRAC_1_SQRT_2,
-    ),
-    (
-        -core::f32::consts::FRAC_1_SQRT_2,
-        core::f32::consts::FRAC_1_SQRT_2,
-    ),
-    (
-        core::f32::consts::FRAC_1_SQRT_2,
-        -core::f32::consts::FRAC_1_SQRT_2,
-    ),
-    (
-        -core::f32::consts::FRAC_1_SQRT_2,
-        -core::f32::consts::FRAC_1_SQRT_2,
-    ),
+    (0.5, -0.866_025_4),
+    (0.866_025_4, -0.5),
 ];
 
-/// Generates a field whose `height` layer is fBm Perlin noise mapped to `[0, 1]`.
+/// Skew factor for the 2D simplex grid: `0.5 * (sqrt(3) - 1)`.
+const SIMPLEX_F2: f32 = 0.366_025_42;
+/// Unskew factor for the 2D simplex grid: `(3 - sqrt(3)) / 6`.
+const SIMPLEX_G2: f32 = 0.211_324_87;
+/// Scales the summed corner contributions to roughly `[-1, 1]` for the unit gradients
+/// above. The raw peak amplitude is about `0.00984` (measured over a dense grid), so a
+/// factor near `101.7` fills the range; `100` leaves a small margin (and the field
+/// mappers clamp regardless).
+const SIMPLEX_SCALE: f32 = 100.0;
+
+/// Generates a field whose `height` layer is fBm noise mapped to `[0, 1]`.
 ///
 /// The noise is sampled across `region` in world space, so the same `seed`,
 /// `params`, and `region` yield a consistent sampling of one continuous function
@@ -294,7 +299,7 @@ fn hash_unit(seed: u64, ix: i32, iy: i32) -> f32 {
     (hash_coords(seed, ix, iy) & 0xFF_FFFF) as f32 / 16_777_216.0
 }
 
-/// Sums Perlin octaves, returning a value in roughly `[-1, 1]`.
+/// Sums simplex octaves, returning a value in roughly `[-1, 1]`.
 fn fbm2(seed: u64, x: f32, y: f32, params: FbmParams) -> f32 {
     let mut frequency = 1.0_f32;
     let mut amplitude = 1.0_f32;
@@ -305,7 +310,7 @@ fn fbm2(seed: u64, x: f32, y: f32, params: FbmParams) -> f32 {
         // Decorrelate octaves with a per-octave seed salt so higher octaves are
         // not just a scaled copy of the base layer.
         let octave_seed = seed ^ 0x9E37_79B9_7F4A_7C15_u64.wrapping_mul(u64::from(octave) + 1);
-        sum += amplitude * perlin2(octave_seed, x * frequency, y * frequency);
+        sum += amplitude * simplex2(octave_seed, x * frequency, y * frequency);
         total_amplitude += amplitude;
         frequency *= params.lacunarity as f32;
         amplitude *= params.gain;
@@ -320,7 +325,7 @@ fn fbm2(seed: u64, x: f32, y: f32, params: FbmParams) -> f32 {
 
 /// Sums ridged-multifractal octaves, returning a value in `[0, 1]`.
 ///
-/// Each octave folds the Perlin value to a ridge (`1 - |n|`, squared to sharpen the
+/// Each octave folds the simplex value to a ridge (`1 - |n|`, squared to sharpen the
 /// crest), so the noise's zero-crossings become sharp ridgelines and its extremes become
 /// valleys. The running `weight`, driven by the coarser octaves, then suppresses each
 /// finer octave in the valleys, so detail concentrates on the ridges: the characteristic
@@ -336,7 +341,7 @@ fn ridged2(seed: u64, x: f32, y: f32, params: FbmParams) -> f32 {
     for octave in 0..params.octaves {
         // Decorrelate octaves with the same per-octave seed salt as the fBm path.
         let octave_seed = seed ^ 0x9E37_79B9_7F4A_7C15_u64.wrapping_mul(u64::from(octave) + 1);
-        let n = perlin2(octave_seed, x * frequency, y * frequency);
+        let n = simplex2(octave_seed, x * frequency, y * frequency);
         // Fold to a ridge (high at the zero-crossing, zero at the extremes) and sharpen.
         let mut ridge = 1.0 - n.abs();
         ridge *= ridge;
@@ -360,7 +365,7 @@ fn ridged2(seed: u64, x: f32, y: f32, params: FbmParams) -> f32 {
 
 /// Sums billow octaves, returning a value in roughly `[-1, 1]`.
 ///
-/// Each octave folds the Perlin value with `2|n| - 1`, which sends the noise's extremes
+/// Each octave folds the simplex value with `2|n| - 1`, which sends the noise's extremes
 /// to `+1` (rounded bumps) and its zero-crossings to `-1` (creased valleys), so the sum
 /// reads as puffy mounds rather than the symmetric ripples of plain fBm. Normalized by the
 /// total amplitude, identical otherwise to the fBm octave loop.
@@ -373,7 +378,7 @@ fn billow2(seed: u64, x: f32, y: f32, params: FbmParams) -> f32 {
     for octave in 0..params.octaves {
         // Same per-octave seed salt as the fBm and ridged paths.
         let octave_seed = seed ^ 0x9E37_79B9_7F4A_7C15_u64.wrapping_mul(u64::from(octave) + 1);
-        let n = perlin2(octave_seed, x * frequency, y * frequency);
+        let n = simplex2(octave_seed, x * frequency, y * frequency);
         sum += amplitude * (2.0 * n.abs() - 1.0);
         total_amplitude += amplitude;
         frequency *= params.lacunarity as f32;
@@ -404,7 +409,7 @@ fn hybrid2(seed: u64, x: f32, y: f32, params: FbmParams, bias: f32) -> f32 {
     for octave in 0..params.octaves {
         // Same per-octave seed salt as the other multifractal paths.
         let octave_seed = seed ^ 0x9E37_79B9_7F4A_7C15_u64.wrapping_mul(u64::from(octave) + 1);
-        let signal = (perlin2(octave_seed, x * frequency, y * frequency) + bias) * amplitude;
+        let signal = (simplex2(octave_seed, x * frequency, y * frequency) + bias) * amplitude;
         if octave == 0 {
             result = signal;
             weight = signal;
@@ -425,34 +430,55 @@ fn hybrid2(seed: u64, x: f32, y: f32, params: FbmParams, bias: f32) -> f32 {
     (result / envelope).clamp(0.0, 1.0)
 }
 
-/// Improved Perlin noise at `(x, y)`, returning a value in roughly `[-1, 1]`.
-fn perlin2(seed: u64, x: f32, y: f32) -> f32 {
-    let x0 = x.floor();
-    let y0 = y.floor();
-    let xi = x0 as i32;
-    let yi = y0 as i32;
+/// 2D simplex noise at `(x, y)`, returning a value in roughly `[-1, 1]`.
+///
+/// The plane is skewed onto a triangular lattice, the sample's simplex (triangle) is
+/// found, and the three corners each contribute a gradient dotted with the distance to
+/// them, weighted by a radial falloff. The triangular lattice has no preferred axes, so
+/// the square-lattice banding of the former Perlin basis is gone. Gradients are still
+/// selected by hashing the integer lattice coordinates with the seed, so the function is
+/// stateless and deterministic (negative coordinates included, via `hash_coords`).
+fn simplex2(seed: u64, x: f32, y: f32) -> f32 {
+    // Skew the input to find the simplex cell origin (i, j).
+    let s = (x + y) * SIMPLEX_F2;
+    let i = (x + s).floor();
+    let j = (y + s).floor();
+    let ii = i as i32;
+    let jj = j as i32;
 
-    // Position within the lattice cell.
-    let fx = x - x0;
-    let fy = y - y0;
-    let u = fade(fx);
-    let v = fade(fy);
+    // Unskew the origin back to (x, y) space; (x0, y0) is the offset from the first corner.
+    let t = (i + j) * SIMPLEX_G2;
+    let x0 = x - (i - t);
+    let y0 = y - (j - t);
 
-    let n00 = dot_gradient(seed, xi, yi, fx, fy);
-    let n10 = dot_gradient(seed, xi + 1, yi, fx - 1.0, fy);
-    let n01 = dot_gradient(seed, xi, yi + 1, fx, fy - 1.0);
-    let n11 = dot_gradient(seed, xi + 1, yi + 1, fx - 1.0, fy - 1.0);
+    // The middle corner: the lower triangle steps in x first, the upper in y first.
+    let (i1, j1) = if x0 > y0 { (1, 0) } else { (0, 1) };
 
-    let nx0 = lerp(n00, n10, u);
-    let nx1 = lerp(n01, n11, u);
-    // 2D gradient noise spans about [-sqrt(2)/2, sqrt(2)/2]; scale to fill [-1, 1].
-    lerp(nx0, nx1, v) * core::f32::consts::SQRT_2
+    // Offsets to the middle and last corners, unskewed.
+    let x1 = x0 - i1 as f32 + SIMPLEX_G2;
+    let y1 = y0 - j1 as f32 + SIMPLEX_G2;
+    let x2 = x0 - 1.0 + 2.0 * SIMPLEX_G2;
+    let y2 = y0 - 1.0 + 2.0 * SIMPLEX_G2;
+
+    let n0 = corner(seed, ii, jj, x0, y0);
+    let n1 = corner(seed, ii + i1, jj + j1, x1, y1);
+    let n2 = corner(seed, ii + 1, jj + 1, x2, y2);
+
+    SIMPLEX_SCALE * (n0 + n1 + n2)
 }
 
-/// Dot product of the lattice point's gradient with the distance vector to it.
-fn dot_gradient(seed: u64, ix: i32, iy: i32, dx: f32, dy: f32) -> f32 {
-    let (gx, gy) = GRADIENTS[(hash_coords(seed, ix, iy) & 7) as usize];
-    gx * dx + gy * dy
+/// One simplex corner's contribution: a radial falloff `(0.5 - d^2)^4` times the corner
+/// gradient dotted with the distance vector to it. Beyond the falloff radius (`t <= 0`)
+/// the corner contributes nothing.
+fn corner(seed: u64, ix: i32, iy: i32, dx: f32, dy: f32) -> f32 {
+    let t = 0.5 - dx * dx - dy * dy;
+    if t <= 0.0 {
+        0.0
+    } else {
+        let (gx, gy) = SIMPLEX_GRADIENTS[(hash_coords(seed, ix, iy) % 12) as usize];
+        let t2 = t * t;
+        t2 * t2 * (gx * dx + gy * dy)
+    }
 }
 
 /// Mixes a seed and integer lattice coordinates into a well-distributed hash,
@@ -471,16 +497,6 @@ fn hash_coords(seed: u64, ix: i32, iy: i32) -> u64 {
     h = h.wrapping_mul(0x94D0_49BB_1331_11EB);
     h ^= h >> 31;
     h
-}
-
-/// Perlin's quintic fade curve `6t^5 - 15t^4 + 10t^3`.
-fn fade(t: f32) -> f32 {
-    t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
-}
-
-/// Linear interpolation.
-fn lerp(a: f32, b: f32, t: f32) -> f32 {
-    a + t * (b - a)
 }
 
 #[cfg(test)]
@@ -542,7 +558,7 @@ mod tests {
         // Fixed fingerprint, unchanged from before the math moved out of
         // ymir-core: this proves the relocation altered zero bytes of output.
         let field = fbm_field(8, 8, Region::UNIT, FbmParams::default(), 42);
-        assert_eq!(field.content_hash().to_u64(), 0x6735_0dbf_a122_5544);
+        assert_eq!(field.content_hash().to_u64(), 0xb075_6620_1b58_4592);
     }
 
     fn worley_params() -> WorleyParams {

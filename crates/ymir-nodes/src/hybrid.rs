@@ -234,6 +234,6 @@ mod tests {
     fn output_matches_golden_value() {
         // Fixed fingerprint so a change to the hybrid math fails here.
         let out = run(&Params::default(), &default_ctx());
-        assert_eq!(out.content_hash().to_u64(), 0xcc21_c72e_80fe_5060);
+        assert_eq!(out.content_hash().to_u64(), 0x31ad_2b6c_6e35_f17f);
     }
 }

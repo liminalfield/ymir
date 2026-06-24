@@ -86,10 +86,13 @@ the one decision to settle before building; it is captured in the issue.
 
 ## Two one-offs, lower priority
 
-- **Simplex / OpenSimplex2 basis.** Not a new generator but a *quality* swap under the
-  gradient-noise nodes: Perlin has faint axis-aligned artifacts that simplex avoids. This
-  is a basis change in `noise.rs` affecting fBm, ridged, billow, and the multifractals at
-  once, with golden-hash churn to manage. Its own track, not a generator to add.
+- **Simplex basis (done, #100).** The gradient-noise basis in `noise.rs` is now a
+  hand-rolled 2D simplex (triangular lattice, 12 evenly-spaced gradients), replacing the
+  former square-lattice Perlin, so fBm, ridged, billow, and hybrid all lost the
+  axis-aligned banding at once. Gradients are still hashed from lattice coordinates, so
+  determinism is unchanged; only the noise goldens moved. (OpenSimplex2 would refine the
+  remaining subtle simplex artifacts further, but classic 2D simplex already removes the
+  axis bias and is simpler to keep byte-stable.)
 - **Curl / flow noise.** Swirly, divergence-free vector fields, useful for flow and
   erosion direction rather than heightfields directly. Niche; revisit when erosion or
   directional warp needs it.
