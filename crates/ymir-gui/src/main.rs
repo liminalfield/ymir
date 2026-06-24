@@ -2013,6 +2013,7 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     let click_hit = click
         .filter(|_| !menu_open)
         .filter(|p| canvas_rect.contains(*p))
+        .filter(|p| over_canvas_surface(ui, *p))
         .and_then(|screen_pos| {
             // Node rects are in the canvas's local space; map the screen click back into
             // it through the inverse pan/zoom transform before hit-testing.
@@ -2146,6 +2147,23 @@ fn node_at(
     node_rects.iter().any(|(_, rect)| rect.contains(graph_pos))
 }
 
+/// True when `pos` lands on the canvas surface itself rather than a window floating over
+/// it (the curve pop-out, a dialog). The click and marquee handlers read raw global
+/// pointer state, so geometry alone cannot tell a press on the bare canvas from one on a
+/// window that happens to sit inside the canvas rect; without this, dragging in the curve
+/// editor draws a marquee and clicking its empty space clears the selection.
+///
+/// The canvas pane and snarl's node sublayer share the pane's order
+/// ([`egui::Order::Background`]); an [`egui::Window`] floats at [`egui::Order::Middle`] or
+/// above. Comparing the order lets a press on the bare canvas or a node through while
+/// rejecting one on a window, and so cannot reject node clicks the way layer identity would
+/// (snarl draws nodes in a same-order sublayer with a distinct id).
+fn over_canvas_surface(ui: &egui::Ui, pos: egui::Pos2) -> bool {
+    ui.ctx()
+        .layer_id_at(pos)
+        .is_none_or(|layer| layer.order <= ui.layer_id().order)
+}
+
 /// Drives the marquee box-select on the canvas: a left-drag that begins on empty canvas
 /// draws a selection rectangle and, on release, selects every node it intersects (#84).
 /// Ctrl/Cmd held adds to the existing selection rather than replacing it. Panning is on
@@ -2174,6 +2192,7 @@ fn handle_marquee(
         && !menu_open
         && let Some(origin) = pointer.press_origin
         && canvas_rect.contains(origin)
+        && over_canvas_surface(ui, origin)
         && !node_at(origin, node_rects, to_global)
     {
         state.marquee_start = Some(origin);
@@ -2413,6 +2432,18 @@ fn curve_popout_window(ctx: &egui::Context, state: &mut AppState) {
         .resizable(true)
         .default_size(egui::vec2(480.0, 520.0))
         .show(ctx, |ui| {
+            // Absorb drags on the window body so only the title bar moves the window. egui
+            // makes the whole window area a move handle, and the curve editor only senses
+            // clicks, so a drag on the body (or empty editor space) would otherwise fall
+            // through to that handle and drag the window. A drag-sensing guard over the body,
+            // registered before the content so the curve's point handles (added after, on
+            // top) keep their own drags, eats those drags; clicks still pass through to add a
+            // point, since egui resolves the click target and drag target independently.
+            ui.interact(
+                ui.max_rect(),
+                ui.id().with("curve-popout-body-drag-guard"),
+                egui::Sense::drag(),
+            );
             ui.weak("Drag a point to move it. Click empty space to add one, right-click a point to remove it.");
             ui.add_space(6.0);
             // A near-square editor that grows with the window, so there is real room to be
