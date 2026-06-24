@@ -153,6 +153,9 @@ pub(crate) struct GraphViewer<'a> {
     /// A preview-pin change the viewer requests (context-menu Pin/Unpin, #39): the
     /// inner value is the new pin (`Some(node)` to pin, `None` to unpin). Output.
     pub(crate) pin_request: Option<Option<Handle>>,
+    /// A node the viewer asks the canvas to toggle bypass on (context-menu Bypass,
+    /// #105); the canvas flips its bypass state after the frame. Output.
+    pub(crate) bypass_request: Option<Handle>,
     /// A one-shot pan/zoom override to apply this frame ("zoom to graph", #65). Input.
     pub(crate) pending_view: Option<egui::emath::TSTransform>,
     /// Set when the graph context menu's "Zoom to graph" was chosen; the canvas
@@ -185,6 +188,7 @@ impl<'a> GraphViewer<'a> {
             select_after: None,
             rename_request: None,
             pin_request: None,
+            bypass_request: None,
             pending_view: None,
             frame_all_request: false,
             zoom: None,
@@ -336,13 +340,21 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
         // keeps the title from being text-selectable, so it shows the normal cursor
         // (not a text I-beam) and reads as a node title, not editable text.
         let is_selected = handle.is_some_and(|h| self.selection.contains(&h));
-        let text = if is_selected {
+        let mut text = if is_selected {
             egui::RichText::new(title)
                 .strong()
                 .color(ui.visuals().selection.stroke.color)
         } else {
             egui::RichText::new(title)
         };
+        // A bypassed node reads as off at a glance: its title is dimmed and struck
+        // through (#105).
+        let is_bypassed = handle
+            .and_then(|h| self.core_id(h))
+            .is_some_and(|id| self.graph.is_bypassed(id));
+        if is_bypassed {
+            text = text.weak().strikethrough();
+        }
         // Fixed node width: the header defines it, so every node is the same width.
         ui.set_min_width(NODE_WIDTH);
         ui.horizontal(|ui| {
@@ -602,6 +614,21 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
             };
             if ui.button(label).clicked() {
                 self.pin_request = Some((!is_pinned).then_some(handle));
+                ui.close();
+            }
+        }
+        // Bypass: toggle the node transparent (forwards input 0; a generator emits
+        // nothing). The label reflects the current state (#105).
+        if let Some(handle) = snarl.get_node(node).copied()
+            && let Some(id) = self.core_id(handle)
+        {
+            let label = if self.graph.is_bypassed(id) {
+                "Enable"
+            } else {
+                "Bypass"
+            };
+            if ui.button(label).clicked() {
+                self.bypass_request = Some(handle);
                 ui.close();
             }
         }

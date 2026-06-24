@@ -1335,6 +1335,15 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
         }
     });
     ui.weak(type_name.as_str());
+
+    // Bypass toggle (#105): make the node transparent (forwards input 0; a generator
+    // emits nothing) without unwiring it. Shown for every node, even param-less ones.
+    let mut bypassed = state.graph.is_bypassed(id);
+    if ui.checkbox(&mut bypassed, "Bypass").changed()
+        && let Err(err) = state.graph.set_bypassed(id, bypassed)
+    {
+        ui.colored_label(ui.visuals().error_fg_color, err.to_string());
+    }
     ui.separator();
 
     if spec.params.is_empty() {
@@ -1894,6 +1903,7 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         select_after: None,
         rename_request: None,
         pin_request: None,
+        bypass_request: None,
         pending_view,
         frame_all_request: frame_to_graph,
         zoom: None,
@@ -1969,6 +1979,8 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     let rename_request = viewer.rename_request;
     // A preview-pin change the viewer requests (context-menu Pin/Unpin, #39).
     let pin_request = viewer.pin_request;
+    // A node the viewer asks to toggle bypass on (context-menu Bypass, #105).
+    let bypass_request = viewer.bypass_request;
     // If "zoom to graph" was chosen, compute the fit from this frame's node rects to
     // apply next frame (#65). Done here, while the viewer (and its node rects) is
     // still borrowed.
@@ -2063,6 +2075,17 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // Apply a viewer-requested preview-pin change (context-menu Pin/Unpin, #39).
     if let Some(new_pin) = pin_request {
         state.preview_pin = new_pin;
+    }
+
+    // Toggle bypass on a node the context menu asked to bypass (#105).
+    if let Some(handle) = bypass_request
+        && let Some(id) = state.graph.node_id_of(handle)
+    {
+        let bypassed = state.graph.is_bypassed(id);
+        if let Err(err) = state.graph.set_bypassed(id, !bypassed) {
+            // The node was live a moment ago; surface it rather than swallow it.
+            ui.colored_label(ui.visuals().error_fg_color, err.to_string());
+        }
     }
 
     // Open the rename dialog for a node the context menu asked to rename (#61),
