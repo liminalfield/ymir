@@ -26,6 +26,23 @@ pub fn tr(key: &str) -> &str {
         "node-generator.fbm" => "fBm Noise",
         "node-generator.fbm-desc" => "Fractional Brownian motion of Perlin noise.",
 
+        // Cellular (Worley) generators.
+        "node-generator.cellular_bumps" => "Cellular Bumps",
+        "node-generator.cellular_bumps-desc" => {
+            "Worley noise as cones peaking at scattered feature points: rock piles, \
+             bumps, scales. Frequency sets cell density, jitter how organic the placement."
+        }
+        "node-generator.cellular_cracks" => "Cellular Cracks",
+        "node-generator.cellular_cracks-desc" => {
+            "Worley cell-edge network: cracks, fractures, dried mud, rocky cell walls. \
+             Frequency sets the network density, jitter how organic the cells."
+        }
+        "node-generator.cellular_regions" => "Cellular Regions",
+        "node-generator.cellular_regions-desc" => {
+            "Worley cells as flat, discrete regions (plates, zones): a control field to \
+             shape or scatter per region. Frequency sets the region count, jitter shape."
+        }
+
         // Ridged-multifractal generator.
         "node-generator.ridged" => "Ridged Noise",
         "node-generator.ridged-desc" => {

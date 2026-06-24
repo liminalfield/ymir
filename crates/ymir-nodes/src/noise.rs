@@ -140,6 +140,101 @@ pub(crate) fn fbm_sample(seed: u64, x: f32, y: f32, params: FbmParams) -> f32 {
     fbm2(seed, x, y, params)
 }
 
+/// Which cellular (Worley) feature a field renders. The shared [`worley`] computation
+/// yields all three; the feature only selects which result becomes the height, so the
+/// three Cellular nodes share one implementation rather than recomputing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WorleyFeature {
+    /// `1 - F1`: cones peaking at each feature point (bumps, rock piles, scales).
+    Bumps,
+    /// `1 - (F2 - F1)`: the bright cell-edge network (cracks, fracture lines).
+    Cracks,
+    /// A flat random value per cell: discrete regions (plates, cell ids).
+    Regions,
+}
+
+/// Parameters for cellular (Worley) noise.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct WorleyParams {
+    /// Cell density: how many cells span one unit of the region.
+    pub frequency: f64,
+    /// How far each feature point wanders from its cell origin, in `[0, 1]` (0 is a
+    /// regular grid, 1 fills the cell).
+    pub jitter: f32,
+}
+
+/// Decorrelates the y feature-offset hash from the x one so points are not on a diagonal.
+const WORLEY_SALT_Y: u64 = 0x2545_F491_4F6C_DD1D;
+/// Decorrelates the per-cell region value from the feature-offset hashes.
+const WORLEY_SALT_REGION: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// Generates a field whose `height` layer is cellular (Worley) noise in `[0, 1]`, for the
+/// chosen [`WorleyFeature`]. Sampled across `region` in world space like the fBm path, so
+/// it is resolution-independent, and seeded deterministically through [`hash_coords`].
+pub(crate) fn worley_field(
+    width: usize,
+    height: usize,
+    region: Region,
+    params: WorleyParams,
+    feature: WorleyFeature,
+    seed: u64,
+) -> Field {
+    let layer = Layer::from_fn(width, height, |x, y| {
+        // Same world-space sampling as the other generators, so frequency sets cell size
+        // and the field registers against the same coordinates at any resolution.
+        let u = (x as f64 + 0.5) / width as f64;
+        let v = (y as f64 + 0.5) / height as f64;
+        let wx = (region.min_x + u * region.width()) * params.frequency;
+        let wy = (region.min_y + v * region.height()) * params.frequency;
+
+        let (f1, f2, cell) = worley(seed, wx as f32, wy as f32, params.jitter);
+        match feature {
+            WorleyFeature::Bumps => (1.0 - f1).clamp(0.0, 1.0),
+            WorleyFeature::Cracks => (1.0 - (f2 - f1)).clamp(0.0, 1.0),
+            WorleyFeature::Regions => hash_unit(seed ^ WORLEY_SALT_REGION, cell.0, cell.1),
+        }
+    });
+
+    Field::new(width, height, region).with_layer(layers::HEIGHT, Arc::new(layer))
+}
+
+/// Cellular noise core: the distances to the nearest (`F1`) and second-nearest (`F2`)
+/// feature points around `(x, y)` in noise space, and the integer cell of the nearest.
+/// Each cell holds one feature point, jittered from its origin by a per-cell hash; only
+/// the 3x3 neighborhood can hold the two nearest, so the search is bounded.
+fn worley(seed: u64, x: f32, y: f32, jitter: f32) -> (f32, f32, (i32, i32)) {
+    let ix = x.floor() as i32;
+    let iy = y.floor() as i32;
+    let mut f1 = f32::INFINITY;
+    let mut f2 = f32::INFINITY;
+    let mut nearest = (ix, iy);
+    for dj in -1..=1 {
+        for di in -1..=1 {
+            let cx = ix + di;
+            let cy = iy + dj;
+            // Feature point: the cell origin plus a jittered, per-cell-deterministic
+            // offset (independent hashes for x and y so points are not diagonal).
+            let px = cx as f32 + jitter * hash_unit(seed, cx, cy);
+            let py = cy as f32 + jitter * hash_unit(seed ^ WORLEY_SALT_Y, cx, cy);
+            let d2 = (px - x).powi(2) + (py - y).powi(2);
+            if d2 < f1 {
+                f2 = f1;
+                f1 = d2;
+                nearest = (cx, cy);
+            } else if d2 < f2 {
+                f2 = d2;
+            }
+        }
+    }
+    (f1.sqrt(), f2.sqrt(), nearest)
+}
+
+/// A deterministic value in `[0, 1)` for an integer cell, from the coordinate hash. Uses
+/// 24 bits so the fraction is exact in `f32`, keeping it byte-identical across machines.
+fn hash_unit(seed: u64, ix: i32, iy: i32) -> f32 {
+    (hash_coords(seed, ix, iy) & 0xFF_FFFF) as f32 / 16_777_216.0
+}
+
 /// Sums Perlin octaves, returning a value in roughly `[-1, 1]`.
 fn fbm2(seed: u64, x: f32, y: f32, params: FbmParams) -> f32 {
     let mut frequency = 1.0_f32;
@@ -322,5 +417,81 @@ mod tests {
         // ymir-core: this proves the relocation altered zero bytes of output.
         let field = fbm_field(8, 8, Region::UNIT, FbmParams::default(), 42);
         assert_eq!(field.content_hash().to_u64(), 0x6735_0dbf_a122_5544);
+    }
+
+    fn worley_params() -> WorleyParams {
+        WorleyParams {
+            frequency: 8.0,
+            jitter: 1.0,
+        }
+    }
+
+    #[test]
+    fn worley_field_is_deterministic() {
+        for feature in [
+            WorleyFeature::Bumps,
+            WorleyFeature::Cracks,
+            WorleyFeature::Regions,
+        ] {
+            let a = worley_field(64, 64, Region::UNIT, worley_params(), feature, 42);
+            let b = worley_field(64, 64, Region::UNIT, worley_params(), feature, 42);
+            assert_eq!(a.content_hash(), b.content_hash(), "feature {feature:?}");
+        }
+    }
+
+    #[test]
+    fn worley_features_differ_and_stay_in_range() {
+        let bumps = worley_field(
+            64,
+            64,
+            Region::UNIT,
+            worley_params(),
+            WorleyFeature::Bumps,
+            7,
+        );
+        let cracks = worley_field(
+            64,
+            64,
+            Region::UNIT,
+            worley_params(),
+            WorleyFeature::Cracks,
+            7,
+        );
+        let regions = worley_field(
+            64,
+            64,
+            Region::UNIT,
+            worley_params(),
+            WorleyFeature::Regions,
+            7,
+        );
+        // The three features render the same cells differently.
+        assert_ne!(bumps.content_hash(), cracks.content_hash());
+        assert_ne!(bumps.content_hash(), regions.content_hash());
+        for field in [&bumps, &cracks, &regions] {
+            let layer = field.layer(layers::HEIGHT).unwrap();
+            for &v in layer.as_slice() {
+                assert!((0.0..=1.0).contains(&v), "value {v} out of [0, 1]");
+            }
+        }
+    }
+
+    #[test]
+    fn worley_jitter_changes_the_pattern() {
+        // A regular grid (jitter 0) is not the jittered pattern (jitter 1).
+        let grid = WorleyParams {
+            frequency: 8.0,
+            jitter: 0.0,
+        };
+        let a = worley_field(64, 64, Region::UNIT, grid, WorleyFeature::Bumps, 7);
+        let b = worley_field(
+            64,
+            64,
+            Region::UNIT,
+            worley_params(),
+            WorleyFeature::Bumps,
+            7,
+        );
+        assert_ne!(a.content_hash(), b.content_hash());
     }
 }
