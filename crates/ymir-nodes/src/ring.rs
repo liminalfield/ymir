@@ -46,18 +46,6 @@ impl Operator for Ring {
         NodeSpec {
             type_id: TYPE_ID,
             category: "generator",
-            tags: &[
-                "ring",
-                "annulus",
-                "circle",
-                "shape",
-                "envelope",
-                "falloff",
-                "crater",
-                "caldera",
-                "atoll",
-                "generator",
-            ],
             inputs: Vec::new(),
             outputs: vec![PortSpec::new("out")],
             params: vec![

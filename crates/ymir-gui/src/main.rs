@@ -629,7 +629,6 @@ struct NodeMenu {
 struct NodeEntry {
     type_id: &'static str,
     category: &'static str,
-    tags: &'static [&'static str],
 }
 
 /// Every registered operator, projected to a [`NodeEntry`]. Built from the
@@ -641,7 +640,6 @@ fn node_entries() -> Vec<NodeEntry> {
             NodeEntry {
                 type_id: spec.type_id,
                 category: spec.category,
-                tags: spec.tags,
             }
         })
         .collect()
@@ -662,46 +660,30 @@ fn has_uncategorized_nodes() -> bool {
         .any(|e| find_category(e.category).is_none())
 }
 
-/// How well a node matched a search query, best variant first. Name matches always
-/// outrank tag matches, and a prefix outranks a mid-word hit, so typing a node's name
-/// surfaces it above nodes that merely carry the word as a tag (#91). `derive(Ord)` ranks
-/// by declaration order, so sorting ascending puts the best matches first.
+/// How well a node's display name matched a search query, best variant first. A prefix
+/// outranks a mid-word hit, so typing the start of a name surfaces it first (#91).
+/// `derive(Ord)` ranks by declaration order, so sorting ascending puts the best first.
+/// Search is over the display name only; nodes carry no search tags (#92).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum MatchRank {
-    NameExact,
-    NamePrefix,
-    NameSubstring,
-    TagPrefix,
-    TagSubstring,
+    Exact,
+    Prefix,
+    Substring,
 }
 
-/// The best rank at which `entry` matches the lowercased `query`, or `None` if it does
-/// not match at all. The display name is tested first, then the tags; tag-only matches
-/// still match (discovery is preserved) but rank below every name match.
+/// The best rank at which `entry`'s display name matches the lowercased `query`, or
+/// `None` if it does not match.
 fn match_rank(entry: &NodeEntry, query: &str) -> Option<MatchRank> {
     let name = tr(&format!("node-{}", entry.type_id)).to_lowercase();
     if name == query {
-        return Some(MatchRank::NameExact);
+        Some(MatchRank::Exact)
+    } else if name.starts_with(query) {
+        Some(MatchRank::Prefix)
+    } else if name.contains(query) {
+        Some(MatchRank::Substring)
+    } else {
+        None
     }
-    if name.starts_with(query) {
-        return Some(MatchRank::NamePrefix);
-    }
-    if name.contains(query) {
-        return Some(MatchRank::NameSubstring);
-    }
-    // No name hit: the best tag tier wins. A tag prefix is the best a tag can do, so
-    // return on the first; otherwise remember a mid-word tag hit and keep looking.
-    let mut best = None;
-    for tag in entry.tags {
-        let tag = tag.to_lowercase();
-        if tag.starts_with(query) {
-            return Some(MatchRank::TagPrefix);
-        }
-        if tag.contains(query) {
-            best = Some(MatchRank::TagSubstring);
-        }
-    }
-    best
 }
 
 /// The nodes shown for the current tab/search selection.
@@ -2533,50 +2515,42 @@ mod tests {
     }
 
     #[test]
-    fn search_matches_name_and_tags() {
+    fn search_matches_display_names() {
         let entries = node_entries();
+        // Matches on the display name ("fBm Noise", "Thermal Erosion"), case-insensitive.
         assert!(
             visible_nodes(&entries, None, "fbm")
                 .iter()
                 .any(|e| e.type_id == "generator.fbm")
         );
         assert!(
-            visible_nodes(&entries, None, "talus")
+            visible_nodes(&entries, None, "thermal")
                 .iter()
                 .any(|e| e.type_id == "modifier.thermal_erosion")
         );
+        // Nodes carry no search tags, so a word only in an old tag no longer matches.
+        assert!(visible_nodes(&entries, None, "talus").is_empty());
         assert!(visible_nodes(&entries, None, "zzznotanode").is_empty());
     }
 
     #[test]
-    fn search_ranks_name_matches_above_tag_only_matches() {
+    fn search_ranks_exact_and_prefix_names_first() {
         let entries = node_entries();
-        // The result position of two type_ids for a query: the named node must lead the
-        // node that matches only via a tag (#91).
-        let order = |query: &str, named: &str, tagged: &str| -> (usize, usize) {
-            let ids: Vec<&str> = visible_nodes(&entries, None, query)
-                .iter()
-                .map(|e| e.type_id)
-                .collect();
-            let n = ids
-                .iter()
-                .position(|&id| id == named)
-                .expect("named node present");
-            let t = ids
-                .iter()
-                .position(|&id| id == tagged)
-                .expect("tag-matched node present");
-            (n, t)
-        };
-        // "levels": the Levels node leads Curve (which has only a "levels" tag).
-        let (lvl, curve) = order("levels", "modifier.levels", "modifier.curve");
-        assert!(lvl < curve, "Levels should outrank Curve for 'levels'");
-        // "gradient": the Gradient node leads Slope (tag-only "gradient").
-        let (grad, slope) = order("gradient", "generator.gradient", "modifier.slope");
-        assert!(grad < slope, "Gradient should outrank Slope for 'gradient'");
-        // "th": Thermal Erosion (name prefix) leads Blur (tag substring of "smooth").
-        let (thermal, blur) = order("th", "modifier.thermal_erosion", "modifier.blur");
-        assert!(thermal < blur, "Thermal should outrank Blur for 'th'");
+        let ids: Vec<&str> = visible_nodes(&entries, None, "gradient")
+            .iter()
+            .map(|e| e.type_id)
+            .collect();
+        // "Gradient" is an exact name match; "Radial Gradient" only contains it, so the
+        // exact match leads the substring match (#91, name-only ranking).
+        let grad = ids
+            .iter()
+            .position(|&id| id == "generator.gradient")
+            .expect("Gradient present");
+        let radial = ids
+            .iter()
+            .position(|&id| id == "generator.radial")
+            .expect("Radial Gradient present");
+        assert!(grad < radial, "exact name should outrank a substring match");
     }
 
     #[test]

@@ -65,8 +65,6 @@ pub struct NodeSpec {
     /// Palette category id (e.g. `"generator"`) that groups nodes in the editor. A
     /// presentation grouping, registered downstream; the engine never reads it.
     pub category: &'static str,
-    /// Optional search tags.
-    pub tags: &'static [&'static str],
     /// Input ports, in order.
     pub inputs: Vec<PortSpec>,
     /// Output ports, in order.
@@ -99,7 +97,6 @@ mod tests {
         NodeSpec {
             type_id: "test.node",
             category: "test",
-            tags: &[],
             inputs: (0..inputs)
                 .map(|i| PortSpec::new(format!("in{i}")))
                 .collect(),

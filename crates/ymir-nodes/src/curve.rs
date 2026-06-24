@@ -30,7 +30,6 @@ impl Operator for CurveNode {
         NodeSpec {
             type_id: TYPE_ID,
             category: "adjust",
-            tags: &["curve", "remap", "levels", "shape", "gamma", "modifier"],
             inputs: vec![PortSpec::new("in")],
             outputs: vec![PortSpec::new("out")],
             params: vec![ParamSpec::new(

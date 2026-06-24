@@ -23,7 +23,6 @@ impl Operator for ExportPng {
         NodeSpec {
             type_id: TYPE_ID,
             category: "output",
-            tags: &["png", "export", "output", "endpoint"],
             inputs: vec![PortSpec::new("in")],
             outputs: Vec::new(),
             params: vec![

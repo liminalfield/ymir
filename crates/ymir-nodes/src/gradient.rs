@@ -46,17 +46,6 @@ impl Operator for Gradient {
         NodeSpec {
             type_id: TYPE_ID,
             category: "generator",
-            tags: &[
-                "gradient",
-                "linear",
-                "directional",
-                "ramp",
-                "shape",
-                "envelope",
-                "trend",
-                "slope",
-                "generator",
-            ],
             inputs: Vec::new(),
             outputs: vec![PortSpec::new("out")],
             params: vec![

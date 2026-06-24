@@ -25,7 +25,6 @@ impl Operator for Invert {
         NodeSpec {
             type_id: TYPE_ID,
             category: "adjust",
-            tags: &["invert", "flip", "negate", "modifier"],
             inputs: vec![PortSpec::new("in")],
             outputs: vec![PortSpec::new("out")],
             params: Vec::new(),

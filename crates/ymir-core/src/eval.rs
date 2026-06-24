@@ -465,7 +465,6 @@ mod tests {
             NodeSpec {
                 type_id: "test.gen",
                 category: "test",
-                tags: &[],
                 inputs: Vec::new(),
                 outputs: vec![PortSpec::new("out")],
                 params: Vec::new(),
@@ -495,7 +494,6 @@ mod tests {
             NodeSpec {
                 type_id: "test.add",
                 category: "test",
-                tags: &[],
                 inputs: vec![PortSpec::new("in")],
                 outputs: vec![PortSpec::new("out")],
                 params: Vec::new(),
@@ -528,7 +526,6 @@ mod tests {
             NodeSpec {
                 type_id: "test.sink",
                 category: "test",
-                tags: &[],
                 inputs: vec![PortSpec::new("in")],
                 outputs: Vec::new(),
                 params: Vec::new(),
@@ -554,7 +551,6 @@ mod tests {
             NodeSpec {
                 type_id: "test.merge",
                 category: "test",
-                tags: &[],
                 inputs: vec![PortSpec::new("a"), PortSpec::new("b")],
                 outputs: vec![PortSpec::new("out")],
                 params: Vec::new(),
@@ -587,7 +583,6 @@ mod tests {
             NodeSpec {
                 type_id: "test.optional",
                 category: "test",
-                tags: &[],
                 inputs: vec![PortSpec::new("in"), PortSpec::optional("extra")],
                 outputs: vec![PortSpec::new("out")],
                 params: Vec::new(),
@@ -621,7 +616,6 @@ mod tests {
             NodeSpec {
                 type_id: "test.probe_extent",
                 category: "test",
-                tags: &[],
                 inputs: Vec::new(),
                 outputs: vec![PortSpec::new("out")],
                 params: Vec::new(),

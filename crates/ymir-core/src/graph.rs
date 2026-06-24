@@ -537,7 +537,6 @@ mod tests {
             NodeSpec {
                 type_id: self.type_id,
                 category: "test",
-                tags: &[],
                 inputs: (0..self.inputs)
                     .map(|i| PortSpec::new(format!("in{i}")))
                     .collect(),

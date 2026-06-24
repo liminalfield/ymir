@@ -26,14 +26,6 @@ impl Operator for Ridged {
         NodeSpec {
             type_id: TYPE_ID,
             category: "generator",
-            tags: &[
-                "ridged",
-                "multifractal",
-                "mountain",
-                "ridge",
-                "noise",
-                "generator",
-            ],
             inputs: Vec::new(),
             outputs: vec![PortSpec::new("out")],
             params: vec![

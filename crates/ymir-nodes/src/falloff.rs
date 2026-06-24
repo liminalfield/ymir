@@ -48,18 +48,6 @@ impl Operator for Falloff {
         NodeSpec {
             type_id: TYPE_ID,
             category: "generator",
-            tags: &[
-                "falloff",
-                "radial",
-                "distance",
-                "profile",
-                "cone",
-                "shape",
-                "envelope",
-                "crater",
-                "caldera",
-                "generator",
-            ],
             inputs: Vec::new(),
             outputs: vec![PortSpec::new("out")],
             params: vec![

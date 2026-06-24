@@ -55,7 +55,6 @@ impl Operator for ThermalErosion {
         NodeSpec {
             type_id: TYPE_ID,
             category: "geology",
-            tags: &["thermal", "talus", "erosion", "modifier"],
             inputs: vec![
                 PortSpec::new("in"),
                 // Optional: a field whose height is the selection. When unwired, the

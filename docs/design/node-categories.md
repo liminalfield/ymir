@@ -113,8 +113,8 @@ nodes exist:
 - **`filter` (Filters)** — spatial/neighbourhood ops (blur, sharpen, terrace,
   warp). The spatial half of the pointwise/spatial line. Empty today.
 - **Generator sub-tabs** (Noise, Shapes, Import) — split out of `generator` only
-  when generators multiply. fBm keeps its `noise` *tag* so it is already findable
-  and easy to promote.
+  when generators multiply. The named nodes (fBm Noise, Ridged Noise, the Shape
+  family) already group cleanly, so promotion is a category split, not new metadata.
 - **Hydrology, Snow/Glacial** — own domain tabs when real. They are not geology, so
   they must not be crammed under it; the only umbrella wide enough for "everything
   natural" is "Nature", which is the World Machine term this taxonomy avoids on
@@ -123,6 +123,16 @@ nodes exist:
 
 The tripwire that says "split now": a tab gets too crowded to scan at a glance, or
 one kind of node clearly dominates the traffic into a shared tab.
+
+## Search is over names, not tags
+
+Node-menu search matches the **display name only**, ranked exact > prefix > substring
+(#91). `NodeSpec` previously carried a `tags` list of search aliases, but it was removed
+(#92): the tags were never shown anywhere, so the only way to learn a node's aliases was
+to read source or docs, and once you have done that you already know the node's name and
+can type it. An invisible alias adds no discovery the name does not. If discovery beyond
+the name is wanted later, the lever is **visible** node descriptions (the `-desc` strings
+already exist), surfaced in the menu, not hidden tags.
 
 ## A follow-up this sets up
 

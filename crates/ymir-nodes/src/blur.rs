@@ -39,7 +39,6 @@ impl Operator for Blur {
         NodeSpec {
             type_id: TYPE_ID,
             category: "filter",
-            tags: &["blur", "gaussian", "smooth", "soften", "filter", "modifier"],
             inputs: vec![PortSpec::new("in")],
             outputs: vec![PortSpec::new("out")],
             params: vec![

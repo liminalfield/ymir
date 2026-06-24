@@ -44,17 +44,6 @@ impl Operator for Radial {
         NodeSpec {
             type_id: TYPE_ID,
             category: "generator",
-            tags: &[
-                "radial",
-                "gradient",
-                "shape",
-                "envelope",
-                "falloff",
-                "circle",
-                "dome",
-                "island",
-                "generator",
-            ],
             inputs: Vec::new(),
             outputs: vec![PortSpec::new("out")],
             params: vec![

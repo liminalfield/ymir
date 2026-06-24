@@ -133,7 +133,7 @@ not, via `field.layer_or(layers::MASK, 1.0)`. Hold this on every node.
   per-node identity derive from `stable_id`, never from the slotmap key, so a saved
   project reloads to identical output. Behavior lives in the operator, per-instance
   config in the graph; this separation enables clean memoization.
-- `NodeSpec` declares `type_id`, a palette `category` id, search `tags`, `inputs`,
+- `NodeSpec` declares `type_id`, a palette `category` id, `inputs`,
   `outputs`, and a `params` schema (name, type, range, default). Schema only, never GUI
   widgets, and only ids/keys, never display prose: the human name and description are
   resolved by convention from `type_id` through a downstream `tr(key)` layer, so the

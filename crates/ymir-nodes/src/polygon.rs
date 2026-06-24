@@ -50,17 +50,6 @@ impl Operator for Polygon {
         NodeSpec {
             type_id: TYPE_ID,
             category: "generator",
-            tags: &[
-                "polygon",
-                "ngon",
-                "hexagon",
-                "shape",
-                "envelope",
-                "falloff",
-                "plateau",
-                "facet",
-                "generator",
-            ],
             inputs: Vec::new(),
             outputs: vec![PortSpec::new("out")],
             params: vec![

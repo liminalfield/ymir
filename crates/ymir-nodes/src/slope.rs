@@ -44,14 +44,6 @@ impl Operator for Slope {
         NodeSpec {
             type_id: TYPE_ID,
             category: "selector",
-            tags: &[
-                "slope",
-                "gradient",
-                "steepness",
-                "select",
-                "selector",
-                "modifier",
-            ],
             inputs: vec![PortSpec::new("in")],
             outputs: vec![PortSpec::new("out")],
             params: vec![

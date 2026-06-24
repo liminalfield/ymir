@@ -32,16 +32,6 @@ impl Operator for Levels {
         NodeSpec {
             type_id: TYPE_ID,
             category: "adjust",
-            tags: &[
-                "levels",
-                "range",
-                "normalize",
-                "clamp",
-                "contrast",
-                "gamma",
-                "remap",
-                "modifier",
-            ],
             inputs: vec![PortSpec::new("in")],
             outputs: vec![PortSpec::new("out")],
             params: vec![

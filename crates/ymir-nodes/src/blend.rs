@@ -58,15 +58,6 @@ impl Operator for Blend {
         NodeSpec {
             type_id: TYPE_ID,
             category: "combine",
-            tags: &[
-                "blend",
-                "combine",
-                "mix",
-                "composite",
-                "add",
-                "multiply",
-                "modifier",
-            ],
             inputs: vec![
                 PortSpec::new("base"),
                 PortSpec::new("overlay"),

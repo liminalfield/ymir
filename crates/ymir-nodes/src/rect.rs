@@ -46,17 +46,6 @@ impl Operator for Rect {
         NodeSpec {
             type_id: TYPE_ID,
             category: "generator",
-            tags: &[
-                "rect",
-                "rectangle",
-                "box",
-                "shape",
-                "envelope",
-                "falloff",
-                "plateau",
-                "mesa",
-                "generator",
-            ],
             inputs: Vec::new(),
             outputs: vec![PortSpec::new("out")],
             params: vec![
