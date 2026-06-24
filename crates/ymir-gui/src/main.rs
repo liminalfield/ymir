@@ -662,15 +662,46 @@ fn has_uncategorized_nodes() -> bool {
         .any(|e| find_category(e.category).is_none())
 }
 
-/// Whether a node matches a lowercased search query, over its display name and
-/// its tags (a simple case-insensitive contains; can grow into true fuzzy later).
-fn node_matches(entry: &NodeEntry, query: &str) -> bool {
+/// How well a node matched a search query, best variant first. Name matches always
+/// outrank tag matches, and a prefix outranks a mid-word hit, so typing a node's name
+/// surfaces it above nodes that merely carry the word as a tag (#91). `derive(Ord)` ranks
+/// by declaration order, so sorting ascending puts the best matches first.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum MatchRank {
+    NameExact,
+    NamePrefix,
+    NameSubstring,
+    TagPrefix,
+    TagSubstring,
+}
+
+/// The best rank at which `entry` matches the lowercased `query`, or `None` if it does
+/// not match at all. The display name is tested first, then the tags; tag-only matches
+/// still match (discovery is preserved) but rank below every name match.
+fn match_rank(entry: &NodeEntry, query: &str) -> Option<MatchRank> {
     let name = tr(&format!("node-{}", entry.type_id)).to_lowercase();
-    name.contains(query)
-        || entry
-            .tags
-            .iter()
-            .any(|tag| tag.to_lowercase().contains(query))
+    if name == query {
+        return Some(MatchRank::NameExact);
+    }
+    if name.starts_with(query) {
+        return Some(MatchRank::NamePrefix);
+    }
+    if name.contains(query) {
+        return Some(MatchRank::NameSubstring);
+    }
+    // No name hit: the best tag tier wins. A tag prefix is the best a tag can do, so
+    // return on the first; otherwise remember a mid-word tag hit and keep looking.
+    let mut best = None;
+    for tag in entry.tags {
+        let tag = tag.to_lowercase();
+        if tag.starts_with(query) {
+            return Some(MatchRank::TagPrefix);
+        }
+        if tag.contains(query) {
+            best = Some(MatchRank::TagSubstring);
+        }
+    }
+    best
 }
 
 /// The nodes shown for the current tab/search selection.
@@ -690,7 +721,17 @@ fn visible_nodes<'a>(
             })
             .collect()
     } else {
-        entries.iter().filter(|e| node_matches(e, &query)).collect()
+        // Rank every match, then sort best-first, breaking ties by display name so the
+        // order is stable rather than registry-dependent (#91).
+        let mut matched: Vec<(MatchRank, String, &NodeEntry)> = entries
+            .iter()
+            .filter_map(|e| {
+                match_rank(e, &query)
+                    .map(|rank| (rank, tr(&format!("node-{}", e.type_id)).to_lowercase(), e))
+            })
+            .collect();
+        matched.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        matched.into_iter().map(|(_, _, e)| e).collect()
     }
 }
 
@@ -2505,6 +2546,37 @@ mod tests {
                 .any(|e| e.type_id == "modifier.thermal_erosion")
         );
         assert!(visible_nodes(&entries, None, "zzznotanode").is_empty());
+    }
+
+    #[test]
+    fn search_ranks_name_matches_above_tag_only_matches() {
+        let entries = node_entries();
+        // The result position of two type_ids for a query: the named node must lead the
+        // node that matches only via a tag (#91).
+        let order = |query: &str, named: &str, tagged: &str| -> (usize, usize) {
+            let ids: Vec<&str> = visible_nodes(&entries, None, query)
+                .iter()
+                .map(|e| e.type_id)
+                .collect();
+            let n = ids
+                .iter()
+                .position(|&id| id == named)
+                .expect("named node present");
+            let t = ids
+                .iter()
+                .position(|&id| id == tagged)
+                .expect("tag-matched node present");
+            (n, t)
+        };
+        // "levels": the Levels node leads Curve (which has only a "levels" tag).
+        let (lvl, curve) = order("levels", "modifier.levels", "modifier.curve");
+        assert!(lvl < curve, "Levels should outrank Curve for 'levels'");
+        // "gradient": the Gradient node leads Slope (tag-only "gradient").
+        let (grad, slope) = order("gradient", "generator.gradient", "modifier.slope");
+        assert!(grad < slope, "Gradient should outrank Slope for 'gradient'");
+        // "th": Thermal Erosion (name prefix) leads Blur (tag substring of "smooth").
+        let (thermal, blur) = order("th", "modifier.thermal_erosion", "modifier.blur");
+        assert!(thermal < blur, "Thermal should outrank Blur for 'th'");
     }
 
     #[test]
