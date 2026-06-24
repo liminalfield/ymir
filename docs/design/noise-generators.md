@@ -93,9 +93,12 @@ the one decision to settle before building; it is captured in the issue.
   determinism is unchanged; only the noise goldens moved. (OpenSimplex2 would refine the
   remaining subtle simplex artifacts further, but classic 2D simplex already removes the
   axis bias and is simpler to keep byte-stable.)
-- **Curl / flow noise.** Swirly, divergence-free vector fields, useful for flow and
-  erosion direction rather than heightfields directly. Niche; revisit when erosion or
-  directional warp needs it.
+- **Curl / flow noise (done, #101).** `generator.flow` warps a noise lookup along the
+  curl streamlines of a potential (divergence-free, so it swirls without pinching),
+  outputting a swirly scalar `height`. As a byproduct it writes the flow vector to
+  `flow_x` / `flow_y` layers, so a later directional-warp or erosion-grain node reads the
+  direction field off the edge. The curl math lives in `noise.rs` as `curl2`, reusable by
+  those consumers; building the scalar form first means they slot in with no rework.
 
 ## Priority (to be slotted against other work)
 

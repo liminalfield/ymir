@@ -89,6 +89,7 @@ mod tests {
                 "generator.cellular_regions",
                 "generator.falloff",
                 "generator.fbm",
+                "generator.flow",
                 "generator.gradient",
                 "generator.hybrid",
                 "generator.polygon",

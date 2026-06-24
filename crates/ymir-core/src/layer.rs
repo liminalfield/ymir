@@ -45,6 +45,27 @@ impl Layer {
         }
     }
 
+    /// Creates a layer from a row-major `data` buffer (x varies fastest). Useful when a
+    /// node computes several layers in one pass (e.g. flow noise's height plus its flow
+    /// vector) and cannot use the per-cell [`from_fn`](Self::from_fn) closure.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `data.len()` is not `width * height`.
+    #[must_use]
+    pub fn from_vec(width: usize, height: usize, data: Vec<f32>) -> Self {
+        assert_eq!(
+            data.len(),
+            width * height,
+            "layer data length must be width * height"
+        );
+        Self {
+            width,
+            height,
+            data,
+        }
+    }
+
     /// Grid width in cells.
     #[must_use]
     pub fn width(&self) -> usize {

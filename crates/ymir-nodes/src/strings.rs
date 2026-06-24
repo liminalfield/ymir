@@ -26,6 +26,13 @@ pub fn tr(key: &str) -> &str {
         "node-generator.fbm" => "fBm Noise",
         "node-generator.fbm-desc" => "Fractional Brownian motion of Perlin noise.",
 
+        // Flow (curl-warped) generator.
+        "node-generator.flow" => "Flow Noise",
+        "node-generator.flow-desc" => {
+            "Noise warped along divergence-free curl streamlines: a swirly, marbled, \
+             fluid look. Also carries the flow direction on its flow_x / flow_y layers."
+        }
+
         // Cellular (Worley) generators.
         "node-generator.cellular_bumps" => "Cellular Bumps",
         "node-generator.cellular_bumps-desc" => {

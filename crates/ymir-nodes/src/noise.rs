@@ -204,6 +204,74 @@ pub(crate) fn fbm_sample(seed: u64, x: f32, y: f32, params: FbmParams) -> f32 {
     fbm2(seed, x, y, params)
 }
 
+/// The curl of the fBm potential at `(x, y)`: the divergence-free 2D vector
+/// `(dphi/dy, -dphi/dx)`, estimated by central finite differences. It swirls like an
+/// incompressible flow, with no sources or sinks. Shared by the flow generator and any
+/// future direction-field consumer (a directional warp, erosion grain), so the curl math
+/// lives once. Coordinates are pre-scaled by the caller, exactly as [`fbm_sample`] is.
+pub(crate) fn curl2(seed: u64, x: f32, y: f32, params: FbmParams) -> (f32, f32) {
+    // Finite-difference step in noise space: small enough to track the gradient, large
+    // enough to avoid f32 cancellation.
+    const EPS: f32 = 0.01;
+    let dphi_dx = (fbm2(seed, x + EPS, y, params) - fbm2(seed, x - EPS, y, params)) / (2.0 * EPS);
+    let dphi_dy = (fbm2(seed, x, y + EPS, params) - fbm2(seed, x, y - EPS, params)) / (2.0 * EPS);
+    // Rotate the gradient 90 degrees: the divergence-free curl.
+    (dphi_dy, -dphi_dx)
+}
+
+/// Decorrelates the warped base noise from the flow potential, so the swirling texture is
+/// not just the potential warping itself.
+const FLOW_BASE_SALT: u64 = 0x1357_9BDF_0246_8ACE;
+
+/// Generates a field whose `height` layer is base noise warped along the curl-flow
+/// streamlines of a potential (a swirly, marbled, fluid look), and whose `flow_x` /
+/// `flow_y` layers carry the divergence-free flow vector for later direction-field
+/// consumers. `strength` scales how far the lookup is displaced along the flow (0 is plain
+/// fBm). Sampled in world space like the other generators, so it is
+/// resolution-independent, and seeded deterministically.
+pub(crate) fn flow_field(
+    width: usize,
+    height: usize,
+    region: Region,
+    params: FbmParams,
+    strength: f32,
+    seed: u64,
+) -> Field {
+    let base_seed = seed ^ FLOW_BASE_SALT;
+    let mut h_buf = Vec::with_capacity(width * height);
+    let mut fx_buf = Vec::with_capacity(width * height);
+    let mut fy_buf = Vec::with_capacity(width * height);
+    for y in 0..height {
+        for x in 0..width {
+            let u = (x as f64 + 0.5) / width as f64 + params.offset_x;
+            let v = (y as f64 + 0.5) / height as f64 + params.offset_y;
+            let wx = ((region.min_x + u * region.width()) * params.frequency) as f32;
+            let wy = ((region.min_y + v * region.height()) * params.frequency) as f32;
+
+            let (vx, vy) = curl2(seed, wx, wy, params);
+            // Warp the base-noise lookup along the flow vector.
+            let n = fbm2(base_seed, wx + strength * vx, wy + strength * vy, params);
+            h_buf.push((0.5 * n + 0.5).clamp(0.0, 1.0));
+            fx_buf.push(vx);
+            fy_buf.push(vy);
+        }
+    }
+
+    Field::new(width, height, region)
+        .with_layer(
+            layers::HEIGHT,
+            Arc::new(Layer::from_vec(width, height, h_buf)),
+        )
+        .with_layer(
+            layers::FLOW_X,
+            Arc::new(Layer::from_vec(width, height, fx_buf)),
+        )
+        .with_layer(
+            layers::FLOW_Y,
+            Arc::new(Layer::from_vec(width, height, fy_buf)),
+        )
+}
+
 /// Which cellular (Worley) feature a field renders. The shared [`worley`] computation
 /// yields all three; the feature only selects which result becomes the height, so the
 /// three Cellular nodes share one implementation rather than recomputing.
