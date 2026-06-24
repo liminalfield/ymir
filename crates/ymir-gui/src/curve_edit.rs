@@ -71,7 +71,7 @@ pub(crate) fn curve_editor(
 /// widget and the larger pop-out window. With `show_readout`, the coordinates of the
 /// hovered or dragged control point are drawn in the corner, so the bigger window can be
 /// precise; the compact inline view leaves it off to stay uncluttered. When `popout` is
-/// `Some`, a pop-out icon is drawn in the top-right corner and its click is reported
+/// `Some`, a pop-out icon is drawn in the top-left corner and its click is reported
 /// through the flag; the window itself passes `None` (no nested pop-out).
 pub(crate) fn curve_editor_sized(
     ui: &mut egui::Ui,
@@ -178,7 +178,7 @@ pub(crate) fn curve_editor_sized(
     // the background and takes its own click before the empty-space "add a point" test
     // below sees it. Drawn later, over the curve.
     let icon_rect = egui::Rect::from_min_size(
-        egui::pos2(rect.right() - ICON_SIZE - 4.0, rect.top() + 4.0),
+        egui::pos2(rect.left() + 4.0, rect.top() + 4.0),
         egui::Vec2::splat(ICON_SIZE),
     );
     let icon_resp = popout.is_some().then(|| {
