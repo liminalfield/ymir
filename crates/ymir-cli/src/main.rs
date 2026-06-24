@@ -102,6 +102,7 @@ mod tests {
                 "modifier.blur",
                 "modifier.curvature",
                 "modifier.curve",
+                "modifier.expression",
                 "modifier.height",
                 "modifier.invert",
                 "modifier.levels",

@@ -178,6 +178,13 @@ pub fn tr(key: &str) -> &str {
         "node-modifier.curve" => "Curve",
         "node-modifier.curve-desc" => "Reshapes height through an editable transfer curve.",
 
+        // Expression (per-cell formula).
+        "node-modifier.expression" => "Expression",
+        "node-modifier.expression-desc" => {
+            "A per-cell math formula over x, y, and the input layers (height, mask, …): \
+             the escape hatch for custom math. Runs wired or as a coordinate formula."
+        }
+
         // Thermal erosion.
         "node-modifier.thermal_erosion" => "Thermal Erosion",
         "node-modifier.thermal_erosion-desc" => {

@@ -108,6 +108,15 @@ pub enum Error {
     /// never affected, so this does not impact determinism.
     #[error("evaluation cancelled")]
     Cancelled,
+
+    /// An operator failed for a reason specific to it, carrying a human-readable message
+    /// (e.g. an expression node's parse error). The general "this node is red because…"
+    /// case for failures the other variants do not name.
+    #[error("{message}")]
+    Operator {
+        /// The operator-specific failure description, shown on the node.
+        message: String,
+    },
 }
 
 /// Convenience alias for results carrying the crate [`Error`].
