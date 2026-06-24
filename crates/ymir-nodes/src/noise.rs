@@ -293,6 +293,11 @@ pub(crate) struct WorleyParams {
     /// How far each feature point wanders from its cell origin, in `[0, 1]` (0 is a
     /// regular grid, 1 fills the cell).
     pub jitter: f32,
+    /// Pan of the sampling window along x, in region widths (0 = no pan): slides across the
+    /// infinite field to place the cells differently, matching the fractal-noise offset.
+    pub offset_x: f64,
+    /// Pan of the sampling window along y, in region heights.
+    pub offset_y: f64,
 }
 
 /// Decorrelates the y feature-offset hash from the x one so points are not on a diagonal.
@@ -313,9 +318,10 @@ pub(crate) fn worley_field(
 ) -> Field {
     let layer = Layer::from_fn(width, height, |x, y| {
         // Same world-space sampling as the other generators, so frequency sets cell size
-        // and the field registers against the same coordinates at any resolution.
-        let u = (x as f64 + 0.5) / width as f64;
-        let v = (y as f64 + 0.5) / height as f64;
+        // and the field registers against the same coordinates at any resolution. The
+        // offset pans the window (in region widths) exactly as the fractal-noise path does.
+        let u = (x as f64 + 0.5) / width as f64 + params.offset_x;
+        let v = (y as f64 + 0.5) / height as f64 + params.offset_y;
         let wx = (region.min_x + u * region.width()) * params.frequency;
         let wy = (region.min_y + v * region.height()) * params.frequency;
 
@@ -633,6 +639,8 @@ mod tests {
         WorleyParams {
             frequency: 8.0,
             jitter: 1.0,
+            offset_x: 0.0,
+            offset_y: 0.0,
         }
     }
 
@@ -692,6 +700,8 @@ mod tests {
         let grid = WorleyParams {
             frequency: 8.0,
             jitter: 0.0,
+            offset_x: 0.0,
+            offset_y: 0.0,
         };
         let a = worley_field(64, 64, Region::UNIT, grid, WorleyFeature::Bumps, 7);
         let b = worley_field(
