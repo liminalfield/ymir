@@ -92,6 +92,7 @@ mod tests {
                 "generator.flow",
                 "generator.gradient",
                 "generator.hybrid",
+                "generator.import",
                 "generator.polygon",
                 "generator.radial",
                 "generator.rect",

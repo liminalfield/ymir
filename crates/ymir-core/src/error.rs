@@ -30,6 +30,10 @@ pub enum Error {
     #[error("PNG encoding failed: {0}")]
     PngEncode(#[from] png::EncodingError),
 
+    /// A PNG could not be decoded (not a PNG, truncated, or an unsupported variant).
+    #[error("PNG decoding failed: {0}")]
+    PngDecode(#[from] png::DecodingError),
+
     /// A project file could not be written or parsed as JSON (malformed file, or a
     /// serialization failure).
     #[error("project JSON error: {0}")]

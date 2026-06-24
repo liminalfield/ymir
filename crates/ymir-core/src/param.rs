@@ -438,6 +438,9 @@ pub enum ParamKind {
     Bool,
     /// Free text.
     Text,
+    /// A filesystem path, edited as a text field with a Browse button (a native file
+    /// picker). The value is the path as a [`ParamValue::Text`].
+    Path,
     /// A choice from a fixed set of option ids. The value is the selected id as a
     /// [`ParamValue::Text`]; the ids are resolved to display labels downstream via
     /// `tr`, so this kind carries no prose.
@@ -510,7 +513,7 @@ fn default_matches_kind(kind: &ParamKind, default: &ParamValue) -> bool {
         (ParamKind::Float { .. }, ParamValue::Float(_))
         | (ParamKind::Int { .. }, ParamValue::Int(_))
         | (ParamKind::Bool, ParamValue::Bool(_))
-        | (ParamKind::Text, ParamValue::Text(_))
+        | (ParamKind::Text | ParamKind::Path, ParamValue::Text(_))
         | (ParamKind::Curve, ParamValue::Curve(_)) => true,
         (ParamKind::Enum { options }, ParamValue::Text(value)) => options.contains(&value.as_str()),
         _ => false,

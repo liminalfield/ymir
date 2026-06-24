@@ -95,14 +95,20 @@ fn sample(value: f32, min: f32, max: f32) -> u16 {
 pub fn export_png(field: &Field, path: impl AsRef<Path>, range: HeightRange) -> Result<()> {
     let file = File::create(path)?;
     let writer = BufWriter::new(file);
-    write_png(field, writer, range)
+    export_png_to(field, writer, range)
 }
 
 /// Encodes the field's `height` layer as a 16-bit grayscale PNG into `writer`.
 ///
-/// Kept generic over [`Write`] so tests can encode into an in-memory buffer and
-/// decode it back without touching the filesystem.
-fn write_png<W: Write>(field: &Field, writer: W, range: HeightRange) -> Result<()> {
+/// Generic over [`Write`], so a caller can encode to a file, an in-memory buffer, or any
+/// other sink (a test decoding it back, a network stream) without going through the
+/// filesystem.
+///
+/// # Errors
+///
+/// Returns [`Error::MissingLayer`] if the field has no `height` layer, or
+/// [`Error::PngEncode`] if the encoder rejects the image or the write fails.
+pub fn export_png_to<W: Write>(field: &Field, writer: W, range: HeightRange) -> Result<()> {
     // The height layer is genuinely required here: an export endpoint asked to
     // write a field with no height has nothing to write. This is the sanctioned
     // use of MissingLayer; optional layers must use `layer_or` instead.
@@ -170,7 +176,7 @@ mod tests {
     fn normalized_round_trips_known_values() {
         let field = field_with_heights(2, 2, &[0.0, 1.0, 0.5, 0.25]);
         let mut bytes = Vec::new();
-        write_png(&field, &mut bytes, HeightRange::Normalized).unwrap();
+        export_png_to(&field, &mut bytes, HeightRange::Normalized).unwrap();
 
         let (w, h, samples) = decode(&bytes);
         assert_eq!((w, h), (2, 2));
@@ -184,7 +190,7 @@ mod tests {
     fn explicit_range_maps_and_clamps() {
         let field = field_with_heights(2, 2, &[10.0, 20.0, 15.0, 25.0]);
         let mut bytes = Vec::new();
-        write_png(
+        export_png_to(
             &field,
             &mut bytes,
             HeightRange::Explicit {
@@ -208,7 +214,7 @@ mod tests {
         // strictly between, proving a real stretch rather than a clamp to the ends.
         let field = field_with_heights(2, 2, &[-0.5, 0.5, 1.5, 2.0]);
         let mut bytes = Vec::new();
-        write_png(&field, &mut bytes, HeightRange::Auto).unwrap();
+        export_png_to(&field, &mut bytes, HeightRange::Auto).unwrap();
 
         let (_, _, s) = decode(&bytes);
         assert_eq!(s[0], 0); // -0.5 is the min
@@ -225,7 +231,7 @@ mod tests {
         // dividing by zero.
         let field = field_with_heights(1, 3, &[0.7, 0.7, 0.7]);
         let mut bytes = Vec::new();
-        write_png(&field, &mut bytes, HeightRange::Auto).unwrap();
+        export_png_to(&field, &mut bytes, HeightRange::Auto).unwrap();
 
         let (_, _, s) = decode(&bytes);
         assert_eq!(s, vec![0, 0, 0]);
@@ -235,7 +241,7 @@ mod tests {
     fn normalized_clamps_out_of_range() {
         let field = field_with_heights(1, 2, &[-0.5, 1.5]);
         let mut bytes = Vec::new();
-        write_png(&field, &mut bytes, HeightRange::Normalized).unwrap();
+        export_png_to(&field, &mut bytes, HeightRange::Normalized).unwrap();
 
         let (_, _, samples) = decode(&bytes);
         assert_eq!(samples, vec![0, 65535]);
@@ -248,8 +254,8 @@ mod tests {
 
         let mut a = Vec::new();
         let mut b = Vec::new();
-        write_png(&field, &mut a, HeightRange::Normalized).unwrap();
-        write_png(&field, &mut b, HeightRange::Normalized).unwrap();
+        export_png_to(&field, &mut a, HeightRange::Normalized).unwrap();
+        export_png_to(&field, &mut b, HeightRange::Normalized).unwrap();
         assert_eq!(a, b);
     }
 
@@ -257,7 +263,7 @@ mod tests {
     fn missing_height_layer_is_an_error() {
         let field = Field::new(2, 2, Region::UNIT);
         let mut bytes = Vec::new();
-        let err = write_png(&field, &mut bytes, HeightRange::Normalized).unwrap_err();
+        let err = export_png_to(&field, &mut bytes, HeightRange::Normalized).unwrap_err();
         assert!(matches!(err, Error::MissingLayer { name } if name == layers::HEIGHT));
     }
 }

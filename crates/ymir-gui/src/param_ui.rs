@@ -25,6 +25,8 @@ pub(crate) enum Widget {
     Checkbox,
     /// A single-line text field.
     Text,
+    /// A filesystem-path text field with a Browse button (a native file picker).
+    Path,
     /// A dropdown over a fixed set of option ids.
     Dropdown { options: &'static [&'static str] },
     /// A visual transfer-curve editor.
@@ -57,6 +59,7 @@ pub(crate) fn widget_for(spec: &ParamSpec) -> Widget {
         },
         ParamKind::Bool => Widget::Checkbox,
         ParamKind::Text => Widget::Text,
+        ParamKind::Path => Widget::Path,
         ParamKind::Enum { options } => Widget::Dropdown { options },
         ParamKind::Curve => Widget::CurveEditor,
         // ParamKind is #[non_exhaustive]; an unknown future kind degrades, never
@@ -213,6 +216,34 @@ pub(crate) fn edit(
                 .inner;
             resp.changed().then_some(ParamValue::Text(x))
         }
+        (Widget::Path, ParamValue::Text(v)) => {
+            // A path text field plus a Browse button opening the native file picker. The
+            // text stays editable (paste or type a path); Browse fills it in.
+            let mut x = v.clone();
+            let new_value = ui
+                .horizontal(|ui| {
+                    ui.label(name);
+                    let mut new_value = None;
+                    if ui.button("Browse…").clicked()
+                        && let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Image", &["png"])
+                            .pick_file()
+                    {
+                        // Reflect the pick in the field this frame, and adopt it.
+                        x = path.display().to_string();
+                        new_value = Some(x.clone());
+                    }
+                    if ui
+                        .add(egui::TextEdit::singleline(&mut x).desired_width(f32::INFINITY))
+                        .changed()
+                    {
+                        new_value = Some(x.clone());
+                    }
+                    new_value
+                })
+                .inner;
+            new_value.map(ParamValue::Text)
+        }
         (Widget::Dropdown { options }, ParamValue::Text(v)) => {
             let mut selected = v.clone();
             let changed = ui
@@ -282,6 +313,10 @@ mod tests {
         assert_eq!(
             widget_for(&spec(ParamKind::Text, ParamValue::Text(String::new()))),
             Widget::Text
+        );
+        assert_eq!(
+            widget_for(&spec(ParamKind::Path, ParamValue::Text(String::new()))),
+            Widget::Path
         );
         assert_eq!(
             widget_for(&spec(

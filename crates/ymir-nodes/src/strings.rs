@@ -26,6 +26,13 @@ pub fn tr(key: &str) -> &str {
         "node-generator.fbm" => "fBm Noise",
         "node-generator.fbm-desc" => "Fractional Brownian motion of Perlin noise.",
 
+        // Import generator.
+        "node-generator.import" => "Import",
+        "node-generator.import-desc" => {
+            "Loads a heightmap PNG as a field, resampled to the build resolution. Set the \
+             file path; an empty path is a flat field."
+        }
+
         // Flow (curl-warped) generator.
         "node-generator.flow" => "Flow Noise",
         "node-generator.flow-desc" => {
