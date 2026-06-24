@@ -10,6 +10,7 @@
 //! crate explicitly (`use ymir_nodes as _;`); merely calling the registry by
 //! string does not reference this crate and would let the linker drop it.
 
+mod billow;
 mod blend;
 mod blur;
 mod category;
@@ -37,6 +38,7 @@ mod strings;
 mod thermal;
 mod warp;
 
+pub use billow::Billow;
 pub use blend::Blend;
 pub use blur::Blur;
 pub use category::{CategoryDef, categories, find_category};

@@ -132,6 +132,36 @@ pub(crate) fn ridged_field(
     Field::new(width, height, region).with_layer(layers::HEIGHT, Arc::new(layer))
 }
 
+/// Generates a field whose `height` layer is billow noise in `[0, 1]`.
+///
+/// A sibling of [`fbm_field`] that folds each octave with `2|n| - 1` before summing, so
+/// the noise's extremes become rounded bumps and its zero-crossings become creased
+/// valleys: puffy mounds and dunes, the rounded inverse of the ridged fold (ridged points
+/// up at crests, billow bulges round). Shares the octave-layering parameters and
+/// world-space sampling with the fBm path, so it is resolution-independent.
+pub(crate) fn billow_field(
+    width: usize,
+    height: usize,
+    region: Region,
+    params: FbmParams,
+    seed: u64,
+) -> Field {
+    let layer = Layer::from_fn(width, height, |x, y| {
+        // Same world-space sampling as fbm_field, so the generators register against the
+        // same coordinates and stay resolution-independent.
+        let u = (x as f64 + 0.5) / width as f64 + params.offset_x;
+        let v = (y as f64 + 0.5) / height as f64 + params.offset_y;
+        let wx = (region.min_x + u * region.width()) * params.frequency;
+        let wy = (region.min_y + v * region.height()) * params.frequency;
+
+        let n = billow2(seed, wx as f32, wy as f32, params);
+        // Billow is in roughly [-1, 1]; map to the nominal height range.
+        (0.5 * n + 0.5).clamp(0.0, 1.0)
+    });
+
+    Field::new(width, height, region).with_layer(layers::HEIGHT, Arc::new(layer))
+}
+
 /// Samples raw fBm (roughly `[-1, 1]`) at the given coordinates, for callers that need
 /// the signed noise directly rather than a mapped `[0, 1]` height field (a domain-warp
 /// displacement, say). The base frequency is applied by the caller scaling the
@@ -294,6 +324,35 @@ fn ridged2(seed: u64, x: f32, y: f32, params: FbmParams) -> f32 {
 
     if total_amplitude > 0.0 {
         (sum / total_amplitude).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+/// Sums billow octaves, returning a value in roughly `[-1, 1]`.
+///
+/// Each octave folds the Perlin value with `2|n| - 1`, which sends the noise's extremes
+/// to `+1` (rounded bumps) and its zero-crossings to `-1` (creased valleys), so the sum
+/// reads as puffy mounds rather than the symmetric ripples of plain fBm. Normalized by the
+/// total amplitude, identical otherwise to the fBm octave loop.
+fn billow2(seed: u64, x: f32, y: f32, params: FbmParams) -> f32 {
+    let mut frequency = 1.0_f32;
+    let mut amplitude = 1.0_f32;
+    let mut sum = 0.0_f32;
+    let mut total_amplitude = 0.0_f32;
+
+    for octave in 0..params.octaves {
+        // Same per-octave seed salt as the fBm and ridged paths.
+        let octave_seed = seed ^ 0x9E37_79B9_7F4A_7C15_u64.wrapping_mul(u64::from(octave) + 1);
+        let n = perlin2(octave_seed, x * frequency, y * frequency);
+        sum += amplitude * (2.0 * n.abs() - 1.0);
+        total_amplitude += amplitude;
+        frequency *= params.lacunarity as f32;
+        amplitude *= params.gain;
+    }
+
+    if total_amplitude > 0.0 {
+        sum / total_amplitude
     } else {
         0.0
     }

@@ -43,6 +43,13 @@ pub fn tr(key: &str) -> &str {
              shape or scatter per region. Frequency sets the region count, jitter shape."
         }
 
+        // Billow generator.
+        "node-generator.billow" => "Billow Noise",
+        "node-generator.billow-desc" => {
+            "Puffy, rounded mounds and dunes: the rounded inverse of ridged noise. \
+             Multiply with a Shape envelope to place rolling hills or a dune field."
+        }
+
         // Ridged-multifractal generator.
         "node-generator.ridged" => "Ridged Noise",
         "node-generator.ridged-desc" => {
