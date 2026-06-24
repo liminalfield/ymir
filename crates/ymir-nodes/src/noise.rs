@@ -162,6 +162,35 @@ pub(crate) fn billow_field(
     Field::new(width, height, region).with_layer(layers::HEIGHT, Arc::new(layer))
 }
 
+/// Generates a field whose `height` layer is hybrid-multifractal noise in `[0, 1]`.
+///
+/// Musgrave's hybrid multifractal: the contribution of each octave is weighted by the
+/// terrain accumulated so far, so detail piles onto high ground while low ground stays
+/// smooth and flat. The result is realistic plains-to-mountains terrain from one
+/// generator, without hand-masking. `bias` (Musgrave's offset) lifts the field before the
+/// weighting, setting how much of it reads as rough highland versus smooth lowland.
+/// Shares the octave-layering parameters and world-space sampling, so it is
+/// resolution-independent.
+pub(crate) fn hybrid_field(
+    width: usize,
+    height: usize,
+    region: Region,
+    params: FbmParams,
+    bias: f32,
+    seed: u64,
+) -> Field {
+    let layer = Layer::from_fn(width, height, |x, y| {
+        let u = (x as f64 + 0.5) / width as f64 + params.offset_x;
+        let v = (y as f64 + 0.5) / height as f64 + params.offset_y;
+        let wx = (region.min_x + u * region.width()) * params.frequency;
+        let wy = (region.min_y + v * region.height()) * params.frequency;
+
+        hybrid2(seed, wx as f32, wy as f32, params, bias)
+    });
+
+    Field::new(width, height, region).with_layer(layers::HEIGHT, Arc::new(layer))
+}
+
 /// Samples raw fBm (roughly `[-1, 1]`) at the given coordinates, for callers that need
 /// the signed noise directly rather than a mapped `[0, 1]` height field (a domain-warp
 /// displacement, say). The base frequency is applied by the caller scaling the
@@ -356,6 +385,44 @@ fn billow2(seed: u64, x: f32, y: f32, params: FbmParams) -> f32 {
     } else {
         0.0
     }
+}
+
+/// Hybrid multifractal at `(x, y)`, mapped to `[0, 1]`.
+///
+/// Each octave's `(noise + bias)` contribution is scaled by `weight`, the product of the
+/// coarser octaves so far (clamped to 1). Where the terrain is already high the weight
+/// stays near 1 and detail accumulates (rough peaks); where it is low the weight collapses
+/// toward 0 and finer octaves barely register (smooth, flat valleys). The raw value is
+/// divided by its analytic envelope `(1 + bias) / (1 - gain)` and clamped, so the field
+/// fills roughly `[0, 1]` while keeping the plains-to-peaks distribution.
+fn hybrid2(seed: u64, x: f32, y: f32, params: FbmParams, bias: f32) -> f32 {
+    let mut frequency = 1.0_f32;
+    let mut amplitude = 1.0_f32;
+    let mut result = 0.0_f32;
+    let mut weight = 1.0_f32;
+
+    for octave in 0..params.octaves {
+        // Same per-octave seed salt as the other multifractal paths.
+        let octave_seed = seed ^ 0x9E37_79B9_7F4A_7C15_u64.wrapping_mul(u64::from(octave) + 1);
+        let signal = (perlin2(octave_seed, x * frequency, y * frequency) + bias) * amplitude;
+        if octave == 0 {
+            result = signal;
+            weight = signal;
+        } else {
+            // The accumulated terrain gates this octave: high ground keeps the weight near
+            // 1 (full detail), low ground drives it toward 0 (stays smooth).
+            let w = weight.min(1.0);
+            result += w * signal;
+            weight = w * signal;
+        }
+        frequency *= params.lacunarity as f32;
+        amplitude *= params.gain;
+    }
+
+    // Normalize by the envelope so the field fills roughly [0, 1]; the actual range still
+    // varies with terrain, which is the point (auto-ranged at display and export).
+    let envelope = (1.0 + bias) / (1.0 - params.gain).max(1e-3);
+    (result / envelope).clamp(0.0, 1.0)
 }
 
 /// Improved Perlin noise at `(x, y)`, returning a value in roughly `[-1, 1]`.

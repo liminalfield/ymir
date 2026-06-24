@@ -50,6 +50,13 @@ pub fn tr(key: &str) -> &str {
              Multiply with a Shape envelope to place rolling hills or a dune field."
         }
 
+        // Hybrid-multifractal generator.
+        "node-generator.hybrid" => "Hybrid Multifractal",
+        "node-generator.hybrid-desc" => {
+            "Realistic plains-to-mountains terrain in one node: roughness scales with \
+             altitude, so valleys stay smooth and flat while peaks get rough and broken."
+        }
+
         // Ridged-multifractal generator.
         "node-generator.ridged" => "Ridged Noise",
         "node-generator.ridged-desc" => {
