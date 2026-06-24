@@ -394,6 +394,7 @@ impl Graph {
                     name: node.name.clone(),
                     params: node.params.clone(),
                     connections,
+                    bypassed: node.bypassed,
                 }
             })
             .collect();
@@ -454,6 +455,7 @@ impl Graph {
             if let Some(node) = graph.nodes.get_mut(id) {
                 node.stable_id = nd.stable_id;
                 node.name = nd.name.clone();
+                node.bypassed = nd.bypassed;
             }
             if by_stable.insert(nd.stable_id, id).is_some() {
                 return Err(Error::DuplicateStableId {
@@ -778,6 +780,22 @@ mod tests {
     }
 
     #[test]
+    fn bypass_state_round_trips_through_a_document() {
+        let mut g = Graph::new();
+        let head = g.add_op(make_test_gen(), Params::new());
+        let modr = g.add_op(make_test_mod(), Params::new());
+        g.connect(head, 0, modr, 0).expect("connect");
+        g.set_bypassed(modr, true).expect("bypass");
+
+        let rebuilt = Graph::from_document(&g.to_document()).expect("rebuild");
+        // The modifier's bypass survives; the untouched generator stays not bypassed.
+        let modr_id = rebuilt.node_id_of(g.stable_id(modr).unwrap()).unwrap();
+        let head_id = rebuilt.node_id_of(g.stable_id(head).unwrap()).unwrap();
+        assert!(rebuilt.is_bypassed(modr_id));
+        assert!(!rebuilt.is_bypassed(head_id));
+    }
+
+    #[test]
     fn from_document_preserves_the_id_counter() {
         let mut g = Graph::new();
         g.add_op(make_test_gen(), Params::new());
@@ -815,6 +833,7 @@ mod tests {
                 name: None,
                 params: Params::new(),
                 connections: Vec::new(),
+                bypassed: false,
             }],
         };
         assert!(matches!(
@@ -831,6 +850,7 @@ mod tests {
             name: None,
             params: Params::new(),
             connections: Vec::new(),
+            bypassed: false,
         };
         let doc = ProjectDocument {
             format_version: FORMAT_VERSION,
@@ -884,6 +904,7 @@ mod tests {
                     source: 99,
                     output: 0,
                 }],
+                bypassed: false,
             }],
         };
         assert!(matches!(

@@ -54,6 +54,15 @@ pub struct NodeDocument {
     /// appear, so an unconnected node carries an empty list (omitted from the file).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connections: Vec<Connection>,
+    /// Whether the node is bypassed (transparent). Defaults to `false` and is omitted
+    /// from the file when not bypassed, so existing projects load unchanged.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub bypassed: bool,
+}
+
+/// Serde predicate: omit a `bool` field from the file when it is `false`.
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// One input connection: which input port of the owning node is fed by which output
@@ -95,6 +104,7 @@ mod tests {
                     name: None,
                     params,
                     connections: Vec::new(),
+                    bypassed: false,
                 },
                 NodeDocument {
                     stable_id: 1,
@@ -106,6 +116,7 @@ mod tests {
                         source: 0,
                         output: 0,
                     }],
+                    bypassed: true,
                 },
             ],
         }
@@ -134,6 +145,17 @@ mod tests {
         // The export node has empty params, which should be omitted.
         let export = &json["nodes"][1];
         assert!(export.get("params").is_none(), "empty params is omitted");
+        // The fbm node is not bypassed, so the flag is omitted; the export node is, so
+        // it is written.
+        assert!(
+            fbm.get("bypassed").is_none(),
+            "a not-bypassed node omits the flag"
+        );
+        assert_eq!(
+            export.get("bypassed"),
+            Some(&serde_json::json!(true)),
+            "a bypassed node writes the flag"
+        );
     }
 
     #[test]
