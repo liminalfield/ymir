@@ -31,6 +31,8 @@ const THUMB_CORNER_RADIUS: f32 = 4.0;
 /// grid and snapping arrive. Applied as a minimum on the header and footer rows; an
 /// unusually long title is the only thing that can push a node wider.
 const NODE_WIDTH: f32 = 140.0;
+/// Opacity a bypassed node's content is faded to, so it reads as off (#105).
+const BYPASS_OPACITY: f32 = 0.4;
 /// Below this canvas zoom, thumbnails are skipped (#74): the nodes are too small on
 /// screen to be worth evaluating and uploading.
 pub(crate) const THUMB_MIN_SCALE: f32 = 0.6;
@@ -340,61 +342,94 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
         // keeps the title from being text-selectable, so it shows the normal cursor
         // (not a text I-beam) and reads as a node title, not editable text.
         let is_selected = handle.is_some_and(|h| self.selection.contains(&h));
-        let mut text = if is_selected {
+        let text = if is_selected {
             egui::RichText::new(title)
                 .strong()
                 .color(ui.visuals().selection.stroke.color)
         } else {
             egui::RichText::new(title)
         };
-        // A bypassed node reads as off at a glance: its title is dimmed and struck
-        // through (#105).
+        // A bypassed node reads as off: its title (and footer thumbnail) fade, while the
+        // header's enable toggle stays bright as the obvious way to switch it back on
+        // (#105).
         let is_bypassed = handle
             .and_then(|h| self.core_id(h))
             .is_some_and(|id| self.graph.is_bypassed(id));
-        if is_bypassed {
-            text = text.weak().strikethrough();
-        }
         // Fixed node width: the header defines it, so every node is the same width.
         ui.set_min_width(NODE_WIDTH);
-        ui.horizontal(|ui| {
-            // Always reserve the status dot's space so a node never changes width when
-            // it becomes the previewed node (a layout jump is jarring). Paint the
-            // colour only for the previewed node; the slot stays empty otherwise.
-            let diameter = ui.text_style_height(&egui::TextStyle::Body) * 0.55;
-            let (rect, _) =
-                ui.allocate_exact_size(egui::vec2(diameter, diameter), egui::Sense::hover());
-            // The dot's colour: the previewed node shows the preview status; any other
-            // structurally-broken node shows red, so a broken node (e.g. a Blend with
-            // a disconnected input) is visible even while the preview is pinned
-            // elsewhere (#43; a fuller per-node status is #44).
-            let dot = handle.and_then(|h| {
-                if let Some((status_handle, color)) = self.status
-                    && status_handle == h
-                {
-                    Some(color)
-                } else if self.core_id(h).is_some_and(|id| self.is_broken(id)) {
-                    Some(ui.visuals().error_fg_color)
-                } else {
-                    None
+        let toggle_clicked = ui
+            .horizontal(|ui| {
+                // Always reserve the status dot's space so a node never changes width when
+                // it becomes the previewed node (a layout jump is jarring). Paint the
+                // colour only for the previewed node; the slot stays empty otherwise.
+                let diameter = ui.text_style_height(&egui::TextStyle::Body) * 0.55;
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(diameter, diameter), egui::Sense::hover());
+                // The dot's colour: the previewed node shows the preview status; any other
+                // structurally-broken node shows red, so a broken node (e.g. a Blend with
+                // a disconnected input) is visible even while the preview is pinned
+                // elsewhere (#43; a fuller per-node status is #44).
+                let dot = handle.and_then(|h| {
+                    if let Some((status_handle, color)) = self.status
+                        && status_handle == h
+                    {
+                        Some(color)
+                    } else if self.core_id(h).is_some_and(|id| self.is_broken(id)) {
+                        Some(ui.visuals().error_fg_color)
+                    } else {
+                        None
+                    }
+                });
+                if let Some(color) = dot {
+                    ui.painter()
+                        .circle_filled(rect.center(), diameter * 0.5, color);
                 }
-            });
-            if let Some(color) = dot {
-                ui.painter()
-                    .circle_filled(rect.center(), diameter * 0.5, color);
-            }
-            // A ring around the dot marks the pinned node, so it reads as the locked
-            // preview target even as selection moves elsewhere. Painted (not
-            // allocated), so it never changes the node's width.
-            if handle.is_some() && handle == self.pinned {
-                ui.painter().circle_stroke(
-                    rect.center(),
-                    diameter * 0.5 + 1.5,
-                    egui::Stroke::new(1.5, ui.visuals().selection.stroke.color),
-                );
-            }
-            ui.add(egui::Label::new(text).selectable(false));
-        });
+                // A ring around the dot marks the pinned node, so it reads as the locked
+                // preview target even as selection moves elsewhere. Painted (not
+                // allocated), so it never changes the node's width.
+                if handle.is_some() && handle == self.pinned {
+                    ui.painter().circle_stroke(
+                        rect.center(),
+                        diameter * 0.5 + 1.5,
+                        egui::Stroke::new(1.5, ui.visuals().selection.stroke.color),
+                    );
+                }
+                // The title, faded when bypassed (scoped, so the enable toggle stays bright).
+                ui.scope(|ui| {
+                    if is_bypassed {
+                        ui.multiply_opacity(BYPASS_OPACITY);
+                    }
+                    ui.add(egui::Label::new(text).selectable(false));
+                });
+                // Right-aligned enable toggle: filled = active, hollow = bypassed; clicking
+                // toggles. Full opacity always, so it stays an obvious, clickable target.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let d = ui.text_style_height(&egui::TextStyle::Body) * 0.6;
+                    let (toggle_rect, resp) =
+                        ui.allocate_exact_size(egui::Vec2::splat(d), egui::Sense::click());
+                    let center = toggle_rect.center();
+                    let radius = d * 0.42;
+                    if is_bypassed {
+                        let off = ui.visuals().weak_text_color();
+                        ui.painter()
+                            .circle_stroke(center, radius, egui::Stroke::new(1.5, off));
+                    } else {
+                        let on = ui.visuals().selection.stroke.color;
+                        ui.painter().circle_filled(center, radius, on);
+                    }
+                    resp.on_hover_text(if is_bypassed {
+                        "Enable node"
+                    } else {
+                        "Bypass node"
+                    })
+                    .clicked()
+                })
+                .inner
+            })
+            .inner;
+        if toggle_clicked && let Some(h) = handle {
+            self.bypass_request = Some(h);
+        }
     }
 
     fn final_node_rect(
@@ -457,6 +492,13 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
         let Some(&handle) = snarl.get_node(node) else {
             return;
         };
+        // Fade the thumbnail to match the dimmed header of a bypassed node (#105).
+        if self
+            .core_id(handle)
+            .is_some_and(|id| self.graph.is_bypassed(id))
+        {
+            ui.multiply_opacity(BYPASS_OPACITY);
+        }
         let size = egui::vec2(THUMB_DISPLAY_SIZE, THUMB_DISPLAY_SIZE);
         // Span the fixed node width so the thumbnail centres within the whole node,
         // not just its own content.

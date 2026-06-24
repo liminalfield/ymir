@@ -1335,15 +1335,6 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
         }
     });
     ui.weak(type_name.as_str());
-
-    // Bypass toggle (#105): make the node transparent (forwards input 0; a generator
-    // emits nothing) without unwiring it. Shown for every node, even param-less ones.
-    let mut bypassed = state.graph.is_bypassed(id);
-    if ui.checkbox(&mut bypassed, "Bypass").changed()
-        && let Err(err) = state.graph.set_bypassed(id, bypassed)
-    {
-        ui.colored_label(ui.visuals().error_fg_color, err.to_string());
-    }
     ui.separator();
 
     if spec.params.is_empty() {
@@ -1518,6 +1509,11 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
         ui.label(name);
         if is_pinned {
             ui.weak("· pinned");
+        }
+        // Make the pass-through obvious: a bypassed node shows its input, not its own
+        // output (#105).
+        if state.graph.is_bypassed(id) {
+            ui.weak("· bypassed");
         }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
