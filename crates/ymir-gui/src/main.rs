@@ -207,6 +207,11 @@ struct AppState {
     /// The screen-space origin of an in-progress marquee box-select (a left-drag begun on
     /// empty canvas), or `None` when not marqueeing (#84).
     marquee_start: Option<egui::Pos2>,
+    /// The selected node currently under the cursor during a multi-node drag (the "leader"
+    /// snarl moves itself), or `None` when no group drag is in flight. The rest of the
+    /// selection follows the leader by the same delta each frame, since snarl moves only the
+    /// dragged node.
+    group_drag_leader: Option<Handle>,
     /// The node pinned as the preview target, if any (GUI view-state, not core graph
     /// data — issue #39). When set and still previewable, the 2D preview shows this
     /// node instead of the selection, so selection can move upstream to edit while the
@@ -334,6 +339,7 @@ impl AppState {
             selection: HashSet::new(),
             primary: None,
             marquee_start: None,
+            group_drag_leader: None,
             seed: 0,
             preview: PreviewEngine::new(),
             thumbnails: ThumbnailEngine::new(),
@@ -2062,6 +2068,11 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // (a move) is excluded by the node_at test at its origin.
     handle_marquee(ui, state, canvas_rect, to_global, &node_rects, menu_open);
 
+    // Drag one selected node and the rest of the selection follows (#84 follow-up). Runs
+    // after the marquee, which is mutually exclusive (a marquee begins on empty canvas, a
+    // group drag on a selected node).
+    handle_group_drag(ui, state, to_global, &node_rects);
+
     // Keep the selection consistent with the graph: a node deleted this frame (e.g. via
     // the context menu's Delete) is dropped from the set and the primary (#84).
     state
@@ -2248,6 +2259,84 @@ struct PointerDrag {
     primary_released: bool,
     press_origin: Option<egui::Pos2>,
     current: Option<egui::Pos2>,
+}
+
+/// Moves the whole selection when one of its nodes is dragged. egui-snarl moves only the
+/// node under the cursor (it keys group moves off its own selection, which the canvas does
+/// not drive), so without this a multi-selection drag leaves the rest behind. On the press
+/// that begins a no-modifier drag on a selected node, that node becomes the leader (snarl
+/// moves it); every frame the drag is held, the other selected nodes follow by the same
+/// delta. The pointer delta is screen space, so it is divided by the zoom to move nodes in
+/// graph space.
+fn handle_group_drag(
+    ui: &egui::Ui,
+    state: &mut AppState,
+    to_global: egui::emath::TSTransform,
+    node_rects: &[(Handle, egui::Rect)],
+) {
+    let (pressed, down, delta, origin, plain) = ui.input(|i| {
+        (
+            i.pointer.primary_pressed(),
+            i.pointer.primary_down(),
+            i.pointer.delta(),
+            i.pointer.press_origin(),
+            !i.modifiers.shift && !i.modifiers.command,
+        )
+    });
+
+    // Begin a group drag only when the press lands on an already-selected node that is part
+    // of a multi-selection, with no modifier (matching snarl's own move gate). Decided once
+    // on the press edge, since a drag moves the node out from under a later hit-test.
+    if state.group_drag_leader.is_none()
+        && pressed
+        && plain
+        && state.selection.len() > 1
+        && let Some(origin) = origin
+    {
+        let graph_pos = to_global.inverse() * origin;
+        if let Some((handle, _)) = node_rects
+            .iter()
+            .find(|(h, r)| r.contains(graph_pos) && state.selection.contains(h))
+        {
+            state.group_drag_leader = Some(*handle);
+        }
+    }
+
+    let Some(leader) = state.group_drag_leader else {
+        return;
+    };
+    if !down {
+        state.group_drag_leader = None;
+        return;
+    }
+
+    // Snarl already moved the leader by this frame's drag; move the rest by the same delta.
+    let scale = to_global.scaling;
+    if delta == egui::Vec2::ZERO || scale == 0.0 {
+        return;
+    }
+    offset_selected_except(&mut state.snarl, &state.selection, leader, delta / scale);
+}
+
+/// Offsets every selected node except `leader` by `delta` (graph space). The leader is
+/// skipped because snarl moves the dragged node itself, so it must not be moved twice.
+fn offset_selected_except(
+    snarl: &mut Snarl<Handle>,
+    selection: &HashSet<Handle>,
+    leader: Handle,
+    delta: egui::Vec2,
+) {
+    // Collect ids first: iterating borrows the snarl, but moving a node needs it mutably.
+    let ids: Vec<SnarlNodeId> = snarl
+        .node_ids()
+        .filter(|(_, h)| **h != leader && selection.contains(h))
+        .map(|(id, _)| id)
+        .collect();
+    for id in ids {
+        if let Some(node) = snarl.get_node_info_mut(id) {
+            node.pos += delta;
+        }
+    }
 }
 
 /// Draws the node-rename dialog when open, and applies its result. A no-op when the
@@ -2944,6 +3033,32 @@ mod tests {
         state.marquee_select(&[], false);
         assert!(state.selection.is_empty());
         assert_eq!(state.primary, None);
+    }
+
+    #[test]
+    fn group_drag_moves_selected_nodes_except_the_leader() {
+        let mut snarl: Snarl<Handle> = Snarl::new();
+        let leader = snarl.insert_node(egui::pos2(0.0, 0.0), 1);
+        let follower = snarl.insert_node(egui::pos2(10.0, 0.0), 2);
+        let unselected = snarl.insert_node(egui::pos2(20.0, 0.0), 3);
+
+        // The selection contains the leader; the leader is skipped (snarl moves it itself),
+        // the other selected node follows, and the unselected node is untouched.
+        let selection: HashSet<Handle> = [1, 2].into_iter().collect();
+        offset_selected_except(&mut snarl, &selection, 1, egui::vec2(5.0, -3.0));
+
+        assert_eq!(
+            snarl.get_node_info(leader).unwrap().pos,
+            egui::pos2(0.0, 0.0)
+        );
+        assert_eq!(
+            snarl.get_node_info(follower).unwrap().pos,
+            egui::pos2(15.0, -3.0)
+        );
+        assert_eq!(
+            snarl.get_node_info(unselected).unwrap().pos,
+            egui::pos2(20.0, 0.0)
+        );
     }
 
     #[test]
