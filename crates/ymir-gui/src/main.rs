@@ -2400,50 +2400,97 @@ inventory::submit! { PaneKind { id: "viewport-3d", draw: viewport_3d_pane } }
 
 // ---- layout description + fixed-panel backend -------------------------------
 
+/// The project node-list pane (Section 4, left): will list the project's nodes and
+/// subgraphs as a tree. A placeholder until that UX lands; shown here so the layout is in
+/// place. Collapsing it is a later step.
+fn node_list_pane(ui: &mut egui::Ui, _state: &mut AppState) {
+    ui.add_space(MENU_VPAD);
+    ui.strong("Nodes");
+    ui.weak("Project node list — placeholder.");
+}
+
+inventory::submit! { PaneKind { id: "node-list", draw: node_list_pane } }
+
+/// The footer (Section 5): status, hints, and context. A placeholder for now.
+fn footer_pane(ui: &mut egui::Ui, _state: &mut AppState) {
+    ui.horizontal(|ui| {
+        ui.add_space(MENU_VPAD);
+        ui.weak("Ready");
+    });
+}
+
+inventory::submit! { PaneKind { id: "footer", draw: footer_pane } }
+
 /// Which pane kind (by id) fills each slot of the default layout. This is the
 /// data the v1 backend reads; a future workspace tree and docking backend will
 /// replace the fixed slots without touching any pane internals.
 struct Layout {
     menu_bar: &'static str,
-    ribbon: &'static str,
-    params: &'static str,
-    preview_2d: &'static str,
+    /// Pane 1: node category tabs, Build, and (later) the node icon grid.
+    palette: &'static str,
     canvas: &'static str,
-    viewport_3d: &'static str,
+    /// The main viewport, stacked with the canvas in the workspace.
+    viewport: &'static str,
+    node_list: &'static str,
+    preview: &'static str,
+    /// The tabbed node inspector / world settings sub-panel.
+    inspector: &'static str,
+    footer: &'static str,
 }
 
 fn default_layout() -> Layout {
     Layout {
         menu_bar: "menu-bar",
-        ribbon: "ribbon",
-        params: "params",
-        preview_2d: "preview-2d",
+        palette: "ribbon",
         canvas: "canvas",
-        viewport_3d: "viewport-3d",
+        viewport: "viewport-3d",
+        node_list: "node-list",
+        preview: "preview-2d",
+        inspector: "params",
+        footer: "footer",
     }
 }
 
-/// The v1 layout backend: mounts the panes named by `layout` into fixed,
-/// resizable native egui panels.
+/// The v1 layout backend: mounts the panes named by `layout` into the five-section
+/// structure (menu, workspace, side column, footer, beneath the OS title bar) of fixed,
+/// resizable native egui
+/// panels. Declaration order matters: title and menu reserve the full-width top, the footer
+/// the full-width bottom, the side column the right edge, and the workspace the remainder.
 fn mount(layout: &Layout, ui: &mut egui::Ui, state: &mut AppState) {
-    egui::Panel::top("menu_bar").show_inside(ui, |ui| draw_pane(layout.menu_bar, ui, state));
-    egui::Panel::top("ribbon").show_inside(ui, |ui| draw_pane(layout.ribbon, ui, state));
+    // Section 2: the full-width menu strip, directly under the OS title bar (Section 1).
+    egui::Panel::top("menu-bar-panel").show_inside(ui, |ui| draw_pane(layout.menu_bar, ui, state));
 
-    egui::Panel::right("right_column")
+    // Section 5: full-width footer.
+    egui::Panel::bottom("footer-panel").show_inside(ui, |ui| draw_pane(layout.footer, ui, state));
+
+    // Section 4: the right column, resizable against the workspace. Inside it, the project
+    // node list on the left, and the preview over the inspector/world tabs on the right.
+    egui::Panel::right("section-4")
         .resizable(true)
-        .default_size(300.0)
+        .default_size(420.0)
         .show_inside(ui, |ui| {
-            draw_pane(layout.params, ui, state);
-            ui.separator();
-            draw_pane(layout.preview_2d, ui, state);
+            egui::Panel::left("node-list-panel")
+                .resizable(true)
+                .default_size(150.0)
+                .show_inside(ui, |ui| draw_pane(layout.node_list, ui, state));
+            egui::Panel::top("preview-panel")
+                .resizable(true)
+                .default_size(260.0)
+                .show_inside(ui, |ui| draw_pane(layout.preview, ui, state));
+            egui::CentralPanel::default()
+                .show_inside(ui, |ui| draw_pane(layout.inspector, ui, state));
         });
 
+    // Section 3: the workspace. Pane 1 (palette) on top, then the canvas and the main
+    // viewport stacked (swapping them is a later step).
     egui::CentralPanel::default().show_inside(ui, |ui| {
-        egui::Panel::right("viewport_3d")
+        egui::Panel::top("palette-panel")
+            .show_inside(ui, |ui| draw_pane(layout.palette, ui, state));
+        egui::Panel::bottom("viewport-panel")
             .resizable(true)
-            .default_size(ui.available_width() * 0.4)
-            .show_inside(ui, |ui| draw_pane(layout.viewport_3d, ui, state));
-        draw_pane(layout.canvas, ui, state);
+            .default_size(ui.available_height() * 0.4)
+            .show_inside(ui, |ui| draw_pane(layout.viewport, ui, state));
+        egui::CentralPanel::default().show_inside(ui, |ui| draw_pane(layout.canvas, ui, state));
     });
 }
 
@@ -2451,6 +2498,9 @@ fn mount(layout: &Layout, ui: &mut egui::Ui, state: &mut AppState) {
 
 struct YmirApp {
     state: AppState,
+    /// The window title last pushed to the OS, so it is only re-sent when it changes (the
+    /// OS title bar is Section 1 of the layout, not an in-app strip).
+    window_title: String,
 }
 
 impl YmirApp {
@@ -2470,7 +2520,29 @@ impl YmirApp {
         // process environment or the filesystem.
         let mut state = AppState::new();
         apply_default(&mut state);
-        Self { state }
+        // Empty so the first frame always pushes the real title to the OS bar.
+        Self {
+            state,
+            window_title: String::new(),
+        }
+    }
+
+    /// Reflects the current project in the OS title bar, re-sending only when it changes so
+    /// the platform is not spammed with a title command every frame.
+    fn sync_window_title(&mut self, ctx: &egui::Context) {
+        let title = match self
+            .state
+            .project_path
+            .as_deref()
+            .and_then(std::path::Path::file_name)
+        {
+            Some(name) => format!("Ymir — {}", name.to_string_lossy()),
+            None => "Ymir".to_string(),
+        };
+        if title != self.window_title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.window_title = title;
+        }
     }
 }
 
@@ -2561,6 +2633,7 @@ impl eframe::App for YmirApp {
         // this frame's render (#82). They are suppressed while a text field has focus, so
         // Ctrl+Z keeps editing text there instead of undoing the graph.
         handle_shortcuts(ui.ctx(), &mut self.state);
+        self.sync_window_title(ui.ctx());
         mount(&default_layout(), ui, &mut self.state);
         // The popped-out curve editor floats over the panes when open (#70-style).
         curve_popout_window(ui.ctx(), &mut self.state);
@@ -3099,11 +3172,13 @@ mod tests {
         let l = default_layout();
         for id in [
             l.menu_bar,
-            l.ribbon,
-            l.params,
-            l.preview_2d,
+            l.palette,
             l.canvas,
-            l.viewport_3d,
+            l.viewport,
+            l.node_list,
+            l.preview,
+            l.inspector,
+            l.footer,
         ] {
             assert!(pane_kind(id).is_some(), "pane {id:?} is not registered");
         }
