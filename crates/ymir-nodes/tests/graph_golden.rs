@@ -28,5 +28,5 @@ fn fbm_then_thermal_matches_golden() {
     let mut cache = EvalCache::new(16);
     let out = graph.evaluate(erosion, &request, &mut cache).unwrap();
 
-    assert_eq!(out[0].content_hash().to_u64(), 0x8b95_f009_7ce0_0e5d);
+    assert_eq!(out[0].content_hash().to_u64(), 0x569d_8044_01c0_9f1e);
 }

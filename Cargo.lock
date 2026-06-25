@@ -3984,6 +3984,7 @@ name = "ymir-nodes"
 version = "0.1.0"
 dependencies = [
  "inventory",
+ "rayon",
  "ymir-core",
 ]
 

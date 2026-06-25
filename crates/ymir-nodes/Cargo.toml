@@ -15,3 +15,8 @@ ymir-core = { path = "../ymir-core" }
 # Each operator registers itself with `inventory::submit!`; `ymir-core` collects
 # the entries. The binary must anchor this crate so the registrations link.
 inventory = "0.3"
+# Data parallelism for thermal erosion's multi-buffer passes (the per-cell generator
+# fills use `Layer::from_par_fn` in ymir-core instead). The pass is a two-phase gather:
+# each cell computes its own outputs from neighbour reads, so the parallel result is
+# byte-identical regardless of thread count.
+rayon = "1"

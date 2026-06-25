@@ -8,13 +8,14 @@
 //! and the preview is representative of the build. An optional `mask` input localizes
 //! the effect (its height layer is the selection); unwired, the input's own `mask`
 //! layer is used by convention, else erosion applies everywhere. Each pass is Jacobi
-//! (it reads the previous full state
-//! and writes a fresh delta), so the result is independent of cell iteration
-//! order, which determinism requires. Single-threaded for now; the per-cell
-//! independence means `rayon` drops in later unchanged.
+//! (it reads the previous full state and writes a fresh delta), so the result is
+//! independent of cell iteration order. A pass runs as two parallel gather phases (each
+//! cell computes its own outputs from neighbour reads, never writing a shared cell), so it
+//! is byte-identical regardless of thread count, which the determinism policy requires.
 
 use std::sync::Arc;
 
+use rayon::prelude::*;
 use ymir_core::registry::OperatorEntry;
 use ymir_core::{
     Error, EvalContext, Field, Inputs, Layer, NodeSpec, Operator, ParamKind, ParamSpec, ParamValue,
@@ -128,6 +129,17 @@ impl Operator for ThermalErosion {
 
         let mut heights = source.as_slice().to_vec();
         let mut delta = vec![0.0_f32; heights.len()];
+        // Reused per-cell scratch for the two-phase pass: how much each cell sheds and its
+        // downhill excess sum (which splits the shed among lower neighbours). Allocated once
+        // and overwritten each pass rather than reallocated.
+        let mut moved = vec![0.0_f32; heights.len()];
+        let mut total_excess = vec![0.0_f32; heights.len()];
+        let pass = Pass {
+            width,
+            height,
+            talus_per_cell,
+            strength,
+        };
 
         for _ in 0..iterations {
             // Erosion is the slow node; poll cancellation each pass so a
@@ -135,17 +147,13 @@ impl Operator for ThermalErosion {
             if ctx.is_cancelled() {
                 return Err(Error::Cancelled);
             }
-            erode_pass(
-                &heights,
-                &mut delta,
-                width,
-                height,
-                talus_per_cell,
-                strength,
-            );
-            for (h, d) in heights.iter_mut().zip(delta.iter()) {
-                *h += *d;
-            }
+            erode_pass(&heights, &mut moved, &mut total_excess, &mut delta, &pass);
+            // Apply the pass. Each cell is independent, so the parallel add is
+            // byte-identical to a sequential one.
+            heights
+                .par_iter_mut()
+                .zip(delta.par_iter())
+                .for_each(|(h, d)| *h += *d);
         }
 
         // Composite the eroded result over the original through the mask: a fully
@@ -167,66 +175,119 @@ impl Operator for ThermalErosion {
     }
 }
 
-/// One Jacobi pass: reads `heights`, writes per-cell movement into `delta`.
-///
-/// Mass-conserving by construction: what a cell sheds is exactly the sum added to
-/// its lower neighbours. Out-of-bounds neighbours are skipped, so material is held
-/// at the boundary rather than flowing off-grid. The mask is applied afterwards, in
-/// `eval`, as a per-cell composite, so a pass here always erodes everywhere.
-fn erode_pass(
-    heights: &[f32],
-    delta: &mut [f32],
+/// The fixed inputs of an erosion pass: grid size and the resolution-aware repose
+/// threshold and shed strength. Bundled so the per-cell helpers stay within a sane argument
+/// count and read the same parameters.
+#[derive(Clone, Copy)]
+struct Pass {
     width: usize,
     height: usize,
     talus_per_cell: f32,
     strength: f32,
+}
+
+/// One Jacobi pass, as two parallel gather phases writing per-cell movement into `delta`.
+///
+/// Mass-conserving by construction: what a cell sheds is exactly the sum its lower
+/// neighbours receive. Phase one computes, for every cell, how much it sheds (`moved`) and
+/// the total downhill excess (`total_excess`) that splits the shed among its lower
+/// neighbours. Phase two has every cell gather its own movement: minus what it sheds, plus
+/// its share of what each higher neighbour sheds. Both phases read shared `heights` and
+/// write only their own cell, so the result is byte-identical regardless of thread count.
+/// Out-of-bounds neighbours are skipped, so material is held at the boundary; the mask is
+/// applied afterwards in `eval`.
+fn erode_pass(
+    heights: &[f32],
+    moved: &mut [f32],
+    total_excess: &mut [f32],
+    delta: &mut [f32],
+    pass: &Pass,
 ) {
-    for d in delta.iter_mut() {
-        *d = 0.0;
+    // One row per chunk (`max(1)` keeps the chunk size non-zero for a zero-width field).
+    let row = pass.width.max(1);
+
+    // Phase one: each cell's shed amount and its downhill excess sum.
+    moved
+        .par_chunks_mut(row)
+        .zip(total_excess.par_chunks_mut(row))
+        .enumerate()
+        .for_each(|(y, (moved_row, excess_row))| {
+            for (x, (m, te)) in moved_row.iter_mut().zip(excess_row.iter_mut()).enumerate() {
+                (*m, *te) = shed_at(heights, x, y, pass);
+            }
+        });
+
+    // Phase two: each cell gathers its incoming and outgoing movement.
+    delta
+        .par_chunks_mut(row)
+        .enumerate()
+        .for_each(|(y, delta_row)| {
+            for (x, cell) in delta_row.iter_mut().enumerate() {
+                *cell = gather_at(heights, moved, total_excess, x, y, pass);
+            }
+        });
+}
+
+/// Phase one at one cell: `(moved, total_excess)`. `moved` is the material the cell sheds
+/// this pass, a stable fraction of its steepest downhill excess; `total_excess` is the sum
+/// of excess over its lower neighbours, by which `moved` is split among them. Both are zero
+/// when no neighbour is steeper than repose.
+fn shed_at(heights: &[f32], x: usize, y: usize, pass: &Pass) -> (f32, f32) {
+    let here = heights[y * pass.width + x];
+    let mut total_excess = 0.0_f32;
+    let mut max_excess = 0.0_f32;
+    for (dx, dy, dist) in NEIGHBORS {
+        let nx = x as i32 + dx;
+        let ny = y as i32 + dy;
+        if nx < 0 || ny < 0 || nx >= pass.width as i32 || ny >= pass.height as i32 {
+            continue; // boundary holds material in-domain
+        }
+        let diff = here - heights[ny as usize * pass.width + nx as usize];
+        // Lower neighbours steeper than repose only; the threshold scales with distance so
+        // diagonals are not favoured.
+        let threshold = pass.talus_per_cell * dist;
+        if diff <= threshold {
+            continue;
+        }
+        let excess = diff - threshold;
+        total_excess += excess;
+        max_excess = max_excess.max(excess);
     }
+    (pass.strength * max_excess * 0.5, total_excess)
+}
 
-    for y in 0..height {
-        for x in 0..width {
-            let idx = y * width + x;
-            let here = heights[idx];
-
-            let mut contributions: [(usize, f32); 8] = [(0, 0.0); 8];
-            let mut count = 0;
-            let mut total_excess = 0.0_f32;
-            let mut max_excess = 0.0_f32;
-
-            for (dx, dy, dist) in NEIGHBORS {
-                let nx = x as i32 + dx;
-                let ny = y as i32 + dy;
-                if nx < 0 || ny < 0 || nx >= width as i32 || ny >= height as i32 {
-                    continue; // boundary holds material in-domain
-                }
-                let nidx = ny as usize * width + nx as usize;
-                let diff = here - heights[nidx];
-                // Lower neighbours steeper than repose only; the per-cell threshold
-                // scales with distance so diagonals are not favoured.
-                let threshold = talus_per_cell * dist;
-                if diff <= threshold {
-                    continue;
-                }
-                let excess = diff - threshold;
-                contributions[count] = (nidx, excess);
-                count += 1;
-                total_excess += excess;
-                max_excess = max_excess.max(excess);
-            }
-
-            if total_excess > 0.0 {
-                // Shed a stable fraction of the steepest excess, split among the
-                // lower neighbours by their share of the excess.
-                let moved = strength * max_excess * 0.5;
-                delta[idx] -= moved;
-                for &(nidx, excess) in &contributions[..count] {
-                    delta[nidx] += moved * (excess / total_excess);
-                }
-            }
+/// Phase two at one cell: its net movement this pass. Minus what it sheds (`-moved[c]`),
+/// plus, from each higher neighbour `s` steeper than repose, that neighbour's share
+/// `moved[s] * excess(s -> c) / total_excess[s]`. This is the scatter the old pass wrote,
+/// read from the receiving side, so the per-cell sum no longer depends on cell order. The
+/// per-term value matches the old expression exactly; only the summation order differs.
+fn gather_at(
+    heights: &[f32],
+    moved: &[f32],
+    total_excess: &[f32],
+    x: usize,
+    y: usize,
+    pass: &Pass,
+) -> f32 {
+    let idx = y * pass.width + x;
+    let here = heights[idx];
+    let mut net = -moved[idx];
+    for (dx, dy, dist) in NEIGHBORS {
+        let nx = x as i32 + dx;
+        let ny = y as i32 + dy;
+        if nx < 0 || ny < 0 || nx >= pass.width as i32 || ny >= pass.height as i32 {
+            continue;
+        }
+        let nidx = ny as usize * pass.width + nx as usize;
+        // The excess this higher neighbour measured downhill to here (the same value it used
+        // when shedding), so the share received matches what the neighbour sent.
+        let threshold = pass.talus_per_cell * dist;
+        let excess = heights[nidx] - here - threshold;
+        if excess > 0.0 && total_excess[nidx] > 0.0 {
+            net += moved[nidx] * (excess / total_excess[nidx]);
         }
     }
+    net
 }
 
 inventory::submit! {
@@ -276,6 +337,25 @@ mod tests {
             (before - after).abs() < 1e-4,
             "mass changed: {before} -> {after}"
         );
+    }
+
+    #[test]
+    fn erosion_is_deterministic() {
+        // The two-phase gather has each cell compute its own movement, so the result is
+        // byte-identical run to run regardless of how rayon schedules the rows.
+        use crate::noise::{FbmParams, fbm_field};
+        let input = fbm_field(64, 64, Region::UNIT, FbmParams::default(), 42);
+        let c = EvalContext::new(64, 64, Region::UNIT, 42);
+        let run = || {
+            ThermalErosion
+                .eval(Inputs::required_only(&[&input]), &Params::default(), &c)
+                .unwrap()
+                .remove(0)
+                .layer(layers::HEIGHT)
+                .unwrap()
+                .content_hash()
+        };
+        assert_eq!(run(), run());
     }
 
     #[test]
