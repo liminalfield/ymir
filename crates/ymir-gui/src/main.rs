@@ -131,6 +131,10 @@ const MAX_BUILD_OUTPUTS: usize = 64;
 /// bar or the node tabs.
 const MENU_VPAD: f32 = 4.0;
 
+/// Vertical breathing room in the palette toolbar: above the categories, between them and
+/// the node list, and below the list.
+const RIBBON_VPAD: f32 = 6.0;
+
 /// Minimum drag (px) before a left-press on empty canvas counts as a marquee rather than
 /// a click; below it, the press is the click that selects/clears (#84).
 const MARQUEE_MIN_DRAG: f32 = 4.0;
@@ -1165,6 +1169,10 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
         state.active_tab = cats.first().map(|c| ActiveTab::Category(c.id));
     }
 
+    // A little breathing room above the categories, between them and the node list, and
+    // below it, so the toolbar reads more clearly.
+    ui.add_space(RIBBON_VPAD);
+
     // Row 1: category tabs, search, and the Build action.
     ui.horizontal(|ui| {
         for cat in &cats {
@@ -1218,6 +1226,8 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
         });
     });
 
+    ui.add_space(RIBBON_VPAD);
+
     // Row 2: the nodes for the active tab (or search), as buttons.
     let entries = node_entries();
     let shown = visible_nodes(&entries, state.active_tab, &state.search);
@@ -1236,6 +1246,8 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
             }
         }
     });
+
+    ui.add_space(RIBBON_VPAD);
 }
 inventory::submit! { PaneKind { id: "ribbon", draw: ribbon_pane } }
 
