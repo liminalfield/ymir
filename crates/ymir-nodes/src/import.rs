@@ -23,7 +23,8 @@
 
 use std::fs::File;
 use std::io::BufReader;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use ymir_core::import::{DecodedImage, decode_png};
 use ymir_core::registry::OperatorEntry;
@@ -112,10 +113,93 @@ impl Operator for Import {
         }
 
         // A set path that cannot be opened or decoded is a real failure, surfaced as a
-        // node error rather than silently producing nothing.
-        let image = decode_png(BufReader::new(File::open(path)?))?;
+        // node error rather than silently producing nothing. The decode is cached, so
+        // changing a placement param re-resamples without re-reading the file.
+        let image = load_cached_image(path)?;
         Ok(vec![resample(&image, ctx, &Placement::from_params(params))])
     }
+}
+
+/// How many decoded images to keep. A decoded image can be large (a full-resolution
+/// heightmap), so this is a small most-recently-used cache, not unbounded memoization; a
+/// graph rarely imports more than a couple of distinct files at once.
+const DECODE_CACHE_CAP: usize = 4;
+
+/// Identifies a decoded image by its source: the path plus the file's length and modified
+/// time, so editing the file on disk (which changes one or both) reloads it rather than
+/// serving a stale decode. `mtime` is optional because not every platform reports it; the
+/// length still catches a resize, which most edits are.
+#[derive(Clone, PartialEq, Eq)]
+struct CacheKey {
+    path: String,
+    len: u64,
+    mtime: Option<SystemTime>,
+}
+
+/// A small most-recently-used cache of decoded images. The PNG decode is the expensive part
+/// of the Import node, and the evaluator memoizes on a key that includes the placement
+/// params, so without this, dragging offset/rotation/scale would re-decode the whole file
+/// every frame.
+struct DecodeCache {
+    /// Most-recent first; bounded to [`DECODE_CACHE_CAP`].
+    entries: Vec<(CacheKey, Arc<DecodedImage>)>,
+}
+
+impl DecodeCache {
+    const fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    /// Returns the cached image for `key`, promoting it to most-recent.
+    fn get(&mut self, key: &CacheKey) -> Option<Arc<DecodedImage>> {
+        let pos = self.entries.iter().position(|(k, _)| k == key)?;
+        let entry = self.entries.remove(pos);
+        let image = entry.1.clone();
+        self.entries.insert(0, entry);
+        Some(image)
+    }
+
+    /// Inserts `image` as most-recent, evicting the least-recent beyond the cap.
+    fn insert(&mut self, key: CacheKey, image: Arc<DecodedImage>) {
+        self.entries.retain(|(k, _)| *k != key);
+        self.entries.insert(0, (key, image));
+        self.entries.truncate(DECODE_CACHE_CAP);
+    }
+}
+
+/// Process-wide decode cache shared by every Import node and evaluation thread.
+static DECODE_CACHE: Mutex<DecodeCache> = Mutex::new(DecodeCache::new());
+
+/// Decodes the PNG at `path`, or returns a cached decode when the file is unchanged (same
+/// length and modified time). The decode runs without the lock held, so concurrent decodes
+/// of different files do not serialize; a rare double-decode of the same file just
+/// overwrites with identical data.
+fn load_cached_image(path: &str) -> Result<Arc<DecodedImage>> {
+    let meta = std::fs::metadata(path)?;
+    let key = CacheKey {
+        path: path.to_string(),
+        len: meta.len(),
+        // shortcut-ok: mtime is optional metadata; when the platform omits it the key falls
+        // back to path + length, which still reloads on a resize.
+        mtime: meta.modified().ok(),
+    };
+    // A poisoned lock means a thread panicked mid-update; the data is still consistent, so
+    // recover the guard rather than turning it into a panic here.
+    if let Some(image) = DECODE_CACHE
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .get(&key)
+    {
+        return Ok(image);
+    }
+    let image = Arc::new(decode_png(BufReader::new(File::open(path)?))?);
+    DECODE_CACHE
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .insert(key, image.clone());
+    Ok(image)
 }
 
 /// Edge-policy ids: how a sample that maps outside the image is resolved.
@@ -454,6 +538,38 @@ mod tests {
         );
         assert!(at(&extend, 15, 8) > 0.8, "extend clamps to the bright edge");
         assert!(at(&zero, 15, 8) < 0.05, "zero reads the void");
+    }
+
+    #[test]
+    fn decode_cache_serves_hits_and_evicts_by_recency() {
+        let img = |w: usize| {
+            Arc::new(DecodedImage {
+                width: w,
+                height: 1,
+                data: vec![0.0; w],
+            })
+        };
+        let key = |path: &str, len: u64| CacheKey {
+            path: path.to_string(),
+            len,
+            mtime: None,
+        };
+
+        let mut cache = DecodeCache::new();
+        let a = img(1);
+        cache.insert(key("a", 1), a.clone());
+        // A matching key hits and returns the very same decode.
+        assert!(Arc::ptr_eq(&cache.get(&key("a", 1)).unwrap(), &a));
+        // A changed file (different length) is a different key, so it misses and reloads.
+        assert!(cache.get(&key("a", 2)).is_none());
+        // Filling past the cap evicts the least-recently-used entry.
+        for i in 0..DECODE_CACHE_CAP {
+            cache.insert(key(&format!("x{i}"), 1), img(1));
+        }
+        assert!(
+            cache.get(&key("a", 1)).is_none(),
+            "a should have been evicted"
+        );
     }
 
     #[test]
