@@ -273,6 +273,9 @@ struct AppState {
     /// Content hash of the height field currently uploaded to the 3D viewport's mesh, so it
     /// re-meshes only when the previewed field changes. `None` until the first mesh.
     viewport_mesh_hash: Option<u64>,
+    /// The 3D viewport's orbit camera, persisted across frames so the view holds as the
+    /// previewed node changes.
+    viewport_camera: viewport::OrbitCamera,
     /// A transient status line shown in the menu bar (e.g. the result of a save or
     /// open). Replaced by the next action.
     status: Option<String>,
@@ -367,6 +370,7 @@ impl AppState {
             project_path: None,
             frame_to_graph_request: false,
             viewport_mesh_hash: None,
+            viewport_camera: viewport::OrbitCamera::default(),
             status: None,
             history,
             saved_snapshot: initial,
@@ -2466,7 +2470,12 @@ fn rename_dialog_ui(ui: &mut egui::Ui, state: &mut AppState) {
 }
 
 fn viewport_3d_pane(ui: &mut egui::Ui, state: &mut AppState) {
-    viewport::show(ui, state.preview.field(), &mut state.viewport_mesh_hash);
+    viewport::show(
+        ui,
+        &mut state.viewport_camera,
+        state.preview.field(),
+        &mut state.viewport_mesh_hash,
+    );
 }
 inventory::submit! { PaneKind { id: "viewport-3d", draw: viewport_3d_pane } }
 

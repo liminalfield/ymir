@@ -165,7 +165,8 @@ pub(crate) fn init(render_state: &egui_wgpu::RenderState) {
 /// The per-frame callback: uploads the MVP (and, when the field changed, the new vertices)
 /// in `prepare`, and draws the mesh into the pane's region of egui's render pass in `paint`.
 struct ViewportCallback {
-    aspect: f32,
+    /// The combined view-projection matrix for this frame, from the orbit camera.
+    view_proj: [[f32; 4]; 4],
     /// New vertices to upload this frame (the field changed), or `None` to keep the current
     /// mesh.
     mesh: Option<Vec<Vertex>>,
@@ -181,17 +182,9 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
         if let Some(res) = resources.get::<ViewportResources>() {
-            // The terrain spans the unit square in x/z with height in y; look at its centre
-            // from an elevated angle. Fixed for now; the camera becomes interactive later.
-            let proj = Mat4::perspective_rh(45f32.to_radians(), self.aspect, 0.05, 10.0);
-            let view = Mat4::look_at_rh(
-                Vec3::new(0.5, 0.95, 2.1),
-                Vec3::new(0.5, 0.05, 0.5),
-                Vec3::Y,
-            );
             let light_dir = Vec3::new(-0.4, -1.0, -0.55).normalize();
             let uniforms = Uniforms {
-                mvp: (proj * view).to_cols_array_2d(),
+                mvp: self.view_proj,
                 light_dir: [light_dir.x, light_dir.y, light_dir.z, 0.0],
             };
             queue.write_buffer(&res.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
@@ -221,11 +214,18 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
     }
 }
 
-/// Fills `ui` with the 3D viewport for `field` (the previewed node's output). Re-meshes only
-/// when the field's height changes: `meshed_hash` carries the hash of the field currently in
-/// the vertex buffer, so an unchanged field uploads nothing.
-pub(crate) fn show(ui: &mut egui::Ui, field: Option<&Field>, meshed_hash: &mut Option<u64>) {
-    let (rect, _response) = ui.allocate_exact_size(ui.available_size(), egui::Sense::drag());
+/// Fills `ui` with the 3D viewport for `field` (the previewed node's output), driven by the
+/// orbit `camera`. Re-meshes only when the field's height changes: `meshed_hash` carries the
+/// hash of the field currently in the vertex buffer, so an unchanged field uploads nothing.
+pub(crate) fn show(
+    ui: &mut egui::Ui,
+    camera: &mut OrbitCamera,
+    field: Option<&Field>,
+    meshed_hash: &mut Option<u64>,
+) {
+    let (rect, response) =
+        ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+    camera.handle_input(ui, &response);
     let aspect = (rect.width() / rect.height().max(1.0)).max(0.01);
 
     let mesh = field.and_then(|field| {
@@ -238,9 +238,120 @@ pub(crate) fn show(ui: &mut egui::Ui, field: Option<&Field>, meshed_hash: &mut O
         }
     });
 
-    let callback = egui_wgpu::Callback::new_paint_callback(rect, ViewportCallback { aspect, mesh });
+    let view_proj = camera.view_proj(aspect).to_cols_array_2d();
+    let callback =
+        egui_wgpu::Callback::new_paint_callback(rect, ViewportCallback { view_proj, mesh });
     ui.painter().add(callback);
 }
+
+/// An orbit camera: it looks at `pivot` from a `yaw`/`pitch` direction at `distance`, the
+/// standard turntable for inspecting a heightfield. Houdini-style navigation drives it (Alt
+/// plus a mouse button); the input mapping is isolated in [`OrbitCamera::handle_input`] so an
+/// alternative scheme can later be selected from settings. State lives in app state so the
+/// view holds across frames and node switches.
+pub(crate) struct OrbitCamera {
+    /// Azimuth around the world Y axis, in radians.
+    yaw: f32,
+    /// Elevation above the horizon, in radians; clamped short of straight up or down so the
+    /// view never flips through the pole.
+    pitch: f32,
+    /// Distance from `pivot` to the eye, in world units.
+    distance: f32,
+    /// The point the camera looks at and orbits around.
+    pivot: Vec3,
+}
+
+impl Default for OrbitCamera {
+    fn default() -> Self {
+        // Reproduces the previous fixed framing: eye near (0.5, 0.95, 2.1) looking at the
+        // terrain centre (0.5, 0.05, 0.5) over the unit footprint.
+        Self {
+            yaw: 0.0,
+            pitch: 0.5,
+            distance: 1.85,
+            pivot: Vec3::new(0.5, 0.05, 0.5),
+        }
+    }
+}
+
+impl OrbitCamera {
+    /// Unit direction from `pivot` toward the eye.
+    fn direction(&self) -> Vec3 {
+        let (sy, cy) = self.yaw.sin_cos();
+        let (sp, cp) = self.pitch.sin_cos();
+        Vec3::new(cp * sy, sp, cp * cy)
+    }
+
+    /// The eye position in world space.
+    fn eye(&self) -> Vec3 {
+        self.pivot + self.direction() * self.distance
+    }
+
+    /// The combined view-projection matrix for `aspect` (wgpu clip space, z in `[0, 1]`).
+    fn view_proj(&self, aspect: f32) -> Mat4 {
+        let proj = Mat4::perspective_rh(45f32.to_radians(), aspect, 0.02, 20.0);
+        let view = Mat4::look_at_rh(self.eye(), self.pivot, Vec3::Y);
+        proj * view
+    }
+
+    /// Tumble: a screen-space drag rotates azimuth and elevation.
+    fn orbit(&mut self, dx: f32, dy: f32) {
+        self.yaw -= dx * ORBIT_SPEED;
+        self.pitch = (self.pitch + dy * ORBIT_SPEED).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+    }
+
+    /// Track: slide the pivot in the camera's screen plane, scaled by distance so the terrain
+    /// keeps pace with the cursor at any zoom.
+    fn pan(&mut self, dx: f32, dy: f32) {
+        let forward = (self.pivot - self.eye()).normalize_or_zero();
+        let right = forward.cross(Vec3::Y).normalize_or_zero();
+        let up = right.cross(forward);
+        let speed = self.distance * PAN_SPEED;
+        self.pivot += (-dx * right + dy * up) * speed;
+    }
+
+    /// Dolly: move the eye toward or away from the pivot. `amount > 0` zooms out; the step is
+    /// a constant fraction of the current distance so it feels even at every zoom.
+    fn dolly(&mut self, amount: f32) {
+        self.distance = (self.distance * (1.0 + amount)).clamp(DISTANCE_MIN, DISTANCE_MAX);
+    }
+
+    /// Maps this frame's pointer and scroll input to camera motion. Houdini scheme: Alt plus
+    /// the left button tumbles, the middle button tracks, and the right button dollies; the
+    /// scroll wheel also dollies. A drag is honoured only when it began inside the pane.
+    fn handle_input(&mut self, ui: &egui::Ui, response: &egui::Response) {
+        if ui.input(|i| i.modifiers.alt) {
+            let delta = ui.input(|i| i.pointer.delta());
+            if response.dragged_by(egui::PointerButton::Primary) {
+                self.orbit(delta.x, delta.y);
+            } else if response.dragged_by(egui::PointerButton::Middle) {
+                self.pan(delta.x, delta.y);
+            } else if response.dragged_by(egui::PointerButton::Secondary) {
+                self.dolly(delta.y * DOLLY_DRAG_SPEED);
+            }
+        }
+        if response.hovered() {
+            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+            if scroll != 0.0 {
+                self.dolly(-scroll * DOLLY_SCROLL_SPEED);
+            }
+        }
+    }
+}
+
+/// Tumble speed, radians of rotation per pixel of drag.
+const ORBIT_SPEED: f32 = 0.006;
+/// Elevation clamp, radians; just short of straight up or down (about 83 degrees).
+const PITCH_LIMIT: f32 = 1.45;
+/// Track speed, world units per pixel at unit distance.
+const PAN_SPEED: f32 = 0.0015;
+/// Dolly fraction per pixel of right-drag.
+const DOLLY_DRAG_SPEED: f32 = 0.01;
+/// Dolly fraction per unit of scroll.
+const DOLLY_SCROLL_SPEED: f32 = 0.0015;
+/// Closest and farthest the eye may sit from the pivot, world units.
+const DISTANCE_MIN: f32 = 0.2;
+const DISTANCE_MAX: f32 = 10.0;
 
 /// Samples the field's height layer to a `MESH_RES`-resolution grid in `[0, 1]`, normalized
 /// to the layer's own value range so the relief is consistent whatever the absolute values
