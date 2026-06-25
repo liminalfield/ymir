@@ -43,3 +43,9 @@ serde_json = "1"
 # never compile on Windows/macOS); we use rfd's blocking sync API, so no async reaches
 # our code (the project is no-async by policy).
 rfd = "0.15"
+# 3D math for the viewport (projection/view/model matrices). The de-facto standard, small,
+# and avoids hand-rolling error-prone matrix math that is hard to debug through a renderer.
+glam = "0.33"
+# Plain-old-data casting for the viewport's wgpu vertex and uniform buffers. Already in the
+# tree via wgpu; declared here for the derive on our buffer structs.
+bytemuck = { version = "1", features = ["derive"] }

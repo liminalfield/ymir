@@ -64,6 +64,9 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport,
+        // A 24-bit depth buffer on egui's render pass, used by the 3D viewport for correct
+        // occlusion (egui clears it to far and never writes it, so it is ours to use).
+        depth_buffer: 24,
         ..Default::default()
     };
     eframe::run_native(

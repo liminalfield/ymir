@@ -1147,6 +1147,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "glam"
+version = "0.33.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "898f5a568a84989b6c0f8caa50a93074b97dbdc58fc6d9543157bb4562758933"
+
+[[package]]
 name = "glow"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3968,8 +3974,10 @@ dependencies = [
 name = "ymir-gui"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "eframe",
  "egui-snarl",
+ "glam",
  "inventory",
  "png 0.17.16",
  "rfd",
