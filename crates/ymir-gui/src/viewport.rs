@@ -2,10 +2,11 @@
 //! callback. egui hands the callback a region of its own render pass (viewport + scissor set
 //! to the pane), so our draw commands land inside the pane and clip to it.
 //!
-//! Step 3 meshes the previewed node's `Field`: the height layer is sampled to a fixed grid,
-//! normalized to its own range (so relief is consistent whatever the absolute values), and
-//! displaced into a lit surface. Only the vertex buffer is re-uploaded, and only when the
-//! field changes; the grid topology (indices) is fixed. Camera and lighting are still fixed.
+//! The previewed node's `Field` is meshed: the height layer is sampled to a fixed grid and
+//! displaced into a lit surface, either at true amplitude (Fixed) or normalized to fill the
+//! relief (Auto), scaled by an adjustable vertical exaggeration. Only the vertex buffer is
+//! re-uploaded, and only when the field or those settings change; the grid topology is fixed.
+//! An orbit camera (Houdini-style Alt + mouse) frames the terrain. Lighting is still fixed.
 
 use eframe::egui;
 use eframe::egui_wgpu::{self, wgpu};
@@ -17,9 +18,10 @@ use ymir_core::{Field, Layer, layers};
 /// pipeline must match.
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
 
-/// Vertical exaggeration of the normalized `[0, 1]` height over the unit footprint, so the
-/// relief is visible without being a sheer cliff.
-const HEIGHT_SCALE: f32 = 0.3;
+/// Default vertical scale: the height a value of `1.0` reaches over the unit footprint. A
+/// display exaggeration for inspecting relief, not a world measurement; the user adjusts it
+/// from the viewport, and it persists in app state.
+pub(crate) const DEFAULT_VERTICAL_SCALE: f32 = 0.3;
 
 /// Mesh grid resolution (vertices per side). The field is sampled to this grid, so the
 /// vertex/index buffers are a fixed size regardless of the field's resolution.
@@ -59,7 +61,7 @@ struct ViewportResources {
 pub(crate) fn init(render_state: &egui_wgpu::RenderState) {
     let device = &render_state.device;
 
-    let flat = build_vertices(&vec![0.0_f32; MESH_RES * MESH_RES]);
+    let flat = build_vertices(&vec![0.0_f32; MESH_RES * MESH_RES], DEFAULT_VERTICAL_SCALE);
     let indices = build_indices();
     let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("viewport-vertices"),
@@ -214,14 +216,36 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
     }
 }
 
+/// How the viewport maps and scales height: whether to take the raw height (`fixed_range`,
+/// true amplitude) or normalize it to fill the relief, and the vertical exaggeration applied
+/// to the mapped `[0, 1]` height.
+#[derive(Clone, Copy)]
+pub(crate) struct ViewSettings {
+    /// Map raw height directly (true amplitude, clipped) rather than auto-normalizing.
+    pub fixed_range: bool,
+    /// Height that a value of `1.0` reaches over the unit footprint.
+    pub vertical_scale: f32,
+}
+
+/// Identifies the mesh currently in the vertex buffer: the field's content plus the settings
+/// that shape it. The mesh is rebuilt only when this changes, so a still field and unchanged
+/// settings upload nothing.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) struct MeshKey {
+    content: u64,
+    fixed_range: bool,
+    vertical_scale_bits: u32,
+}
+
 /// Fills `ui` with the 3D viewport for `field` (the previewed node's output), driven by the
-/// orbit `camera`. Re-meshes only when the field's height changes: `meshed_hash` carries the
-/// hash of the field currently in the vertex buffer, so an unchanged field uploads nothing.
+/// orbit `camera` and `settings`. Re-meshes only when the field or settings change: `meshed`
+/// carries the key of the mesh in the vertex buffer, so nothing uploads when it is unchanged.
 pub(crate) fn show(
     ui: &mut egui::Ui,
     camera: &mut OrbitCamera,
     field: Option<&Field>,
-    meshed_hash: &mut Option<u64>,
+    settings: ViewSettings,
+    meshed: &mut Option<MeshKey>,
 ) {
     let (rect, response) =
         ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -229,12 +253,17 @@ pub(crate) fn show(
     let aspect = (rect.width() / rect.height().max(1.0)).max(0.01);
 
     let mesh = field.and_then(|field| {
-        let hash = field.layer_or(layers::HEIGHT, 0.0).content_hash().to_u64();
-        if *meshed_hash == Some(hash) {
+        let key = MeshKey {
+            content: field.layer_or(layers::HEIGHT, 0.0).content_hash().to_u64(),
+            fixed_range: settings.fixed_range,
+            vertical_scale_bits: settings.vertical_scale.to_bits(),
+        };
+        if *meshed == Some(key) {
             None
         } else {
-            *meshed_hash = Some(hash);
-            Some(build_vertices(&sample_field(field, MESH_RES)))
+            *meshed = Some(key);
+            let heights = sample_field(field, MESH_RES, settings.fixed_range);
+            Some(build_vertices(&heights, settings.vertical_scale))
         }
     });
 
@@ -353,10 +382,11 @@ const DOLLY_SCROLL_SPEED: f32 = 0.0015;
 const DISTANCE_MIN: f32 = 0.2;
 const DISTANCE_MAX: f32 = 10.0;
 
-/// Samples the field's height layer to a `MESH_RES`-resolution grid in `[0, 1]`, normalized
-/// to the layer's own value range so the relief is consistent whatever the absolute values
-/// (matching the preview's auto-range default).
-fn sample_field(field: &Field, res: usize) -> Vec<f32> {
+/// Samples the field's height layer to a `MESH_RES`-resolution grid in `[0, 1]`. With
+/// `fixed_range`, the raw height is taken directly (true amplitude, clipped to `[0, 1]`); in
+/// auto mode it is normalized to the layer's own value range, which fills the relief but
+/// hides amplitude (the same Auto/Fixed distinction as the 2D preview).
+fn sample_field(field: &Field, res: usize, fixed_range: bool) -> Vec<f32> {
     let layer = field.layer_or(layers::HEIGHT, 0.0);
     let (lo, hi) = layer.value_range();
     let range = (hi - lo).max(1e-6);
@@ -366,7 +396,8 @@ fn sample_field(field: &Field, res: usize) -> Vec<f32> {
     for j in 0..res {
         for i in 0..res {
             let raw = bilinear(&layer, i as f32 / last, j as f32 / last);
-            out[j * res + i] = ((raw - lo) / range).clamp(0.0, 1.0);
+            let mapped = if fixed_range { raw } else { (raw - lo) / range };
+            out[j * res + i] = mapped.clamp(0.0, 1.0);
         }
     }
     out
@@ -386,12 +417,13 @@ fn bilinear(layer: &Layer, u: f32, v: f32) -> f32 {
     top * (1.0 - tz) + bottom * tz
 }
 
-/// Builds the `MESH_RES * MESH_RES` vertices from a normalized `[0, 1]` height grid: positions
-/// over the unit square in x/z with `y = height * HEIGHT_SCALE`, and per-vertex normals from
-/// the height gradient (central differences).
-fn build_vertices(heights: &[f32]) -> Vec<Vertex> {
+/// Builds the `MESH_RES * MESH_RES` vertices from a `[0, 1]` height grid: positions over the
+/// unit square in x/z with `y = height * vertical_scale`, and per-vertex normals from the
+/// height gradient (central differences). The normal is computed from the scaled height, so
+/// lighting stays correct at any vertical scale.
+fn build_vertices(heights: &[f32], vertical_scale: f32) -> Vec<Vertex> {
     let res = MESH_RES;
-    let at = |i: usize, j: usize| heights[j * res + i] * HEIGHT_SCALE;
+    let at = |i: usize, j: usize| heights[j * res + i] * vertical_scale;
     let cell = 1.0 / (res - 1) as f32;
 
     let mut vertices = Vec::with_capacity(res * res);

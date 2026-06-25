@@ -270,12 +270,18 @@ struct AppState {
     /// A one-shot request to frame the canvas to the whole graph on the next render,
     /// set after opening a project so its layout comes into view.
     frame_to_graph_request: bool,
-    /// Content hash of the height field currently uploaded to the 3D viewport's mesh, so it
-    /// re-meshes only when the previewed field changes. `None` until the first mesh.
-    viewport_mesh_hash: Option<u64>,
+    /// Key of the mesh currently uploaded to the 3D viewport (field content plus the display
+    /// settings that shape it), so it re-meshes only when one of those changes. `None` until
+    /// the first mesh.
+    viewport_mesh: Option<viewport::MeshKey>,
     /// The 3D viewport's orbit camera, persisted across frames so the view holds as the
     /// previewed node changes.
     viewport_camera: viewport::OrbitCamera,
+    /// Whether the 3D viewport shows true amplitude (Fixed) or normalizes to fill the relief
+    /// (Auto). Fixed by default so terrain reads at its real height.
+    viewport_scale: shade::HeightScale,
+    /// The 3D viewport's vertical exaggeration (height of a `1.0` value over the footprint).
+    viewport_vscale: f32,
     /// A transient status line shown in the menu bar (e.g. the result of a save or
     /// open). Replaced by the next action.
     status: Option<String>,
@@ -369,8 +375,10 @@ impl AppState {
             world_extent: DEFAULT_WORLD_EXTENT,
             project_path: None,
             frame_to_graph_request: false,
-            viewport_mesh_hash: None,
+            viewport_mesh: None,
             viewport_camera: viewport::OrbitCamera::default(),
+            viewport_scale: shade::HeightScale::Fixed,
+            viewport_vscale: viewport::DEFAULT_VERTICAL_SCALE,
             status: None,
             history,
             saved_snapshot: initial,
@@ -2470,12 +2478,50 @@ fn rename_dialog_ui(ui: &mut egui::Ui, state: &mut AppState) {
 }
 
 fn viewport_3d_pane(ui: &mut egui::Ui, state: &mut AppState) {
+    // The pane rect, captured before `show` consumes it, anchors the floating control HUD.
+    let rect = ui.available_rect_before_wrap();
+
+    let settings = viewport::ViewSettings {
+        fixed_range: state.viewport_scale == shade::HeightScale::Fixed,
+        vertical_scale: state.viewport_vscale,
+    };
     viewport::show(
         ui,
         &mut state.viewport_camera,
         state.preview.field(),
-        &mut state.viewport_mesh_hash,
+        settings,
+        &mut state.viewport_mesh,
     );
+
+    // A small control HUD overlaid at the top-left of the viewport. A temporary home: the
+    // design calls for a vertical toolbar down the left edge, not yet built.
+    let mut scale = state.viewport_scale;
+    let mut vscale = state.viewport_vscale;
+    egui::Area::new(ui.id().with("viewport-hud"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(rect.left_top() + egui::vec2(8.0, 8.0))
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    // Fixed shows true amplitude; Auto normalizes to fill the relief (and so
+                    // hides amplitude). Mirrors the 2D preview's Auto/Fixed toggle.
+                    ui.selectable_value(&mut scale, shade::HeightScale::Fixed, "Fixed")
+                        .on_hover_text("Show true height (clips out of range)");
+                    ui.selectable_value(&mut scale, shade::HeightScale::Auto, "Auto")
+                        .on_hover_text("Stretch the field's actual range to fill the relief");
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Vertical");
+                    ui.add(
+                        egui::Slider::new(&mut vscale, 0.0..=1.5)
+                            .fixed_decimals(2)
+                            .custom_formatter(|v, _| format!("{v:.2}x")),
+                    );
+                });
+            });
+        });
+    state.viewport_scale = scale;
+    state.viewport_vscale = vscale;
 }
 inventory::submit! { PaneKind { id: "viewport-3d", draw: viewport_3d_pane } }
 
