@@ -498,9 +498,21 @@ fn hybrid2(seed: u64, x: f32, y: f32, params: FbmParams, bias: f32) -> f32 {
         amplitude *= params.gain;
     }
 
-    // Normalize by the envelope so the field fills roughly [0, 1]; the actual range still
-    // varies with terrain, which is the point (auto-ranged at display and export).
-    let envelope = (1.0 + bias) / (1.0 - params.gain).max(1e-3);
+    // Normalize by the octave envelope so the field fills roughly [0, 1] at any gain. The
+    // envelope is the finite geometric sum of the per-octave amplitudes (sum of gain^k over
+    // the octaves evaluated), the most the accumulated result can reach. The earlier closed
+    // form (1 + bias) / (1 - gain) is this sum's infinite-octave limit, which diverges as
+    // gain approaches 1 and so crushed high-gain fields into a sliver. The finite sum stays
+    // bounded (tending to `octaves` at gain = 1), which decouples amplitude from gain: gain
+    // now sets form (octave roughness) alone, leaving amplitude to a downstream control. A
+    // single scalar divisor over the whole field, so the form is unchanged.
+    let gain = params.gain;
+    let octave_sum = if (1.0 - gain).abs() < 1e-6 {
+        params.octaves as f32
+    } else {
+        (1.0 - gain.powi(params.octaves as i32)) / (1.0 - gain)
+    };
+    let envelope = (1.0 + bias) * octave_sum;
     (result / envelope).clamp(0.0, 1.0)
 }
 

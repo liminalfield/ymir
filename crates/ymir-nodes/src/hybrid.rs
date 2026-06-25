@@ -232,8 +232,10 @@ mod tests {
 
     #[test]
     fn output_matches_golden_value() {
-        // Fixed fingerprint so a change to the hybrid math fails here.
+        // Fixed fingerprint so a change to the hybrid math fails here. Updated when the
+        // octave-envelope normalization changed from the infinite-octave closed form to the
+        // finite geometric sum, which rescales the output (the form is unchanged).
         let out = run(&Params::default(), &default_ctx());
-        assert_eq!(out.content_hash().to_u64(), 0x31ad_2b6c_6e35_f17f);
+        assert_eq!(out.content_hash().to_u64(), 0x4fa2_4f50_6559_bf1b);
     }
 }
