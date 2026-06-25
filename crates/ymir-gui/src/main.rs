@@ -2505,9 +2505,12 @@ fn mount(layout: &Layout, ui: &mut egui::Ui, state: &mut AppState) {
         .show_separator_line(false)
         .show_inside(ui, |ui| draw_pane(layout.menu_bar, ui, state));
 
-    // Section 5: the footer (its top border is drawn below).
+    // Section 5: the footer (its top border is drawn below), a bit darker than the body.
     let footer = egui::Panel::bottom("footer-panel")
         .show_separator_line(false)
+        .frame(
+            egui::Frame::side_top_panel(ui.style()).fill(scale_color(ui.visuals().panel_fill, 0.7)),
+        )
         .show_inside(ui, |ui| draw_pane(layout.footer, ui, state));
 
     // Section 4: the right column — the preview over the inspector/world tabs. Fixed width
