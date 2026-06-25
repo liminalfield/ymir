@@ -131,10 +131,6 @@ const MAX_BUILD_OUTPUTS: usize = 64;
 /// bar or the node tabs.
 const MENU_VPAD: f32 = 4.0;
 
-/// Vertical breathing room in the palette toolbar: above the categories, between them and
-/// the node list, and below the list.
-const RIBBON_VPAD: f32 = 6.0;
-
 /// Minimum drag (px) before a left-press on empty canvas counts as a marquee rather than
 /// a click; below it, the press is the click that selects/clears (#84).
 const MARQUEE_MIN_DRAG: f32 = 4.0;
@@ -1169,85 +1165,90 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
         state.active_tab = cats.first().map(|c| ActiveTab::Category(c.id));
     }
 
-    // A little breathing room above the categories, between them and the node list, and
-    // below it, so the toolbar reads more clearly.
-    ui.add_space(RIBBON_VPAD);
-
-    // Row 1: category tabs, search, and the Build action.
-    ui.horizontal(|ui| {
-        for cat in &cats {
-            let key = format!("category-{}", cat.id);
-            ui.selectable_value(
-                &mut state.active_tab,
-                Some(ActiveTab::Category(cat.id)),
-                tr(&key),
-            );
-        }
-        if has_uncategorized_nodes() {
-            ui.selectable_value(
-                &mut state.active_tab,
-                Some(ActiveTab::Uncategorized),
-                "Uncategorized",
-            );
-        }
-        ui.separator();
-        ui.add(
-            egui::TextEdit::singleline(&mut state.search)
-                .hint_text("search nodes")
-                .desired_width(160.0),
-        );
-
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            // Build the selected outputs at the world-tab resolution, off-thread.
-            state.build.poll(ui.ctx());
-            let building = state.build.is_building();
-            if ui
-                .add_enabled(!building, egui::Button::new("Build"))
-                .clicked()
-            {
-                let targets = included_endpoints(state);
-                if targets.is_empty() {
-                    state
-                        .build
-                        .report("No outputs selected to build.".to_string());
-                } else if targets.len() > MAX_BUILD_OUTPUTS {
-                    state.build.report(format!(
-                        "Too many outputs ({}); the limit is {MAX_BUILD_OUTPUTS}.",
-                        targets.len()
-                    ));
-                } else {
-                    let res = state.build_res;
-                    let request = EvalRequest::new(res, res, Region::UNIT, state.seed)
-                        .with_world_extent(state.world_extent);
-                    state.build.start(state.graph.clone(), targets, request);
+    // Two full-width bands with equal padding, so they are equal height with their content
+    // vertically centred: the categories/search/Build bar, then the node list below.
+    egui::Frame::new()
+        .fill(scale_color(ui.visuals().panel_fill, 1.5))
+        .inner_margin(egui::Margin::symmetric(8, 6))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                for cat in &cats {
+                    let key = format!("category-{}", cat.id);
+                    ui.selectable_value(
+                        &mut state.active_tab,
+                        Some(ActiveTab::Category(cat.id)),
+                        tr(&key),
+                    );
                 }
-            }
-            state.build.show(ui);
+                if has_uncategorized_nodes() {
+                    ui.selectable_value(
+                        &mut state.active_tab,
+                        Some(ActiveTab::Uncategorized),
+                        "Uncategorized",
+                    );
+                }
+                ui.separator();
+                ui.add(
+                    egui::TextEdit::singleline(&mut state.search)
+                        .hint_text("search nodes")
+                        .desired_width(160.0),
+                );
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Build the selected outputs at the world-tab resolution, off-thread.
+                    state.build.poll(ui.ctx());
+                    let building = state.build.is_building();
+                    if ui
+                        .add_enabled(!building, egui::Button::new("Build"))
+                        .clicked()
+                    {
+                        let targets = included_endpoints(state);
+                        if targets.is_empty() {
+                            state
+                                .build
+                                .report("No outputs selected to build.".to_string());
+                        } else if targets.len() > MAX_BUILD_OUTPUTS {
+                            state.build.report(format!(
+                                "Too many outputs ({}); the limit is {MAX_BUILD_OUTPUTS}.",
+                                targets.len()
+                            ));
+                        } else {
+                            let res = state.build_res;
+                            let request = EvalRequest::new(res, res, Region::UNIT, state.seed)
+                                .with_world_extent(state.world_extent);
+                            state.build.start(state.graph.clone(), targets, request);
+                        }
+                    }
+                    state.build.show(ui);
+                });
+            });
         });
-    });
 
-    ui.add_space(RIBBON_VPAD);
-
-    // Row 2: the nodes for the active tab (or search), as buttons.
+    // The node list, a touch lighter so it reads as distinct from the bar above.
     let entries = node_entries();
     let shown = visible_nodes(&entries, state.active_tab, &state.search);
-    ui.horizontal_wrapped(|ui| {
-        for entry in shown {
-            let key = format!("node-{}", entry.type_id);
-            if ui.button(tr(&key)).clicked() {
-                let pos = spawn_pos(state.canvas_view, state.graph.node_count());
-                if let Some(id) =
-                    canvas::add_node(&mut state.graph, &mut state.snarl, entry.type_id, pos)
-                    && let Some(handle) = state.graph.stable_id(id)
-                {
-                    // Select the new node so the inspector shows it immediately (#62).
-                    state.select_only(handle);
+    egui::Frame::new()
+        .fill(scale_color(ui.visuals().panel_fill, 1.8))
+        .inner_margin(egui::Margin::symmetric(8, 6))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                for entry in shown {
+                    let key = format!("node-{}", entry.type_id);
+                    if ui.button(tr(&key)).clicked() {
+                        let pos = spawn_pos(state.canvas_view, state.graph.node_count());
+                        if let Some(id) =
+                            canvas::add_node(&mut state.graph, &mut state.snarl, entry.type_id, pos)
+                            && let Some(handle) = state.graph.stable_id(id)
+                        {
+                            // Select the new node so the inspector shows it immediately (#62).
+                            state.select_only(handle);
+                        }
+                    }
                 }
-            }
-        }
-    });
-
-    ui.add_space(RIBBON_VPAD);
+            });
+        });
 }
 inventory::submit! { PaneKind { id: "ribbon", draw: ribbon_pane } }
 
@@ -2545,6 +2546,14 @@ fn mount(layout: &Layout, ui: &mut egui::Ui, state: &mut AppState) {
         .show_inside(ui, |ui| {
             let palette = egui::Panel::top("palette-panel")
                 .show_separator_line(false)
+                // No inner margin (the ribbon draws its own full-width bands), filled to match
+                // the category band so the spacing between the two bands does not show the
+                // darker default fill through the gap.
+                .frame(
+                    egui::Frame::side_top_panel(ui.style())
+                        .fill(scale_color(ui.visuals().panel_fill, 1.5))
+                        .inner_margin(0),
+                )
                 .show_inside(ui, |ui| draw_pane(layout.palette, ui, state));
             let viewport = egui::Panel::bottom("viewport-panel")
                 .resizable(true)
