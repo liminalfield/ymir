@@ -384,6 +384,9 @@ impl PreviewEngine {
         let resp = ui.add(
             egui::Image::new(sized)
                 .max_width(ui.available_width())
+                // Bound by height too, so the square preview fits the fixed-height pane
+                // instead of overflowing it at narrow widths.
+                .max_height(ui.available_height())
                 .maintain_aspect_ratio(true)
                 .sense(sense),
         );

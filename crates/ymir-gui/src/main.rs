@@ -1488,15 +1488,16 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // The preview shows the pinned node if one is set, else the selection. Only nodes
     // with an output qualify; evaluating an endpoint would run its side effect.
     let Some(target) = state.preview_target() else {
-        if state.primary.is_some() {
-            ui.weak("This node has no output to preview.");
+        let message = if state.primary.is_some() {
+            "This node has no output to preview."
         } else {
-            ui.weak("Select a node to preview its output.");
-        }
+            "Select a node to preview its output."
+        };
+        preview_placeholder(ui, message);
         return;
     };
     let Some(id) = state.graph.node_id_of(target) else {
-        ui.weak("Select a node to preview its output.");
+        preview_placeholder(ui, "Select a node to preview its output.");
         return;
     };
     let is_pinned = state.preview_pin == Some(target);
@@ -1548,7 +1549,6 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
         } else {
             // Auto stretches the actual range (shape); Fixed maps [0, 1] (true
             // amplitude, clips out of range).
-            ui.separator();
             ui.selectable_value(&mut scale, shade::HeightScale::Auto, "Auto")
                 .on_hover_text("Stretch the field's actual range to black/white");
             ui.selectable_value(&mut scale, shade::HeightScale::Fixed, "Fixed")
@@ -1575,7 +1575,35 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
     let now = ui.input(|i| i.time);
     state.preview.sync(&state.graph, id, request, now);
     state.preview.poll(ui.ctx());
-    state.preview.show(ui);
+    preview_box(ui, |ui| state.preview.show(ui));
+}
+
+/// Draws the preview image in a border that hugs it (no inset), with a little space below so
+/// it does not sit flush against the pane's lower edge. The image sizes itself to fit the
+/// fixed-height pane, and the border is drawn at its exact edge.
+fn preview_box(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::NONE
+        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+        .corner_radius(2)
+        .show(ui, contents);
+    ui.add_space(8.0);
+}
+
+/// A bordered box filling the preview pane with a centred message, for when there is nothing
+/// to show. Unlike the image box (which hugs the image), this fills the pane so the empty
+/// preview reads as a slot rather than a small floating box.
+fn preview_placeholder(ui: &mut egui::Ui, message: &str) {
+    let height = (ui.available_height() - 8.0).max(40.0);
+    egui::Frame::NONE
+        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+        .corner_radius(2)
+        .show(ui, |ui| {
+            ui.set_min_size(egui::vec2(ui.available_width(), height));
+            ui.centered_and_justified(|ui| {
+                ui.weak(message);
+            });
+        });
+    ui.add_space(8.0);
 }
 inventory::submit! { PaneKind { id: "preview-2d", draw: preview_2d_pane } }
 
@@ -2452,46 +2480,94 @@ fn default_layout() -> Layout {
 }
 
 /// The v1 layout backend: mounts the panes named by `layout` into the five-section
-/// structure (menu, workspace, side column, footer, beneath the OS title bar) of fixed,
-/// resizable native egui
-/// panels. Declaration order matters: title and menu reserve the full-width top, the footer
-/// the full-width bottom, the side column the right edge, and the workspace the remainder.
+/// structure (menu, workspace, side column, footer, beneath the OS title bar).
+///
+/// Separation between panes comes mostly from their fills, not lines, so egui's automatic
+/// panel separators are turned off and only a few deliberate borders are drawn: a heavier
+/// one between the workspace and the side column, and lighter ones above the footer, between
+/// the node bar and the canvas, and between the canvas and the viewport.
 fn mount(layout: &Layout, ui: &mut egui::Ui, state: &mut AppState) {
-    // Section 2: the full-width menu strip, directly under the OS title bar (Section 1).
-    egui::Panel::top("menu-bar-panel").show_inside(ui, |ui| draw_pane(layout.menu_bar, ui, state));
+    let color = ui.visuals().widgets.noninteractive.bg_stroke.color;
+    let line = egui::Stroke::new(1.0, color);
+    let heavy = egui::Stroke::new(2.0, color);
 
-    // Section 5: full-width footer.
-    egui::Panel::bottom("footer-panel").show_inside(ui, |ui| draw_pane(layout.footer, ui, state));
+    // Section 2: the menu strip, directly under the OS title bar (Section 1).
+    egui::Panel::top("menu-bar-panel")
+        .show_separator_line(false)
+        .show_inside(ui, |ui| draw_pane(layout.menu_bar, ui, state));
 
-    // Section 4: the right column, resizable against the workspace. Inside it, the project
-    // node list on the left, and the preview over the inspector/world tabs on the right.
-    egui::Panel::right("section-4")
+    // Section 5: the footer (its top border is drawn below).
+    let footer = egui::Panel::bottom("footer-panel")
+        .show_separator_line(false)
+        .show_inside(ui, |ui| draw_pane(layout.footer, ui, state));
+
+    // Section 4: the right column. Inside it the node list, preview, and inspector are
+    // separated by fill rather than lines.
+    let section_4 = egui::Panel::right("section-4")
         .resizable(true)
         .default_size(420.0)
+        .show_separator_line(false)
         .show_inside(ui, |ui| {
             egui::Panel::left("node-list-panel")
                 .resizable(true)
                 .default_size(150.0)
+                .show_separator_line(false)
                 .show_inside(ui, |ui| draw_pane(layout.node_list, ui, state));
             egui::Panel::top("preview-panel")
-                .resizable(true)
-                .default_size(260.0)
+                // A fixed height so the preview pane does not change size between having a
+                // node selected (a tall image) and not (a placeholder); the image fits
+                // within it, and the inspector below takes the rest of the column.
+                .exact_size(346.0)
+                .show_separator_line(false)
                 .show_inside(ui, |ui| draw_pane(layout.preview, ui, state));
             egui::CentralPanel::default()
                 .show_inside(ui, |ui| draw_pane(layout.inspector, ui, state));
         });
 
-    // Section 3: the workspace. Pane 1 (palette) on top, then the canvas and the main
-    // viewport stacked (swapping them is a later step).
-    egui::CentralPanel::default().show_inside(ui, |ui| {
-        egui::Panel::top("palette-panel")
-            .show_inside(ui, |ui| draw_pane(layout.palette, ui, state));
-        egui::Panel::bottom("viewport-panel")
-            .resizable(true)
-            .default_size(ui.available_height() * 0.4)
-            .show_inside(ui, |ui| draw_pane(layout.viewport, ui, state));
-        egui::CentralPanel::default().show_inside(ui, |ui| draw_pane(layout.canvas, ui, state));
-    });
+    // Section 3: the workspace. Palette on top, then the canvas and the main viewport
+    // stacked. No frame margin, so the canvas hugs the section borders.
+    egui::CentralPanel::default()
+        .frame(egui::Frame::NONE)
+        .show_inside(ui, |ui| {
+            let palette = egui::Panel::top("palette-panel")
+                .show_separator_line(false)
+                .show_inside(ui, |ui| draw_pane(layout.palette, ui, state));
+            let viewport = egui::Panel::bottom("viewport-panel")
+                .resizable(true)
+                .default_size(ui.available_height() * 0.4)
+                .show_separator_line(false)
+                .show_inside(ui, |ui| draw_pane(layout.viewport, ui, state));
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE)
+                .show_inside(ui, |ui| draw_pane(layout.canvas, ui, state));
+
+            // Border under the node bar and between the canvas and the viewport.
+            let painter = ui.painter();
+            painter.hline(
+                palette.response.rect.x_range(),
+                palette.response.rect.bottom(),
+                line,
+            );
+            painter.hline(
+                viewport.response.rect.x_range(),
+                viewport.response.rect.top(),
+                line,
+            );
+        });
+
+    // Section borders, drawn last so they sit on top: the footer's top edge, and the heavier
+    // workspace/side-column boundary.
+    let painter = ui.painter();
+    painter.hline(
+        footer.response.rect.x_range(),
+        footer.response.rect.top(),
+        line,
+    );
+    painter.vline(
+        section_4.response.rect.left(),
+        section_4.response.rect.y_range(),
+        heavy,
+    );
 }
 
 // ---- app shell --------------------------------------------------------------
