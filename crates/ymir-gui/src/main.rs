@@ -1277,18 +1277,34 @@ fn node_display_name(graph: &Graph, id: NodeId) -> String {
     )
 }
 
-fn params_pane(ui: &mut egui::Ui, state: &mut AppState) {
-    ui.horizontal(|ui| {
+/// The right column: a tab header (Node / World) over the selected tab's content. The Node
+/// tab shows the preview over the node inspector; the World tab shows the world settings. A
+/// collapse control will live at the far right of the header later.
+fn right_panel_pane(ui: &mut egui::Ui, state: &mut AppState) {
+    header_strip(ui, |ui| {
         ui.selectable_value(&mut state.param_tab, ParamTab::Node, "Node");
         ui.selectable_value(&mut state.param_tab, ParamTab::World, "World");
     });
-    ui.separator();
     match state.param_tab {
-        ParamTab::Node => node_inspector(ui, state),
-        ParamTab::World => world_settings(ui, state),
+        ParamTab::Node => {
+            egui::Panel::top("preview-panel")
+                // Fixed height so the preview does not change size between having a node
+                // selected (a tall image) and not (a placeholder).
+                .exact_size(346.0)
+                .show_separator_line(false)
+                .frame(
+                    egui::Frame::side_top_panel(ui.style())
+                        .inner_margin(egui::Margin::symmetric(4, 2)),
+                )
+                .show_inside(ui, |ui| preview_2d_pane(ui, state));
+            egui::CentralPanel::default().show_inside(ui, |ui| node_inspector(ui, state));
+        }
+        ParamTab::World => {
+            egui::CentralPanel::default().show_inside(ui, |ui| world_settings(ui, state));
+        }
     }
 }
-inventory::submit! { PaneKind { id: "params", draw: params_pane } }
+inventory::submit! { PaneKind { id: "right-panel", draw: right_panel_pane } }
 
 /// The selected node's inspector: its display-name override and parameter widgets.
 fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
@@ -1478,10 +1494,10 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
     let id = target.and_then(|t| state.graph.node_id_of(t));
     let is_pinned = target.is_some() && state.preview_pin == target;
 
-    // Row 1: a header strip carrying the status dot (colour = up-to-date/evaluating/error,
-    // words on hover), the previewed node's name, a pinned/bypassed marker, and the
-    // Pin/Unpin toggle right-aligned.
-    header_strip(ui, |ui| {
+    // Row 1: the status dot (colour = up-to-date/evaluating/error, words on hover), the
+    // previewed node's name, a pinned/bypassed marker, and the Pin/Unpin toggle right-aligned.
+    // A plain row on the regular background (the tab header above is the panel's header).
+    ui.horizontal(|ui| {
         let color = match id {
             Some(_) => state.preview.status_color(ui.visuals()),
             None => ui.visuals().weak_text_color(),
@@ -1614,8 +1630,6 @@ fn preview_box(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
         .show(ui, contents);
     ui.add_space(8.0);
 }
-
-inventory::submit! { PaneKind { id: "preview-2d", draw: preview_2d_pane } }
 
 /// Draws the cursor-anchored node-creation menu when open, and applies its outcome:
 /// drilling into a category, creating a node at the cursor, or closing. A no-op when
@@ -2458,9 +2472,8 @@ struct Layout {
     canvas: &'static str,
     /// The main viewport, stacked with the canvas in the workspace.
     viewport: &'static str,
-    preview: &'static str,
-    /// The tabbed node inspector / world settings sub-panel.
-    inspector: &'static str,
+    /// The right column: tabbed Node (preview + inspector) / World (settings).
+    right_panel: &'static str,
     footer: &'static str,
 }
 
@@ -2470,8 +2483,7 @@ fn default_layout() -> Layout {
         palette: "ribbon",
         canvas: "canvas",
         viewport: "viewport-3d",
-        preview: "preview-2d",
-        inspector: "params",
+        right_panel: "right-panel",
         footer: "footer",
     }
 }
@@ -2503,24 +2515,13 @@ fn mount(layout: &Layout, ui: &mut egui::Ui, state: &mut AppState) {
     // contents do not reflow nicely at other widths. Halved horizontal padding (4 here plus
     // the preview's 4) so the image sits close to the edges.
     let section_4 = egui::Panel::right("section-4")
+        // Not resizable: exact_size alone leaves the panel resizable, so the edge still shows
+        // a resize cursor even though dragging does nothing.
+        .resizable(false)
         .exact_size(260.0)
         .show_separator_line(false)
         .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::symmetric(4, 2)))
-        .show_inside(ui, |ui| {
-            egui::Panel::top("preview-panel")
-                // A fixed height so the preview pane does not change size between having a
-                // node selected (a tall image) and not (a placeholder); the image fits
-                // within it, and the inspector below takes the rest of the column.
-                .exact_size(346.0)
-                .show_separator_line(false)
-                .frame(
-                    egui::Frame::side_top_panel(ui.style())
-                        .inner_margin(egui::Margin::symmetric(4, 2)),
-                )
-                .show_inside(ui, |ui| draw_pane(layout.preview, ui, state));
-            egui::CentralPanel::default()
-                .show_inside(ui, |ui| draw_pane(layout.inspector, ui, state));
-        });
+        .show_inside(ui, |ui| draw_pane(layout.right_panel, ui, state));
 
     // Section 3: the workspace. Palette on top, then the canvas and the main viewport
     // stacked. No frame margin, so the canvas hugs the section borders.
@@ -3257,8 +3258,7 @@ mod tests {
             l.palette,
             l.canvas,
             l.viewport,
-            l.preview,
-            l.inspector,
+            l.right_panel,
             l.footer,
         ] {
             assert!(pane_kind(id).is_some(), "pane {id:?} is not registered");
