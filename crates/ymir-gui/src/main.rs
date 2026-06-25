@@ -1231,8 +1231,6 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
         });
     });
 
-    ui.separator();
-
     // Row 2: the nodes for the active tab (or search), as buttons.
     let entries = node_entries();
     let shown = visible_nodes(&entries, state.active_tab, &state.search);
@@ -1485,57 +1483,81 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
         state.preview_pin = None;
     }
 
-    // The preview shows the pinned node if one is set, else the selection. Only nodes
-    // with an output qualify; evaluating an endpoint would run its side effect.
-    let Some(target) = state.preview_target() else {
-        let message = if state.primary.is_some() {
-            "This node has no output to preview."
-        } else {
-            "Select a node to preview its output."
-        };
-        preview_placeholder(ui, message);
-        return;
-    };
-    let Some(id) = state.graph.node_id_of(target) else {
-        preview_placeholder(ui, "Select a node to preview its output.");
-        return;
-    };
-    let is_pinned = state.preview_pin == Some(target);
+    // The preview shows the pinned node if one is set, else the selection. Only nodes with
+    // an output qualify; evaluating an endpoint would run its side effect. When nothing is
+    // selected the same layout is drawn with placeholder content (a neutral header and a
+    // black image), so the pane never collapses or swaps to a bare box.
+    let target = state.preview_target();
+    let id = target.and_then(|t| state.graph.node_id_of(t));
+    let is_pinned = target.is_some() && state.preview_pin == target;
 
-    // Row 1: status dot (colour = up-to-date/evaluating/error, words on hover), the
-    // previewed node's name so it is always clear what is shown, a pinned marker, and
-    // the Pin/Unpin toggle right-aligned.
-    let name = node_display_name(&state.graph, id);
-    ui.horizontal(|ui| {
-        let color = state.preview.status_color(ui.visuals());
-        let d = ui.text_style_height(&egui::TextStyle::Body) * 0.6;
-        let (rect, resp) = ui.allocate_exact_size(egui::vec2(d, d), egui::Sense::hover());
-        ui.painter().circle_filled(rect.center(), d * 0.5, color);
-        resp.on_hover_text(state.preview.status_label());
-
-        ui.label(name);
-        if is_pinned {
-            ui.weak("· pinned");
-        }
-        // Make the pass-through obvious: a bypassed node shows its input, not its own
-        // output (#105).
-        if state.graph.is_bypassed(id) {
-            ui.weak("· bypassed");
-        }
-
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if is_pinned {
-                if ui.button("Unpin").clicked() {
-                    state.preview_pin = None;
+    // Row 1: a header strip (darker than the rest of the preview) carrying the status dot
+    // (colour = up-to-date/evaluating/error, words on hover), the previewed node's name, a
+    // pinned/bypassed marker, and the Pin/Unpin toggle right-aligned.
+    let pf = ui.visuals().panel_fill;
+    let header_fill = egui::Color32::from_rgb(
+        (f32::from(pf.r()) * 0.5) as u8,
+        (f32::from(pf.g()) * 0.5) as u8,
+        (f32::from(pf.b()) * 0.5) as u8,
+    );
+    egui::Frame::new()
+        .fill(header_fill)
+        .inner_margin(egui::Margin::symmetric(8, 6))
+        .show(ui, |ui| {
+            // Fill the width so the header strip spans the pane even when its text is short.
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let color = match id {
+                    Some(_) => state.preview.status_color(ui.visuals()),
+                    None => ui.visuals().weak_text_color(),
+                };
+                let d = ui.text_style_height(&egui::TextStyle::Body) * 0.6;
+                let (rect, resp) = ui.allocate_exact_size(egui::vec2(d, d), egui::Sense::hover());
+                ui.painter().circle_filled(rect.center(), d * 0.5, color);
+                if id.is_some() {
+                    resp.on_hover_text(state.preview.status_label());
                 }
-            } else if ui.button("Pin").clicked() {
-                state.preview_pin = Some(target);
-            }
+
+                match id {
+                    Some(id) => {
+                        ui.label(node_display_name(&state.graph, id));
+                        if is_pinned {
+                            ui.weak("· pinned");
+                        }
+                        // A bypassed node shows its input, not its own output (#105).
+                        if state.graph.is_bypassed(id) {
+                            ui.weak("· bypassed");
+                        }
+                    }
+                    None => {
+                        ui.weak("No node selected");
+                    }
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    match (target, is_pinned) {
+                        (Some(_), true) => {
+                            if ui.button("Unpin").clicked() {
+                                state.preview_pin = None;
+                            }
+                        }
+                        (Some(t), false) => {
+                            if ui.button("Pin").clicked() {
+                                state.preview_pin = Some(t);
+                            }
+                        }
+                        // Nothing to pin, but keep the control for a stable header.
+                        (None, _) => {
+                            ui.add_enabled(false, egui::Button::new("Pin"));
+                        }
+                    }
+                });
+            });
         });
-    });
 
     // Row 2: shading toggle (relief makes subtle height changes legible, #40); in relief
-    // the light dial, in height the Auto/Fixed scale toggle; and the range readout (#83).
+    // the light dial, in height the Auto/Fixed scale toggle. These are persistent display
+    // settings, so they show even with no node selected.
     let mut mode = state.preview.mode();
     let mut scale = state.preview.scale();
     ui.horizontal(|ui| {
@@ -1544,38 +1566,46 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
         ui.set_min_height(preview::LIGHT_DIAL_SIZE);
         ui.selectable_value(&mut mode, shade::ShadeMode::Height, "Height");
         ui.selectable_value(&mut mode, shade::ShadeMode::Relief, "Relief");
-        if mode == shade::ShadeMode::Relief {
-            state.preview.light_indicator(ui);
-        } else {
-            // Auto stretches the actual range (shape); Fixed maps [0, 1] (true
-            // amplitude, clips out of range).
-            ui.selectable_value(&mut scale, shade::HeightScale::Auto, "Auto")
-                .on_hover_text("Stretch the field's actual range to black/white");
-            ui.selectable_value(&mut scale, shade::HeightScale::Fixed, "Fixed")
-                .on_hover_text("Map a fixed [0, 1]: true height, clips out of range");
-        }
-        // The field's actual min–max, right-aligned, so amplitude and out-of-range are
-        // visible as numbers whatever the display mode.
-        if let Some((lo, hi)) = state.preview.range() {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let strong = ui.visuals().strong_text_color();
-                ui.label(egui::RichText::new(format!("{lo:.2} – {hi:.2}")).color(strong))
-                    .on_hover_text("Actual value range of the previewed field");
-            });
-        }
+        // The mode-specific control sits at the right, separated from Height/Relief.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if mode == shade::ShadeMode::Relief {
+                state.preview.light_indicator(ui);
+            } else {
+                // Auto stretches the actual range (shape); Fixed maps [0, 1] (true amplitude,
+                // clips out of range). right_to_left places the first-added widget rightmost,
+                // so add Fixed then Auto to keep the pair reading "Auto  Fixed".
+                ui.selectable_value(&mut scale, shade::HeightScale::Fixed, "Fixed")
+                    .on_hover_text("Map a fixed [0, 1]: true height, clips out of range");
+                ui.selectable_value(&mut scale, shade::HeightScale::Auto, "Auto")
+                    .on_hover_text("Stretch the field's actual range to black/white");
+            }
+        });
     });
     state.preview.set_mode(mode);
     state.preview.set_scale(scale);
 
-    // Submit a snapshot for off-thread evaluation if the output changed, collect any
-    // result, and render — none of which blocks the UI thread.
-    let res = state.preview_res;
-    let request =
-        EvalRequest::new(res, res, Region::UNIT, state.seed).with_world_extent(state.world_extent);
-    let now = ui.input(|i| i.time);
-    state.preview.sync(&state.graph, id, request, now);
-    state.preview.poll(ui.ctx());
-    preview_box(ui, |ui| state.preview.show(ui));
+    // The image: the node's output (evaluated off-thread), or a black placeholder when
+    // nothing is selected.
+    match id {
+        Some(id) => {
+            let res = state.preview_res;
+            let request = EvalRequest::new(res, res, Region::UNIT, state.seed)
+                .with_world_extent(state.world_extent);
+            let now = ui.input(|i| i.time);
+            state.preview.sync(&state.graph, id, request, now);
+            state.preview.poll(ui.ctx());
+            preview_box(ui, |ui| state.preview.show(ui));
+        }
+        None => preview_box(ui, preview_black_image),
+    }
+}
+
+/// A black square the size a preview image would occupy, drawn when nothing is selected so
+/// the preview reads as an empty image rather than a missing one.
+fn preview_black_image(ui: &mut egui::Ui) {
+    let side = ui.available_width().min(ui.available_height()).max(0.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 0.0, egui::Color32::BLACK);
 }
 
 /// Draws the preview image in a border that hugs it (no inset), with a little space below so
@@ -1589,22 +1619,6 @@ fn preview_box(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
     ui.add_space(8.0);
 }
 
-/// A bordered box filling the preview pane with a centred message, for when there is nothing
-/// to show. Unlike the image box (which hugs the image), this fills the pane so the empty
-/// preview reads as a slot rather than a small floating box.
-fn preview_placeholder(ui: &mut egui::Ui, message: &str) {
-    let height = (ui.available_height() - 8.0).max(40.0);
-    egui::Frame::NONE
-        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
-        .corner_radius(2)
-        .show(ui, |ui| {
-            ui.set_min_size(egui::vec2(ui.available_width(), height));
-            ui.centered_and_justified(|ui| {
-                ui.weak(message);
-            });
-        });
-    ui.add_space(8.0);
-}
 inventory::submit! { PaneKind { id: "preview-2d", draw: preview_2d_pane } }
 
 /// Draws the cursor-anchored node-creation menu when open, and applies its outcome:
@@ -2492,7 +2506,7 @@ fn mount(layout: &Layout, ui: &mut egui::Ui, state: &mut AppState) {
     let heavy = egui::Stroke::new(2.0, color);
 
     // Section 2: the menu strip, directly under the OS title bar (Section 1).
-    egui::Panel::top("menu-bar-panel")
+    let menu = egui::Panel::top("menu-bar-panel")
         .show_separator_line(false)
         .show_inside(ui, |ui| draw_pane(layout.menu_bar, ui, state));
 
@@ -2541,12 +2555,13 @@ fn mount(layout: &Layout, ui: &mut egui::Ui, state: &mut AppState) {
                 .frame(egui::Frame::NONE)
                 .show_inside(ui, |ui| draw_pane(layout.canvas, ui, state));
 
-            // Border under the node bar and between the canvas and the viewport.
+            // A heavier border under the node bar (like the workspace/side-column one), and
+            // a lighter one between the canvas and the viewport.
             let painter = ui.painter();
             painter.hline(
                 palette.response.rect.x_range(),
                 palette.response.rect.bottom(),
-                line,
+                heavy,
             );
             painter.hline(
                 viewport.response.rect.x_range(),
@@ -2555,9 +2570,14 @@ fn mount(layout: &Layout, ui: &mut egui::Ui, state: &mut AppState) {
             );
         });
 
-    // Section borders, drawn last so they sit on top: the footer's top edge, and the heavier
-    // workspace/side-column boundary.
+    // Section borders, drawn last so they sit on top: the full-width line under the menu,
+    // the footer's top edge, and the heavier workspace/side-column boundary.
     let painter = ui.painter();
+    painter.hline(
+        menu.response.rect.x_range(),
+        menu.response.rect.bottom(),
+        line,
+    );
     painter.hline(
         footer.response.rect.x_range(),
         footer.response.rect.top(),

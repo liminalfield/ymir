@@ -178,15 +178,6 @@ impl PreviewEngine {
         self.scale = scale;
     }
 
-    /// The actual `(min, max)` of the previewed field's `height` layer, for the range
-    /// readout, or `None` when nothing has been evaluated yet. Always the true range,
-    /// independent of the display scale, so amplitude and out-of-range read as numbers.
-    pub(crate) fn range(&self) -> Option<(f32, f32)> {
-        self.last_field
-            .as_ref()
-            .map(|f| f.layer_or(layers::HEIGHT, 0.0).value_range())
-    }
-
     /// The input distribution (normalized bin heights over `[0, 1]`) of `node`, for the
     /// histogram behind its curve/levels editor (#15). `None` unless the most recent
     /// preview result is for that node, so the histogram always matches the editor.
