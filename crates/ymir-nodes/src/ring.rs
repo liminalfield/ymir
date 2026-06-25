@@ -119,7 +119,7 @@ fn ring_field(
     flank_cells: f64,
 ) -> Field {
     let (cx, cy) = center;
-    let layer = Layer::from_fn(width, height, |x, y| {
+    let layer = Layer::from_par_fn(width, height, |x, y| {
         // Distance from the cell center to the ring center, in cells; cells are square,
         // so this is isotropic and matches the world-space circle of the radius.
         let dx = (x as f64 + 0.5) - cx;

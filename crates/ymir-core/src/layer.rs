@@ -45,6 +45,39 @@ impl Layer {
         }
     }
 
+    /// Like [`from_fn`](Self::from_fn) but fills rows in parallel with `rayon`, for the hot
+    /// per-cell generators (noise, shapes, the import resample).
+    ///
+    /// The closure must be `Sync`, so each cell is an independent pure read with no shared
+    /// mutable state; it is called once per cell with that cell's `(x, y)` and writes only
+    /// its own slot. The result is therefore byte-identical to the sequential
+    /// [`from_fn`](Self::from_fn) regardless of thread count, which the determinism promise
+    /// requires. Use [`from_fn`](Self::from_fn) when the closure reuses a buffer (`FnMut`)
+    /// or the work per cell is too small to outweigh the threading overhead.
+    pub fn from_par_fn<F>(width: usize, height: usize, f: F) -> Self
+    where
+        F: Fn(usize, usize) -> f32 + Sync,
+    {
+        use rayon::prelude::*;
+
+        let mut data = vec![0.0_f32; width * height];
+        // One chunk per row (`max(1)` keeps the chunk size non-zero for a zero-width layer,
+        // where `data` is empty and no chunk is produced). Each row writes its own cells, so
+        // there is no cross-thread ordering to depend on.
+        data.par_chunks_mut(width.max(1))
+            .enumerate()
+            .for_each(|(y, row)| {
+                for (x, cell) in row.iter_mut().enumerate() {
+                    *cell = f(x, y);
+                }
+            });
+        Self {
+            width,
+            height,
+            data,
+        }
+    }
+
     /// Creates a layer from a row-major `data` buffer (x varies fastest). Useful when a
     /// node computes several layers in one pass (e.g. flow noise's height plus its flow
     /// vector) and cannot use the per-cell [`from_fn`](Self::from_fn) closure.
@@ -163,6 +196,25 @@ mod tests {
         assert_eq!(layer.as_slice(), &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
         assert_eq!(layer.get(2, 1), Some(5.0));
         assert_eq!(layer.get(0, 0), Some(0.0));
+    }
+
+    #[test]
+    fn from_par_fn_matches_from_fn_byte_for_byte() {
+        // The determinism guard: the parallel fill must produce the exact same bytes as the
+        // sequential one, so a node can switch to it without changing its output. A
+        // non-square grid with a position-dependent value catches any row/column mix-up.
+        let f = |x: usize, y: usize| ((x * 31 + y * 7) as f32).sin();
+        let seq = Layer::from_fn(13, 9, f);
+        let par = Layer::from_par_fn(13, 9, f);
+        assert_eq!(seq.as_slice(), par.as_slice());
+        assert_eq!(seq.content_hash(), par.content_hash());
+    }
+
+    #[test]
+    fn from_par_fn_handles_degenerate_sizes() {
+        // A zero-width layer must not panic on the row chunking.
+        assert_eq!(Layer::from_par_fn(0, 4, |_, _| 1.0).len(), 0);
+        assert_eq!(Layer::from_par_fn(4, 0, |_, _| 1.0).len(), 0);
     }
 
     #[test]

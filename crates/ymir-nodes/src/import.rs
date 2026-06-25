@@ -189,7 +189,7 @@ inventory::submit! {
 /// placement to find its source position in the image, then samples there.
 fn resample(image: &DecodedImage, ctx: &EvalContext, placement: &Placement) -> Field {
     let region = ctx.region;
-    let layer = Layer::from_fn(ctx.width, ctx.height, |x, y| {
+    let layer = Layer::from_par_fn(ctx.width, ctx.height, |x, y| {
         // Output cell centre as a world position in [0, 1].
         let u = (x as f64 + 0.5) / ctx.width as f64;
         let v = (y as f64 + 0.5) / ctx.height as f64;

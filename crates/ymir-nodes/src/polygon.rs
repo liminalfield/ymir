@@ -163,7 +163,7 @@ fn polygon_field(
     let apothem = radius_cells * (std::f64::consts::PI / sides as f64).cos();
     let normal_base = -std::f64::consts::FRAC_PI_2 + 0.5 * seg;
 
-    let layer = Layer::from_fn(width, height, |x, y| {
+    let layer = Layer::from_par_fn(width, height, |x, y| {
         let off = ((x as f64 + 0.5) - cx, (y as f64 + 0.5) - cy);
         let (lx, ly) = rotate(off, neg_angle);
         // Distance past the nearest edge line: the largest signed distance to any edge's

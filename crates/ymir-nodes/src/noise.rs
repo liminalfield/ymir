@@ -94,7 +94,7 @@ pub(crate) fn fbm_field(
     params: FbmParams,
     seed: u64,
 ) -> Field {
-    let layer = Layer::from_fn(width, height, |x, y| {
+    let layer = Layer::from_par_fn(width, height, |x, y| {
         // Cell centre as a normalized position within the region, panned by the
         // offset (in region widths) so a different region of the field is sampled.
         let u = (x as f64 + 0.5) / width as f64 + params.offset_x;
@@ -123,7 +123,7 @@ pub(crate) fn ridged_field(
     params: FbmParams,
     seed: u64,
 ) -> Field {
-    let layer = Layer::from_fn(width, height, |x, y| {
+    let layer = Layer::from_par_fn(width, height, |x, y| {
         // Same world-space sampling as fbm_field, so the two generators register against
         // the same coordinates and stay resolution-independent.
         let u = (x as f64 + 0.5) / width as f64 + params.offset_x;
@@ -151,7 +151,7 @@ pub(crate) fn billow_field(
     params: FbmParams,
     seed: u64,
 ) -> Field {
-    let layer = Layer::from_fn(width, height, |x, y| {
+    let layer = Layer::from_par_fn(width, height, |x, y| {
         // Same world-space sampling as fbm_field, so the generators register against the
         // same coordinates and stay resolution-independent.
         let u = (x as f64 + 0.5) / width as f64 + params.offset_x;
@@ -184,7 +184,7 @@ pub(crate) fn hybrid_field(
     bias: f32,
     seed: u64,
 ) -> Field {
-    let layer = Layer::from_fn(width, height, |x, y| {
+    let layer = Layer::from_par_fn(width, height, |x, y| {
         let u = (x as f64 + 0.5) / width as f64 + params.offset_x;
         let v = (y as f64 + 0.5) / height as f64 + params.offset_y;
         let wx = (region.min_x + u * region.width()) * params.frequency;
@@ -316,7 +316,7 @@ pub(crate) fn worley_field(
     feature: WorleyFeature,
     seed: u64,
 ) -> Field {
-    let layer = Layer::from_fn(width, height, |x, y| {
+    let layer = Layer::from_par_fn(width, height, |x, y| {
         // Same world-space sampling as the other generators, so frequency sets cell size
         // and the field registers against the same coordinates at any resolution. The
         // offset pans the window (in region widths) exactly as the fractal-noise path does.

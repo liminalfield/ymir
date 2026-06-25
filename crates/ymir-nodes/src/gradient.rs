@@ -124,7 +124,7 @@ fn gradient_field(
 ) -> Field {
     let (cx, cy) = center;
     let (dx_dir, dy_dir) = dir;
-    let layer = Layer::from_fn(width, height, |x, y| {
+    let layer = Layer::from_par_fn(width, height, |x, y| {
         // Signed distance from the center line, in cells: the cell offset projected onto
         // the unit direction. Positive on the +direction side, negative on the other.
         let ox = (x as f64 + 0.5) - cx;

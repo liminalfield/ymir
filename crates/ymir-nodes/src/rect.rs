@@ -155,7 +155,7 @@ fn rect_field(
 ) -> Field {
     let (cx, cy) = center;
     let (hx, hy) = half;
-    let layer = Layer::from_fn(width, height, |x, y| {
+    let layer = Layer::from_par_fn(width, height, |x, y| {
         // Cell offset from the center, rotated into the box's local frame.
         let off = ((x as f64 + 0.5) - cx, (y as f64 + 0.5) - cy);
         let (lx, ly) = rotate(off, neg_angle);
