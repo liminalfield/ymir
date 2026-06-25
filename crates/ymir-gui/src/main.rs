@@ -876,23 +876,10 @@ fn menu_bar_pane(ui: &mut egui::Ui, state: &mut AppState) {
         ui.menu_button("Help", |ui| {
             ui.weak("(empty)");
         });
-        // The project name and a transient status, pushed to the right so they read as a
-        // status area rather than trailing menu items (#83, #87). The name is the current
-        // file (or "untitled"), with a marker when there are unsaved changes.
+        // The project name and unsaved-changes marker live in the OS title bar now (#83, #87);
+        // the menu bar carries only the transient status, pushed to the right.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let name = state
-                .project_path
-                .as_ref()
-                .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "untitled".to_string());
-            ui.label(if state.modified {
-                format!("{name} ●")
-            } else {
-                name
-            });
             if let Some(status) = &state.status {
-                ui.separator();
                 ui.weak(status);
             }
         });
@@ -1542,14 +1529,14 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
         });
     });
 
-    // Row 2: shading toggle (relief makes subtle height changes legible, #40); in relief
-    // the light dial, in height the Auto/Fixed scale toggle. These are persistent display
+    // Row 2: shading toggle (relief makes subtle height changes legible, #40); in relief the
+    // light dial, in height the Auto/Fixed scale toggle. These are persistent display
     // settings, so they show even with no node selected.
     let mut mode = state.preview.mode();
     let mut scale = state.preview.scale();
     ui.horizontal(|ui| {
-        // Reserve the dial's height in both modes so the image never jumps when
-        // toggling Height/Relief.
+        // Reserve the dial's height in both modes so the image never jumps when toggling
+        // Height/Relief.
         ui.set_min_height(preview::LIGHT_DIAL_SIZE);
         ui.selectable_value(&mut mode, shade::ShadeMode::Height, "Height");
         ui.selectable_value(&mut mode, shade::ShadeMode::Relief, "Relief");
@@ -2451,19 +2438,6 @@ inventory::submit! { PaneKind { id: "viewport-3d", draw: viewport_3d_pane } }
 
 // ---- layout description + fixed-panel backend -------------------------------
 
-/// The project node-list pane (Section 4, left): will list the project's nodes and
-/// subgraphs as a tree. A placeholder until that UX lands; shown here so the layout is in
-/// place. Collapsing it is a later step.
-fn node_list_pane(ui: &mut egui::Ui, _state: &mut AppState) {
-    header_strip(ui, |ui| {
-        ui.strong("Nodes");
-    });
-    ui.add_space(MENU_VPAD);
-    ui.weak("Project node list — placeholder.");
-}
-
-inventory::submit! { PaneKind { id: "node-list", draw: node_list_pane } }
-
 /// The footer (Section 5): status, hints, and context. A placeholder for now.
 fn footer_pane(ui: &mut egui::Ui, _state: &mut AppState) {
     ui.horizontal(|ui| {
@@ -2484,7 +2458,6 @@ struct Layout {
     canvas: &'static str,
     /// The main viewport, stacked with the canvas in the workspace.
     viewport: &'static str,
-    node_list: &'static str,
     preview: &'static str,
     /// The tabbed node inspector / world settings sub-panel.
     inspector: &'static str,
@@ -2497,7 +2470,6 @@ fn default_layout() -> Layout {
         palette: "ribbon",
         canvas: "canvas",
         viewport: "viewport-3d",
-        node_list: "node-list",
         preview: "preview-2d",
         inspector: "params",
         footer: "footer",
@@ -2526,35 +2498,25 @@ fn mount(layout: &Layout, ui: &mut egui::Ui, state: &mut AppState) {
         .show_separator_line(false)
         .show_inside(ui, |ui| draw_pane(layout.footer, ui, state));
 
-    // Section 4: the right column. Inside it the node list, preview, and inspector are
-    // separated by fill rather than lines.
+    // Section 4: the right column — the preview over the inspector/world tabs. Fixed width
+    // (not resizable): sized to the square preview image plus a small margin, since the
+    // contents do not reflow nicely at other widths. Halved horizontal padding (4 here plus
+    // the preview's 4) so the image sits close to the edges.
     let section_4 = egui::Panel::right("section-4")
-        .resizable(true)
-        .default_size(420.0)
+        .exact_size(260.0)
         .show_separator_line(false)
-        // No frame margin, so the inner panels reach section-4's edges: the node-list's
-        // lighter fill meets the heavy workspace border with no gap. The inner panels carry
-        // their own content padding.
-        .frame(egui::Frame::NONE)
+        .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::symmetric(4, 2)))
         .show_inside(ui, |ui| {
-            egui::Panel::left("node-list-panel")
-                .resizable(true)
-                .default_size(150.0)
-                .show_separator_line(false)
-                // A slightly lighter body than the preview/inspector column, so the two
-                // right panels read as distinct. The header strip draws its own darker fill
-                // on top.
-                .frame(
-                    egui::Frame::side_top_panel(ui.style())
-                        .fill(scale_color(ui.visuals().panel_fill, 1.5)),
-                )
-                .show_inside(ui, |ui| draw_pane(layout.node_list, ui, state));
             egui::Panel::top("preview-panel")
                 // A fixed height so the preview pane does not change size between having a
                 // node selected (a tall image) and not (a placeholder); the image fits
                 // within it, and the inspector below takes the rest of the column.
                 .exact_size(346.0)
                 .show_separator_line(false)
+                .frame(
+                    egui::Frame::side_top_panel(ui.style())
+                        .inner_margin(egui::Margin::symmetric(4, 2)),
+                )
                 .show_inside(ui, |ui| draw_pane(layout.preview, ui, state));
             egui::CentralPanel::default()
                 .show_inside(ui, |ui| draw_pane(layout.inspector, ui, state));
@@ -2645,18 +2607,20 @@ impl YmirApp {
         }
     }
 
-    /// Reflects the current project in the OS title bar, re-sending only when it changes so
-    /// the platform is not spammed with a title command every frame.
+    /// Reflects the current project (and a trailing "*" for unsaved changes) in the OS title
+    /// bar, re-sending only when it changes so the platform is not spammed every frame.
     fn sync_window_title(&mut self, ctx: &egui::Context) {
-        let title = match self
+        let name = self
             .state
             .project_path
             .as_deref()
             .and_then(std::path::Path::file_name)
-        {
-            Some(name) => format!("Ymir — {}", name.to_string_lossy()),
-            None => "Ymir".to_string(),
-        };
+            .map_or_else(
+                || "untitled".to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            );
+        let marker = if self.state.modified { " *" } else { "" };
+        let title = format!("Ymir — {name}{marker}");
         if title != self.window_title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.window_title = title;
@@ -3293,7 +3257,6 @@ mod tests {
             l.palette,
             l.canvas,
             l.viewport,
-            l.node_list,
             l.preview,
             l.inspector,
             l.footer,
