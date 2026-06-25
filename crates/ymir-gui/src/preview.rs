@@ -157,6 +157,12 @@ impl PreviewEngine {
         }
     }
 
+    /// The most recently evaluated field, if any, for the 3D viewport to mesh from. Shares
+    /// the preview's already-evaluated output rather than evaluating again.
+    pub(crate) fn field(&self) -> Option<&Field> {
+        self.last_field.as_ref()
+    }
+
     /// The current shading mode, for the pane's toggle.
     pub(crate) fn mode(&self) -> ShadeMode {
         self.mode

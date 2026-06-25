@@ -270,6 +270,9 @@ struct AppState {
     /// A one-shot request to frame the canvas to the whole graph on the next render,
     /// set after opening a project so its layout comes into view.
     frame_to_graph_request: bool,
+    /// Content hash of the height field currently uploaded to the 3D viewport's mesh, so it
+    /// re-meshes only when the previewed field changes. `None` until the first mesh.
+    viewport_mesh_hash: Option<u64>,
     /// A transient status line shown in the menu bar (e.g. the result of a save or
     /// open). Replaced by the next action.
     status: Option<String>,
@@ -363,6 +366,7 @@ impl AppState {
             world_extent: DEFAULT_WORLD_EXTENT,
             project_path: None,
             frame_to_graph_request: false,
+            viewport_mesh_hash: None,
             status: None,
             history,
             saved_snapshot: initial,
@@ -2461,8 +2465,8 @@ fn rename_dialog_ui(ui: &mut egui::Ui, state: &mut AppState) {
     }
 }
 
-fn viewport_3d_pane(ui: &mut egui::Ui, _state: &mut AppState) {
-    viewport::show(ui);
+fn viewport_3d_pane(ui: &mut egui::Ui, state: &mut AppState) {
+    viewport::show(ui, state.preview.field(), &mut state.viewport_mesh_hash);
 }
 inventory::submit! { PaneKind { id: "viewport-3d", draw: viewport_3d_pane } }
 
