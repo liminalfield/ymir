@@ -263,4 +263,31 @@ mod tests {
         .unwrap();
         assert_eq!(out.content_hash().to_u64(), 0x8183_da01_4033_a76a);
     }
+
+    #[test]
+    fn cookbook_examples_compile_and_run() {
+        // Every recipe in docs/expression-cookbook.md, kept honest: if a function is renamed
+        // or the grammar changes, the documented examples must not silently break.
+        let input = input_field(8, 0.5, 1.0);
+        let examples = [
+            "sin(x * 20)",
+            "sin(x * 40)",
+            "sin((x + 0.25) * 20)",
+            "sin((x*cos(0.5) - y*sin(0.5)) * 20) * 0.1",
+            "sin((x*cos(30*pi/180) - y*sin(30*pi/180)) * 20) * 0.1",
+            "sin(sqrt((x-0.5)^2 + (y-0.5)^2) * 40)",
+            "floor(height * 8) / 8",
+            "step(0.5, height)",
+            "smoothstep(0.45, 0.55, height)",
+            "lerp(height, height + sin(x*60)*0.05, mask)",
+            "select(step(0.5, height), height, height * 0.5)",
+            "clamp(height * 1.5, 0, 1)",
+        ];
+        for expr in examples {
+            assert!(
+                run(expr, Some(&input), &ctx(8)).is_ok(),
+                "cookbook example failed to compile: {expr:?}"
+            );
+        }
+    }
 }
