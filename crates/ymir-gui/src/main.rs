@@ -1491,69 +1491,56 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
     let id = target.and_then(|t| state.graph.node_id_of(t));
     let is_pinned = target.is_some() && state.preview_pin == target;
 
-    // Row 1: a header strip (darker than the rest of the preview) carrying the status dot
-    // (colour = up-to-date/evaluating/error, words on hover), the previewed node's name, a
-    // pinned/bypassed marker, and the Pin/Unpin toggle right-aligned.
-    let pf = ui.visuals().panel_fill;
-    let header_fill = egui::Color32::from_rgb(
-        (f32::from(pf.r()) * 0.5) as u8,
-        (f32::from(pf.g()) * 0.5) as u8,
-        (f32::from(pf.b()) * 0.5) as u8,
-    );
-    egui::Frame::new()
-        .fill(header_fill)
-        .inner_margin(egui::Margin::symmetric(8, 6))
-        .show(ui, |ui| {
-            // Fill the width so the header strip spans the pane even when its text is short.
-            ui.set_min_width(ui.available_width());
-            ui.horizontal(|ui| {
-                let color = match id {
-                    Some(_) => state.preview.status_color(ui.visuals()),
-                    None => ui.visuals().weak_text_color(),
-                };
-                let d = ui.text_style_height(&egui::TextStyle::Body) * 0.6;
-                let (rect, resp) = ui.allocate_exact_size(egui::vec2(d, d), egui::Sense::hover());
-                ui.painter().circle_filled(rect.center(), d * 0.5, color);
-                if id.is_some() {
-                    resp.on_hover_text(state.preview.status_label());
-                }
+    // Row 1: a header strip carrying the status dot (colour = up-to-date/evaluating/error,
+    // words on hover), the previewed node's name, a pinned/bypassed marker, and the
+    // Pin/Unpin toggle right-aligned.
+    header_strip(ui, |ui| {
+        let color = match id {
+            Some(_) => state.preview.status_color(ui.visuals()),
+            None => ui.visuals().weak_text_color(),
+        };
+        let d = ui.text_style_height(&egui::TextStyle::Body) * 0.6;
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(d, d), egui::Sense::hover());
+        ui.painter().circle_filled(rect.center(), d * 0.5, color);
+        if id.is_some() {
+            resp.on_hover_text(state.preview.status_label());
+        }
 
-                match id {
-                    Some(id) => {
-                        ui.label(node_display_name(&state.graph, id));
-                        if is_pinned {
-                            ui.weak("· pinned");
-                        }
-                        // A bypassed node shows its input, not its own output (#105).
-                        if state.graph.is_bypassed(id) {
-                            ui.weak("· bypassed");
-                        }
-                    }
-                    None => {
-                        ui.weak("No node selected");
+        match id {
+            Some(id) => {
+                ui.label(node_display_name(&state.graph, id));
+                if is_pinned {
+                    ui.weak("· pinned");
+                }
+                // A bypassed node shows its input, not its own output (#105).
+                if state.graph.is_bypassed(id) {
+                    ui.weak("· bypassed");
+                }
+            }
+            None => {
+                ui.weak("No node selected");
+            }
+        }
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            match (target, is_pinned) {
+                (Some(_), true) => {
+                    if ui.button("Unpin").clicked() {
+                        state.preview_pin = None;
                     }
                 }
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    match (target, is_pinned) {
-                        (Some(_), true) => {
-                            if ui.button("Unpin").clicked() {
-                                state.preview_pin = None;
-                            }
-                        }
-                        (Some(t), false) => {
-                            if ui.button("Pin").clicked() {
-                                state.preview_pin = Some(t);
-                            }
-                        }
-                        // Nothing to pin, but keep the control for a stable header.
-                        (None, _) => {
-                            ui.add_enabled(false, egui::Button::new("Pin"));
-                        }
+                (Some(t), false) => {
+                    if ui.button("Pin").clicked() {
+                        state.preview_pin = Some(t);
                     }
-                });
-            });
+                }
+                // Nothing to pin, but keep the control for a stable header.
+                (None, _) => {
+                    ui.add_enabled(false, egui::Button::new("Pin"));
+                }
+            }
         });
+    });
 
     // Row 2: shading toggle (relief makes subtle height changes legible, #40); in relief
     // the light dial, in height the Auto/Fixed scale toggle. These are persistent display
@@ -1606,6 +1593,28 @@ fn preview_black_image(ui: &mut egui::Ui) {
     let side = ui.available_width().min(ui.available_height()).max(0.0);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
     ui.painter().rect_filled(rect, 0.0, egui::Color32::BLACK);
+}
+
+/// Multiplies an opaque colour's channels by `factor` (clamped), keeping it opaque. Unlike
+/// [`egui::Color32::gamma_multiply`], which changes opacity, this darkens (`factor < 1`) or
+/// lightens (`factor > 1`) the colour itself.
+fn scale_color(c: egui::Color32, factor: f32) -> egui::Color32 {
+    let s = |v: u8| (f32::from(v) * factor).clamp(0.0, 255.0) as u8;
+    egui::Color32::from_rgb(s(c.r()), s(c.g()), s(c.b()))
+}
+
+/// Draws a pane header strip: a full-width band a touch darker than the pane body, with
+/// `contents` laid out horizontally inside it. Shared by the preview and node-list panes so
+/// their headers match.
+fn header_strip(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::new()
+        .fill(scale_color(ui.visuals().panel_fill, 0.5))
+        .inner_margin(egui::Margin::symmetric(8, 6))
+        .show(ui, |ui| {
+            // Fill the width so the strip spans the pane even when its content is short.
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(contents);
+        });
 }
 
 /// Draws the preview image in a border that hugs it (no inset), with a little space below so
@@ -2446,8 +2455,10 @@ inventory::submit! { PaneKind { id: "viewport-3d", draw: viewport_3d_pane } }
 /// subgraphs as a tree. A placeholder until that UX lands; shown here so the layout is in
 /// place. Collapsing it is a later step.
 fn node_list_pane(ui: &mut egui::Ui, _state: &mut AppState) {
+    header_strip(ui, |ui| {
+        ui.strong("Nodes");
+    });
     ui.add_space(MENU_VPAD);
-    ui.strong("Nodes");
     ui.weak("Project node list — placeholder.");
 }
 
@@ -2521,11 +2532,22 @@ fn mount(layout: &Layout, ui: &mut egui::Ui, state: &mut AppState) {
         .resizable(true)
         .default_size(420.0)
         .show_separator_line(false)
+        // No frame margin, so the inner panels reach section-4's edges: the node-list's
+        // lighter fill meets the heavy workspace border with no gap. The inner panels carry
+        // their own content padding.
+        .frame(egui::Frame::NONE)
         .show_inside(ui, |ui| {
             egui::Panel::left("node-list-panel")
                 .resizable(true)
                 .default_size(150.0)
                 .show_separator_line(false)
+                // A slightly lighter body than the preview/inspector column, so the two
+                // right panels read as distinct. The header strip draws its own darker fill
+                // on top.
+                .frame(
+                    egui::Frame::side_top_panel(ui.style())
+                        .fill(scale_color(ui.visuals().panel_fill, 1.5)),
+                )
                 .show_inside(ui, |ui| draw_pane(layout.node_list, ui, state));
             egui::Panel::top("preview-panel")
                 // A fixed height so the preview pane does not change size between having a
