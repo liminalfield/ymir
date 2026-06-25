@@ -39,6 +39,8 @@ mod build;
 mod project_file;
 // The built-in starter graph a fresh session opens with (#76).
 mod starter;
+// The 3D viewport: custom wgpu rendering inside an egui pane (#7).
+mod viewport;
 // Snapshot-based undo/redo over the session (#82).
 mod history;
 use build::BuildRunner;
@@ -2457,9 +2459,7 @@ fn rename_dialog_ui(ui: &mut egui::Ui, state: &mut AppState) {
 }
 
 fn viewport_3d_pane(ui: &mut egui::Ui, _state: &mut AppState) {
-    ui.centered_and_justified(|ui| {
-        ui.weak("3D viewport — placeholder (step 7)");
-    });
+    viewport::show(ui);
 }
 inventory::submit! { PaneKind { id: "viewport-3d", draw: viewport_3d_pane } }
 
@@ -2625,6 +2625,10 @@ impl YmirApp {
         // process environment or the filesystem.
         let mut state = AppState::new();
         apply_default(&mut state);
+        // Set up the 3D viewport's wgpu pipeline once, now that the wgpu device exists.
+        if let Some(render_state) = cc.wgpu_render_state.as_ref() {
+            viewport::init(render_state);
+        }
         // Empty so the first frame always pushes the real title to the OS bar.
         Self {
             state,
