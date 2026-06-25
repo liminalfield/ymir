@@ -29,8 +29,9 @@ pub fn tr(key: &str) -> &str {
         // Import generator.
         "node-generator.import" => "Import",
         "node-generator.import-desc" => {
-            "Loads a heightmap PNG as a field, resampled to the build resolution. Set the \
-             file path; an empty path is a flat field."
+            "Loads a heightmap PNG as a field, resampled to the build resolution and placed \
+             by offset, rotation, and scale. Set the file path; an empty path is a flat \
+             field. The edge policy fills where the placement maps outside the image."
         }
 
         // Flow (curl-warped) generator.
