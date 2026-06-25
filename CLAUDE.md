@@ -190,27 +190,55 @@ that asserts the expected node count so a missing node fails fast.
     functions. Running N iterations at 512 squared and at 2048 squared produces
     genuinely different terrain. A low-resolution preview is therefore an approximation
     of the full build, not an identical result. Do not promise otherwise anywhere.
-  - What we do promise: determinism at a given resolution; a tiled build matches an
-    untiled build at the same resolution (halo overlap handles seams); and erosion
-    parameters are expressed in resolution-aware terms (strength and scale in world
-    units, iteration counts scaled with cell count) so the preview is representative
-    rather than misleading. The target-resolution build is the source of truth.
+  - What we do promise: same-machine repeatability at a given resolution; a tiled build
+    matches an untiled build at the same resolution, visually equivalent rather than
+    necessarily bit-identical (halo overlap handles seams); and erosion parameters are
+    expressed in resolution-aware terms (strength and scale in world units, iteration
+    counts scaled with cell count) so the preview is representative rather than
+    misleading. The target-resolution build is the source of truth.
 
-## Determinism (hard requirement)
+## Determinism (a means to repeatability)
 
-Same seed and same graph must produce byte-identical output, on any machine,
-regardless of thread count. This is a core promise of a procedural tool. Watch the
-Rust footguns:
+Determinism here serves a goal, it is not the goal. A user must be able to rely on and
+reproduce their results; that is the point. Byte-identity for its own sake is not.
+Nobody chooses the tool because it is bit-exact across machines, they choose it because
+it works and reliably regenerates great terrain. A build that is unusable or never
+finishes is far worse than a few pixels differing, so we do not contort an algorithm to
+force bit-identity when that costs usability.
 
-- `HashMap` iteration order is nondeterministic. Never let output depend on it; use
-  ordered iteration wherever layer or node order can affect results.
-- `rayon` reductions must be order-independent.
-- A node's seed is derived from the global seed (carried in `EvalContext`) and the
-  node's persistent `stable_id`, never from the runtime slotmap key, the clock, or a
-  thread id. So a node yields identical output across reloads and graph edits, while
-  changing the global seed reseeds the whole world and each node stays internally stable.
+The contract, by rung:
 
-Every node and the evaluator get a determinism test: run twice, assert identical bytes.
+- **Same-machine repeatability (required).** Same seed, same graph, same machine yields
+  the same output, every time. This is what a user relies on, and the memo cache depends
+  on it: cache keys are content hashes, so output that varied run-to-run would make every
+  downstream node cache-miss constantly and the tool feel slow and flickery. Never
+  introduce run-to-run nondeterminism: no output that depends on `HashMap` iteration
+  order, the clock, a thread id, or address layout.
+- **Cross-machine / cross-thread-count (visual equivalence).** A project shared to a
+  different machine, or built with a different core count, regenerates terrain that is
+  visually equivalent, not necessarily bit-identical. A few ULPs may differ where a
+  parallel reduction is order-sensitive. That is acceptable and expected.
+
+In practice:
+
+- **Keep byte-exactness where it is free, which is most places.** A per-cell pure
+  function (noise, shapes, sampled coordinates) writes each cell independently, so
+  `Layer::from_par_fn` is byte-identical regardless of thread count at no cost. Keep
+  these bit-exact everywhere; there is no reason to give it up.
+- **Relax only where byte-identity is expensive.** An order-sensitive parallel reduction
+  (thermal erosion's scatter, where cells add into shared neighbour cells) may use a
+  fixed per-machine partition: byte-stable on a given machine, possibly differing in the
+  last bits across core counts. Do not reformulate the algorithm (for instance an
+  8x-compute gather) solely to recover cross-machine bit-identity.
+- **Seeds still derive from the global seed** (carried in `EvalContext`) and the node's
+  persistent `stable_id`, never the runtime slotmap key, the clock, or a thread id, so a
+  node yields the same output across reloads and graph edits while the global seed
+  reseeds the whole world.
+
+Testing: a pure per-cell node asserts byte-identity (run twice, identical bytes). A node
+with an order-sensitive parallel reduction asserts same-machine repeatability (run twice,
+identical) and visual equivalence to a stored reference within a tolerance, rather than
+an exact hash, so its golden is not machine-bound.
 
 ## Hashing and identity
 
