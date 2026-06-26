@@ -20,6 +20,7 @@ pub fn tr(key: &str) -> &str {
         "category-filter" => "Filters",
         "category-combine" => "Combine",
         "category-geology" => "Geology",
+        "category-utility" => "Utility",
         "category-output" => "Outputs",
 
         // fBm generator.
@@ -196,6 +197,12 @@ pub fn tr(key: &str) -> &str {
         "node-modifier.hydraulic_erosion" => "Hydraulic Erosion",
         "node-modifier.hydraulic_erosion-desc" => {
             "Simulates rain and water flow, writing a water-depth layer (terrain carving comes later)."
+        }
+
+        // Null (pass-through utility).
+        "node-modifier.null" => "Null",
+        "node-modifier.null-desc" => {
+            "Passes the field through unchanged: a point to view, reroute, or anchor wiring."
         }
 
         // PNG export.

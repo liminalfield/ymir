@@ -107,6 +107,7 @@ mod tests {
                 "modifier.hydraulic_erosion",
                 "modifier.invert",
                 "modifier.levels",
+                "modifier.null",
                 "modifier.slope",
                 "modifier.thermal_erosion",
                 "modifier.warp"

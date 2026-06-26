@@ -45,6 +45,8 @@ inventory::submit! { CategoryDef { id: "adjust", icon: "sliders", sort: 20 } }
 inventory::submit! { CategoryDef { id: "filter", icon: "blur", sort: 25 } }
 inventory::submit! { CategoryDef { id: "combine", icon: "merge", sort: 30 } }
 inventory::submit! { CategoryDef { id: "geology", icon: "mountains", sort: 40 } }
+// Graph plumbing rather than terrain processing: pass-through, reroute, organizing anchors.
+inventory::submit! { CategoryDef { id: "utility", icon: "circle", sort: 50 } }
 inventory::submit! { CategoryDef { id: "output", icon: "export", sort: 90 } }
 
 #[cfg(test)]
@@ -61,6 +63,7 @@ mod tests {
             "filter",
             "combine",
             "geology",
+            "utility",
             "output",
         ] {
             assert!(
