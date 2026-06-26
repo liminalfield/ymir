@@ -13,6 +13,11 @@ pub const HEIGHT: &str = "height";
 /// absent, so a mask never gates a connection.
 pub const MASK: &str = "mask";
 
+/// Standing water depth, in working height units. Written by hydraulic erosion (the
+/// shallow-water simulation's water field) and absent on a plain heightfield, so consumers
+/// degrade gracefully. A useful intermediate in its own right: where water pools and runs.
+pub const WATER: &str = "water";
+
 /// The x component of a 2D direction/flow field (paired with [`FLOW_Y`]). A vector
 /// field rides on the `Field` as these two scalar layers rather than a special vector
 /// type; curl/flow noise writes them, and a directional warp or erosion grain reads

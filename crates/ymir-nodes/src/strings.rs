@@ -192,6 +192,12 @@ pub fn tr(key: &str) -> &str {
             "Relaxes slopes steeper than the talus angle toward repose."
         }
 
+        // Hydraulic erosion.
+        "node-modifier.hydraulic_erosion" => "Hydraulic Erosion",
+        "node-modifier.hydraulic_erosion-desc" => {
+            "Simulates rain and water flow, writing a water-depth layer (terrain carving comes later)."
+        }
+
         // PNG export.
         "node-endpoint.export" => "Export PNG",
         "node-endpoint.export-desc" => "Writes the height layer to a 16-bit grayscale PNG.",
