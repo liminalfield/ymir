@@ -43,13 +43,29 @@ pub(crate) struct ProjectFile {
     pub view: ViewState,
 }
 
-/// World settings that affect evaluation and so belong with the project.
+/// The world height (meters that a height of `1.0` represents) assumed for a project saved
+/// before the field existed, and the app-level default for a fresh project. Roughly a
+/// quarter of the default world extent, so the default world reads at natural proportions.
+pub(crate) const DEFAULT_WORLD_HEIGHT: f64 = 256.0;
+
+/// The world height for a project file that predates the field (format version 1 without it).
+fn default_world_height() -> f64 {
+    DEFAULT_WORLD_HEIGHT
+}
+
+/// World settings restored with the project.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub(crate) struct WorldSettings {
     /// The global seed.
     pub seed: u64,
-    /// World extent along x, in meters.
+    /// World extent along x, in meters: the footprint's physical width.
     pub world_extent: f64,
+    /// World height, in meters: the real elevation a height value of `1.0` represents, the
+    /// vertical counterpart to `world_extent`. An interpretation of the normalized height
+    /// (for display proportion and export), not an input to evaluation. Defaulted on load so
+    /// projects saved before it existed still open.
+    #[serde(default = "default_world_height")]
+    pub world_height: f64,
 }
 
 /// GUI view-state: where each node sits on the canvas, keyed by `stable_id`.
@@ -68,8 +84,10 @@ pub(crate) struct RestoredProject {
     pub snarl: Snarl<Handle>,
     /// The restored global seed.
     pub seed: u64,
-    /// The restored world extent.
+    /// The restored world extent (meters).
     pub world_extent: f64,
+    /// The restored world height (meters).
+    pub world_height: f64,
 }
 
 impl ProjectFile {
@@ -80,6 +98,7 @@ impl ProjectFile {
         snarl: &Snarl<Handle>,
         seed: u64,
         world_extent: f64,
+        world_height: f64,
     ) -> Self {
         let nodes = snarl
             .node_ids()
@@ -90,7 +109,11 @@ impl ProjectFile {
             .collect();
         Self {
             format_version: PROJECT_FORMAT_VERSION,
-            world: WorldSettings { seed, world_extent },
+            world: WorldSettings {
+                seed,
+                world_extent,
+                world_height,
+            },
             graph: graph.to_document(),
             view: ViewState { nodes },
         }
@@ -190,6 +213,7 @@ impl ProjectFile {
             snarl,
             seed: self.world.seed,
             world_extent: self.world.world_extent,
+            world_height: self.world.world_height,
         })
     }
 }
@@ -236,7 +260,7 @@ mod tests {
         .expect("thermal");
         graph.connect(generator, 0, erosion, 0).expect("connect");
 
-        let file = ProjectFile::capture(&graph, &snarl, 99, 4096.0);
+        let file = ProjectFile::capture(&graph, &snarl, 99, 4096.0, 800.0);
 
         // Through JSON, to exercise the real serialization path.
         let json = serde_json::to_string(&file).expect("serialize");
@@ -250,6 +274,7 @@ mod tests {
         // World settings restored.
         assert_eq!(restored.seed, 99);
         assert_eq!(restored.world_extent, 4096.0);
+        assert_eq!(restored.world_height, 800.0);
 
         // Positions restored by stable_id.
         let gen_sid = graph.stable_id(generator).expect("gen sid");
@@ -277,7 +302,7 @@ mod tests {
         add_node(&mut graph, &mut snarl, "generator.fbm", Pos2::ZERO).expect("fbm");
 
         // Drop the view section entirely, as a headless or fragment file would have.
-        let mut file = ProjectFile::capture(&graph, &snarl, 0, 1024.0);
+        let mut file = ProjectFile::capture(&graph, &snarl, 0, 1024.0, 256.0);
         file.view.nodes.clear();
 
         let restored = file.restore().expect("restore");
@@ -296,11 +321,28 @@ mod tests {
     fn restore_rejects_an_unknown_envelope_version() {
         let graph = Graph::new();
         let snarl = Snarl::<Handle>::new();
-        let mut file = ProjectFile::capture(&graph, &snarl, 0, 1024.0);
+        let mut file = ProjectFile::capture(&graph, &snarl, 0, 1024.0, 256.0);
         file.format_version = PROJECT_FORMAT_VERSION + 1;
         assert!(matches!(
             file.restore(),
             Err(ymir_core::Error::UnsupportedFormatVersion { .. })
         ));
+    }
+
+    #[test]
+    fn world_height_defaults_when_absent_from_an_older_file() {
+        // A version-1 project saved before world_height existed: its `world` section has
+        // only seed and world_extent. It must still load, taking the default height rather
+        // than failing to deserialize.
+        let json = r#"{
+            "format_version": 1,
+            "world": { "seed": 3, "world_extent": 2048.0 },
+            "graph": { "format_version": 1, "next_stable_id": 0, "nodes": [] }
+        }"#;
+        let file: ProjectFile = serde_json::from_str(json).expect("deserialize legacy file");
+        assert_eq!(file.world.world_height, DEFAULT_WORLD_HEIGHT);
+        let restored = file.restore().expect("restore legacy file");
+        assert_eq!(restored.world_extent, 2048.0);
+        assert_eq!(restored.world_height, DEFAULT_WORLD_HEIGHT);
     }
 }

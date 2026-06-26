@@ -263,6 +263,11 @@ struct AppState {
     /// Preview requests so world-unit parameters resolve to cells consistently. Cells
     /// are square, so the y extent follows the grid aspect.
     world_extent: f64,
+    /// Physical world height, in meters: the elevation a height value of `1.0` represents.
+    /// The vertical counterpart to `world_extent`, used to show the terrain at true
+    /// proportion in the viewport. An interpretation of the normalized height, not an input
+    /// to evaluation, so it is not threaded into the eval request.
+    world_height: f64,
     /// The project file the session is bound to, if any (#75). `Save` writes here;
     /// `None` until the project is first saved or opened, when `Save` falls back to
     /// `Save As`.
@@ -280,8 +285,10 @@ struct AppState {
     /// Whether the 3D viewport shows true amplitude (Fixed) or normalizes to fill the relief
     /// (Auto). Fixed by default so terrain reads at its real height.
     viewport_scale: shade::HeightScale,
-    /// The 3D viewport's vertical exaggeration (height of a `1.0` value over the footprint).
-    viewport_vscale: f32,
+    /// The 3D viewport's vertical exaggeration: a multiplier on the true world proportion
+    /// (`world_height / world_extent`). `1.0` shows real-world proportions; higher values
+    /// exaggerate relief to inspect subtle terrain. A non-persisted view aid.
+    viewport_exaggeration: f32,
     /// A transient status line shown in the menu bar (e.g. the result of a save or
     /// open). Replaced by the next action.
     status: Option<String>,
@@ -347,7 +354,13 @@ impl AppState {
         let (graph, snarl) = starter::starter_graph();
         // Anchor the undo history and the clean point at this initial session, so the
         // first edit records an undo step and marks the session modified.
-        let initial = project_file::ProjectFile::capture(&graph, &snarl, 0, DEFAULT_WORLD_EXTENT);
+        let initial = project_file::ProjectFile::capture(
+            &graph,
+            &snarl,
+            0,
+            DEFAULT_WORLD_EXTENT,
+            project_file::DEFAULT_WORLD_HEIGHT,
+        );
         let history = EditHistory::new(initial.clone());
         Self {
             graph,
@@ -373,12 +386,13 @@ impl AppState {
             build_res: 1024,
             preview_res: PREVIEW_RES,
             world_extent: DEFAULT_WORLD_EXTENT,
+            world_height: project_file::DEFAULT_WORLD_HEIGHT,
             project_path: None,
             frame_to_graph_request: false,
             viewport_mesh: None,
             viewport_camera: viewport::OrbitCamera::default(),
             viewport_scale: shade::HeightScale::Fixed,
-            viewport_vscale: viewport::DEFAULT_VERTICAL_SCALE,
+            viewport_exaggeration: 1.0,
             status: None,
             history,
             saved_snapshot: initial,
@@ -402,6 +416,7 @@ impl AppState {
         self.snarl = restored.snarl;
         self.seed = restored.seed;
         self.world_extent = restored.world_extent;
+        self.world_height = restored.world_height;
         self.clear_selection();
         self.preview_pin = None;
         self.node_menu = None;
@@ -419,11 +434,19 @@ impl AppState {
     /// Replaces the session with a fresh untitled one built from `graph`/`snarl`: resets
     /// world settings and view-state, drops the project path, and re-anchors undo and the
     /// clean point. Shared by New (a starter graph) and Close (an empty graph).
-    fn install_fresh(&mut self, graph: Graph, snarl: Snarl<Handle>, seed: u64, world_extent: f64) {
+    fn install_fresh(
+        &mut self,
+        graph: Graph,
+        snarl: Snarl<Handle>,
+        seed: u64,
+        world_extent: f64,
+        world_height: f64,
+    ) {
         self.graph = graph;
         self.snarl = snarl;
         self.seed = seed;
         self.world_extent = world_extent;
+        self.world_height = world_height;
         self.clear_selection();
         self.preview_pin = None;
         self.node_menu = None;
@@ -439,7 +462,13 @@ impl AppState {
 
     /// Starts a new, empty project: a blank canvas, untitled.
     fn new_project(&mut self) {
-        self.install_fresh(Graph::new(), Snarl::new(), 0, DEFAULT_WORLD_EXTENT);
+        self.install_fresh(
+            Graph::new(),
+            Snarl::new(),
+            0,
+            DEFAULT_WORLD_EXTENT,
+            project_file::DEFAULT_WORLD_HEIGHT,
+        );
     }
 
     /// Opens the default startup graph (the saved default if one exists, else the
@@ -449,10 +478,16 @@ impl AppState {
             .filter(|p| p.exists())
             .and_then(|p| read_project(&p).ok());
         match loaded {
-            Some(r) => self.install_fresh(r.graph, r.snarl, r.seed, r.world_extent),
+            Some(r) => self.install_fresh(r.graph, r.snarl, r.seed, r.world_extent, r.world_height),
             None => {
                 let (graph, snarl) = starter::starter_graph();
-                self.install_fresh(graph, snarl, 0, DEFAULT_WORLD_EXTENT);
+                self.install_fresh(
+                    graph,
+                    snarl,
+                    0,
+                    DEFAULT_WORLD_EXTENT,
+                    project_file::DEFAULT_WORLD_HEIGHT,
+                );
             }
         }
     }
@@ -460,7 +495,13 @@ impl AppState {
     /// A snapshot of the current session (graph, canvas positions, world settings),
     /// the unit the undo history and the project file both work in.
     fn snapshot(&self) -> project_file::ProjectFile {
-        project_file::ProjectFile::capture(&self.graph, &self.snarl, self.seed, self.world_extent)
+        project_file::ProjectFile::capture(
+            &self.graph,
+            &self.snarl,
+            self.seed,
+            self.world_extent,
+            self.world_height,
+        )
     }
 
     /// Re-anchors the undo history at the current session and clears its stacks, after
@@ -488,6 +529,7 @@ impl AppState {
                 self.snarl = restored.snarl;
                 self.seed = restored.seed;
                 self.world_extent = restored.world_extent;
+                self.world_height = restored.world_height;
                 self.selection
                     .retain(|&h| self.graph.node_id_of(h).is_some());
                 self.primary = self.primary.filter(|h| self.selection.contains(h));
@@ -1046,12 +1088,7 @@ fn save_project(state: &mut AppState, path: Option<std::path::PathBuf>) -> bool 
         Some(path) => path,
         None => return false,
     };
-    let file = project_file::ProjectFile::capture(
-        &state.graph,
-        &state.snarl,
-        state.seed,
-        state.world_extent,
-    );
+    let file = state.snapshot();
     match write_project(&path, &file) {
         Ok(()) => {
             state.status = Some("Saved".to_string());
@@ -1134,12 +1171,7 @@ fn save_as_default(state: &mut AppState) {
         state.status = Some(format!("Could not create {}: {err}", parent.display()));
         return;
     }
-    let file = project_file::ProjectFile::capture(
-        &state.graph,
-        &state.snarl,
-        state.seed,
-        state.world_extent,
-    );
+    let file = state.snapshot();
     match write_project(&path, &file) {
         Ok(()) => {
             state.status = Some(format!(
@@ -1169,6 +1201,7 @@ fn apply_default(state: &mut AppState) {
             state.snarl = restored.snarl;
             state.seed = restored.seed;
             state.world_extent = restored.world_extent;
+            state.world_height = restored.world_height;
             state.frame_to_graph_request = true;
             // Anchor undo and the clean point at the default, not the starter it replaced.
             state.reset_history();
@@ -1443,6 +1476,21 @@ fn world_settings(ui: &mut egui::Ui, state: &mut AppState) {
         // size along both axes; it follows from extent / build resolution.
         let m_per_cell = state.world_extent / state.build_res as f64;
         ui.weak(format!("≈ {m_per_cell:.3} m/cell at build"));
+    });
+
+    ui.separator();
+    ui.label("World height");
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::DragValue::new(&mut state.world_height)
+                .speed(2.0)
+                .range(1.0..=100_000.0)
+                .suffix(" m"),
+        );
+        // The vertical:horizontal ratio a height of 1.0 reaches over the footprint: what the
+        // viewport shows at 1x exaggeration. A value of 1.0 would be as tall as it is wide.
+        let proportion = state.world_height / state.world_extent;
+        ui.weak(format!("≈ {proportion:.2}× footprint at full height"));
     });
 
     ui.separator();
@@ -2481,9 +2529,12 @@ fn viewport_3d_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // The pane rect, captured before `show` consumes it, anchors the floating control HUD.
     let rect = ui.available_rect_before_wrap();
 
+    // True world proportion: a height of 1.0 rises to (world_height / world_extent) over the
+    // unit footprint. The exaggeration multiplies it, so 1x is real-world proportion.
+    let true_proportion = (state.world_height / state.world_extent.max(f64::EPSILON)) as f32;
     let settings = viewport::ViewSettings {
         fixed_range: state.viewport_scale == shade::HeightScale::Fixed,
-        vertical_scale: state.viewport_vscale,
+        vertical_scale: true_proportion * state.viewport_exaggeration,
     };
     viewport::show(
         ui,
@@ -2496,7 +2547,7 @@ fn viewport_3d_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // A small control HUD overlaid at the top-left of the viewport. A temporary home: the
     // design calls for a vertical toolbar down the left edge, not yet built.
     let mut scale = state.viewport_scale;
-    let mut vscale = state.viewport_vscale;
+    let mut exaggeration = state.viewport_exaggeration;
     egui::Area::new(ui.id().with("viewport-hud"))
         .order(egui::Order::Foreground)
         .fixed_pos(rect.left_top() + egui::vec2(8.0, 8.0))
@@ -2511,9 +2562,12 @@ fn viewport_3d_pane(ui: &mut egui::Ui, state: &mut AppState) {
                         .on_hover_text("Stretch the field's actual range to fill the relief");
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Vertical");
+                    ui.label("Exaggeration").on_hover_text(
+                        "Vertical exaggeration; 1x is real-world proportion (set by World height)",
+                    );
                     ui.add(
-                        egui::Slider::new(&mut vscale, 0.0..=1.5)
+                        egui::Slider::new(&mut exaggeration, 0.25..=8.0)
+                            .logarithmic(true)
                             .fixed_decimals(2)
                             .custom_formatter(|v, _| format!("{v:.2}x")),
                     );
@@ -2521,7 +2575,7 @@ fn viewport_3d_pane(ui: &mut egui::Ui, state: &mut AppState) {
             });
         });
     state.viewport_scale = scale;
-    state.viewport_vscale = vscale;
+    state.viewport_exaggeration = exaggeration;
 }
 inventory::submit! { PaneKind { id: "viewport-3d", draw: viewport_3d_pane } }
 
@@ -3170,7 +3224,7 @@ mod tests {
         // Exercises the real file I/O wrappers (the in-memory serde path is covered in
         // project_file): write a session to disk, read it back, confirm it matches.
         let (graph, snarl) = starter::starter_graph();
-        let file = project_file::ProjectFile::capture(&graph, &snarl, 7, 2048.0);
+        let file = project_file::ProjectFile::capture(&graph, &snarl, 7, 2048.0, 640.0);
         let path =
             std::env::temp_dir().join(format!("ymir-default-test-{}.ymir", std::process::id()));
 
@@ -3181,6 +3235,7 @@ mod tests {
         assert_eq!(restored.graph.to_document(), graph.to_document());
         assert_eq!(restored.seed, 7);
         assert_eq!(restored.world_extent, 2048.0);
+        assert_eq!(restored.world_height, 640.0);
     }
 
     #[test]

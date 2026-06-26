@@ -18,11 +18,6 @@ use ymir_core::{Field, Layer, layers};
 /// pipeline must match.
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
 
-/// Default vertical scale: the height a value of `1.0` reaches over the unit footprint. A
-/// display exaggeration for inspecting relief, not a world measurement; the user adjusts it
-/// from the viewport, and it persists in app state.
-pub(crate) const DEFAULT_VERTICAL_SCALE: f32 = 0.3;
-
 /// Mesh grid resolution (vertices per side). The field is sampled to this grid, so the
 /// vertex/index buffers are a fixed size regardless of the field's resolution.
 const MESH_RES: usize = 256;
@@ -61,7 +56,8 @@ struct ViewportResources {
 pub(crate) fn init(render_state: &egui_wgpu::RenderState) {
     let device = &render_state.device;
 
-    let flat = build_vertices(&vec![0.0_f32; MESH_RES * MESH_RES], DEFAULT_VERTICAL_SCALE);
+    // Flat starter mesh (all heights zero, so the vertical scale is irrelevant here).
+    let flat = build_vertices(&vec![0.0_f32; MESH_RES * MESH_RES], 1.0);
     let indices = build_indices();
     let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("viewport-vertices"),

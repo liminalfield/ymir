@@ -136,7 +136,7 @@ mod tests {
     /// A distinct snapshot per `seed` (an empty graph differing only in world seed), so
     /// the tests can drive the history without building real graphs.
     fn snap(seed: u64) -> ProjectFile {
-        ProjectFile::capture(&Graph::new(), &Snarl::<Handle>::new(), seed, 1024.0)
+        ProjectFile::capture(&Graph::new(), &Snarl::<Handle>::new(), seed, 1024.0, 256.0)
     }
 
     /// A base snapshot with two nodes already positioned, so a "move" changes an existing
