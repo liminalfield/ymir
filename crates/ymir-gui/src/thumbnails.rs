@@ -262,9 +262,9 @@ fn evaluate_thumb_job(job: &Job, cache: &mut EvalCache) -> Vec<Shaded> {
             out.push(Shaded {
                 handle: t.handle,
                 key: t.key,
-                // Thumbnails always auto-range, so each node's shape is legible at a
-                // glance regardless of its amplitude.
-                image: height_image(field, HeightScale::Auto),
+                // Thumbnails always show the height layer, auto-ranged, so each node's shape
+                // is legible at a glance regardless of its amplitude.
+                image: height_image(field, ymir_core::layers::HEIGHT, HeightScale::Auto),
             });
         }
     }

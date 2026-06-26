@@ -116,6 +116,10 @@ pub(crate) struct PreviewEngine {
     /// Relief light direction (unit vector), steered by dragging over the relief
     /// image (#40).
     light: [f32; 3],
+    /// Which layer the preview displays. Usually `height`, but any layer the field carries
+    /// (a `water` depth, a selection `mask`, …) can be shown. Falls back to `height` when the
+    /// chosen layer is absent on the current field.
+    display_layer: String,
     /// The most recent evaluated field, kept so a mode toggle can re-render without
     /// re-evaluating the graph.
     last_field: Option<Field>,
@@ -124,9 +128,9 @@ pub(crate) struct PreviewEngine {
     last_histogram: Option<Vec<f32>>,
     histogram_target: Option<u64>,
     texture: Option<egui::TextureHandle>,
-    /// The (field hash, mode, scale, light bits) the current texture was built from; the
-    /// texture is rebuilt when any changes.
-    texture_key: Option<(u64, ShadeMode, HeightScale, [u32; 3])>,
+    /// The (field hash, layer, mode, scale, light bits) the current texture was built from;
+    /// the texture is rebuilt when any changes.
+    texture_key: Option<(u64, String, ShadeMode, HeightScale, [u32; 3])>,
 }
 
 impl PreviewEngine {
@@ -149,6 +153,7 @@ impl PreviewEngine {
             mode: ShadeMode::Height,
             scale: HeightScale::Auto,
             light: DEFAULT_LIGHT,
+            display_layer: layers::HEIGHT.to_string(),
             last_field: None,
             last_histogram: None,
             histogram_target: None,
@@ -182,6 +187,20 @@ impl PreviewEngine {
     /// changed.
     pub(crate) fn set_scale(&mut self, scale: HeightScale) {
         self.scale = scale;
+    }
+
+    /// The layer the preview is set to display (may be absent on the current field, in which
+    /// case the image falls back to height).
+    pub(crate) fn display_layer(&self) -> &str {
+        &self.display_layer
+    }
+
+    /// Sets the layer to display; the texture is rebuilt on the next `poll` if it changed.
+    pub(crate) fn set_display_layer(&mut self, layer: &str) {
+        if self.display_layer != layer {
+            self.display_layer.clear();
+            self.display_layer.push_str(layer);
+        }
     }
 
     /// The input distribution (normalized bin heights over `[0, 1]`) of `node`, for the
@@ -307,16 +326,23 @@ impl PreviewEngine {
         let Some(field) = self.last_field.as_ref() else {
             return;
         };
+        // Show the chosen layer, falling back to height when it is absent on this field.
+        let layer = if field.layer(&self.display_layer).is_some() {
+            self.display_layer.as_str()
+        } else {
+            layers::HEIGHT
+        };
         let key = (
             field.content_hash().to_u64(),
+            layer.to_string(),
             self.mode,
             self.scale,
             self.light.map(f32::to_bits),
         );
-        if self.texture_key == Some(key) {
+        if self.texture_key.as_ref() == Some(&key) {
             return;
         }
-        let image = field_to_image(field, self.mode, self.scale, self.light);
+        let image = field_to_image(field, layer, self.mode, self.scale, self.light);
         self.texture = Some(ctx.load_texture("preview", image, egui::TextureOptions::LINEAR));
         self.texture_key = Some(key);
     }

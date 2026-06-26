@@ -1686,6 +1686,33 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
         });
     });
 
+    // Layer picker: when the previewed field carries more than just height (a `water` depth,
+    // a selection `mask`, …), choose which layer to view. Hidden for a plain heightfield, so
+    // it appears exactly when there is a choice to make.
+    let layer_names: Vec<String> = state
+        .preview
+        .field()
+        .map(|f| f.layers().map(|(name, _)| name.to_string()).collect())
+        .unwrap_or_default();
+    if layer_names.len() > 1 {
+        // Reset to height if the prior choice is absent from this field.
+        let mut selected = state.preview.display_layer().to_string();
+        if !layer_names.iter().any(|n| n == &selected) {
+            selected = ymir_core::layers::HEIGHT.to_string();
+        }
+        ui.horizontal(|ui| {
+            ui.label("Layer");
+            egui::ComboBox::from_id_salt("preview-layer")
+                .selected_text(selected.clone())
+                .show_ui(ui, |ui| {
+                    for name in &layer_names {
+                        ui.selectable_value(&mut selected, name.clone(), name);
+                    }
+                });
+        });
+        state.preview.set_display_layer(&selected);
+    }
+
     // Row 2: shading toggle (relief makes subtle height changes legible, #40); in relief the
     // light dial, in height the Auto/Fixed scale toggle. These are persistent display
     // settings, so they show even with no node selected.

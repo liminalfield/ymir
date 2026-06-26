@@ -1,12 +1,12 @@
 //! Field → image shading, shared by the 2D preview pane and the node thumbnails.
 //!
-//! Pure pixel work: every function here produces an [`egui::ColorImage`] from a
-//! [`Field`]'s `height` layer with no GPU context, so it runs on a worker thread the
-//! same way for the preview and for thumbnails. It renders a *layer*, never asking
-//! "which node is this?", so the additive-node invariant holds.
+//! Pure pixel work: every function here produces an [`egui::ColorImage`] from a named
+//! [`Field`] layer (usually `height`, but any layer the field carries) with no GPU context,
+//! so it runs on a worker thread the same way for the preview and for thumbnails. It renders
+//! a *layer*, never asking "which node is this?", so the additive-node invariant holds.
 
 use eframe::egui;
-use ymir_core::{Field, layers};
+use ymir_core::Field;
 
 /// How the height layer is shaded.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -57,25 +57,27 @@ fn relief_shade(gx: f32, gy: f32, light: [f32; 3]) -> f32 {
     RELIEF_AMBIENT + (1.0 - RELIEF_AMBIENT) * lambert
 }
 
-/// Builds an image from a field's `height` layer, in the chosen mode and (for Height)
-/// scale.
+/// Builds an image from the named layer of `field`, in the chosen mode and (for Height)
+/// scale. The layer is usually `height`, but any layer the field carries can be shown
+/// (a `water` depth, a selection `mask`, …) so intermediates are inspectable.
 pub(crate) fn field_to_image(
     field: &Field,
+    layer: &str,
     mode: ShadeMode,
     scale: HeightScale,
     light: [f32; 3],
 ) -> egui::ColorImage {
     match mode {
-        ShadeMode::Height => height_image(field, scale),
-        ShadeMode::Relief => relief_image(field, light),
+        ShadeMode::Height => height_image(field, layer, scale),
+        ShadeMode::Relief => relief_image(field, layer, light),
     }
 }
 
-/// Height mapped to grayscale over the chosen [`HeightScale`]: the field's actual
+/// The named layer mapped to grayscale over the chosen [`HeightScale`]: the layer's actual
 /// `[min, max]` (Auto), or a fixed `[0, 1]` that shows true amplitude and clips
-/// out-of-range (Fixed). A flat field, or any zero-width range, maps to a single tone.
-pub(crate) fn height_image(field: &Field, scale: HeightScale) -> egui::ColorImage {
-    let layer = field.layer_or(layers::HEIGHT, 0.0);
+/// out-of-range (Fixed). A flat layer, or any zero-width range, maps to a single tone.
+pub(crate) fn height_image(field: &Field, layer: &str, scale: HeightScale) -> egui::ColorImage {
+    let layer = field.layer_or(layer, 0.0);
     let (min, max) = match scale {
         HeightScale::Auto => layer.value_range(),
         HeightScale::Fixed => (0.0, 1.0),
@@ -96,11 +98,11 @@ pub(crate) fn height_image(field: &Field, scale: HeightScale) -> egui::ColorImag
     egui::ColorImage::from_rgba_unmultiplied([layer.width(), layer.height()], &rgba)
 }
 
-/// Relief (hillshade) image: each cell shaded by its surface normal. The gradient is
-/// per unit region (central difference scaled by the cell count), so the shading
-/// reads the same at any preview resolution.
-fn relief_image(field: &Field, light: [f32; 3]) -> egui::ColorImage {
-    let layer = field.layer_or(layers::HEIGHT, 0.0);
+/// Relief (hillshade) image: each cell of the named layer shaded by its surface normal.
+/// The gradient is per unit region (central difference scaled by the cell count), so the
+/// shading reads the same at any preview resolution.
+fn relief_image(field: &Field, layer: &str, light: [f32; 3]) -> egui::ColorImage {
+    let layer = field.layer_or(layer, 0.0);
     let (w, h) = (layer.width(), layer.height());
     let at = |x: usize, y: usize| layer.get(x, y).unwrap_or(0.0);
     let mut rgba = Vec::with_capacity(w * h * 4);
@@ -124,7 +126,7 @@ fn relief_image(field: &Field, light: [f32; 3]) -> egui::ColorImage {
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use ymir_core::{Layer, Region};
+    use ymir_core::{Layer, Region, layers};
 
     fn height_field(values: &[f32]) -> Field {
         let n = values.len();
@@ -138,7 +140,11 @@ mod tests {
     fn auto_ranges_to_the_field_extent() {
         // A compressed range [0.4, 0.6] is stretched across the display: the min reads
         // black and the max white, so the shape is visible rather than near-uniform gray.
-        let img = height_image(&height_field(&[0.4, 0.6]), HeightScale::Auto);
+        let img = height_image(
+            &height_field(&[0.4, 0.6]),
+            layers::HEIGHT,
+            HeightScale::Auto,
+        );
         assert_eq!(img.pixels[0].r(), 0);
         assert_eq!(img.pixels[1].r(), 255);
     }
@@ -147,7 +153,11 @@ mod tests {
     fn auto_shows_out_of_range_without_clipping() {
         // Values below 0 and above 1 are not clamped: the extremes anchor the range and
         // the middle stays distinct.
-        let img = height_image(&height_field(&[-0.5, 0.5, 2.0]), HeightScale::Auto);
+        let img = height_image(
+            &height_field(&[-0.5, 0.5, 2.0]),
+            layers::HEIGHT,
+            HeightScale::Auto,
+        );
         assert_eq!(img.pixels[0].r(), 0); // -0.5 (min)
         assert_eq!(img.pixels[2].r(), 255); // 2.0 (max)
         let mid = img.pixels[1].r();
@@ -159,7 +169,11 @@ mod tests {
         // Fixed maps [0, 1] to black/white regardless of the field: a field that only
         // reaches 0.5 reads mid-grey (true amplitude, not stretched to white), and a
         // value past 1 clips to white.
-        let img = height_image(&height_field(&[0.0, 0.5, 2.0]), HeightScale::Fixed);
+        let img = height_image(
+            &height_field(&[0.0, 0.5, 2.0]),
+            layers::HEIGHT,
+            HeightScale::Fixed,
+        );
         assert_eq!(img.pixels[0].r(), 0); // 0.0
         assert_eq!(img.pixels[1].r(), 128); // 0.5 stays mid-grey, not stretched
         assert_eq!(img.pixels[2].r(), 255); // 2.0 clips
@@ -167,7 +181,11 @@ mod tests {
 
     #[test]
     fn a_flat_field_is_a_single_tone() {
-        let img = height_image(&height_field(&[0.7, 0.7, 0.7]), HeightScale::Auto);
+        let img = height_image(
+            &height_field(&[0.7, 0.7, 0.7]),
+            layers::HEIGHT,
+            HeightScale::Auto,
+        );
         assert_eq!(img.pixels[0], img.pixels[1]);
         assert_eq!(img.pixels[1], img.pixels[2]);
     }
