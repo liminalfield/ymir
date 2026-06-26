@@ -8,7 +8,7 @@
 //! close it into a solid block, so orbiting underneath shows a plinth, not a hollow shell.
 //! Only the vertex buffer is re-uploaded, and only when the field or those settings change;
 //! the grid topology is fixed. An orbit camera (Houdini-style Alt + mouse) frames the
-//! terrain. Lighting is still fixed.
+//! terrain, and a directional sun (azimuth/elevation, intensity, ambient) lights it.
 
 use eframe::egui;
 use eframe::egui_wgpu::{self, wgpu};
@@ -40,13 +40,16 @@ struct Vertex {
     kind: f32,
 }
 
-/// Per-frame shader uniforms: the combined model-view-projection matrix and the light
-/// direction (a `vec4` for std140 alignment; `w` unused).
+/// Per-frame shader uniforms: the combined model-view-projection matrix, the light
+/// direction (xyz = the direction the light travels; `w` unused), and the light response
+/// (x = diffuse intensity, y = ambient; the rest unused). Each is a `vec4` for std140
+/// alignment.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms {
     mvp: [[f32; 4]; 4],
     light_dir: [f32; 4],
+    light: [f32; 4],
 }
 
 /// GPU resources for the viewport, created once at startup and stored in egui_wgpu's
@@ -175,6 +178,10 @@ pub(crate) fn init(render_state: &egui_wgpu::RenderState) {
 struct ViewportCallback {
     /// The combined view-projection matrix for this frame, from the orbit camera.
     view_proj: [[f32; 4]; 4],
+    /// Direction the light travels (xyz), from the sun azimuth/elevation.
+    light_dir: [f32; 4],
+    /// Light response: x = diffuse intensity, y = ambient.
+    light: [f32; 4],
     /// New vertices to upload this frame (the field changed), or `None` to keep the current
     /// mesh.
     mesh: Option<Vec<Vertex>>,
@@ -190,10 +197,10 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
         if let Some(res) = resources.get::<ViewportResources>() {
-            let light_dir = Vec3::new(-0.4, -1.0, -0.55).normalize();
             let uniforms = Uniforms {
                 mvp: self.view_proj,
-                light_dir: [light_dir.x, light_dir.y, light_dir.z, 0.0],
+                light_dir: self.light_dir,
+                light: self.light,
             };
             queue.write_buffer(&res.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
@@ -233,6 +240,34 @@ pub(crate) struct ViewSettings {
     pub vertical_scale: f32,
 }
 
+/// The viewport's directional sun: where it sits (azimuth around the compass, elevation above
+/// the horizon) and how the surface responds (diffuse intensity plus a flat ambient fill).
+/// Raking the sun low across the terrain is the readiest way to read its form. Affects only
+/// the per-frame uniform, never the mesh, so changing it never re-meshes.
+#[derive(Clone, Copy)]
+pub(crate) struct Lighting {
+    /// Compass direction the light comes from, in degrees (0 = +z, increasing toward +x).
+    pub azimuth_deg: f32,
+    /// Height of the sun above the horizon, in degrees (0 = grazing, 90 = straight down).
+    pub elevation_deg: f32,
+    /// Diffuse (Lambert) weight.
+    pub intensity: f32,
+    /// Ambient fill, lifting the unlit side off black.
+    pub ambient: f32,
+}
+
+impl Lighting {
+    /// The direction the light travels (the negated direction to the sun), for the shader.
+    fn travel_dir(self) -> [f32; 4] {
+        let (sa, ca) = self.azimuth_deg.to_radians().sin_cos();
+        let (se, ce) = self.elevation_deg.to_radians().sin_cos();
+        // Direction toward the sun on a Y-up world; the light travels the opposite way.
+        let to_sun = Vec3::new(ce * sa, se, ce * ca);
+        let travel = -to_sun;
+        [travel.x, travel.y, travel.z, 0.0]
+    }
+}
+
 /// Identifies the mesh currently in the vertex buffer: the field's content plus the settings
 /// that shape it. The mesh is rebuilt only when this changes, so a still field and unchanged
 /// settings upload nothing.
@@ -251,6 +286,7 @@ pub(crate) fn show(
     camera: &mut OrbitCamera,
     field: Option<&Field>,
     settings: ViewSettings,
+    lighting: Lighting,
     meshed: &mut Option<MeshKey>,
 ) {
     let (rect, response) =
@@ -274,8 +310,15 @@ pub(crate) fn show(
     });
 
     let view_proj = camera.view_proj(aspect).to_cols_array_2d();
-    let callback =
-        egui_wgpu::Callback::new_paint_callback(rect, ViewportCallback { view_proj, mesh });
+    let callback = egui_wgpu::Callback::new_paint_callback(
+        rect,
+        ViewportCallback {
+            view_proj,
+            light_dir: lighting.travel_dir(),
+            light: [lighting.intensity, lighting.ambient, 0.0, 0.0],
+            mesh,
+        },
+    );
     ui.painter().add(callback);
 }
 
@@ -582,6 +625,7 @@ const SHADER: &str = r"
 struct Uniforms {
     mvp: mat4x4<f32>,
     light_dir: vec4<f32>,
+    light: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 
@@ -609,7 +653,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let n = normalize(in.normal);
     let l = normalize(-u.light_dir.xyz);
     let diffuse = max(dot(n, l), 0.0);
-    let shade = 0.25 + 0.75 * diffuse;
+    let shade = u.light.y + u.light.x * diffuse;
     // The terrain top is neutral grey; the base (sides and bottom) reads as an earthy
     // cross-section. kind is constant per triangle, so this is a hard switch, not a gradient.
     let terrain = vec3<f32>(0.55, 0.56, 0.60);

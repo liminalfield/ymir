@@ -289,6 +289,9 @@ struct AppState {
     /// (`world_height / world_extent`). `1.0` shows real-world proportions; higher values
     /// exaggerate relief to inspect subtle terrain. A non-persisted view aid.
     viewport_exaggeration: f32,
+    /// The 3D viewport's sun direction and response (azimuth/elevation degrees, diffuse
+    /// intensity, ambient fill). A non-persisted view aid; raking the sun low reads form.
+    viewport_lighting: viewport::Lighting,
     /// A transient status line shown in the menu bar (e.g. the result of a save or
     /// open). Replaced by the next action.
     status: Option<String>,
@@ -393,6 +396,13 @@ impl AppState {
             viewport_camera: viewport::OrbitCamera::default(),
             viewport_scale: shade::HeightScale::Fixed,
             viewport_exaggeration: 1.0,
+            // Reproduces the previous fixed key light: high from the front-right.
+            viewport_lighting: viewport::Lighting {
+                azimuth_deg: 35.0,
+                elevation_deg: 55.0,
+                intensity: 0.75,
+                ambient: 0.25,
+            },
             status: None,
             history,
             saved_snapshot: initial,
@@ -2583,6 +2593,7 @@ fn viewport_3d_pane(ui: &mut egui::Ui, state: &mut AppState) {
         &mut state.viewport_camera,
         state.preview.field(),
         settings,
+        state.viewport_lighting,
         &mut state.viewport_mesh,
     );
 
@@ -2590,6 +2601,7 @@ fn viewport_3d_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // design calls for a vertical toolbar down the left edge, not yet built.
     let mut scale = state.viewport_scale;
     let mut exaggeration = state.viewport_exaggeration;
+    let mut light = state.viewport_lighting;
     egui::Area::new(ui.id().with("viewport-hud"))
         .order(egui::Order::Foreground)
         .fixed_pos(rect.left_top() + egui::vec2(8.0, 8.0))
@@ -2614,10 +2626,45 @@ fn viewport_3d_pane(ui: &mut egui::Ui, state: &mut AppState) {
                             .custom_formatter(|v, _| format!("{v:.2}x")),
                     );
                 });
+                // Lighting tucks under a collapsing header so the HUD stays compact.
+                ui.collapsing("Light", |ui| {
+                    egui::Grid::new("viewport-light")
+                        .num_columns(2)
+                        .show(ui, |ui| {
+                            ui.label("Azimuth")
+                                .on_hover_text("Compass direction the sun comes from");
+                            ui.add(
+                                egui::Slider::new(&mut light.azimuth_deg, 0.0..=360.0)
+                                    .fixed_decimals(0)
+                                    .suffix("°"),
+                            );
+                            ui.end_row();
+                            ui.label("Elevation")
+                                .on_hover_text("Sun height above the horizon; low rakes the form");
+                            ui.add(
+                                egui::Slider::new(&mut light.elevation_deg, 0.0..=90.0)
+                                    .fixed_decimals(0)
+                                    .suffix("°"),
+                            );
+                            ui.end_row();
+                            ui.label("Intensity");
+                            ui.add(
+                                egui::Slider::new(&mut light.intensity, 0.0..=2.0)
+                                    .fixed_decimals(2),
+                            );
+                            ui.end_row();
+                            ui.label("Ambient");
+                            ui.add(
+                                egui::Slider::new(&mut light.ambient, 0.0..=1.0).fixed_decimals(2),
+                            );
+                            ui.end_row();
+                        });
+                });
             });
         });
     state.viewport_scale = scale;
     state.viewport_exaggeration = exaggeration;
+    state.viewport_lighting = light;
 }
 inventory::submit! { PaneKind { id: "viewport-3d", draw: viewport_3d_pane } }
 
