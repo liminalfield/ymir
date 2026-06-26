@@ -665,6 +665,55 @@ impl AppState {
         self.preview_pin
             .filter(|&h| self.is_previewable(h))
             .or_else(|| self.primary.filter(|&h| self.is_previewable(h)))
+            .or_else(|| self.preview_sink())
+    }
+
+    /// The graph's natural "result" node: a previewable node whose output feeds nothing else
+    /// (a sink). With several such sinks, the last-added one (highest stable id) wins,
+    /// matching "the last node in the graph". `None` for a graph with no previewable sink (an
+    /// empty graph, or one whose only sinks are endpoints). Used as the preview target when
+    /// nothing is pinned or selected, so a freshly opened or launched graph shows its result
+    /// instead of a blank preview and a flat 3D viewport.
+    fn preview_sink(&self) -> Option<Handle> {
+        // A node whose output is read by some input port is consumed, so it is not a sink.
+        let mut consumed: HashSet<NodeId> = HashSet::new();
+        for (_, &handle) in self.snarl.node_ids() {
+            let Some(id) = self.graph.node_id_of(handle) else {
+                continue;
+            };
+            let Some(spec) = self.graph.spec(id) else {
+                continue;
+            };
+            for port in 0..spec.inputs.len() {
+                if let Some((source, _)) = self.graph.input_source(id, port) {
+                    consumed.insert(source);
+                }
+            }
+        }
+        self.snarl
+            .node_ids()
+            .filter_map(|(_, &handle)| {
+                let id = self.graph.node_id_of(handle)?;
+                (self.is_previewable(handle) && !consumed.contains(&id)).then_some(handle)
+            })
+            .max()
+    }
+
+    /// Evaluates the current preview target once per frame, regardless of which pane or tab is
+    /// visible. The 3D viewport meshes the preview's output, so without this the viewport froze
+    /// whenever the 2D preview pane was hidden, most visibly when switching to the World tab to
+    /// change world settings: evaluation used to run only inside that pane. A no-op when no
+    /// node is previewable.
+    fn drive_preview(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.preview_target().and_then(|h| self.graph.node_id_of(h)) else {
+            return;
+        };
+        let res = self.preview_res;
+        let request = EvalRequest::new(res, res, Region::UNIT, self.seed)
+            .with_world_extent(self.world_extent);
+        let now = ctx.input(|i| i.time);
+        self.preview.sync(&self.graph, id, request, now);
+        self.preview.poll(ctx);
     }
 }
 
@@ -1656,18 +1705,11 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
     state.preview.set_mode(mode);
     state.preview.set_scale(scale);
 
-    // The image: the node's output (evaluated off-thread), or a black placeholder when
-    // nothing is selected.
+    // The image: the previewed node's output (evaluated each frame by `drive_preview`,
+    // independent of this pane being visible), or a black placeholder when there is no
+    // previewable target.
     match id {
-        Some(id) => {
-            let res = state.preview_res;
-            let request = EvalRequest::new(res, res, Region::UNIT, state.seed)
-                .with_world_extent(state.world_extent);
-            let now = ui.input(|i| i.time);
-            state.preview.sync(&state.graph, id, request, now);
-            state.preview.poll(ui.ctx());
-            preview_box(ui, |ui| state.preview.show(ui));
-        }
+        Some(_) => preview_box(ui, |ui| state.preview.show(ui)),
         None => preview_box(ui, preview_black_image),
     }
 }
@@ -2861,6 +2903,9 @@ impl eframe::App for YmirApp {
         // Ctrl+Z keeps editing text there instead of undoing the graph.
         handle_shortcuts(ui.ctx(), &mut self.state);
         self.sync_window_title(ui.ctx());
+        // Evaluate the preview before the panes draw, so the 3D viewport and 2D preview both
+        // render this frame's result regardless of which pane or tab is visible.
+        self.state.drive_preview(ui.ctx());
         mount(&default_layout(), ui, &mut self.state);
         // The popped-out curve editor floats over the panes when open (#70-style).
         curve_popout_window(ui.ctx(), &mut self.state);
@@ -3118,10 +3163,14 @@ mod tests {
             canvas::add_node(&mut state.graph, &mut state.snarl, "generator.fbm", pos).unwrap();
         let out_id =
             canvas::add_node(&mut state.graph, &mut state.snarl, "endpoint.export", pos).unwrap();
+        // Wire the generator into the endpoint so the generator is consumed (not a sink) and
+        // the endpoint is not previewable: the graph then has no previewable sink, isolating
+        // this test to the pin/selection precedence the sink fallback is checked separately.
+        state.graph.connect(gen_id, 0, out_id, 0).unwrap();
         let generator = state.graph.stable_id(gen_id).unwrap();
         let endpoint = state.graph.stable_id(out_id).unwrap();
 
-        // Nothing selected or pinned: no target.
+        // Nothing selected or pinned, and no previewable sink: no target.
         assert_eq!(state.preview_target(), None);
 
         // A previewable selection is the target; an endpoint (no output) is not.
@@ -3141,6 +3190,33 @@ mod tests {
         state.select_only(generator);
         assert_eq!(state.preview_target(), Some(generator));
         state.preview_pin = Some(99_999);
+        assert_eq!(state.preview_target(), Some(generator));
+    }
+
+    #[test]
+    fn preview_target_falls_back_to_the_sink_when_nothing_is_selected() {
+        let mut state = AppState::new();
+        // A clean two-node chain so the sink is unambiguous: generator -> modifier.
+        state.graph = Graph::new();
+        state.snarl = Snarl::new();
+        let pos = egui::Pos2::ZERO;
+        let gen_id =
+            canvas::add_node(&mut state.graph, &mut state.snarl, "generator.fbm", pos).unwrap();
+        let mod_id =
+            canvas::add_node(&mut state.graph, &mut state.snarl, "modifier.invert", pos).unwrap();
+        state.graph.connect(gen_id, 0, mod_id, 0).unwrap();
+        let generator = state.graph.stable_id(gen_id).unwrap();
+        let modifier = state.graph.stable_id(mod_id).unwrap();
+
+        // Nothing pinned or selected: the previewable sink (the downstream modifier, which
+        // feeds nothing) is the target, so the graph previews its result on its own.
+        assert_eq!(state.preview_target(), Some(modifier));
+
+        // A selection and a pin still take precedence over the sink fallback.
+        state.select_only(generator);
+        assert_eq!(state.preview_target(), Some(generator));
+        state.preview_pin = Some(generator);
+        state.clear_selection();
         assert_eq!(state.preview_target(), Some(generator));
     }
 
