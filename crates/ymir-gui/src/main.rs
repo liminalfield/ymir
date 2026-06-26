@@ -272,6 +272,9 @@ struct AppState {
     /// `None` until the project is first saved or opened, when `Save` falls back to
     /// `Save As`.
     project_path: Option<std::path::PathBuf>,
+    /// Recently opened/saved projects, most recent first, capped at [`RECENT_MAX`]. Shown at
+    /// the bottom of the File menu and persisted across sessions. Loaded by the app shell.
+    recent: Vec<std::path::PathBuf>,
     /// A one-shot request to frame the canvas to the whole graph on the next render,
     /// set after opening a project so its layout comes into view.
     frame_to_graph_request: bool,
@@ -315,10 +318,12 @@ struct AppState {
 
 /// An action that would discard unsaved changes, deferred behind the unsaved-changes
 /// prompt until the user resolves it (#83).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 enum PendingAction {
     /// Open another project (prompts for a file once resolved).
     Open,
+    /// Open a specific project by path (a recent-projects entry).
+    OpenPath(std::path::PathBuf),
     /// Start a new, empty canvas.
     New,
     /// Open the default startup graph (the saved default, or the built-in starter).
@@ -391,6 +396,7 @@ impl AppState {
             world_extent: DEFAULT_WORLD_EXTENT,
             world_height: project_file::DEFAULT_WORLD_HEIGHT,
             project_path: None,
+            recent: Vec::new(),
             frame_to_graph_request: false,
             viewport_mesh: None,
             viewport_camera: viewport::OrbitCamera::default(),
@@ -967,6 +973,27 @@ fn menu_bar_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 save_as_default(state);
                 ui.close();
             }
+            // Recent projects (most recent first), each opening through the unsaved-changes
+            // guard. Shown only when there are any; the file name labels the entry, the full
+            // path is on hover.
+            if !state.recent.is_empty() {
+                ui.separator();
+                ui.weak("Open Recent");
+                for path in state.recent.clone() {
+                    let label = path.file_name().map_or_else(
+                        || path.to_string_lossy().into_owned(),
+                        |n| n.to_string_lossy().into_owned(),
+                    );
+                    if ui
+                        .button(label)
+                        .on_hover_text(path.display().to_string())
+                        .clicked()
+                    {
+                        request_open_path(state, path);
+                        ui.close();
+                    }
+                }
+            }
             ui.separator();
             if ui.button("Exit").clicked() {
                 request_quit(ui.ctx(), state);
@@ -1023,6 +1050,16 @@ fn request_open(state: &mut AppState) {
     }
 }
 
+/// Begins opening a specific project by path (a recent-projects entry), guarded by the
+/// unsaved-changes prompt.
+fn request_open_path(state: &mut AppState, path: std::path::PathBuf) {
+    if state.modified {
+        state.pending_action = Some(PendingAction::OpenPath(path));
+    } else {
+        open_project_path(state, path);
+    }
+}
+
 /// Begins a fresh project (the starter graph), guarded by the unsaved-changes prompt.
 fn request_new(state: &mut AppState) {
     if state.modified {
@@ -1066,7 +1103,7 @@ enum UnsavedChoice {
 /// out, or Cancel and stay. A failed or cancelled save aborts the action so no changes
 /// are lost. A no-op when nothing is pending.
 fn unsaved_changes_dialog(ctx: &egui::Context, state: &mut AppState) {
-    let Some(action) = state.pending_action else {
+    let Some(action) = state.pending_action.clone() else {
         return;
     };
     let mut choice = None;
@@ -1111,6 +1148,7 @@ fn unsaved_changes_dialog(ctx: &egui::Context, state: &mut AppState) {
     }
     match action {
         PendingAction::Open => open_project(state),
+        PendingAction::OpenPath(path) => open_project_path(state, path),
         PendingAction::New => state.new_project(),
         PendingAction::OpenDefault => state.open_default(),
         PendingAction::Quit => {
@@ -1131,9 +1169,24 @@ fn open_project(state: &mut AppState) {
     else {
         return;
     };
+    open_project_path(state, path);
+}
+
+/// Opens a known project path (the Open dialog's pick, or a recent-projects entry). On
+/// success it becomes the most recent project; a failed read leaves the current project
+/// untouched, reports why, and drops the path from the recent list so a stale entry clears
+/// itself.
+fn open_project_path(state: &mut AppState, path: std::path::PathBuf) {
     match read_project(&path) {
-        Ok(restored) => state.install_project(restored, path),
-        Err(err) => state.status = Some(format!("Could not open {}: {err}", path.display())),
+        Ok(restored) => {
+            state.install_project(restored, path.clone());
+            record_recent(state, path);
+        }
+        Err(err) => {
+            state.status = Some(format!("Could not open {}: {err}", path.display()));
+            state.recent.retain(|p| p != &path);
+            save_recent(state);
+        }
     }
 }
 
@@ -1151,8 +1204,9 @@ fn save_project(state: &mut AppState, path: Option<std::path::PathBuf>) -> bool 
     match write_project(&path, &file) {
         Ok(()) => {
             state.status = Some("Saved".to_string());
-            state.project_path = Some(path);
+            state.project_path = Some(path.clone());
             state.mark_clean();
+            record_recent(state, path);
             true
         }
         Err(err) => {
@@ -1194,15 +1248,27 @@ fn default_project_path() -> Option<std::path::PathBuf> {
     config_path(
         std::env::var_os("XDG_CONFIG_HOME"),
         std::env::var_os("HOME"),
+        "default.ymir",
     )
 }
 
-/// Resolves the default-graph path from the XDG config base, given the
-/// `XDG_CONFIG_HOME` and `HOME` values. Pure (the env read lives in the caller), so
-/// the precedence is unit-tested without touching the process environment.
+/// The path to the recent-projects list: `…/ymir/recent.json` under the XDG config base,
+/// or `None` when no config directory can be resolved.
+fn recent_projects_path() -> Option<std::path::PathBuf> {
+    config_path(
+        std::env::var_os("XDG_CONFIG_HOME"),
+        std::env::var_os("HOME"),
+        "recent.json",
+    )
+}
+
+/// Resolves a config file path from the XDG config base, given the `XDG_CONFIG_HOME`
+/// and `HOME` values and a `filename`. Pure (the env read lives in the caller), so the
+/// precedence is unit-tested without touching the process environment.
 fn config_path(
     xdg: Option<std::ffi::OsString>,
     home: Option<std::ffi::OsString>,
+    filename: &str,
 ) -> Option<std::path::PathBuf> {
     let base = xdg
         .filter(|s| !s.is_empty())
@@ -1211,7 +1277,72 @@ fn config_path(
             home.filter(|s| !s.is_empty())
                 .map(|h| std::path::PathBuf::from(h).join(".config"))
         })?;
-    Some(base.join("ymir").join("default.ymir"))
+    Some(base.join("ymir").join(filename))
+}
+
+/// How many recent projects to remember.
+const RECENT_MAX: usize = 5;
+
+/// The recent-projects list, persisted as JSON next to the default graph. A small wrapper so
+/// the on-disk shape can evolve without changing the bare list type.
+#[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+struct RecentProjects {
+    /// Project paths, most recent first.
+    paths: Vec<std::path::PathBuf>,
+}
+
+/// Moves `path` to the front of the recent list, removing any earlier occurrence and
+/// trimming to [`RECENT_MAX`]. Pure, so the ordering and cap are unit-tested directly.
+fn push_recent(list: &mut Vec<std::path::PathBuf>, path: std::path::PathBuf) {
+    list.retain(|p| p != &path);
+    list.insert(0, path);
+    list.truncate(RECENT_MAX);
+}
+
+/// Loads the recent-projects list, or an empty list when it is absent or unreadable (a
+/// missing or stale list is the normal first-run case, not an error).
+fn load_recent() -> Vec<std::path::PathBuf> {
+    let Some(path) = recent_projects_path() else {
+        return Vec::new();
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return Vec::new();
+    };
+    serde_json::from_slice::<RecentProjects>(&bytes)
+        .map(|r| r.paths)
+        .unwrap_or_default()
+}
+
+/// Records `path` as the most recent project: moves it to the front of `state.recent` and
+/// persists the list.
+fn record_recent(state: &mut AppState, path: std::path::PathBuf) {
+    push_recent(&mut state.recent, path);
+    save_recent(state);
+}
+
+/// Persists `state.recent` to the config file. A failed write is reported on the status line
+/// rather than silently dropped, but never blocks the open/save that triggered it.
+fn save_recent(state: &mut AppState) {
+    let Some(config) = recent_projects_path() else {
+        return;
+    };
+    if let Some(parent) = config.parent()
+        && let Err(err) = std::fs::create_dir_all(parent)
+    {
+        state.status = Some(format!("Could not save recent list: {err}"));
+        return;
+    }
+    let recent = RecentProjects {
+        paths: state.recent.clone(),
+    };
+    match serde_json::to_string_pretty(&recent) {
+        Ok(json) => {
+            if let Err(err) = std::fs::write(&config, json) {
+                state.status = Some(format!("Could not save recent list: {err}"));
+            }
+        }
+        Err(err) => state.status = Some(format!("Could not serialize recent list: {err}")),
+    }
 }
 
 /// Saves the current session as the user's default startup graph (#76), at the
@@ -2852,6 +2983,9 @@ impl YmirApp {
         // process environment or the filesystem.
         let mut state = AppState::new();
         apply_default(&mut state);
+        // Load the recent-projects list from config (empty on first run), here in the app
+        // shell so the test-constructed state never touches the filesystem.
+        state.recent = load_recent();
         // Set up the 3D viewport's wgpu pipeline once, now that the wgpu device exists.
         if let Some(render_state) = cc.wgpu_render_state.as_ref() {
             viewport::init(render_state);
@@ -3263,6 +3397,28 @@ mod tests {
     }
 
     #[test]
+    fn push_recent_dedupes_orders_and_caps() {
+        use std::path::PathBuf;
+        let mut list: Vec<PathBuf> = Vec::new();
+
+        // Most recent goes to the front.
+        push_recent(&mut list, PathBuf::from("a.ymir"));
+        push_recent(&mut list, PathBuf::from("b.ymir"));
+        assert_eq!(list, [PathBuf::from("b.ymir"), PathBuf::from("a.ymir")]);
+
+        // Re-opening an existing entry moves it to the front, without duplicating.
+        push_recent(&mut list, PathBuf::from("a.ymir"));
+        assert_eq!(list, [PathBuf::from("a.ymir"), PathBuf::from("b.ymir")]);
+
+        // The list never grows past RECENT_MAX; the oldest drops off.
+        for i in 0..RECENT_MAX + 3 {
+            push_recent(&mut list, PathBuf::from(format!("p{i}.ymir")));
+        }
+        assert_eq!(list.len(), RECENT_MAX);
+        assert_eq!(list[0], PathBuf::from(format!("p{}.ymir", RECENT_MAX + 2)));
+    }
+
+    #[test]
     fn preview_target_falls_back_to_the_sink_when_nothing_is_selected() {
         let mut state = AppState::new();
         // A clean two-node chain so the sink is unambiguous: generator -> modifier.
@@ -3342,24 +3498,29 @@ mod tests {
         assert_eq!(
             config_path(
                 Some(OsString::from("/xdg")),
-                Some(OsString::from("/home/u"))
+                Some(OsString::from("/home/u")),
+                "default.ymir"
             ),
             Some(PathBuf::from("/xdg/ymir/default.ymir"))
         );
         // An empty XDG value falls through to HOME/.config.
         assert_eq!(
-            config_path(Some(OsString::new()), Some(OsString::from("/home/u"))),
+            config_path(
+                Some(OsString::new()),
+                Some(OsString::from("/home/u")),
+                "default.ymir"
+            ),
             Some(PathBuf::from("/home/u/.config/ymir/default.ymir"))
         );
         // No XDG: HOME/.config.
         assert_eq!(
-            config_path(None, Some(OsString::from("/home/u"))),
+            config_path(None, Some(OsString::from("/home/u")), "default.ymir"),
             Some(PathBuf::from("/home/u/.config/ymir/default.ymir"))
         );
         // Neither set (or both empty): no path, so the feature is unavailable.
-        assert_eq!(config_path(None, None), None);
+        assert_eq!(config_path(None, None, "default.ymir"), None);
         assert_eq!(
-            config_path(Some(OsString::new()), Some(OsString::new())),
+            config_path(Some(OsString::new()), Some(OsString::new()), "default.ymir"),
             None
         );
     }
