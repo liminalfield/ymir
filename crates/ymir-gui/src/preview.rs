@@ -47,7 +47,9 @@ enum Outcome {
         /// The previewed node's `stable_id`, so the histogram can be matched to the node
         /// the inspector is editing.
         target: u64,
-        field: Field,
+        /// Every output of the previewed node, so the pane can switch which one it shows
+        /// without re-evaluating (the engine computes all outputs together).
+        fields: Vec<Field>,
         /// Normalized bin heights of the node's *input* distribution (the field feeding
         /// it), for the editor histogram. `None` for a generator (no input) or a failed
         /// input eval.
@@ -116,21 +118,21 @@ pub(crate) struct PreviewEngine {
     /// Relief light direction (unit vector), steered by dragging over the relief
     /// image (#40).
     light: [f32; 3],
-    /// Which layer the preview displays. Usually `height`, but any layer the field carries
-    /// (a `water` depth, a selection `mask`, …) can be shown. Falls back to `height` when the
-    /// chosen layer is absent on the current field.
-    display_layer: String,
-    /// The most recent evaluated field, kept so a mode toggle can re-render without
-    /// re-evaluating the graph.
-    last_field: Option<Field>,
+    /// Which output port the preview displays, by index. A multi-output node (e.g. hydraulic
+    /// erosion's heightfield/water/sediment) is viewed one output at a time; switching is
+    /// instant since all outputs are kept. Clamped to the available outputs.
+    display_output: usize,
+    /// The most recent evaluated node's outputs, kept so switching the shown output or the
+    /// shading mode re-renders without re-evaluating the graph. Empty when none.
+    last_outputs: Vec<Field>,
     /// The input histogram of the most recent result, and the node it is for. Surfaced
     /// to the curve/levels editors via [`input_histogram`](Self::input_histogram).
     last_histogram: Option<Vec<f32>>,
     histogram_target: Option<u64>,
     texture: Option<egui::TextureHandle>,
-    /// The (field hash, layer, mode, scale, light bits) the current texture was built from;
-    /// the texture is rebuilt when any changes.
-    texture_key: Option<(u64, String, ShadeMode, HeightScale, [u32; 3])>,
+    /// The (field hash, output index, mode, scale, light bits) the current texture was built
+    /// from; the texture is rebuilt when any changes.
+    texture_key: Option<(u64, usize, ShadeMode, HeightScale, [u32; 3])>,
 }
 
 impl PreviewEngine {
@@ -153,8 +155,8 @@ impl PreviewEngine {
             mode: ShadeMode::Height,
             scale: HeightScale::Auto,
             light: DEFAULT_LIGHT,
-            display_layer: layers::HEIGHT.to_string(),
-            last_field: None,
+            display_output: 0,
+            last_outputs: Vec::new(),
             last_histogram: None,
             histogram_target: None,
             texture: None,
@@ -162,10 +164,20 @@ impl PreviewEngine {
         }
     }
 
-    /// The most recently evaluated field, if any, for the 3D viewport to mesh from. Shares
-    /// the preview's already-evaluated output rather than evaluating again.
+    /// The currently shown output field, if any, for the 3D viewport to mesh from. Shares the
+    /// preview's already-evaluated output rather than evaluating again, and follows the output
+    /// picker so the viewport meshes whatever the 2D preview shows.
     pub(crate) fn field(&self) -> Option<&Field> {
-        self.last_field.as_ref()
+        self.shown_field()
+    }
+
+    /// The output the picker currently selects, clamped to what the node produced.
+    fn shown_field(&self) -> Option<&Field> {
+        if self.last_outputs.is_empty() {
+            return None;
+        }
+        let index = self.display_output.min(self.last_outputs.len() - 1);
+        self.last_outputs.get(index)
     }
 
     /// The current shading mode, for the pane's toggle.
@@ -189,18 +201,15 @@ impl PreviewEngine {
         self.scale = scale;
     }
 
-    /// The layer the preview is set to display (may be absent on the current field, in which
-    /// case the image falls back to height).
-    pub(crate) fn display_layer(&self) -> &str {
-        &self.display_layer
+    /// The output index the preview is set to display.
+    pub(crate) fn display_output(&self) -> usize {
+        self.display_output
     }
 
-    /// Sets the layer to display; the texture is rebuilt on the next `poll` if it changed.
-    pub(crate) fn set_display_layer(&mut self, layer: &str) {
-        if self.display_layer != layer {
-            self.display_layer.clear();
-            self.display_layer.push_str(layer);
-        }
+    /// Sets the output index to display; the texture is rebuilt on the next `poll` if it
+    /// changed.
+    pub(crate) fn set_display_output(&mut self, index: usize) {
+        self.display_output = index;
     }
 
     /// The input distribution (normalized bin heights over `[0, 1]`) of `node`, for the
@@ -297,21 +306,21 @@ impl PreviewEngine {
         self.shown = outcome.generation();
         match outcome {
             Outcome::Ready {
-                field,
+                fields,
                 target,
                 histogram,
                 ..
             } => {
                 self.eval_error = None;
-                // Keep the field; `refresh_texture` re-uploads only when the field or
-                // the shading mode changed.
-                self.last_field = Some(field);
+                // Keep all outputs; `refresh_texture` re-uploads only when the shown output
+                // or the shading mode changed.
+                self.last_outputs = fields;
                 self.last_histogram = histogram;
                 self.histogram_target = Some(target);
             }
             Outcome::Failed { message, .. } => {
                 self.eval_error = Some(message);
-                self.last_field = None;
+                self.last_outputs = Vec::new();
                 self.last_histogram = None;
                 self.histogram_target = None;
                 self.texture = None;
@@ -323,26 +332,24 @@ impl PreviewEngine {
     /// Rebuilds the preview texture from the last field when the field or the shading
     /// mode has changed since the texture was uploaded. Cheap to call every frame.
     fn refresh_texture(&mut self, ctx: &egui::Context) {
-        let Some(field) = self.last_field.as_ref() else {
+        let index = self
+            .display_output
+            .min(self.last_outputs.len().saturating_sub(1));
+        let Some(field) = self.last_outputs.get(index) else {
             return;
         };
-        // Show the chosen layer, falling back to height when it is absent on this field.
-        let layer = if field.layer(&self.display_layer).is_some() {
-            self.display_layer.as_str()
-        } else {
-            layers::HEIGHT
-        };
+        // Each output is a standalone field; show its height layer.
         let key = (
             field.content_hash().to_u64(),
-            layer.to_string(),
+            index,
             self.mode,
             self.scale,
             self.light.map(f32::to_bits),
         );
-        if self.texture_key.as_ref() == Some(&key) {
+        if self.texture_key == Some(key) {
             return;
         }
-        let image = field_to_image(field, layer, self.mode, self.scale, self.light);
+        let image = field_to_image(field, layers::HEIGHT, self.mode, self.scale, self.light);
         self.texture = Some(ctx.load_texture("preview", image, egui::TextureOptions::LINEAR));
         self.texture_key = Some(key);
     }
@@ -508,19 +515,20 @@ fn evaluate_job(job: &Job, cache: &mut EvalCache) -> Option<Outcome> {
         });
     };
     match job.graph.evaluate(target, &job.request, cache) {
-        Ok(outputs) => Some(match outputs.first() {
-            Some(field) => Outcome::Ready {
+        Ok(outputs) => Some(if outputs.is_empty() {
+            Outcome::Failed {
+                generation,
+                message: "node has no output to preview".to_string(),
+            }
+        } else {
+            Outcome::Ready {
                 generation,
                 target: job.target,
-                field: field.clone(),
+                fields: outputs.to_vec(),
                 // The node's input source is upstream of the target, so it is already in
                 // the cache from the eval above; this re-eval is a cheap hit.
                 histogram: input_histogram(&job.graph, target, &job.request, cache),
-            },
-            None => Outcome::Failed {
-                generation,
-                message: "node has no output to preview".to_string(),
-            },
+            }
         }),
         Err(Error::Cancelled) => None,
         Err(err) => Some(Outcome::Failed {

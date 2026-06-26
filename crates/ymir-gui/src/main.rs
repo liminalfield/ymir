@@ -1686,31 +1686,26 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
         });
     });
 
-    // Layer picker: when the previewed field carries more than just height (a `water` depth,
-    // a selection `mask`, …), choose which layer to view. Hidden for a plain heightfield, so
-    // it appears exactly when there is a choice to make.
-    let layer_names: Vec<String> = state
-        .preview
-        .field()
-        .map(|f| f.layers().map(|(name, _)| name.to_string()).collect())
+    // Output picker: when the previewed node has more than one output (e.g. hydraulic
+    // erosion's heightfield/water/sediment), choose which output to view. Hidden for a
+    // single-output node, so it appears exactly when there is a choice to make.
+    let output_names: Vec<String> = id
+        .and_then(|id| state.graph.spec(id))
+        .map(|spec| spec.outputs.iter().map(|p| p.name.clone()).collect())
         .unwrap_or_default();
-    if layer_names.len() > 1 {
-        // Reset to height if the prior choice is absent from this field.
-        let mut selected = state.preview.display_layer().to_string();
-        if !layer_names.iter().any(|n| n == &selected) {
-            selected = ymir_core::layers::HEIGHT.to_string();
-        }
+    if output_names.len() > 1 {
+        let mut selected = state.preview.display_output().min(output_names.len() - 1);
         ui.horizontal(|ui| {
-            ui.label("Layer");
-            egui::ComboBox::from_id_salt("preview-layer")
-                .selected_text(selected.clone())
+            ui.label("Output");
+            egui::ComboBox::from_id_salt("preview-output")
+                .selected_text(output_names[selected].clone())
                 .show_ui(ui, |ui| {
-                    for name in &layer_names {
-                        ui.selectable_value(&mut selected, name.clone(), name);
+                    for (index, name) in output_names.iter().enumerate() {
+                        ui.selectable_value(&mut selected, index, name);
                     }
                 });
         });
-        state.preview.set_display_layer(&selected);
+        state.preview.set_display_output(selected);
     }
 
     // Row 2: shading toggle (relief makes subtle height changes legible, #40); in relief the

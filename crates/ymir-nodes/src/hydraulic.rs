@@ -1,9 +1,14 @@
 //! Hydraulic erosion: water flowing over the terrain (virtual-pipes shallow-water model).
 //!
 //! This first step simulates only the water. Rain falls, flows downhill to lower neighbours
-//! through "virtual pipes", and evaporates, leaving a `water` depth layer that shows where
-//! water pools and runs. The terrain (`height`) is passed through unchanged; erosion and
-//! deposition couple to it in a later step. Useful on its own as a wetness/flow map.
+//! through "virtual pipes", and evaporates, leaving a `water` depth that shows where water
+//! pools and runs. The terrain (`height`) is passed through unchanged; erosion and deposition
+//! couple to it in a later step. Useful on its own as a wetness/flow map.
+//!
+//! The node has three outputs, each a clean standalone field: `heightfield` (the terrain,
+//! unchanged this step), `water` (the water depth on its height layer), and `sediment`
+//! (stubbed empty until the erosion step fills it). Each byproduct lives on its own port and
+//! is tapped as needed — wired onward, or viewed by selecting the output in the preview.
 //!
 //! It is a grid (Eulerian) simulation after Mei et al. (2007): each cell exchanges water
 //! with its four neighbours through pipes whose flow is driven by the difference in water
@@ -45,7 +50,7 @@ const DEFAULT_EVAPORATION: f64 = 0.02;
 /// Default simulation iterations.
 const DEFAULT_ITERATIONS: i64 = 60;
 
-/// Hydraulic erosion modifier: one input, one output.
+/// Hydraulic erosion modifier: one input, three outputs (heightfield, water, sediment).
 #[derive(Clone)]
 pub struct HydraulicErosion;
 
@@ -55,7 +60,14 @@ impl Operator for HydraulicErosion {
             type_id: TYPE_ID,
             category: "geology",
             inputs: vec![PortSpec::new("in")],
-            outputs: vec![PortSpec::new("out")],
+            // The terrain on the primary port, plus a tap for each byproduct as a clean
+            // standalone field. Sediment is stubbed until the erosion step produces it; flow
+            // waits for a step that defines its scalar form (it is a vector underneath).
+            outputs: vec![
+                PortSpec::new("heightfield"),
+                PortSpec::new("water"),
+                PortSpec::new("sediment"),
+            ],
             params: vec![
                 ParamSpec::new(
                     "rain",
@@ -113,10 +125,25 @@ impl Operator for HydraulicErosion {
             }
         }
 
-        let water = Layer::from_fn(width, height, |x, y| state.water[y * width + x]);
-        let mut out = input.clone();
-        out.set_layer(layers::WATER, Arc::new(water));
-        Ok(vec![out])
+        let water = Arc::new(Layer::from_fn(width, height, |x, y| {
+            state.water[y * width + x]
+        }));
+        let region = input.region();
+
+        // Output 0, `heightfield`: the terrain unchanged this step (in == out). Clean — the
+        // byproducts live on their own ports, not bundled here.
+        let heightfield = input.clone();
+
+        // Output 1, `water`: the water depth as a standalone field (on the height layer), so
+        // it can be wired, shaped, viewed, or exported directly.
+        let water_field = Field::new(width, height, region).with_layer(layers::HEIGHT, water);
+
+        // Output 2, `sediment`: stubbed until the erosion step produces it. An empty field so
+        // the port exists and the node's output shape is settled now.
+        let sediment_field = Field::new(width, height, region)
+            .with_layer(layers::HEIGHT, Arc::new(Layer::filled(width, height, 0.0)));
+
+        Ok(vec![heightfield, water_field, sediment_field])
     }
 }
 
@@ -254,6 +281,7 @@ mod tests {
             .with("iterations", ParamValue::Int(iterations))
     }
 
+    /// Output 0, the `heightfield` (terrain).
     fn run(input: &Field, params: &Params) -> Field {
         HydraulicErosion
             .eval(Inputs::required_only(&[input]), params, &ctx())
@@ -261,13 +289,27 @@ mod tests {
             .remove(0)
     }
 
+    /// Output 1, the `water` depth (on its height layer).
+    fn water(input: &Field, params: &Params) -> Field {
+        HydraulicErosion
+            .eval(Inputs::required_only(&[input]), params, &ctx())
+            .unwrap()
+            .remove(1)
+    }
+
     #[test]
     fn is_deterministic() {
         let input = bowl_field();
         let p = params(0.02, 0.01, 20);
         assert_eq!(
-            run(&input, &p).layer(layers::WATER).unwrap().content_hash(),
-            run(&input, &p).layer(layers::WATER).unwrap().content_hash(),
+            water(&input, &p)
+                .layer(layers::HEIGHT)
+                .unwrap()
+                .content_hash(),
+            water(&input, &p)
+                .layer(layers::HEIGHT)
+                .unwrap()
+                .content_hash(),
         );
     }
 
@@ -290,9 +332,9 @@ mod tests {
         // leaves the domain, so the total matches the rain put in.
         let input = bowl_field();
         let (rain, iters) = (0.02_f64, 15_i64);
-        let out = run(&input, &params(rain, 0.0, iters));
+        let out = water(&input, &params(rain, 0.0, iters));
         let total: f64 = out
-            .layer(layers::WATER)
+            .layer(layers::HEIGHT)
             .unwrap()
             .as_slice()
             .iter()
@@ -310,10 +352,10 @@ mod tests {
         // Uniform rain over a bowl: water drains toward the centre, so the middle ends up
         // deeper than a corner.
         let input = bowl_field();
-        let out = run(&input, &params(0.02, 0.01, 60));
-        let water = out.layer(layers::WATER).unwrap();
-        let centre = water.get(16, 16).unwrap();
-        let corner = water.get(1, 1).unwrap();
+        let out = water(&input, &params(0.02, 0.01, 60));
+        let depth = out.layer(layers::HEIGHT).unwrap();
+        let centre = depth.get(16, 16).unwrap();
+        let corner = depth.get(1, 1).unwrap();
         assert!(
             centre > corner,
             "water should pool in the low centre: centre {centre}, corner {corner}"
@@ -323,9 +365,47 @@ mod tests {
     #[test]
     fn zero_iterations_leaves_no_water() {
         let input = bowl_field();
-        let out = run(&input, &params(0.02, 0.02, 0));
-        let total: f32 = out.layer(layers::WATER).unwrap().as_slice().iter().sum();
+        let out = water(&input, &params(0.02, 0.02, 0));
+        let total: f32 = out.layer(layers::HEIGHT).unwrap().as_slice().iter().sum();
         assert_eq!(total, 0.0, "no iterations should produce no water");
+    }
+
+    #[test]
+    fn spec_has_the_three_outputs() {
+        let spec = HydraulicErosion.spec();
+        let names: Vec<&str> = spec.outputs.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["heightfield", "water", "sediment"]);
+    }
+
+    #[test]
+    fn heightfield_output_is_clean_terrain() {
+        // Output 0 is the terrain only; byproducts live on their own ports, not bundled here.
+        let input = bowl_field();
+        let out = run(&input, &params(0.02, 0.01, 30));
+        assert!(
+            out.layer(layers::WATER).is_none(),
+            "the heightfield output must not carry a water layer"
+        );
+    }
+
+    #[test]
+    fn sediment_output_is_empty_in_this_step() {
+        // Sediment is stubbed until the erosion step; its field is all zero for now.
+        let input = bowl_field();
+        let outs = HydraulicErosion
+            .eval(
+                Inputs::required_only(&[&input]),
+                &params(0.02, 0.01, 30),
+                &ctx(),
+            )
+            .unwrap();
+        let total: f32 = outs[2]
+            .layer(layers::HEIGHT)
+            .unwrap()
+            .as_slice()
+            .iter()
+            .sum();
+        assert_eq!(total, 0.0, "sediment is stubbed empty until erosion");
     }
 
     #[test]
@@ -352,10 +432,13 @@ mod tests {
         let via_registry = made
             .eval(Inputs::required_only(&[&input]), &p, &ctx())
             .unwrap();
-        let direct = run(&input, &p);
+        let direct = water(&input, &p);
         assert_eq!(
-            via_registry[0].layer(layers::WATER).unwrap().content_hash(),
-            direct.layer(layers::WATER).unwrap().content_hash(),
+            via_registry[1]
+                .layer(layers::HEIGHT)
+                .unwrap()
+                .content_hash(),
+            direct.layer(layers::HEIGHT).unwrap().content_hash(),
         );
     }
 
