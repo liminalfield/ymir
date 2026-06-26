@@ -4,9 +4,11 @@
 //!
 //! The previewed node's `Field` is meshed: the height layer is sampled to a fixed grid and
 //! displaced into a lit surface, either at true amplitude (Fixed) or normalized to fill the
-//! relief (Auto), scaled by an adjustable vertical exaggeration. Only the vertex buffer is
-//! re-uploaded, and only when the field or those settings change; the grid topology is fixed.
-//! An orbit camera (Houdini-style Alt + mouse) frames the terrain. Lighting is still fixed.
+//! relief (Auto), scaled by an adjustable vertical exaggeration. Side walls and a bottom
+//! close it into a solid block, so orbiting underneath shows a plinth, not a hollow shell.
+//! Only the vertex buffer is re-uploaded, and only when the field or those settings change;
+//! the grid topology is fixed. An orbit camera (Houdini-style Alt + mouse) frames the
+//! terrain. Lighting is still fixed.
 
 use eframe::egui;
 use eframe::egui_wgpu::{self, wgpu};
@@ -22,12 +24,20 @@ const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
 /// vertex/index buffers are a fixed size regardless of the field's resolution.
 const MESH_RES: usize = 256;
 
+/// Depth of the solid base below the terrain's lowest point, in mesh units (the footprint is
+/// `1.0` wide). Closes the heightfield into a solid block so orbiting underneath shows a
+/// plinth rather than the hollow underside (#117).
+const BASE_DEPTH: f32 = 0.06;
+
 /// One mesh vertex: world position and surface normal.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Vertex {
     position: [f32; 3],
     normal: [f32; 3],
+    /// Surface kind for shading: `0.0` is the terrain top, `1.0` is the base (side walls and
+    /// bottom), which the shader tints as an earthy cross-section.
+    kind: f32,
 }
 
 /// Per-frame shader uniforms: the combined model-view-projection matrix and the light
@@ -117,7 +127,7 @@ pub(crate) fn init(render_state: &egui_wgpu::RenderState) {
             buffers: &[wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<Vertex>() as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3],
+                attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32],
             }],
             compilation_options: wgpu::PipelineCompilationOptions::default(),
         },
@@ -413,16 +423,24 @@ fn bilinear(layer: &Layer, u: f32, v: f32) -> f32 {
     top * (1.0 - tz) + bottom * tz
 }
 
-/// Builds the `MESH_RES * MESH_RES` vertices from a `[0, 1]` height grid: positions over the
-/// unit square in x/z with `y = height * vertical_scale`, and per-vertex normals from the
-/// height gradient (central differences). The normal is computed from the scaled height, so
-/// lighting stays correct at any vertical scale.
+/// Builds the mesh vertices from a `[0, 1]` height grid: the `MESH_RES * MESH_RES` terrain
+/// top (positions over the unit square in x/z with `y = height * vertical_scale`, smooth
+/// normals from the height gradient), plus the side walls and bottom that close it into a
+/// solid block (#117). The base sits `BASE_DEPTH` below the lowest point, so the slab has a
+/// visible thickness in both range modes. Vertex order (top, four wall strips, bottom) is
+/// mirrored by [`build_indices`].
 fn build_vertices(heights: &[f32], vertical_scale: f32) -> Vec<Vertex> {
     let res = MESH_RES;
     let at = |i: usize, j: usize| heights[j * res + i] * vertical_scale;
     let cell = 1.0 / (res - 1) as f32;
+    let max = (res - 1) as f32 * cell; // The far x/z edge, 1.0.
 
-    let mut vertices = Vec::with_capacity(res * res);
+    let min_y = heights.iter().copied().fold(f32::INFINITY, f32::min) * vertical_scale;
+    let base_y = min_y - BASE_DEPTH;
+
+    let mut vertices = Vec::with_capacity(res * res + 8 * res + 4);
+
+    // Terrain top (kind 0): smooth-shaded heightfield.
     for j in 0..res {
         for i in 0..res {
             // Gradient over two cells; the unscaled normal is (-dh/dx, 2*cell, -dh/dz).
@@ -432,16 +450,97 @@ fn build_vertices(heights: &[f32], vertical_scale: f32) -> Vec<Vertex> {
             vertices.push(Vertex {
                 position: [i as f32 * cell, at(i, j), j as f32 * cell],
                 normal: [normal.x, normal.y, normal.z],
+                kind: 0.0,
             });
         }
     }
+
+    // Side walls (kind 1): each perimeter point drops from the terrain edge to the base with a
+    // flat outward normal. Two vertices per point ([top, bottom]) so each strip triangulates
+    // as quads. Order south, north, west, east must match build_indices.
+    for i in 0..res {
+        push_wall(
+            &mut vertices,
+            i as f32 * cell,
+            at(i, 0),
+            base_y,
+            0.0,
+            [0.0, 0.0, -1.0],
+        );
+    }
+    for i in 0..res {
+        push_wall(
+            &mut vertices,
+            i as f32 * cell,
+            at(i, res - 1),
+            base_y,
+            max,
+            [0.0, 0.0, 1.0],
+        );
+    }
+    for j in 0..res {
+        push_wall(
+            &mut vertices,
+            0.0,
+            at(0, j),
+            base_y,
+            j as f32 * cell,
+            [-1.0, 0.0, 0.0],
+        );
+    }
+    for j in 0..res {
+        push_wall(
+            &mut vertices,
+            max,
+            at(res - 1, j),
+            base_y,
+            j as f32 * cell,
+            [1.0, 0.0, 0.0],
+        );
+    }
+
+    // Bottom face (kind 1): four corners at the base, facing down.
+    for &(x, z) in &[(0.0, 0.0), (max, 0.0), (0.0, max), (max, max)] {
+        vertices.push(Vertex {
+            position: [x, base_y, z],
+            normal: [0.0, -1.0, 0.0],
+            kind: 1.0,
+        });
+    }
+
     vertices
 }
 
-/// Builds the fixed grid topology (two triangles per cell) for the `MESH_RES` mesh.
+/// Pushes one perimeter wall point: a top vertex at the terrain edge and a bottom vertex at
+/// the base, sharing the outward `normal`. Paired so a wall strip triangulates as quads.
+fn push_wall(
+    vertices: &mut Vec<Vertex>,
+    x: f32,
+    top_y: f32,
+    base_y: f32,
+    z: f32,
+    normal: [f32; 3],
+) {
+    vertices.push(Vertex {
+        position: [x, top_y, z],
+        normal,
+        kind: 1.0,
+    });
+    vertices.push(Vertex {
+        position: [x, base_y, z],
+        normal,
+        kind: 1.0,
+    });
+}
+
+/// Builds the fixed mesh topology: the terrain grid (two triangles per cell), then the four
+/// wall strips, then the bottom quad. Topology is constant, so this is built once; only the
+/// vertex positions rebuild per frame. Offsets mirror the vertex order in [`build_vertices`].
 fn build_indices() -> Vec<u32> {
     let res = MESH_RES;
-    let mut indices = Vec::with_capacity((res - 1) * (res - 1) * 6);
+    let mut indices = Vec::with_capacity((res - 1) * (res - 1) * 6 + 4 * (res - 1) * 6 + 6);
+
+    // Terrain grid.
     for j in 0..res - 1 {
         for i in 0..res - 1 {
             let tl = (j * res + i) as u32;
@@ -451,6 +550,29 @@ fn build_indices() -> Vec<u32> {
             indices.extend_from_slice(&[tl, bl, tr, tr, bl, br]);
         }
     }
+
+    // Four wall strips, each 2*res vertices laid out [top0, bot0, top1, bot1, ...].
+    let mut offset = (res * res) as u32;
+    for _ in 0..4 {
+        for k in 0..res as u32 - 1 {
+            let t0 = offset + 2 * k;
+            let b0 = t0 + 1;
+            let t1 = offset + 2 * (k + 1);
+            let b1 = t1 + 1;
+            indices.extend_from_slice(&[t0, b0, t1, t1, b0, b1]);
+        }
+        offset += 2 * res as u32;
+    }
+
+    // Bottom quad (corners 00, 10, 01, 11).
+    indices.extend_from_slice(&[
+        offset,
+        offset + 1,
+        offset + 2,
+        offset + 2,
+        offset + 1,
+        offset + 3,
+    ]);
     indices
 }
 
@@ -466,13 +588,19 @@ struct Uniforms {
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) normal: vec3<f32>,
+    @location(1) kind: f32,
 };
 
 @vertex
-fn vs_main(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>) -> VsOut {
+fn vs_main(
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) kind: f32,
+) -> VsOut {
     var out: VsOut;
     out.clip = u.mvp * vec4<f32>(position, 1.0);
     out.normal = normal;
+    out.kind = kind;
     return out;
 }
 
@@ -482,7 +610,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let l = normalize(-u.light_dir.xyz);
     let diffuse = max(dot(n, l), 0.0);
     let shade = 0.25 + 0.75 * diffuse;
-    let base = vec3<f32>(0.55, 0.56, 0.60);
+    // The terrain top is neutral grey; the base (sides and bottom) reads as an earthy
+    // cross-section. kind is constant per triangle, so this is a hard switch, not a gradient.
+    let terrain = vec3<f32>(0.55, 0.56, 0.60);
+    let plinth = vec3<f32>(0.36, 0.33, 0.30);
+    let base = mix(terrain, plinth, in.kind);
     return vec4<f32>(base * shade, 1.0);
 }
 ";
