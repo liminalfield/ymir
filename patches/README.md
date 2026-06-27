@@ -85,6 +85,24 @@ The trait methods live in `src/ui/viewer.rs`; the per-frame report and the drop 
 `src/ui.rs`. The proper long-term fix is for snarl to expose the in-progress wire (and a
 drop hook) upstream.
 
+## 5. `egui-snarl-drop-on-wire.patch`
+
+For drop-on-wire (#124) the host needs to know when a node is dropped on a wire, so it can
+splice the node in (A -> B becomes A -> node -> B). snarl's own wire hover (`hovered_wire`,
+via `hit_wire` against the cursor) cannot serve this: while a node is being dragged it is the
+top widget, so the scene does not report the pointer as hovering it and the cursor-based hover
+is suppressed. The hit-test must use the node's geometry, not the cursor.
+
+The patch detects the drop in snarl, where both the node rect and the wire endpoints are
+known: it notes when a node's own frame drag is released (`node_drag_released` on
+`DrawNodeResponse`), then after the nodes are laid out it tests that node's centre against
+each wire with `hit_wire`, and on a hit (where the node is not an endpoint) calls a new
+`SnarlViewer::on_node_dropped_on_wire(node, out_pin, in_pin)` hook (default no-op). Pieces:
+the trait method in `src/ui/viewer.rs`; the `node_drag_released` field, its capture in
+`draw_node`, and the node-centre-vs-wire pass in `src/ui.rs`. The proper long-term fix is for
+snarl to support node-on-wire splicing (or expose the hovered wire and node geometry)
+upstream.
+
 ## Upgrading egui-snarl
 
 When bumping the pinned version:
@@ -99,6 +117,7 @@ When bumping the pinned version:
    git apply -p1 ../../patches/egui-snarl-click-to-wire.patch
    git apply -p1 ../../patches/egui-snarl-output-pin-space.patch
    git apply -p1 ../../patches/egui-snarl-wire-to-create.patch
+   git apply -p1 ../../patches/egui-snarl-drop-on-wire.patch
    ```
 
 3. If a hunk rejects because upstream moved the surrounding code, apply that change by

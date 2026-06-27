@@ -178,6 +178,9 @@ pub(crate) struct GraphViewer<'a> {
     /// pin (#123 step 2, via `on_wire_dropped`). The canvas opens the node menu there for
     /// wire-to-create. Output.
     pub(crate) dropped_wire: Option<(egui::Pos2, ArmedWire)>,
+    /// A node dropped on a wire this frame (#124, via `on_node_dropped_on_wire`): the node
+    /// and the wire's endpoints. The canvas splices the node into that connection. Output.
+    pub(crate) node_dropped_on_wire: Option<(SnarlNodeId, OutPinId, InPinId)>,
     /// Set by the canvas to ask snarl to drop the armed wire (after it created a node and
     /// connected the wire to it), so the rubber-band clears. Returned from
     /// `report_new_wire`. Input.
@@ -234,6 +237,7 @@ impl<'a> GraphViewer<'a> {
             wire_click: false,
             pending_wire: None,
             dropped_wire: None,
+            node_dropped_on_wire: None,
             consume_wire: false,
             status: None,
             pinned: None,
@@ -655,6 +659,11 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
         self.dropped_wire = armed_from_pins(pins).map(|wire| (pos, wire));
     }
 
+    fn on_node_dropped_on_wire(&mut self, node: SnarlNodeId, out_pin: OutPinId, in_pin: InPinId) {
+        // A node dropped on a wire (#124); the canvas splices it into that connection.
+        self.node_dropped_on_wire = Some((node, out_pin, in_pin));
+    }
+
     fn connect(&mut self, from: &OutPin, to: &InPin, snarl: &mut Snarl<Handle>) {
         connect_pins(
             self.graph,
@@ -831,6 +840,36 @@ pub(crate) fn connect_pins(
     } else {
         false
     }
+}
+
+/// Splices `node` into the wire from `out_pin` to `in_pin` (#124): connects the wire's
+/// source output to the node's first input, then the node's first output to the wire's
+/// destination input (which replaces the original edge, since a core input holds one
+/// source). Refuses if `node` is an endpoint of the wire or lacks an input or an output,
+/// so a generator or endpoint dropped on a wire is a no-op rather than a broken edge.
+/// Returns whether it spliced.
+pub(crate) fn splice_node_into_wire(
+    graph: &mut Graph,
+    snarl: &mut Snarl<Handle>,
+    node: SnarlNodeId,
+    out_pin: OutPinId,
+    in_pin: InPinId,
+) -> bool {
+    if node == out_pin.node || node == in_pin.node {
+        return false;
+    }
+    let has_both_ports = snarl
+        .get_node(node)
+        .and_then(|&h| graph.node_id_of(h))
+        .and_then(|id| graph.spec(id))
+        .is_some_and(|spec| !spec.inputs.is_empty() && !spec.outputs.is_empty());
+    if !has_both_ports {
+        return false;
+    }
+    // A -> node.in0, then node.out0 -> B (the second connect replaces the original A -> B).
+    let head = connect_pins(graph, snarl, out_pin.node, out_pin.output, node, 0);
+    let tail = connect_pins(graph, snarl, node, 0, in_pin.node, in_pin.input);
+    head && tail
 }
 
 /// Removes a canvas node from core (cascading its edges) and from snarl (cascading
@@ -1054,6 +1093,72 @@ mod tests {
         assert!(!viewer.wire_click, "flag starts clear");
         viewer.on_wire_click();
         assert!(viewer.wire_click, "the hook sets the flag");
+    }
+
+    #[test]
+    fn splice_node_into_wire_inserts_between_endpoints() {
+        // Dropping a node on the A -> B wire (#124) rewires it to A -> node -> B.
+        let mut graph = Graph::new();
+        let mut snarl = Snarl::<Handle>::new();
+        let a = add_node(&mut graph, &mut snarl, FBM, Pos2::ZERO).expect("fbm");
+        let b = add_node(&mut graph, &mut snarl, THERMAL, Pos2::ZERO).expect("thermal b");
+        let mid = add_node(&mut graph, &mut snarl, THERMAL, Pos2::ZERO).expect("thermal mid");
+        let (sa, sb, smid) = (
+            snarl_id(&snarl, &graph, a),
+            snarl_id(&snarl, &graph, b),
+            snarl_id(&snarl, &graph, mid),
+        );
+
+        let (out, inp) = pins(&snarl, sa, sb);
+        GraphViewer::for_test(&mut graph).connect(&out, &inp, &mut snarl);
+        assert!(edge_exists(&graph, a, b));
+
+        let spliced = splice_node_into_wire(
+            &mut graph,
+            &mut snarl,
+            smid,
+            OutPinId {
+                node: sa,
+                output: 0,
+            },
+            InPinId { node: sb, input: 0 },
+        );
+        assert!(spliced, "a node with an input and output splices in");
+        assert!(edge_exists(&graph, a, mid), "A -> mid");
+        assert!(edge_exists(&graph, mid, b), "mid -> B replaced A -> B");
+        assert!(!edge_exists(&graph, a, b), "the original A -> B is gone");
+        assert_in_sync(&graph, &snarl);
+    }
+
+    #[test]
+    fn splice_refuses_a_node_lacking_an_input_or_output() {
+        // A generator has no input, so it cannot sit in a wire: no splice, A -> B intact.
+        let mut graph = Graph::new();
+        let mut snarl = Snarl::<Handle>::new();
+        let a = add_node(&mut graph, &mut snarl, FBM, Pos2::ZERO).expect("fbm a");
+        let b = add_node(&mut graph, &mut snarl, THERMAL, Pos2::ZERO).expect("thermal");
+        let lone = add_node(&mut graph, &mut snarl, FBM, Pos2::ZERO).expect("fbm lone");
+        let (sa, sb, slone) = (
+            snarl_id(&snarl, &graph, a),
+            snarl_id(&snarl, &graph, b),
+            snarl_id(&snarl, &graph, lone),
+        );
+        let (out, inp) = pins(&snarl, sa, sb);
+        GraphViewer::for_test(&mut graph).connect(&out, &inp, &mut snarl);
+
+        let spliced = splice_node_into_wire(
+            &mut graph,
+            &mut snarl,
+            slone,
+            OutPinId {
+                node: sa,
+                output: 0,
+            },
+            InPinId { node: sb, input: 0 },
+        );
+        assert!(!spliced, "a generator cannot be spliced into a wire");
+        assert!(edge_exists(&graph, a, b), "the wire is unchanged");
+        assert_in_sync(&graph, &snarl);
     }
 
     #[test]

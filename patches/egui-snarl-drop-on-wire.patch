@@ -1,0 +1,132 @@
+--- a/src/ui.rs
++++ b/src/ui.rs
+@@ -801,6 +801,9 @@
+     drag_released: bool,
+     pin_hovered: Option<AnyPin>,
+     final_rect: Rect,
++    // Ymir patch (#124): set when this node's own drag was released this frame, so the
++    // caller can test its body against the wires for drop-on-wire splicing.
++    node_drag_released: bool,
+ }
+ 
+ struct DrawPinsResponse {
+@@ -1033,6 +1036,9 @@
+ 
+     let mut node_moved = None;
+     let mut node_to_top = None;
++    // Ymir patch (#124): the node whose drag ended this frame, with its rect, for
++    // drop-on-wire splicing.
++    let mut dropped_node: Option<(NodeId, Rect)> = None;
+ 
+     // Process selection rect.
+     let mut rect_selection_ended = None;
+@@ -1107,6 +1113,11 @@
+                 pin_hovered = Some(v);
+             }
+             drag_released |= response.drag_released;
++            // Ymir patch (#124): remember a node whose drag ended over the canvas, with its
++            // rect, so its body can be tested against the wires below.
++            if response.node_drag_released {
++                dropped_node = Some((node_idx, response.final_rect));
++            }
+ 
+             nodes_bb = nodes_bb.union(response.final_rect);
+             if rect_selection_ended.is_some() {
+@@ -1196,6 +1207,51 @@
+         viewer.disconnect(&out_pin, &in_pin, snarl);
+     }
+ 
++    // Ymir patch (#124): a node whose drag ended with its body over a wire is reported so
++    // the host can splice it into that connection. The hit-test is the node's centre
++    // against each wire (not the cursor), so it works while dragging — when the scene is
++    // not the hovered widget and cursor-based wire hover is suppressed. See
++    // patches/egui-snarl-drop-on-wire.patch.
++    if let Some((node, rect)) = dropped_node {
++        let center = rect.center();
++        // Tolerance scaled to the node so a wire passing through the node body counts as a
++        // drop on it, not just one within a hair of the node's exact centre.
++        let hit_threshold = (rect.size().min_elem() * 0.5).max(wire_width.max(2.0));
++        let mut splice = None;
++        for wire in snarl.wires.iter() {
++            if wire.out_pin.node == node || wire.in_pin.node == node {
++                continue;
++            }
++            let (Some(from_r), Some(to_r)) =
++                (output_info.get(&wire.out_pin), input_info.get(&wire.in_pin))
++            else {
++                continue;
++            };
++            if hit_wire(
++                ui.ctx(),
++                WireId::Connected {
++                    snarl_id,
++                    out_pin: wire.out_pin,
++                    in_pin: wire.in_pin,
++                },
++                wire_frame_size,
++                style.get_upscale_wire_frame(),
++                style.get_downscale_wire_frame(),
++                from_r.pos,
++                to_r.pos,
++                center,
++                hit_threshold,
++                pick_wire_style(from_r.wire_style, to_r.wire_style),
++            ) {
++                splice = Some((wire.out_pin, wire.in_pin));
++                break;
++            }
++        }
++        if let Some((out_pin, in_pin)) = splice {
++            viewer.on_node_dropped_on_wire(node, out_pin, in_pin);
++        }
++    }
++
+     if let Some(select_rect) = rect_selection_ended {
+         let select_nodes = node_rects.into_iter().filter_map(|(id, rect)| {
+             let select = if style.get_select_rect_contained() {
+@@ -1913,6 +1969,8 @@
+     let mut node_moved = None;
+     let mut drag_released = false;
+     let mut pin_hovered = None;
++    // Ymir patch (#124): set when this node's frame drag is released this frame.
++    let mut node_drag_released = false;
+ 
+     let node_frame = viewer.node_frame(
+         style.get_node_frame(ui.style()),
+@@ -1978,6 +2036,10 @@
+     if !modifiers.shift && !modifiers.command && r.dragged_by(PointerButton::Primary) {
+         node_moved = Some((node, r.drag_delta()));
+     }
++    // Ymir patch (#124): note when this node's own drag ends, for drop-on-wire splicing.
++    if r.drag_stopped_by(PointerButton::Primary) {
++        node_drag_released = true;
++    }
+ 
+     if r.clicked_by(PointerButton::Primary) || r.dragged_by(PointerButton::Primary) {
+         if modifiers.shift {
+@@ -2574,6 +2636,7 @@
+         drag_released,
+         pin_hovered,
+         final_rect: r.response.rect,
++        node_drag_released,
+     })
+ }
+ 
+--- a/src/ui/viewer.rs
++++ b/src/ui/viewer.rs
+@@ -312,6 +312,15 @@
+     #[inline]
+     fn on_wire_dropped(&mut self, _pos: Pos2, _pins: AnyPins) {}
+ 
++    /// Called when a node's drag is released with the node's body over a connected wire it
++    /// is not an endpoint of (Ymir patch, #124): the dropped node and the wire's endpoints.
++    /// A host uses it to splice the node into that wire (insert it between the endpoints).
++    /// The hit-test is the node's centre against the wire, so it works mid-drag when the
++    /// scene is not the hovered widget. The default does nothing. See
++    /// patches/egui-snarl-drop-on-wire.patch.
++    #[inline]
++    fn on_node_dropped_on_wire(&mut self, _node: NodeId, _out_pin: OutPinId, _in_pin: InPinId) {}
++
+     /// Asks the viewer to connect two pins.
+     ///
+     /// This is usually happens when user drags a wire from one node's output pin to another node's input pin or vice versa.

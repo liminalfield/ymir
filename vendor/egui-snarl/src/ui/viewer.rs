@@ -312,6 +312,15 @@ pub trait SnarlViewer<T> {
     #[inline]
     fn on_wire_dropped(&mut self, _pos: Pos2, _pins: AnyPins) {}
 
+    /// Called when a node's drag is released with the node's body over a connected wire it
+    /// is not an endpoint of (Ymir patch, #124): the dropped node and the wire's endpoints.
+    /// A host uses it to splice the node into that wire (insert it between the endpoints).
+    /// The hit-test is the node's centre against the wire, so it works mid-drag when the
+    /// scene is not the hovered widget. The default does nothing. See
+    /// patches/egui-snarl-drop-on-wire.patch.
+    #[inline]
+    fn on_node_dropped_on_wire(&mut self, _node: NodeId, _out_pin: OutPinId, _in_pin: InPinId) {}
+
     /// Asks the viewer to connect two pins.
     ///
     /// This is usually happens when user drags a wire from one node's output pin to another node's input pin or vice versa.

@@ -2340,6 +2340,7 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         wire_click: false,
         pending_wire: None,
         dropped_wire: None,
+        node_dropped_on_wire: None,
         consume_wire,
         status,
         pinned,
@@ -2433,6 +2434,9 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // A wire dropped on empty canvas this frame (#123 step 2): drop point (graph space)
     // and source pin. Opens the node menu there, once the viewer borrow has ended.
     let dropped_wire = viewer.dropped_wire;
+    // A node dropped on a wire this frame (#124): the node and the wire's endpoints.
+    // Spliced below, once the viewer borrow has ended.
+    let node_dropped_on_wire = viewer.node_dropped_on_wire;
     // A node the viewer asks to toggle bypass on (context-menu Bypass, #105).
     let bypass_request = viewer.bypass_request;
     // If "zoom to graph" was chosen, compute the fit from this frame's node rects to
@@ -2500,6 +2504,11 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // flag: this frame's render already acted on it (snarl dropped the wire if it was set).
     state.pending_wire = pending_wire;
     state.consume_wire = false;
+    // Splice a node dropped on a wire into that connection (#124). snarl reports the exact
+    // node and wire on the drop frame, so this is just the splice.
+    if let Some((node, out_pin, in_pin)) = node_dropped_on_wire {
+        canvas::splice_node_into_wire(&mut state.graph, &mut state.snarl, node, out_pin, in_pin);
+    }
 
     // The pending "zoom to graph" view was consumed by this frame's render; replace
     // it with a freshly requested fit (or clear it). One-shot, so it does not fight
