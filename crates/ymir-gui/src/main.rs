@@ -2547,6 +2547,15 @@ fn handle_marquee(
         current: i.pointer.interact_pos(),
     });
 
+    // The viewport panel stacked below the canvas is resizable, so its resize handle straddles
+    // the canvas's bottom edge. Keep marquee starts out of that bottom grab strip, or dragging
+    // the divider also begins a marquee (#120).
+    let grab = ui.style().interaction.resize_grab_radius_side;
+    let marquee_region = egui::Rect::from_min_max(
+        canvas_rect.min,
+        egui::pos2(canvas_rect.max.x, canvas_rect.max.y - grab),
+    );
+
     // Decide whether to begin a marquee once, on the press-down edge, while the node is
     // still under the cursor. Testing every frame instead would misfire: dragging a node
     // moves it out from under the fixed press origin, so `node_at(origin)` would flip to
@@ -2555,7 +2564,7 @@ fn handle_marquee(
         && pointer.primary_pressed
         && !menu_open
         && let Some(origin) = pointer.press_origin
-        && canvas_rect.contains(origin)
+        && marquee_region.contains(origin)
         && over_canvas_surface(ui, origin)
         && !node_at(origin, node_rects, to_global)
     {
