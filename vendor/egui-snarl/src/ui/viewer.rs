@@ -304,6 +304,14 @@ pub trait SnarlViewer<T> {
         false
     }
 
+    /// Called when a wire is released (dropped) on empty canvas, with the drop point (in
+    /// graph space) and the dropped wire's source pins (Ymir patch, #123). A host can open
+    /// its own node menu there for wire-to-create, instead of (or alongside) snarl's
+    /// dropped-wire context menu. The default does nothing. See
+    /// patches/egui-snarl-wire-to-create.patch.
+    #[inline]
+    fn on_wire_dropped(&mut self, _pos: Pos2, _pins: AnyPins) {}
+
     /// Asks the viewer to connect two pins.
     ///
     /// This is usually happens when user drags a wire from one node's output pin to another node's input pin or vice versa.

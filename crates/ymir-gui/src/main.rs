@@ -774,6 +774,10 @@ struct NodeMenu {
     /// Set when the search field should grab keyboard focus next frame (on open and
     /// after a drill, so typing keeps working without a click).
     focus_search: bool,
+    /// The wire to connect when a node is picked, snapshotted at open time for
+    /// wire-to-create (#123): the armed wire (Space path) or the dropped wire (drop path).
+    /// `None` for a plain create. Holds snarl ids; the source pin outlives the menu.
+    pending_wire: Option<canvas::ArmedWire>,
 }
 
 // ---- palette: registry-driven node listing (pure, testable) -----------------
@@ -2091,10 +2095,11 @@ fn node_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
         });
     });
 
-    // The placement view and anchor are Copy; read them out so the menu borrow can
-    // end before the state is mutated below.
+    // The placement view, anchor, and the snapshotted wire-to-create wire are Copy; read
+    // them out so the menu borrow can end before the state is mutated below.
     let anchor = menu.anchor;
     let view = menu.view;
+    let pending_wire = menu.pending_wire;
     let menu_rect = area_resp.response.rect;
 
     // A primary press outside the menu dismisses it.
@@ -2137,12 +2142,12 @@ fn node_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
                 {
                     // Select the new node so the inspector shows it immediately (#62).
                     state.select_only(handle);
-                    // Wire-to-create (#123): if a wire was armed when the menu opened,
-                    // connect it to the new node's default opposite port (its first input
-                    // for a wire pulled from an output, its first output otherwise), then
-                    // ask snarl to drop the armed wire. Degrades to no wire if the new node
-                    // has no port on that side.
-                    if let Some(wire) = state.pending_wire
+                    // Wire-to-create (#123): if a wire was snapshotted when the menu opened
+                    // (Space path or drop path), connect it to the new node's default
+                    // opposite port (its first input for a wire pulled from an output, its
+                    // first output otherwise), then ask snarl to drop the armed wire.
+                    // Degrades to no wire if the new node has no port on that side.
+                    if let Some(wire) = pending_wire
                         && let Some(new_node) = canvas::snarl_node_of(&state.snarl, handle)
                     {
                         let has_input = state.graph.spec(id).is_some_and(|s| !s.inputs.is_empty());
@@ -2214,7 +2219,13 @@ fn fit_view(
 
 /// A fresh node-creation menu anchored at `anchor` (screen space), placing into
 /// `view`. Shared by the Space gesture and the right-click "Add node" (#51, #60).
-fn open_node_menu(anchor: egui::Pos2, view: CanvasView) -> NodeMenu {
+/// `pending_wire` is the wire to connect when a node is picked (wire-to-create, #123),
+/// or `None` for a plain create.
+fn open_node_menu(
+    anchor: egui::Pos2,
+    view: CanvasView,
+    pending_wire: Option<canvas::ArmedWire>,
+) -> NodeMenu {
     NodeMenu {
         anchor,
         view,
@@ -2222,6 +2233,7 @@ fn open_node_menu(anchor: egui::Pos2, view: CanvasView) -> NodeMenu {
         drilled: None,
         highlight: 0,
         focus_search: true,
+        pending_wire,
     }
 }
 
@@ -2327,6 +2339,7 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         to_global: egui::emath::TSTransform::IDENTITY,
         wire_click: false,
         pending_wire: None,
+        dropped_wire: None,
         consume_wire,
         status,
         pinned,
@@ -2417,6 +2430,9 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // The wire snarl reports as armed this frame, for wire-to-create (#123). Applied to
     // the state below, once the viewer's borrow of the graph has ended.
     let pending_wire = viewer.pending_wire;
+    // A wire dropped on empty canvas this frame (#123 step 2): drop point (graph space)
+    // and source pin. Opens the node menu there, once the viewer borrow has ended.
+    let dropped_wire = viewer.dropped_wire;
     // A node the viewer asks to toggle bypass on (context-menu Bypass, #105).
     let bypass_request = viewer.bypass_request;
     // If "zoom to graph" was chosen, compute the fit from this frame's node rects to
@@ -2557,6 +2573,19 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         });
     }
 
+    // Wire-to-create by drop (#123 step 2): a wire released on empty canvas opens the node
+    // menu at the drop point, carrying the dropped wire to connect on pick. The drop point
+    // is in graph space; map it back to screen for the anchor.
+    if state.node_menu.is_none()
+        && let Some((graph_pos, wire)) = dropped_wire
+        && let Some(view) = state.canvas_view
+    {
+        let anchor = view.to_global * graph_pos;
+        if anchor.is_finite() {
+            state.node_menu = Some(open_node_menu(anchor, view, Some(wire)));
+        }
+    }
+
     // Right-click "Add node" (snarl graph menu) opens the node menu at the clicked
     // graph spot, mapped back to screen for the anchor (#60).
     if state.node_menu.is_none()
@@ -2565,7 +2594,8 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     {
         let anchor = view.to_global * graph_pos;
         if anchor.is_finite() {
-            state.node_menu = Some(open_node_menu(anchor, view));
+            // Right-click "Add node" is a plain create, not a wiring gesture.
+            state.node_menu = Some(open_node_menu(anchor, view, None));
         }
     }
 
@@ -2581,7 +2611,9 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
             })
             .filter(|p| canvas_rect.contains(*p));
         if let (Some(anchor), Some(view)) = (anchor, state.canvas_view) {
-            state.node_menu = Some(open_node_menu(anchor, view));
+            // Wire-to-create (#123): if a wire is armed, snapshot it so picking a node
+            // connects it. Otherwise a plain Space create.
+            state.node_menu = Some(open_node_menu(anchor, view, state.pending_wire));
         }
     }
     node_menu_ui(ui, state);

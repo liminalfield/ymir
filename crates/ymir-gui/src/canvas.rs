@@ -130,6 +130,23 @@ pub(crate) struct ArmedWire {
     pub(crate) port: usize,
 }
 
+/// The first source pin of an armed/dropped wire as an [`ArmedWire`], or `None` for an
+/// empty set. Only the first pin matters: wire-to-create connects a single new node.
+fn armed_from_pins(pins: AnyPins) -> Option<ArmedWire> {
+    match pins {
+        AnyPins::Out(ids) => ids.first().map(|id| ArmedWire {
+            node: id.node,
+            from_output: true,
+            port: id.output,
+        }),
+        AnyPins::In(ids) => ids.first().map(|id| ArmedWire {
+            node: id.node,
+            from_output: false,
+            port: id.input,
+        }),
+    }
+}
+
 /// A [`SnarlViewer`] that borrows the core graph and renders it. Every display
 /// detail is pulled from the graph, and every edit is validated and applied to the
 /// graph before snarl is touched, so core stays the single source of truth.
@@ -155,8 +172,12 @@ pub(crate) struct GraphViewer<'a> {
     /// pin wires rather than selects. Output.
     pub(crate) wire_click: bool,
     /// The wire snarl reports as armed this frame, if any (#123, via `report_new_wire`).
-    /// The canvas reads it for wire-to-create. Output.
+    /// The canvas reads it for the Space wire-to-create path. Output.
     pub(crate) pending_wire: Option<ArmedWire>,
+    /// A wire dropped on empty canvas this frame: its drop point (graph space) and source
+    /// pin (#123 step 2, via `on_wire_dropped`). The canvas opens the node menu there for
+    /// wire-to-create. Output.
+    pub(crate) dropped_wire: Option<(egui::Pos2, ArmedWire)>,
     /// Set by the canvas to ask snarl to drop the armed wire (after it created a node and
     /// connected the wire to it), so the rubber-band clears. Returned from
     /// `report_new_wire`. Input.
@@ -212,6 +233,7 @@ impl<'a> GraphViewer<'a> {
             to_global: egui::emath::TSTransform::IDENTITY,
             wire_click: false,
             pending_wire: None,
+            dropped_wire: None,
             consume_wire: false,
             status: None,
             pinned: None,
@@ -620,22 +642,17 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
     }
 
     fn report_new_wire(&mut self, pins: Option<AnyPins>) -> bool {
-        // Record the armed wire's source pin (#123) so the canvas can offer
-        // wire-to-create. Only the first pin matters; a multi-wire pull connects one node.
-        self.pending_wire = pins.and_then(|pins| match pins {
-            AnyPins::Out(ids) => ids.first().map(|id| ArmedWire {
-                node: id.node,
-                from_output: true,
-                port: id.output,
-            }),
-            AnyPins::In(ids) => ids.first().map(|id| ArmedWire {
-                node: id.node,
-                from_output: false,
-                port: id.input,
-            }),
-        });
-        // Tell snarl to drop the wire when the canvas has consumed it (created a node).
+        // Record the armed wire's source pin (#123) so the canvas can offer the Space
+        // wire-to-create path. Tell snarl to drop the wire once the canvas consumed it.
+        self.pending_wire = pins.and_then(armed_from_pins);
         self.consume_wire
+    }
+
+    fn on_wire_dropped(&mut self, pos: egui::Pos2, pins: AnyPins) {
+        // A wire dropped on empty canvas (#123 step 2): record its source pin and the drop
+        // point so the canvas opens the node menu there. snarl already took the wire, so no
+        // consume is needed for this path.
+        self.dropped_wire = armed_from_pins(pins).map(|wire| (pos, wire));
     }
 
     fn connect(&mut self, from: &OutPin, to: &InPin, snarl: &mut Snarl<Handle>) {

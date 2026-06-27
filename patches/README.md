@@ -71,11 +71,19 @@ pins), so it can press Space, open the node menu, create a node, and connect the
 to it — and it needs a way to drop that wire once consumed. snarl keeps the armed wire in
 its private `SnarlState`, not exposed to the viewer.
 
-The patch adds a `SnarlViewer::report_new_wire(pins) -> bool` hook (default no-op) called
-once per frame with the current armed wire's source pins (or `None`); returning `true` asks
-snarl to drop the wire that frame. Two pieces: the trait method in `src/ui/viewer.rs` and
-the per-frame call in `src/ui.rs`. The proper long-term fix is for snarl to expose the
-in-progress wire (and a drop hook) upstream.
+The patch adds two `SnarlViewer` hooks (both default no-ops):
+
+- `report_new_wire(pins) -> bool`, called once per frame with the current armed wire's
+  source pins (or `None`); returning `true` asks snarl to drop the wire that frame. Drives
+  the Space wire-to-create path (arm a wire, press Space, pick a node).
+- `on_wire_dropped(pos, pins)`, called when a wire is released on empty canvas, with the
+  drop point (graph space) and source pins. Drives the drop wire-to-create path (drag a
+  wire into empty space, let go, pick a node), so the host opens its own node menu there
+  instead of snarl's dropped-wire context menu.
+
+The trait methods live in `src/ui/viewer.rs`; the per-frame report and the drop call are in
+`src/ui.rs`. The proper long-term fix is for snarl to expose the in-progress wire (and a
+drop hook) upstream.
 
 ## Upgrading egui-snarl
 

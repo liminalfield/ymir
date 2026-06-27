@@ -1,6 +1,24 @@
 --- a/src/ui.rs
 +++ b/src/ui.rs
-@@ -1343,6 +1343,19 @@
+@@ -1288,6 +1288,17 @@
+                 }
+             }
+             (Some(new_wires), None) if snarl_resp.hovered() => {
++                // Ymir patch (#123 step 2): a wire dropped on empty canvas reports its
++                // source pins (and the drop point, in graph space) to the host, which
++                // opens its node menu there for wire-to-create. AnyPins is not Copy, so it
++                // is rebuilt for the upstream `has_dropped_wire_menu` call below. See
++                // patches/egui-snarl-wire-to-create.patch.
++                let pins = match &new_wires {
++                    NewWires::In(x) => AnyPins::In(x),
++                    NewWires::Out(x) => AnyPins::Out(x),
++                };
++                viewer.on_wire_dropped(wire_end_pos, pins);
++
+                 let pins = match &new_wires {
+                     NewWires::In(x) => AnyPins::In(x),
+                     NewWires::Out(x) => AnyPins::Out(x),
+@@ -1343,6 +1354,19 @@
          }
      }
  
@@ -22,7 +40,7 @@
          Some(NewWires::In(in_pins)) => {
 --- a/src/ui/viewer.rs
 +++ b/src/ui/viewer.rs
-@@ -294,6 +294,16 @@
+@@ -294,6 +294,24 @@
      #[inline]
      fn on_wire_click(&mut self) {}
  
@@ -35,6 +53,14 @@
 +    fn report_new_wire(&mut self, _pins: Option<AnyPins>) -> bool {
 +        false
 +    }
++
++    /// Called when a wire is released (dropped) on empty canvas, with the drop point (in
++    /// graph space) and the dropped wire's source pins (Ymir patch, #123). A host can open
++    /// its own node menu there for wire-to-create, instead of (or alongside) snarl's
++    /// dropped-wire context menu. The default does nothing. See
++    /// patches/egui-snarl-wire-to-create.patch.
++    #[inline]
++    fn on_wire_dropped(&mut self, _pos: Pos2, _pins: AnyPins) {}
 +
      /// Asks the viewer to connect two pins.
      ///

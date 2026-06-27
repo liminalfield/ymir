@@ -1288,6 +1288,17 @@ where
                 }
             }
             (Some(new_wires), None) if snarl_resp.hovered() => {
+                // Ymir patch (#123 step 2): a wire dropped on empty canvas reports its
+                // source pins (and the drop point, in graph space) to the host, which
+                // opens its node menu there for wire-to-create. AnyPins is not Copy, so it
+                // is rebuilt for the upstream `has_dropped_wire_menu` call below. See
+                // patches/egui-snarl-wire-to-create.patch.
+                let pins = match &new_wires {
+                    NewWires::In(x) => AnyPins::In(x),
+                    NewWires::Out(x) => AnyPins::Out(x),
+                };
+                viewer.on_wire_dropped(wire_end_pos, pins);
+
                 let pins = match &new_wires {
                     NewWires::In(x) => AnyPins::In(x),
                     NewWires::Out(x) => AnyPins::Out(x),
