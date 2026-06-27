@@ -91,7 +91,13 @@ impl EvalRequest {
 /// dropping a result the current pull still needs.
 pub struct EvalCache {
     entries: HashMap<NodeId, CacheEntry>,
+    /// Upper bound on the number of entries. `usize::MAX` for a memory-budgeted cache.
     capacity: usize,
+    /// Upper bound on the total approximate bytes of cached fields. `usize::MAX` for a
+    /// count-bounded cache. Eviction runs when either bound is exceeded.
+    byte_budget: usize,
+    /// Running sum of the cached entries' approximate byte sizes.
+    total_bytes: usize,
     tick: u64,
 }
 
@@ -99,17 +105,47 @@ struct CacheEntry {
     key: u64,
     outputs: Arc<Vec<Field>>,
     last_used: u64,
+    /// Approximate byte size of `outputs`, summed for the memory bound.
+    bytes: usize,
+}
+
+/// Approximate in-memory size of a node's output: the layer cell data, which dominates.
+/// Detail scalars, layer names, and `Arc` overhead are ignored as negligible.
+fn fields_bytes(fields: &[Field]) -> usize {
+    fields
+        .iter()
+        .flat_map(|f| f.layers())
+        .map(|(_, layer)| std::mem::size_of_val(layer.as_slice()))
+        .sum()
 }
 
 impl EvalCache {
-    /// Creates a cache holding at most `capacity` node results across
-    /// evaluations. A capacity of zero keeps nothing between pulls (the active
-    /// path is still pinned within each pull).
+    /// Creates a cache holding at most `capacity` node results across evaluations, with no
+    /// byte bound. A capacity of zero keeps nothing between pulls (the active path is still
+    /// pinned within each pull). Suited to caches over small fields (preview, thumbnails),
+    /// where a count is simpler than a byte budget.
     #[must_use]
     pub fn new(capacity: usize) -> Self {
         Self {
             entries: HashMap::new(),
             capacity,
+            byte_budget: usize::MAX,
+            total_bytes: 0,
+            tick: 0,
+        }
+    }
+
+    /// Creates a cache bounded by approximate total bytes rather than a count, for results
+    /// large enough that a count is the wrong unit (build-resolution fields). A single result
+    /// larger than the whole budget is not cached, rather than thrashing the cache to evict
+    /// everything for something that cannot be retained.
+    #[must_use]
+    pub fn with_memory_budget(byte_budget: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            capacity: usize::MAX,
+            byte_budget,
+            total_bytes: 0,
             tick: 0,
         }
     }
@@ -131,21 +167,38 @@ impl EvalCache {
         Some(Arc::clone(&entry.outputs))
     }
 
-    /// Inserts or replaces `id`'s result, evicting the least-recently-used entry
-    /// while over capacity.
+    /// Inserts or replaces `id`'s result, evicting least-recently-used entries while either
+    /// the entry-count or the byte bound is exceeded.
     fn insert(&mut self, id: NodeId, key: u64, outputs: Arc<Vec<Field>>) {
+        let bytes = fields_bytes(&outputs);
+
+        // A result bigger than the entire budget can never be retained; drop any stale entry
+        // for this id and skip caching it, rather than evicting the whole cache for nothing.
+        // (Never triggers for a count-bounded cache, where the budget is usize::MAX.)
+        if bytes > self.byte_budget {
+            if let Some(old) = self.entries.remove(&id) {
+                self.total_bytes -= old.bytes;
+            }
+            return;
+        }
+
         self.tick += 1;
         let last_used = self.tick;
-        self.entries.insert(
+        let prev = self.entries.insert(
             id,
             CacheEntry {
                 key,
                 outputs,
                 last_used,
+                bytes,
             },
         );
+        self.total_bytes += bytes;
+        if let Some(old) = prev {
+            self.total_bytes -= old.bytes;
+        }
 
-        while self.entries.len() > self.capacity {
+        while self.entries.len() > self.capacity || self.total_bytes > self.byte_budget {
             // last_used is unique per access, so the minimum is unambiguous and
             // eviction is deterministic.
             let Some(victim) = self
@@ -156,7 +209,9 @@ impl EvalCache {
             else {
                 break;
             };
-            self.entries.remove(&victim);
+            if let Some(old) = self.entries.remove(&victim) {
+                self.total_bytes -= old.bytes;
+            }
         }
     }
 }
@@ -1059,6 +1114,50 @@ mod tests {
         graph.evaluate(add, &request(), &mut cache).unwrap();
         assert_eq!(gen_calls.load(Ordering::Relaxed), 2);
         assert_eq!(add_calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn memory_budget_evicts_by_bytes_and_skips_oversized() {
+        // A 10x10 single-layer field is 400 bytes.
+        let field = |v: f32| {
+            Arc::new(vec![
+                Field::new(10, 10, Region::UNIT)
+                    .with_layer(layers::HEIGHT, Arc::new(Layer::filled(10, 10, v))),
+            ])
+        };
+        // Three node ids from a throwaway graph; the cache uses them only as keys.
+        let mut graph = Graph::new();
+        let a = graph.add_op(Box::new(ProbeExtent), Params::new());
+        let b = graph.add_op(Box::new(ProbeExtent), Params::new());
+        let c = graph.add_op(Box::new(ProbeExtent), Params::new());
+
+        // A budget that holds two 400-byte results but not three.
+        let mut cache = EvalCache::with_memory_budget(900);
+        cache.insert(a, 1, field(0.1));
+        cache.insert(b, 2, field(0.2));
+        cache.insert(c, 3, field(0.3)); // total would reach 1200 > 900, so the oldest goes
+        assert!(
+            cache.get(a, 1).is_none(),
+            "oldest evicted by the byte budget"
+        );
+        assert!(cache.get(b, 2).is_some(), "recent result retained");
+        assert!(cache.get(c, 3).is_some(), "newest result retained");
+
+        // A single result larger than the whole budget is skipped, leaving the cache intact.
+        let oversized =
+            Arc::new(vec![Field::new(20, 20, Region::UNIT).with_layer(
+                layers::HEIGHT,
+                Arc::new(Layer::filled(20, 20, 0.0)),
+            )]); // 1600 bytes
+        cache.insert(a, 9, oversized);
+        assert!(
+            cache.get(a, 9).is_none(),
+            "an oversized result is not cached"
+        );
+        assert!(
+            cache.get(c, 3).is_some(),
+            "the oversized insert must not evict existing entries"
+        );
     }
 
     #[test]
