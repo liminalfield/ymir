@@ -737,7 +737,8 @@ impl AppState {
         };
         let res = self.preview_res;
         let request = EvalRequest::new(res, res, Region::UNIT, self.seed)
-            .with_world_extent(self.world_extent);
+            .with_world_extent(self.world_extent)
+            .with_world_height(self.world_height);
         let now = ctx.input(|i| i.time);
         self.preview.sync(&self.graph, id, request, now);
         self.preview.poll(ctx);
@@ -1471,7 +1472,8 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
                         } else {
                             let res = state.build_res;
                             let request = EvalRequest::new(res, res, Region::UNIT, state.seed)
-                                .with_world_extent(state.world_extent);
+                                .with_world_extent(state.world_extent)
+                                .with_world_height(state.world_height);
                             state.build.start(state.graph.clone(), targets, request);
                         }
                     }
@@ -2192,7 +2194,8 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         Region::UNIT,
         state.seed,
     )
-    .with_world_extent(state.world_extent);
+    .with_world_extent(state.world_extent)
+    .with_world_height(state.world_height);
     // The working set is culled to the last-frame view (#74): off-screen nodes and a
     // zoomed-out canvas (where a thumbnail is too small to read) are skipped, so a
     // large graph evaluates only what is on screen. Disabled entirely from the View
@@ -2752,7 +2755,8 @@ fn refresh_viewport_build(state: &mut AppState) {
         let id = state.graph.node_id_of(state.primary?)?;
         let res = state.build_res;
         let request = EvalRequest::new(res, res, Region::UNIT, state.seed)
-            .with_world_extent(state.world_extent);
+            .with_world_extent(state.world_extent)
+            .with_world_height(state.world_height);
         state.graph.output_key(id, &request).ok()
     })();
     let Some(key) = key else {

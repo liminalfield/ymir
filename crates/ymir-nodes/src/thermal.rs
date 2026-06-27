@@ -94,15 +94,14 @@ impl Operator for ThermalErosion {
 
         let strength = params.get_f64("strength", 0.5) as f32;
 
-        // The talus angle as a per-cell height threshold, resolution-aware: tan(angle)
-        // is the slope, scaled by the world size of one cell, so the same terrain
-        // relaxes the same way at any resolution. A normalized-space angle until a
-        // vertical scale lands, matching the Slope selector (slope 1, one height unit
-        // per region unit, is 45 degrees).
-        let region = input.region();
-        let cell_size = (region.width() / width as f64) as f32;
+        // The talus angle as a per-cell normalized-height threshold: tan(angle) is the real
+        // slope (rise over run), divided by the vertical:horizontal scale to express it as the
+        // normalized height a cell may differ from a neighbour before it sheds. Resolution-aware
+        // (the scale folds in cell size) and a real angle now: the world's vertical and
+        // horizontal extents set real_slope_scale, so a 35 degree talus means 35 degrees on the
+        // terrain. At a unit world (the default) this reduces to the prior normalized behaviour.
         let talus_deg = params.get_f64("talus", DEFAULT_TALUS_DEG) as f32;
-        let talus_per_cell = talus_deg.to_radians().tan() * cell_size;
+        let talus_per_cell = talus_deg.to_radians().tan() / ctx.real_slope_scale() as f32;
 
         // Passes scale with resolution: material moves one cell per pass, so to relax
         // the same world distance a finer grid needs proportionally more passes, which

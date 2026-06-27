@@ -12,11 +12,10 @@
 //! freeform shaping to a downstream Curve and the application to an effect's mask
 //! input. The scale at which slope is measured comes from a Blur placed upstream.
 //!
-//! The gradient is taken in world units (scaled by the region span and resolution),
-//! so the angle reads consistently as the resolution changes rather than drifting
-//! with cell size. (A true physical angle additionally needs a vertical scale; until
-//! that lands this is the normalized-space slope, where a gradient magnitude of 1 is
-//! reported as 45 degrees.)
+//! The gradient is taken as a true rise over run via the context's vertical:horizontal scale,
+//! so the angle is a real terrain angle (resolution-stable, and set by the world's vertical and
+//! horizontal extents). At a unit world (the default) this matches the prior normalized slope,
+//! where a gradient magnitude of 1 reads as 45 degrees.
 
 use std::sync::Arc;
 
@@ -78,7 +77,7 @@ impl Operator for Slope {
         }
     }
 
-    fn eval(&self, inputs: Inputs, params: &Params, _ctx: &EvalContext) -> Result<Vec<Field>> {
+    fn eval(&self, inputs: Inputs, params: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
         let input = inputs[0];
         let width = input.width();
         let height = input.height();
@@ -88,22 +87,22 @@ impl Operator for Slope {
         let max = params.get_f64("max", DEFAULT_MAX) as f32;
         let falloff = params.get_f64("falloff", DEFAULT_FALLOFF).max(0.0) as f32;
 
-        // Cells per world unit, for a resolution-stable world-space gradient.
-        let region = input.region();
-        let wx = (width as f64 / region.width().max(f64::EPSILON)) as f32;
-        let wy = (height as f64 / region.height().max(f64::EPSILON)) as f32;
+        // The vertical:horizontal scale turns a per-cell normalized-height delta into a true
+        // slope (rise over run), so the angle is a real terrain angle and resolution-stable.
+        // Cells are square, so x and y share the one scale.
+        let scale = ctx.real_slope_scale() as f32;
 
         let selection = Layer::from_fn(width, height, |x, y| {
             // Central difference over clamped neighbours (one-sided at the edges),
-            // scaled to world units so the magnitude is resolution-stable.
+            // scaled to a true slope so the magnitude is resolution-stable.
             let xm = x.saturating_sub(1);
             let xp = (x + 1).min(width - 1);
             let ym = y.saturating_sub(1);
             let yp = (y + 1).min(height - 1);
-            let gx =
-                (h.get(xp, y).unwrap_or(0.0) - h.get(xm, y).unwrap_or(0.0)) * wx / (xp - xm) as f32;
-            let gy =
-                (h.get(x, yp).unwrap_or(0.0) - h.get(x, ym).unwrap_or(0.0)) * wy / (yp - ym) as f32;
+            let gx = (h.get(xp, y).unwrap_or(0.0) - h.get(xm, y).unwrap_or(0.0)) * scale
+                / (xp - xm) as f32;
+            let gy = (h.get(x, yp).unwrap_or(0.0) - h.get(x, ym).unwrap_or(0.0)) * scale
+                / (yp - ym) as f32;
             let angle = (gx * gx + gy * gy).sqrt().atan().to_degrees();
 
             // Fully selected in [min, max], softening to zero over `falloff` degrees
@@ -140,10 +139,6 @@ mod tests {
     use super::*;
     use ymir_core::Region;
 
-    fn ctx() -> EvalContext {
-        EvalContext::new(16, 16, Region::UNIT, 0)
-    }
-
     /// A field whose height ramps left-to-right with gradient `k` over the unit
     /// region, so its slope angle is about `atan(k)` degrees everywhere.
     fn sloped(size: usize, k: f32) -> Field {
@@ -165,8 +160,11 @@ mod tests {
             .with("min", ParamValue::Float(f64::from(min)))
             .with("max", ParamValue::Float(f64::from(max)))
             .with("falloff", ParamValue::Float(f64::from(falloff)));
+        // A context matching the field, as in real evaluation (the field is produced at the
+        // request resolution), so the real-slope scale uses the right cell size.
+        let ctx = EvalContext::new(input.width(), input.height(), input.region(), 0);
         Slope
-            .eval(Inputs::required_only(&[input]), &params, &ctx())
+            .eval(Inputs::required_only(&[input]), &params, &ctx)
             .unwrap()
             .remove(0)
     }
