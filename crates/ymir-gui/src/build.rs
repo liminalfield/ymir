@@ -6,11 +6,14 @@ use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::thread;
 
 use eframe::egui;
-use ymir_core::{CancelToken, Error, EvalCache, EvalRequest, Graph};
+use ymir_core::{CancelToken, Error, EvalCache, EvalRequest, FieldStore, Graph};
 
-/// Worker cache capacity for one build, so a shared upstream feeding several outputs
-/// is evaluated once.
-const BUILD_CACHE_CAP: usize = 64;
+/// Memory budget for the build cache's hot tier: holds a typical build in RAM, while larger
+/// builds spill to the disk tier. (Will become a user setting.)
+const BUILD_MEMORY_BUDGET: usize = 1 << 30; // 1 GiB
+/// Disk budget for the build cache's warm tier under the user cache dir, so an unchanged
+/// rebuild reuses results and survives restarts. (Will become a user setting.)
+const BUILD_DISK_BUDGET: u64 = 4 << 30; // 4 GiB
 
 /// The worker's reply: how many outputs were written, the first failure, or that it
 /// aborted on a cancellation request.
@@ -68,7 +71,8 @@ impl BuildRunner {
         self.rx = Some(rx);
         self.status = Status::Building;
         thread::spawn(move || {
-            let outcome = run(&graph, &targets, &request);
+            let mut cache = build_cache();
+            let outcome = run(&graph, &targets, &request, &mut cache);
             // shortcut-ok: the receiver only drops if the app has exited; nothing to recover.
             let _ = tx.send(outcome);
         });
@@ -144,16 +148,27 @@ impl BuildRunner {
     }
 }
 
-/// Evaluates each target endpoint with a shared cache, returning how many succeeded
-/// or the first failure. Every failure is a value, never a panic.
-fn run(graph: &Graph, targets: &[u64], request: &EvalRequest) -> Outcome {
-    let mut cache = EvalCache::new(BUILD_CACHE_CAP);
+/// Builds the cache for one build: a byte-bounded memory tier over the on-disk warm tier in
+/// the user cache directory, so an unchanged rebuild reuses results (and they survive
+/// restarts). If the cache directory is unavailable, the build still runs memory-only.
+fn build_cache() -> EvalCache {
+    let cache = EvalCache::with_memory_budget(BUILD_MEMORY_BUDGET);
+    match FieldStore::default_dir().and_then(|dir| FieldStore::open(dir, BUILD_DISK_BUDGET)) {
+        Some(store) => cache.with_disk(store),
+        None => cache,
+    }
+}
+
+/// Evaluates each target endpoint with the given cache, returning how many succeeded or the
+/// first failure. Every failure is a value, never a panic. The cache is a parameter so a test
+/// can inject one over a temp directory.
+fn run(graph: &Graph, targets: &[u64], request: &EvalRequest, cache: &mut EvalCache) -> Outcome {
     let mut built = 0;
     for &stable_id in targets {
         let Some(id) = graph.node_id_of(stable_id) else {
             continue; // removed between click and build; skip it
         };
-        match graph.evaluate(id, request, &mut cache) {
+        match graph.evaluate(id, request, cache) {
             Ok(_) => built += 1,
             // A cancelled build is a calm, expected outcome, not an error to alarm with.
             Err(Error::Cancelled) => return Outcome::Cancelled,
@@ -161,4 +176,81 @@ fn run(graph: &Graph, targets: &[u64], request: &EvalRequest) -> Outcome {
         }
     }
     Outcome::Done(built)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use ymir_core::{
+        EvalContext, Field, Inputs, Layer, NodeSpec, Operator, Params, PortSpec, Region, layers,
+    };
+
+    /// A generator that counts its evaluations, so a test can prove the build reused a cached
+    /// result instead of recomputing.
+    #[derive(Clone)]
+    struct CountingGen {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Operator for CountingGen {
+        fn spec(&self) -> NodeSpec {
+            NodeSpec {
+                type_id: "test.counting_gen",
+                category: "test",
+                inputs: Vec::new(),
+                outputs: vec![PortSpec::new("out")],
+                params: Vec::new(),
+            }
+        }
+
+        fn eval(&self, _: Inputs, _: &Params, ctx: &EvalContext) -> ymir_core::Result<Vec<Field>> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(vec![
+                Field::new(ctx.width, ctx.height, ctx.region).with_layer(
+                    layers::HEIGHT,
+                    Arc::new(Layer::filled(ctx.width, ctx.height, 0.5)),
+                ),
+            ])
+        }
+    }
+
+    #[test]
+    fn an_unchanged_rebuild_reuses_the_disk_cache_across_builds() {
+        let dir = std::env::temp_dir().join(format!("ymir-build-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir); // shortcut-ok: pre-clean any stale dir
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut graph = Graph::new();
+        let node = graph.add_op(
+            Box::new(CountingGen {
+                calls: Arc::clone(&calls),
+            }),
+            Params::new(),
+        );
+        let stable = graph.stable_id(node).expect("node has a stable id");
+        let request = EvalRequest::new(8, 8, Region::UNIT, 0);
+
+        // First build: a fresh memory tier over the disk store; the generator computes once and
+        // is written through to disk.
+        let mut first = EvalCache::with_memory_budget(1 << 20)
+            .with_disk(FieldStore::open(dir.clone(), 1 << 20).expect("disk store opens"));
+        run(&graph, &[stable], &request, &mut first);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+        // Second build: a *fresh* memory tier over the same disk directory (the real per-build
+        // pattern). It must hit disk, not recompute.
+        let mut second = EvalCache::with_memory_budget(1 << 20)
+            .with_disk(FieldStore::open(dir.clone(), 1 << 20).expect("disk store opens"));
+        run(&graph, &[stable], &request, &mut second);
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "an unchanged rebuild must reuse the disk cache, not recompute"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir); // shortcut-ok: best-effort test cleanup
+    }
 }
