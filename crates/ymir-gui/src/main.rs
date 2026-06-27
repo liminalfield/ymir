@@ -217,6 +217,13 @@ struct AppState {
     /// selection follows the leader by the same delta each frame, since snarl moves only the
     /// dragged node.
     group_drag_leader: Option<Handle>,
+    /// The wire snarl reports as armed this frame, mirrored from the viewer each frame for
+    /// wire-to-create (#123): when the node menu picks a node, this is the wire it connects.
+    /// `None` when no wire is in flight; self-correcting, so a cancelled wire clears it.
+    pending_wire: Option<canvas::ArmedWire>,
+    /// Set after wire-to-create makes a node, to ask snarl (via the viewer) to drop the
+    /// armed wire next frame so its rubber-band clears (#123). One-shot.
+    consume_wire: bool,
     /// The node pinned as the preview target, if any (GUI view-state, not core graph
     /// data — issue #39). When set and still previewable, the 2D preview shows this
     /// node instead of the selection, so selection can move upstream to edit while the
@@ -387,6 +394,8 @@ impl AppState {
             primary: None,
             marquee_start: None,
             group_drag_leader: None,
+            pending_wire: None,
+            consume_wire: false,
             seed: 0,
             preview: PreviewEngine::new(),
             thumbnails: ThumbnailEngine::new(),
@@ -2128,6 +2137,40 @@ fn node_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
                 {
                     // Select the new node so the inspector shows it immediately (#62).
                     state.select_only(handle);
+                    // Wire-to-create (#123): if a wire was armed when the menu opened,
+                    // connect it to the new node's default opposite port (its first input
+                    // for a wire pulled from an output, its first output otherwise), then
+                    // ask snarl to drop the armed wire. Degrades to no wire if the new node
+                    // has no port on that side.
+                    if let Some(wire) = state.pending_wire
+                        && let Some(new_node) = canvas::snarl_node_of(&state.snarl, handle)
+                    {
+                        let has_input = state.graph.spec(id).is_some_and(|s| !s.inputs.is_empty());
+                        let has_output =
+                            state.graph.spec(id).is_some_and(|s| !s.outputs.is_empty());
+                        if wire.from_output && has_input {
+                            canvas::connect_pins(
+                                &mut state.graph,
+                                &mut state.snarl,
+                                wire.node,
+                                wire.port,
+                                new_node,
+                                0,
+                            );
+                        } else if !wire.from_output && has_output {
+                            canvas::connect_pins(
+                                &mut state.graph,
+                                &mut state.snarl,
+                                new_node,
+                                0,
+                                wire.node,
+                                wire.port,
+                            );
+                        }
+                        // The gesture consumed the wire; clear it next frame so its
+                        // rubber-band stops following the cursor.
+                        state.consume_wire = true;
+                    }
                 }
                 state.node_menu = None;
             }
@@ -2266,6 +2309,9 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // The selection to highlight this frame, cloned so the click handling below can apply
     // changes through the state after the disjoint borrow ends.
     let selection = state.selection.clone();
+    // Read before the disjoint borrow below: whether to drop the armed wire this frame
+    // (set last frame by wire-to-create, #123).
+    let consume_wire = state.consume_wire;
     // Disjoint borrows: the viewer holds the graph while snarl is rendered. Both
     // are distinct fields of the state, so this split is sound.
     let AppState {
@@ -2280,6 +2326,8 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         node_rects: Vec::new(),
         to_global: egui::emath::TSTransform::IDENTITY,
         wire_click: false,
+        pending_wire: None,
+        consume_wire,
         status,
         pinned,
         add_node_at: None,
@@ -2366,6 +2414,9 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // it was, the click already wired (or armed a wire), so it must not also select the
     // node under the pin.
     let wire_click = viewer.wire_click;
+    // The wire snarl reports as armed this frame, for wire-to-create (#123). Applied to
+    // the state below, once the viewer's borrow of the graph has ended.
+    let pending_wire = viewer.pending_wire;
     // A node the viewer asks to toggle bypass on (context-menu Bypass, #105).
     let bypass_request = viewer.bypass_request;
     // If "zoom to graph" was chosen, compute the fit from this frame's node rects to
@@ -2428,6 +2479,11 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // by CanvasView::center falling back to the screen centre, so placement stays
     // finite (a NaN position panics egui's layout) and on the canvas.
     state.canvas_view = view.rect.is_finite().then_some(view);
+
+    // Mirror snarl's armed wire for wire-to-create (#123), and clear the one-shot consume
+    // flag: this frame's render already acted on it (snarl dropped the wire if it was set).
+    state.pending_wire = pending_wire;
+    state.consume_wire = false;
 
     // The pending "zoom to graph" view was consumed by this frame's render; replace
     // it with a freshly requested fit (or clear it). One-shot, so it does not fight

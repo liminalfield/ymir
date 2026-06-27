@@ -1,0 +1,41 @@
+--- a/src/ui.rs
++++ b/src/ui.rs
+@@ -1343,6 +1343,19 @@
+         }
+     }
+ 
++    // Ymir patch (#123): report the armed wire to the host each frame so it can offer
++    // wire-to-create (press Space to open the node menu, pick a node, connect the armed
++    // wire to it). If the host says it consumed the wire, drop it. See
++    // patches/egui-snarl-wire-to-create.patch.
++    let report = match snarl_state.new_wires() {
++        Some(NewWires::In(p)) => Some(AnyPins::In(&p[..])),
++        Some(NewWires::Out(p)) => Some(AnyPins::Out(&p[..])),
++        None => None,
++    };
++    if viewer.report_new_wire(report) {
++        let _ = snarl_state.take_new_wires();
++    }
++
+     match snarl_state.new_wires() {
+         None => {}
+         Some(NewWires::In(in_pins)) => {
+--- a/src/ui/viewer.rs
++++ b/src/ui/viewer.rs
+@@ -294,6 +294,16 @@
+     #[inline]
+     fn on_wire_click(&mut self) {}
+ 
++    /// Reports the wire currently being dragged/armed (its source pins), or `None` when
++    /// there is none, once per frame (Ymir patch, #123). Returning `true` asks snarl to
++    /// drop that armed wire this frame, so a host that consumed it (e.g. to create a node
++    /// and connect it) can clear it. The default ignores the report and keeps the wire.
++    /// See patches/egui-snarl-wire-to-create.patch.
++    #[inline]
++    fn report_new_wire(&mut self, _pins: Option<AnyPins>) -> bool {
++        false
++    }
++
+     /// Asks the viewer to connect two pins.
+     ///
+     /// This is usually happens when user drags a wire from one node's output pin to another node's input pin or vice versa.

@@ -48,6 +48,35 @@ output-pin click handler (its mirror), and the cancel block; in `src/ui/viewer.r
 `on_wire_click` trait method. The proper long-term fix is for snarl to support
 click-to-wire (or expose pin rects and a hook so the host can) upstream.
 
+## 3. `egui-snarl-output-pin-space.patch`
+
+Output port labels rendered jammed under their pins, while input labels had a clean gap
+(#55). The cause is an asymmetry in how snarl reserves the pin slot: input rows are
+left-to-right and output rows right-to-left, but both reserve the slot the same way —
+`advance_cursor_after_rect(Rect::from_min_size(next_widget_position(), (spacing, size)))`.
+In a left-to-right row `next_widget_position` is the left edge and the rect extends right,
+*into* the row, so the cursor advances and space is reserved. In a right-to-left row it is
+the right edge and the rect extends right, *outside* the row, so the cursor never advances
+and nothing is reserved — the label then draws under the pin.
+
+The patch makes the output reservation extend leftward into the row (`from_min_size(pos2(x
+- spacing, y), (spacing, size))`), mirroring the input side, so output labels clear the
+pins with the same gap. One block in `src/ui.rs`. The proper long-term fix is for snarl
+to reserve the pin slot direction-correctly upstream.
+
+## 4. `egui-snarl-wire-to-create.patch`
+
+For wire-to-create (#123) the host needs to know which wire is currently armed (its source
+pins), so it can press Space, open the node menu, create a node, and connect the armed wire
+to it — and it needs a way to drop that wire once consumed. snarl keeps the armed wire in
+its private `SnarlState`, not exposed to the viewer.
+
+The patch adds a `SnarlViewer::report_new_wire(pins) -> bool` hook (default no-op) called
+once per frame with the current armed wire's source pins (or `None`); returning `true` asks
+snarl to drop the wire that frame. Two pieces: the trait method in `src/ui/viewer.rs` and
+the per-frame call in `src/ui.rs`. The proper long-term fix is for snarl to expose the
+in-progress wire (and a drop hook) upstream.
+
 ## Upgrading egui-snarl
 
 When bumping the pinned version:
@@ -60,12 +89,15 @@ When bumping the pinned version:
    ```sh
    git apply -p1 ../../patches/egui-snarl-middle-pan.patch
    git apply -p1 ../../patches/egui-snarl-click-to-wire.patch
+   git apply -p1 ../../patches/egui-snarl-output-pin-space.patch
+   git apply -p1 ../../patches/egui-snarl-wire-to-create.patch
    ```
 
 3. If a hunk rejects because upstream moved the surrounding code, apply that change by
    hand (each is small and self-contained), then regenerate its patch so it stays current.
-   Generate each patch against the *previous* patch's result so they remain independent —
-   for click-to-wire, diff a pristine-plus-middle-pan baseline against the vendored file:
+   Generate each patch against the *previous* patches' result so they remain independent —
+   for click-to-wire, diff a pristine-plus-middle-pan baseline against the vendored file
+   (and for output-pin-space, a pristine-plus-middle-pan-plus-click-to-wire baseline):
 
    ```sh
    # baseline = pristine + middle-pan

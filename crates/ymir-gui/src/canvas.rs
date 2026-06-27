@@ -12,8 +12,8 @@
 use std::collections::HashSet;
 
 use eframe::egui::{self, Pos2};
-use egui_snarl::ui::{PinInfo, SnarlPin, SnarlViewer};
-use egui_snarl::{InPin, NodeId as SnarlNodeId, OutPin, Snarl};
+use egui_snarl::ui::{AnyPins, PinInfo, SnarlPin, SnarlViewer};
+use egui_snarl::{InPin, InPinId, NodeId as SnarlNodeId, OutPin, OutPinId, Snarl};
 
 use ymir_core::{EvalRequest, Graph, NodeId, Params, Region, registry};
 use ymir_nodes::tr;
@@ -116,6 +116,20 @@ fn style_context_menu(ui: &mut egui::Ui) {
 /// reload, and keeps the snarl structure a pure view with no copy of node data.
 pub(crate) type Handle = u64;
 
+/// The source pin of an armed (in-progress) wire, reported by snarl each frame for
+/// wire-to-create (#123). `from_output` says which side it is: a wire pulled from an
+/// output wants the new node's first input; one pulled from an input wants its first
+/// output. Holds snarl ids, valid for the frame they are read in.
+#[derive(Clone, Copy)]
+pub(crate) struct ArmedWire {
+    /// The node the wire is anchored on.
+    pub(crate) node: SnarlNodeId,
+    /// Whether the anchored pin is an output (vs an input).
+    pub(crate) from_output: bool,
+    /// The anchored pin's index on its side.
+    pub(crate) port: usize,
+}
+
 /// A [`SnarlViewer`] that borrows the core graph and renders it. Every display
 /// detail is pulled from the graph, and every edit is validated and applied to the
 /// graph before snarl is touched, so core stays the single source of truth.
@@ -140,6 +154,13 @@ pub(crate) struct GraphViewer<'a> {
     /// it after the frame to suppress node selection for that same click, so clicking a
     /// pin wires rather than selects. Output.
     pub(crate) wire_click: bool,
+    /// The wire snarl reports as armed this frame, if any (#123, via `report_new_wire`).
+    /// The canvas reads it for wire-to-create. Output.
+    pub(crate) pending_wire: Option<ArmedWire>,
+    /// Set by the canvas to ask snarl to drop the armed wire (after it created a node and
+    /// connected the wire to it), so the rubber-band clears. Returned from
+    /// `report_new_wire`. Input.
+    pub(crate) consume_wire: bool,
     /// The previewed node's handle and its preview-status colour, drawn as a small
     /// dot at the left of that node's header. Only the previewed node has a status,
     /// since the preview evaluates a single target. Input, read-only.
@@ -190,6 +211,8 @@ impl<'a> GraphViewer<'a> {
             node_rects: Vec::new(),
             to_global: egui::emath::TSTransform::IDENTITY,
             wire_click: false,
+            pending_wire: None,
+            consume_wire: false,
             status: None,
             pinned: None,
             add_node_at: None,
@@ -582,10 +605,9 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
         snarl: &mut Snarl<Handle>,
     ) -> impl SnarlPin + 'static {
         if let Some(label) = self.port_label(snarl, pin.id.node, false, pin.id.output) {
-            // snarl's output pin_ui is already right-to-left and reserves a pin slot,
-            // but the pin circle overhangs it, so reserve extra clearance on the right
-            // before the label so it sits clear of the circle, not under it (#55).
-            ui.add_space(ui.spacing().icon_width);
+            // Just the label, mirroring the input side: the vendored snarl reserves the pin
+            // slot on the output side correctly now (it did not in RTL upstream, which jammed
+            // labels under the output pins, #55). See patches/egui-snarl-output-pin-space.patch.
             ui.label(label);
         }
         PinInfo::circle()
@@ -597,29 +619,34 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
         self.wire_click = true;
     }
 
+    fn report_new_wire(&mut self, pins: Option<AnyPins>) -> bool {
+        // Record the armed wire's source pin (#123) so the canvas can offer
+        // wire-to-create. Only the first pin matters; a multi-wire pull connects one node.
+        self.pending_wire = pins.and_then(|pins| match pins {
+            AnyPins::Out(ids) => ids.first().map(|id| ArmedWire {
+                node: id.node,
+                from_output: true,
+                port: id.output,
+            }),
+            AnyPins::In(ids) => ids.first().map(|id| ArmedWire {
+                node: id.node,
+                from_output: false,
+                port: id.input,
+            }),
+        });
+        // Tell snarl to drop the wire when the canvas has consumed it (created a node).
+        self.consume_wire
+    }
+
     fn connect(&mut self, from: &OutPin, to: &InPin, snarl: &mut Snarl<Handle>) {
-        let Some(source) = self.core_id_of_snarl(snarl, from.id.node) else {
-            return;
-        };
-        let Some(dest) = self.core_id_of_snarl(snarl, to.id.node) else {
-            return;
-        };
-        // Core is the validity authority: refuse a wire that would form a loop
-        // before it is ever shown.
-        if self.graph.would_create_cycle(source, dest) {
-            return;
-        }
-        if self
-            .graph
-            .connect(source, from.id.output, dest, to.id.input)
-            .is_ok()
-        {
-            // A core input holds one connection, so this overwrote any prior
-            // source. Mirror that: drop the old wire into this input, then add the
-            // accepted one, so the view shows exactly the edges core holds.
-            snarl.drop_inputs(to.id);
-            snarl.connect(from.id, to.id);
-        }
+        connect_pins(
+            self.graph,
+            snarl,
+            from.id.node,
+            from.id.output,
+            to.id.node,
+            to.id.input,
+        );
     }
 
     fn disconnect(&mut self, from: &OutPin, to: &InPin, snarl: &mut Snarl<Handle>) {
@@ -740,6 +767,53 @@ pub(crate) fn add_node(
     let handle = graph.stable_id(id)?;
     snarl.insert_node(pos, handle);
     Some(id)
+}
+
+/// The snarl id of the node carrying `handle`, if it is in the canvas.
+pub(crate) fn snarl_node_of(snarl: &Snarl<Handle>, handle: Handle) -> Option<SnarlNodeId> {
+    snarl
+        .node_ids()
+        .find(|(_, h)| **h == handle)
+        .map(|(id, _)| id)
+}
+
+/// Connects an output pin to an input pin in core (the validity authority) and mirrors
+/// the accepted edge into snarl, keeping the two in step. Refuses a wire that would form
+/// a cycle, and overwrites any existing source on the destination input (a core input
+/// holds one connection). Returns whether an edge was made. Shared by the drag/click
+/// `connect` hook and wire-to-create (#123).
+pub(crate) fn connect_pins(
+    graph: &mut Graph,
+    snarl: &mut Snarl<Handle>,
+    from_node: SnarlNodeId,
+    output: usize,
+    to_node: SnarlNodeId,
+    input: usize,
+) -> bool {
+    let Some(source) = snarl.get_node(from_node).and_then(|&h| graph.node_id_of(h)) else {
+        return false;
+    };
+    let Some(dest) = snarl.get_node(to_node).and_then(|&h| graph.node_id_of(h)) else {
+        return false;
+    };
+    if graph.would_create_cycle(source, dest) {
+        return false;
+    }
+    if graph.connect(source, output, dest, input).is_ok() {
+        let from = OutPinId {
+            node: from_node,
+            output,
+        };
+        let to = InPinId {
+            node: to_node,
+            input,
+        };
+        snarl.drop_inputs(to);
+        snarl.connect(from, to);
+        true
+    } else {
+        false
+    }
 }
 
 /// Removes a canvas node from core (cascading its edges) and from snarl (cascading
@@ -920,6 +994,36 @@ mod tests {
         assert!(!edge_exists(&graph, head, modr));
         assert_eq!(wires_into(&snarl, sm), 0);
         assert_in_sync(&graph, &snarl);
+    }
+
+    #[test]
+    fn report_new_wire_maps_the_armed_pin_and_returns_consume() {
+        // The wire-to-create hook (#123) records the armed wire's source pin for the canvas
+        // and returns whether snarl should drop it.
+        let mut graph = Graph::new();
+        let mut snarl = Snarl::<Handle>::new();
+        let head = add_node(&mut graph, &mut snarl, FBM, Pos2::ZERO).expect("fbm");
+        let sh = snarl_id(&snarl, &graph, head);
+        let mut viewer = GraphViewer::for_test(&mut graph);
+
+        // An armed output wire is reported as a from_output ArmedWire on that pin.
+        let out = [OutPinId {
+            node: sh,
+            output: 0,
+        }];
+        assert!(!viewer.report_new_wire(Some(AnyPins::Out(&out))));
+        let armed = viewer.pending_wire.expect("armed wire reported");
+        assert_eq!(armed.node, sh);
+        assert!(armed.from_output);
+        assert_eq!(armed.port, 0);
+
+        // No armed wire clears the report.
+        viewer.report_new_wire(None);
+        assert!(viewer.pending_wire.is_none());
+
+        // The consume flag is returned so snarl drops the wire once the canvas used it.
+        viewer.consume_wire = true;
+        assert!(viewer.report_new_wire(None));
     }
 
     #[test]

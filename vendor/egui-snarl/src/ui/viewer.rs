@@ -294,6 +294,16 @@ pub trait SnarlViewer<T> {
     #[inline]
     fn on_wire_click(&mut self) {}
 
+    /// Reports the wire currently being dragged/armed (its source pins), or `None` when
+    /// there is none, once per frame (Ymir patch, #123). Returning `true` asks snarl to
+    /// drop that armed wire this frame, so a host that consumed it (e.g. to create a node
+    /// and connect it) can clear it. The default ignores the report and keeps the wire.
+    /// See patches/egui-snarl-wire-to-create.patch.
+    #[inline]
+    fn report_new_wire(&mut self, _pins: Option<AnyPins>) -> bool {
+        false
+    }
+
     /// Asks the viewer to connect two pins.
     ///
     /// This is usually happens when user drags a wire from one node's output pin to another node's input pin or vice versa.

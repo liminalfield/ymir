@@ -1343,6 +1343,19 @@ where
         }
     }
 
+    // Ymir patch (#123): report the armed wire to the host each frame so it can offer
+    // wire-to-create (press Space to open the node menu, pick a node, connect the armed
+    // wire to it). If the host says it consumed the wire, drop it. See
+    // patches/egui-snarl-wire-to-create.patch.
+    let report = match snarl_state.new_wires() {
+        Some(NewWires::In(p)) => Some(AnyPins::In(&p[..])),
+        Some(NewWires::Out(p)) => Some(AnyPins::Out(&p[..])),
+        None => None,
+    };
+    if viewer.report_new_wire(report) {
+        let _ = snarl_state.take_new_wires();
+    }
+
     match snarl_state.new_wires() {
         None => {}
         Some(NewWires::In(in_pins)) => {
@@ -1667,9 +1680,16 @@ where
         outputs_ui.scope_builder(builder, |pin_ui| {
             // Allocate space for pin shape.
             if let Some(output_spacing) = output_spacing {
-                let min = pin_ui.next_widget_position();
+                // Ymir patch (#55): the output row is laid out right-to-left, so
+                // `next_widget_position` is the row's right edge. The upstream code reserves
+                // the pin slot with a rect extending right *from* that edge, i.e. outside the
+                // row, so the cursor never advances and no space is reserved — output labels
+                // then render under the pin. Extend the reservation rect leftward (into the
+                // row) instead, mirroring the (left-to-right) input side, so the label clears
+                // the pin. See patches/egui-snarl-output-pin-space.patch.
+                let max = pin_ui.next_widget_position();
                 pin_ui.advance_cursor_after_rect(Rect::from_min_size(
-                    min,
+                    pos2(max.x - output_spacing, max.y),
                     vec2(output_spacing, pin_size),
                 ));
             }
