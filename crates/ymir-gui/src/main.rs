@@ -1636,7 +1636,12 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
     // changed. The graph stays the single source of truth.
     let mut params = state.graph.params(id).cloned().unwrap_or_default();
     let mut changed = false;
-    for pspec in &spec.params {
+    for (index, pspec) in spec.params.iter().enumerate() {
+        // A little vertical breathing room between parameters, so the panel does not read as a
+        // dense stack (#90). Between rows only: none before the first or after the last.
+        if index > 0 {
+            ui.add_space(6.0);
+        }
         let current = param_ui::current_value(&params, pspec);
         // The curve editor's corner pop-out icon (#70-style) reports through this flag,
         // opening the larger, draggable window for this node's curve param.
