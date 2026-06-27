@@ -26,3 +26,69 @@ pub const FLOW_X: &str = "flow_x";
 
 /// The y component of a 2D direction/flow field (paired with [`FLOW_X`]).
 pub const FLOW_Y: &str = "flow_y";
+
+// Erosion byproducts. Erosion nodes write these alongside the height so downstream nodes can
+// texture, mask, and chain off them; each is absent on a plain heightfield, so consumers read
+// them through [`Field::layer_or`](crate::Field::layer_or) and degrade gracefully. This is the
+// shared vocabulary the erosion roadmap is built on (see docs/design/erosion-roadmap.md).
+
+/// Flow accumulation: how much upstream drainage passes through each cell, the magnitude behind
+/// a drainage network. Written by stream and hydraulic erosion; a primary texturing signal and
+/// the guidance a later erosion pass can read. This is the scalar magnitude; the flow direction
+/// rides on [`FLOW_X`]/[`FLOW_Y`].
+pub const FLOW: &str = "flow";
+
+/// Fine material moved and dropped by water: sediment carried then deposited by hydraulic
+/// erosion. Smooth, in contrast to the broken [`DEBRIS`] of thermal weathering, and kept a
+/// separate layer so downstream texturing and scatter can treat the two differently.
+pub const SEDIMENT: &str = "sediment";
+
+/// Coarse material broken loose by thermal weathering and shed downslope (scree, talus).
+/// Distinct from the fine [`SEDIMENT`] of water transport.
+pub const DEBRIS: &str = "debris";
+
+/// Cumulative material removed by erosion: where, and how much, the bed was worn down. A
+/// primary texturing signal, exposed rock often reading from wear combined with slope.
+pub const WEAR: &str = "wear";
+
+/// Cumulative material settled out: where deposition built the surface up. The counterpart to
+/// [`WEAR`], and a texturing signal for sediment fields, fans, and valley fill.
+pub const DEPOSITION: &str = "deposition";
+
+/// Erodibility (softness) input: a `[0, 1]` weighting of how readily each cell erodes, 0 being
+/// resistant rock and 1 loose material. Read through [`Field::layer_or`](crate::Field::layer_or)
+/// so erosion applies uniformly when it is absent, and lets hardness vary across the terrain.
+pub const ERODIBILITY: &str = "erodibility";
+
+/// Bedrock reference height: a floor erosion does not cut below, so resistant rock is exposed
+/// rather than endlessly incised. Absent on a plain heightfield, where erosion is unbounded
+/// below.
+pub const BEDROCK: &str = "bedrock";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_names_are_unique() {
+        // A duplicated string across two constants would silently alias two layers; guard it.
+        let names = [
+            HEIGHT,
+            MASK,
+            WATER,
+            FLOW,
+            FLOW_X,
+            FLOW_Y,
+            SEDIMENT,
+            DEBRIS,
+            WEAR,
+            DEPOSITION,
+            ERODIBILITY,
+            BEDROCK,
+        ];
+        let mut unique = names.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), names.len(), "duplicate canonical layer name");
+    }
+}
