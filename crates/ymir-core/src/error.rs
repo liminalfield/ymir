@@ -117,6 +117,12 @@ pub enum Error {
         /// The operator-specific failure description, shown on the node.
         message: String,
     },
+
+    /// A cached field blob could not be decoded (bad magic, unsupported version, or a
+    /// truncated/corrupt body). The evaluation cache treats this as a miss and recomputes,
+    /// so it is recoverable, never fatal.
+    #[error("field cache decode error: {0}")]
+    FieldCacheDecode(String),
 }
 
 /// Convenience alias for results carrying the crate [`Error`].

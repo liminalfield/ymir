@@ -110,6 +110,14 @@ impl Field {
         self.detail.get(key).copied()
     }
 
+    /// Iterates the scalar globals in canonical (sorted) name order, for serialization and
+    /// hashing. Mirrors [`layers`](Self::layers).
+    pub fn details(&self) -> impl Iterator<Item = (&str, f64)> {
+        self.detail
+            .iter()
+            .map(|(name, &value)| (name.as_str(), value))
+    }
+
     /// Returns the named scalar global, or `default` if absent.
     #[must_use]
     pub fn detail_or(&self, key: &str, default: f64) -> f64 {
