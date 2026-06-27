@@ -2279,6 +2279,7 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         selection,
         node_rects: Vec::new(),
         to_global: egui::emath::TSTransform::IDENTITY,
+        wire_click: false,
         status,
         pinned,
         add_node_at: None,
@@ -2361,6 +2362,10 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     let rename_request = viewer.rename_request;
     // A preview-pin change the viewer requests (context-menu Pin/Unpin, #39).
     let pin_request = viewer.pin_request;
+    // Whether this frame's primary click was a click-to-wire gesture on a pin (#50). When
+    // it was, the click already wired (or armed a wire), so it must not also select the
+    // node under the pin.
+    let wire_click = viewer.wire_click;
     // A node the viewer asks to toggle bypass on (context-menu Bypass, #105).
     let bypass_request = viewer.bypass_request;
     // If "zoom to graph" was chosen, compute the fit from this frame's node rects to
@@ -2398,6 +2403,8 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // canvas. The selection change is applied below, through the state.
     let click_hit = click
         .filter(|_| !menu_open)
+        // A click that wired (or armed a wire) on a pin is not a selection click (#50).
+        .filter(|_| !wire_click)
         .filter(|p| canvas_rect.contains(*p))
         .filter(|p| over_canvas_surface(ui, *p))
         .and_then(|screen_pos| {

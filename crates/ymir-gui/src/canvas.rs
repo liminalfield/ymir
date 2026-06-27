@@ -135,6 +135,11 @@ pub(crate) struct GraphViewer<'a> {
     /// it each frame; the canvas uses its inverse to map a screen click back into
     /// the local space the node rects live in. Output.
     pub(crate) to_global: egui::emath::TSTransform,
+    /// Set when a primary click on a pin began or completed a click-to-wire gesture
+    /// this frame (#50, via the vendored snarl `on_wire_click` hook). The canvas reads
+    /// it after the frame to suppress node selection for that same click, so clicking a
+    /// pin wires rather than selects. Output.
+    pub(crate) wire_click: bool,
     /// The previewed node's handle and its preview-status colour, drawn as a small
     /// dot at the left of that node's header. Only the previewed node has a status,
     /// since the preview evaluates a single target. Input, read-only.
@@ -184,6 +189,7 @@ impl<'a> GraphViewer<'a> {
             selection: HashSet::new(),
             node_rects: Vec::new(),
             to_global: egui::emath::TSTransform::IDENTITY,
+            wire_click: false,
             status: None,
             pinned: None,
             add_node_at: None,
@@ -585,6 +591,12 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
         PinInfo::circle()
     }
 
+    fn on_wire_click(&mut self) {
+        // A pin click is a wiring gesture (#50); record it so the canvas does not also
+        // select the node under the pin for the same click.
+        self.wire_click = true;
+    }
+
     fn connect(&mut self, from: &OutPin, to: &InPin, snarl: &mut Snarl<Handle>) {
         let Some(source) = self.core_id_of_snarl(snarl, from.id.node) else {
             return;
@@ -908,6 +920,19 @@ mod tests {
         assert!(!edge_exists(&graph, head, modr));
         assert_eq!(wires_into(&snarl, sm), 0);
         assert_in_sync(&graph, &snarl);
+    }
+
+    #[test]
+    fn on_wire_click_arms_the_selection_suppression_flag() {
+        // The click-to-wire snarl patch (#50) calls `on_wire_click` when a pin click
+        // begins or completes a wire; the canvas reads the resulting flag to skip
+        // selecting the node under the pin. Guards the host plumbing against a future
+        // snarl upgrade silently dropping the hook.
+        let mut graph = Graph::new();
+        let mut viewer = GraphViewer::for_test(&mut graph);
+        assert!(!viewer.wire_click, "flag starts clear");
+        viewer.on_wire_click();
+        assert!(viewer.wire_click, "the hook sets the flag");
     }
 
     #[test]

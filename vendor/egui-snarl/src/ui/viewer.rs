@@ -287,6 +287,13 @@ pub trait SnarlViewer<T> {
         let _ = (node, inputs, outputs, ui, snarl);
     }
 
+    /// Called when a primary click on a pin begins or completes a click-to-wire
+    /// gesture (Ymir patch, #50). The default does nothing; a host can override it to
+    /// suppress its own handling of that same click (for example node selection), so a
+    /// pin click wires rather than selects. See patches/egui-snarl-click-to-wire.patch.
+    #[inline]
+    fn on_wire_click(&mut self) {}
+
     /// Asks the viewer to connect two pins.
     ///
     /// This is usually happens when user drags a wire from one node's output pin to another node's input pin or vice versa.

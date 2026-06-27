@@ -1230,10 +1230,24 @@ where
     //
     // This uses `button_down` directly, instead of `clicked_by` to improve
     // responsiveness of the cancel action.
-    if snarl_state.has_new_wires() && ui.input(|x| x.pointer.button_down(PointerButton::Secondary))
+    if snarl_state.has_new_wires()
+        && (ui.input(|x| x.pointer.button_down(PointerButton::Secondary))
+            // Ymir patch (#50): Esc also cancels, so a click-armed wire is dismissable
+            // from the keyboard. See patches/egui-snarl-click-to-wire.patch.
+            || ui.input(|x| x.key_pressed(egui::Key::Escape)))
     {
         let _ = snarl_state.take_new_wires();
         snarl_resp.flags.remove(Flags::CLICKED);
+    }
+
+    // Ymir patch (#50): a primary click on empty canvas (not over a pin) cancels a
+    // click-armed wire, matching Esc / right-click. Guarded on `pin_hovered` so the click
+    // that arms or completes a wire over a pin can never also cancel it the same frame.
+    if snarl_state.has_new_wires()
+        && pin_hovered.is_none()
+        && snarl_resp.clicked_by(PointerButton::Primary)
+    {
+        let _ = snarl_state.take_new_wires();
     }
 
     // Do centering unless no nodes are present.
@@ -1521,6 +1535,35 @@ where
                 }
             }
 
+            // Ymir patch (#50): click-to-wire, alongside snarl's drag-to-wire. A plain
+            // primary click arms a wire from this input; a click while an output wire is
+            // armed completes the connection. Completion routes through `viewer.connect`,
+            // so core stays the validity authority exactly as for a dragged wire. A click
+            // with any wire of this same side (or none) just (re)arms from this pin.
+            // See patches/egui-snarl-click-to-wire.patch.
+            if r.clicked_by(PointerButton::Primary) {
+                // Tell the host this click is a wire gesture, so it can skip selecting
+                // the node under the pin for the same click.
+                viewer.on_wire_click();
+                if matches!(snarl_state.new_wires(), Some(NewWires::Out(_))) {
+                    if let Some(NewWires::Out(out_pins)) = snarl_state.take_new_wires() {
+                        for out_pin in out_pins {
+                            viewer.connect(
+                                &OutPin::new(snarl, out_pin),
+                                &InPin::new(snarl, in_pin.id),
+                                snarl,
+                            );
+                            if !snarl.nodes.contains(node.0) {
+                                // If removed
+                                return;
+                            }
+                        }
+                    }
+                } else {
+                    snarl_state.start_new_wire_in(in_pin.id);
+                }
+            }
+
             if r.drag_stopped() {
                 drag_released = true;
             }
@@ -1674,6 +1717,31 @@ where
                         if !snarl.nodes.contains(node.0) {
                             // If removed
                             return;
+                        }
+                    }
+                } else {
+                    snarl_state.start_new_wire_out(out_pin.id);
+                }
+            }
+
+            // Ymir patch (#50): click-to-wire, the output-pin mirror of the input case
+            // above. A primary click arms a wire from this output; a click while an input
+            // wire is armed completes the connection through `viewer.connect`.
+            // See patches/egui-snarl-click-to-wire.patch.
+            if r.clicked_by(PointerButton::Primary) {
+                viewer.on_wire_click();
+                if matches!(snarl_state.new_wires(), Some(NewWires::In(_))) {
+                    if let Some(NewWires::In(in_pins)) = snarl_state.take_new_wires() {
+                        for in_pin in in_pins {
+                            viewer.connect(
+                                &OutPin::new(snarl, out_pin.id),
+                                &InPin::new(snarl, in_pin),
+                                snarl,
+                            );
+                            if !snarl.nodes.contains(node.0) {
+                                // If removed
+                                return;
+                            }
                         }
                     }
                 } else {
