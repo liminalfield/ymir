@@ -20,9 +20,22 @@ use ymir_core::{Field, Layer, layers};
 /// pipeline must match.
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
 
-/// Mesh grid resolution (vertices per side). The field is sampled to this grid, so the
-/// vertex/index buffers are a fixed size regardless of the field's resolution.
+/// Initial mesh grid resolution (vertices per side), used for the flat startup mesh. The live
+/// mesh then follows the previewed field's own resolution (see [`mesh_res`]), so raising the
+/// preview resolution shows finer terrain instead of resampling back down to a fixed grid.
 const MESH_RES: usize = 256;
+
+/// Upper bound on mesh resolution (vertices per side). The mesh tracks the field's resolution
+/// up to this cap, beyond which it downsamples — a 1024 grid is ~1M vertices, ample preview
+/// detail while keeping the vertex/index buffers to tens of MB.
+const MAX_MESH_RES: usize = 1024;
+
+/// The mesh resolution for a field: its own width, clamped to a sane range. Sampling at the
+/// field's native resolution means a 1:1 read (no blurring), so all the field's detail reaches
+/// the surface; only an oversized field is downsampled to the cap.
+fn mesh_res(field: &Field) -> usize {
+    field.width().clamp(2, MAX_MESH_RES)
+}
 
 /// Depth of the solid base below the terrain's lowest point, in mesh units (the footprint is
 /// `1.0` wide). Closes the heightfield into a solid block so orbiting underneath shows a
@@ -57,8 +70,14 @@ struct Uniforms {
 struct ViewportResources {
     pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
+    /// Vertices the vertex buffer can hold; grown (the buffer reallocated) when a higher-
+    /// resolution mesh arrives, so same-resolution updates stay in-place writes.
+    vertex_capacity: usize,
     index_buffer: wgpu::Buffer,
     index_count: u32,
+    /// Resolution of the topology currently in the index buffer; the index buffer is rebuilt
+    /// only when this changes (a new preview resolution), not on every field edit.
+    mesh_res: usize,
     uniform_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
 }
@@ -70,8 +89,9 @@ pub(crate) fn init(render_state: &egui_wgpu::RenderState) {
     let device = &render_state.device;
 
     // Flat starter mesh (all heights zero, so the vertical scale is irrelevant here).
-    let flat = build_vertices(&vec![0.0_f32; MESH_RES * MESH_RES], 1.0);
-    let indices = build_indices();
+    let flat = build_vertices(&vec![0.0_f32; MESH_RES * MESH_RES], 1.0, MESH_RES);
+    let vertex_capacity = flat.len();
+    let indices = build_indices(MESH_RES);
     let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("viewport-vertices"),
         contents: bytemuck::cast_slice(&flat),
@@ -166,8 +186,10 @@ pub(crate) fn init(render_state: &egui_wgpu::RenderState) {
         .insert(ViewportResources {
             pipeline,
             vertex_buffer,
+            vertex_capacity,
             index_buffer,
             index_count,
+            mesh_res: MESH_RES,
             uniform_buffer,
             bind_group,
         });
@@ -182,21 +204,27 @@ struct ViewportCallback {
     light_dir: [f32; 4],
     /// Light response: x = diffuse intensity, y = ambient.
     light: [f32; 4],
-    /// New vertices to upload this frame (the field changed), or `None` to keep the current
-    /// mesh.
-    mesh: Option<Vec<Vertex>>,
+    /// New mesh to upload this frame (the field changed), or `None` to keep the current mesh.
+    mesh: Option<MeshUpload>,
+}
+
+/// A mesh ready to upload: its vertices and the grid resolution they were built at (so the
+/// callback can rebuild the index topology when the resolution changes).
+struct MeshUpload {
+    vertices: Vec<Vertex>,
+    res: usize,
 }
 
 impl egui_wgpu::CallbackTrait for ViewportCallback {
     fn prepare(
         &self,
-        _device: &wgpu::Device,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         _screen_descriptor: &egui_wgpu::ScreenDescriptor,
         _egui_encoder: &mut wgpu::CommandEncoder,
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
-        if let Some(res) = resources.get::<ViewportResources>() {
+        if let Some(res) = resources.get_mut::<ViewportResources>() {
             let uniforms = Uniforms {
                 mvp: self.view_proj,
                 light_dir: self.light_dir,
@@ -204,8 +232,37 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
             };
             queue.write_buffer(&res.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
-            if let Some(mesh) = &self.mesh {
-                queue.write_buffer(&res.vertex_buffer, 0, bytemuck::cast_slice(mesh));
+            if let Some(upload) = &self.mesh {
+                // Grow the vertex buffer if this mesh is larger than the current one (a higher
+                // preview resolution); otherwise overwrite in place.
+                if upload.vertices.len() > res.vertex_capacity {
+                    res.vertex_buffer =
+                        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("viewport-vertices"),
+                            contents: bytemuck::cast_slice(&upload.vertices),
+                            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                        });
+                    res.vertex_capacity = upload.vertices.len();
+                } else {
+                    queue.write_buffer(
+                        &res.vertex_buffer,
+                        0,
+                        bytemuck::cast_slice(&upload.vertices),
+                    );
+                }
+
+                // Rebuild the index topology only when the resolution changed.
+                if upload.res != res.mesh_res {
+                    let indices = build_indices(upload.res);
+                    res.index_count = indices.len() as u32;
+                    res.index_buffer =
+                        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("viewport-indices"),
+                            contents: bytemuck::cast_slice(&indices),
+                            usage: wgpu::BufferUsages::INDEX,
+                        });
+                    res.mesh_res = upload.res;
+                }
             }
         }
         Vec::new()
@@ -276,6 +333,7 @@ pub(crate) struct MeshKey {
     content: u64,
     fixed_range: bool,
     vertical_scale_bits: u32,
+    res: usize,
 }
 
 /// Fills `ui` with the 3D viewport for `field` (the previewed node's output), driven by the
@@ -295,17 +353,22 @@ pub(crate) fn show(
     let aspect = (rect.width() / rect.height().max(1.0)).max(0.01);
 
     let mesh = field.and_then(|field| {
+        let res = mesh_res(field);
         let key = MeshKey {
             content: field.layer_or(layers::HEIGHT, 0.0).content_hash().to_u64(),
             fixed_range: settings.fixed_range,
             vertical_scale_bits: settings.vertical_scale.to_bits(),
+            res,
         };
         if *meshed == Some(key) {
             None
         } else {
             *meshed = Some(key);
-            let heights = sample_field(field, MESH_RES, settings.fixed_range);
-            Some(build_vertices(&heights, settings.vertical_scale))
+            let heights = sample_field(field, res, settings.fixed_range);
+            Some(MeshUpload {
+                vertices: build_vertices(&heights, settings.vertical_scale, res),
+                res,
+            })
         }
     });
 
@@ -466,14 +529,13 @@ fn bilinear(layer: &Layer, u: f32, v: f32) -> f32 {
     top * (1.0 - tz) + bottom * tz
 }
 
-/// Builds the mesh vertices from a `[0, 1]` height grid: the `MESH_RES * MESH_RES` terrain
+/// Builds the mesh vertices from a `[0, 1]` height grid: the `res * res` terrain
 /// top (positions over the unit square in x/z with `y = height * vertical_scale`, smooth
 /// normals from the height gradient), plus the side walls and bottom that close it into a
 /// solid block (#117). The base sits `BASE_DEPTH` below the lowest point, so the slab has a
 /// visible thickness in both range modes. Vertex order (top, four wall strips, bottom) is
 /// mirrored by [`build_indices`].
-fn build_vertices(heights: &[f32], vertical_scale: f32) -> Vec<Vertex> {
-    let res = MESH_RES;
+fn build_vertices(heights: &[f32], vertical_scale: f32, res: usize) -> Vec<Vertex> {
     let at = |i: usize, j: usize| heights[j * res + i] * vertical_scale;
     let cell = 1.0 / (res - 1) as f32;
     let max = (res - 1) as f32 * cell; // The far x/z edge, 1.0.
@@ -576,11 +638,11 @@ fn push_wall(
     });
 }
 
-/// Builds the fixed mesh topology: the terrain grid (two triangles per cell), then the four
-/// wall strips, then the bottom quad. Topology is constant, so this is built once; only the
-/// vertex positions rebuild per frame. Offsets mirror the vertex order in [`build_vertices`].
-fn build_indices() -> Vec<u32> {
-    let res = MESH_RES;
+/// Builds the mesh topology for a `res`-resolution grid: the terrain grid (two triangles per
+/// cell), then the four wall strips, then the bottom quad. Rebuilt only when the resolution
+/// changes; same-resolution field edits reuse it. Offsets mirror the vertex order in
+/// [`build_vertices`].
+fn build_indices(res: usize) -> Vec<u32> {
     let mut indices = Vec::with_capacity((res - 1) * (res - 1) * 6 + 4 * (res - 1) * 6 + 6);
 
     // Terrain grid.
