@@ -1450,6 +1450,12 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
                         .hint_text("search nodes")
                         .desired_width(160.0),
                 );
+                // Clear button, shown only when there is a query (#56).
+                if !state.search.is_empty()
+                    && ui.small_button("×").on_hover_text("Clear search").clicked()
+                {
+                    state.search.clear();
+                }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // Build the selected outputs at the world-tab resolution, off-thread.
