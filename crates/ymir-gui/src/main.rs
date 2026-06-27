@@ -14,7 +14,7 @@ use eframe::egui;
 use egui_snarl::ui::SnarlWidget;
 use egui_snarl::{NodeId as SnarlNodeId, Snarl};
 use ymir_core::registry;
-use ymir_core::{EvalRequest, Graph, NodeId, ParamValue, Region};
+use ymir_core::{EvalRequest, Field, FieldStore, Graph, NodeId, ParamValue, Region};
 use ymir_nodes::{CategoryDef, categories, find_category, tr};
 
 // The node-editor canvas (GUI step 5, issue #6): egui-snarl as a pure view over the
@@ -295,6 +295,15 @@ struct AppState {
     /// The 3D viewport's sun direction and response (azimuth/elevation degrees, diffuse
     /// intensity, ambient fill). A non-persisted view aid; raking the sun low reads form.
     viewport_lighting: viewport::Lighting,
+    /// The build cache's disk store (read view), opened once in the app shell so the viewport
+    /// can show build-quality terrain. `None` if the cache directory is unavailable, or in the
+    /// test-constructed state, which never touches the filesystem.
+    field_store: Option<FieldStore>,
+    /// Build-quality outputs for the shown node, loaded from the disk cache and keyed by the
+    /// node's build-resolution content hash. The viewport meshes these when present (after a
+    /// Build of the unchanged graph), falling back to the coarse preview field otherwise.
+    /// Reloaded only when the key changes, not every frame.
+    viewport_build: Option<(u64, Vec<Field>)>,
     /// A transient status line shown in the menu bar (e.g. the result of a save or
     /// open). Replaced by the next action.
     status: Option<String>,
@@ -409,6 +418,8 @@ impl AppState {
                 intensity: 0.75,
                 ambient: 0.25,
             },
+            field_store: None,
+            viewport_build: None,
             status: None,
             history,
             saved_snapshot: initial,
@@ -2730,6 +2741,38 @@ fn rename_dialog_ui(ui: &mut egui::Ui, state: &mut AppState) {
     }
 }
 
+/// Refreshes the cached build-quality outputs for the shown node. Recomputes the node's
+/// build-resolution content key (cheap, no evaluation) and, only when that key changes, loads
+/// the matching fields from the disk cache: a hit becomes the viewport's source, a miss leaves
+/// `None` so the viewport falls back to the live preview. As the graph is edited the key drifts
+/// and misses, so the viewport shows the live preview; after a Build, the new key hits and the
+/// viewport shows build-quality terrain until the next edit.
+fn refresh_viewport_build(state: &mut AppState) {
+    let key = (|| {
+        let id = state.graph.node_id_of(state.primary?)?;
+        let res = state.build_res;
+        let request = EvalRequest::new(res, res, Region::UNIT, state.seed)
+            .with_world_extent(state.world_extent);
+        state.graph.output_key(id, &request).ok()
+    })();
+    let Some(key) = key else {
+        state.viewport_build = None;
+        return;
+    };
+    if state
+        .viewport_build
+        .as_ref()
+        .is_some_and(|(k, _)| *k == key)
+    {
+        return; // already loaded for this key
+    }
+    state.viewport_build = state
+        .field_store
+        .as_ref()
+        .and_then(|store| store.load(key))
+        .map(|fields| (key, fields));
+}
+
 fn viewport_3d_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // The pane rect, captured before `show` consumes it, anchors the floating control HUD.
     let rect = ui.available_rect_before_wrap();
@@ -2741,10 +2784,20 @@ fn viewport_3d_pane(ui: &mut egui::Ui, state: &mut AppState) {
         fixed_range: state.viewport_scale == shade::HeightScale::Fixed,
         vertical_scale: true_proportion * state.viewport_exaggeration,
     };
+    // Prefer build-quality fields for the shown node when the disk cache has them (after a
+    // Build of the unchanged graph), else the live preview field.
+    refresh_viewport_build(state);
+    let display = state.preview.display_output();
+    let build_field = state
+        .viewport_build
+        .as_ref()
+        .and_then(|(_, fields)| fields.get(display.min(fields.len().saturating_sub(1))));
+    let showing_build = build_field.is_some();
+    let field = build_field.or_else(|| state.preview.field());
     viewport::show(
         ui,
         &mut state.viewport_camera,
-        state.preview.field(),
+        field,
         settings,
         state.viewport_lighting,
         &mut state.viewport_mesh,
@@ -2760,6 +2813,16 @@ fn viewport_3d_pane(ui: &mut egui::Ui, state: &mut AppState) {
         .fixed_pos(rect.left_top() + egui::vec2(8.0, 8.0))
         .show(ui.ctx(), |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
+                // Whether the viewport is meshing the full build result or the coarse preview,
+                // so it is clear which fidelity is on screen while tuning.
+                ui.weak(if showing_build {
+                    "Showing: build"
+                } else {
+                    "Showing: preview"
+                })
+                .on_hover_text(
+                    "Build quality appears after a Build, until the graph changes; otherwise the live preview",
+                );
                 ui.horizontal(|ui| {
                     // Fixed shows true amplitude; Auto normalizes to fill the relief (and so
                     // hides amplitude). Mirrors the 2D preview's Auto/Fixed toggle.
@@ -2986,6 +3049,9 @@ impl YmirApp {
         // Load the recent-projects list from config (empty on first run), here in the app
         // shell so the test-constructed state never touches the filesystem.
         state.recent = load_recent();
+        // Open the build cache's disk store (read view) for the viewport, in the app shell so
+        // the test-constructed state never touches the filesystem.
+        state.field_store = build::open_store();
         // Set up the 3D viewport's wgpu pipeline once, now that the wgpu device exists.
         if let Some(render_state) = cc.wgpu_render_state.as_ref() {
             viewport::init(render_state);

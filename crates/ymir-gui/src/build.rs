@@ -153,10 +153,17 @@ impl BuildRunner {
 /// restarts). If the cache directory is unavailable, the build still runs memory-only.
 fn build_cache() -> EvalCache {
     let cache = EvalCache::with_memory_budget(BUILD_MEMORY_BUDGET);
-    match FieldStore::default_dir().and_then(|dir| FieldStore::open(dir, BUILD_DISK_BUDGET)) {
+    match open_store() {
         Some(store) => cache.with_disk(store),
         None => cache,
     }
+}
+
+/// Opens the build cache's disk store under the user cache directory, or `None` if that
+/// directory is unavailable. Shared by the build (which writes through it) and the viewport
+/// (which reads build-quality fields back from it).
+pub(crate) fn open_store() -> Option<FieldStore> {
+    FieldStore::default_dir().and_then(|dir| FieldStore::open(dir, BUILD_DISK_BUDGET))
 }
 
 /// Evaluates each target endpoint with the given cache, returning how many succeeded or the
