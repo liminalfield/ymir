@@ -196,7 +196,13 @@ pub fn tr(key: &str) -> &str {
         // Hydraulic erosion.
         "node-modifier.hydraulic_erosion" => "Hydraulic Erosion",
         "node-modifier.hydraulic_erosion-desc" => {
-            "Simulates rain and water flow, writing a water-depth layer (terrain carving comes later)."
+            "Simulates rain, water flow, and sediment transport, carving the terrain."
+        }
+
+        // Stream erosion.
+        "node-modifier.stream_erosion" => "Stream Erosion",
+        "node-modifier.stream_erosion-desc" => {
+            "Carves drainage networks from flow accumulation; outputs the river/flow map."
         }
 
         // Null (pass-through utility).

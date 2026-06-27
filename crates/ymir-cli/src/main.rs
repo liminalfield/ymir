@@ -109,6 +109,7 @@ mod tests {
                 "modifier.levels",
                 "modifier.null",
                 "modifier.slope",
+                "modifier.stream_erosion",
                 "modifier.thermal_erosion",
                 "modifier.warp"
             ],
