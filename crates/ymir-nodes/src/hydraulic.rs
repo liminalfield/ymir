@@ -80,7 +80,7 @@ impl Operator for HydraulicErosion {
         NodeSpec {
             type_id: TYPE_ID,
             category: "geology",
-            inputs: vec![PortSpec::new("in")],
+            inputs: vec![PortSpec::new("in"), PortSpec::optional("mask")],
             // The eroded terrain on the primary port, plus a tap for each byproduct as a clean
             // standalone field.
             outputs: vec![
@@ -139,8 +139,18 @@ impl Operator for HydraulicErosion {
             .get_i64("iterations", DEFAULT_ITERATIONS)
             .clamp(0, 100_000) as usize;
 
+        // The original terrain, kept for the mask composite at the end.
+        let source = input.layer_or(layers::HEIGHT, 0.0);
+        // Optional mask (soft-layer contract, like Thermal and Stream): an explicit mask input
+        // wins (its height is the selection), else the input's own mask layer, else erode
+        // everywhere. Never gates the connection.
+        let mask = match inputs.optional(0) {
+            Some(mask_field) => mask_field.layer_or(layers::HEIGHT, 1.0),
+            None => input.layer_or(layers::MASK, 1.0),
+        };
+
         let sim = Sim { width, height };
-        let mut state = SimState::new(input.layer_or(layers::HEIGHT, 0.0).as_slice());
+        let mut state = SimState::new(source.as_slice());
 
         for _ in 0..iterations {
             // The simulation is the slow node; poll cancellation each iteration so a
@@ -179,11 +189,21 @@ impl Operator for HydraulicErosion {
             Arc::new(Layer::from_fn(width, height, |x, y| values[y * width + x]))
         };
 
-        // Output 0, `heightfield`: the eroded terrain, passing the input's other layers
-        // through. Outputs 1 and 2 are the water depth and suspended sediment as clean
-        // standalone fields (the quantity on the height layer).
+        // Output 0, `heightfield`: the eroded terrain composited over the original through the
+        // mask (confine), passing the input's other layers through. A fully masked-out cell
+        // keeps its original height, masked-in takes the eroded height, partials blend; the
+        // water and sediment taps below report the full simulation. Outputs 1 and 2 are the
+        // water depth and suspended sediment as clean standalone fields.
         let mut heightfield = input.clone();
-        heightfield.set_layer(layers::HEIGHT, layer(state.terrain));
+        heightfield.set_layer(
+            layers::HEIGHT,
+            Arc::new(Layer::from_fn(width, height, |x, y| {
+                let idx = y * width + x;
+                let original = source.get(x, y).unwrap_or(0.0);
+                let m = mask.get(x, y).unwrap_or(1.0);
+                original + (state.terrain[idx] - original) * m
+            })),
+        );
         let water_field =
             Field::new(width, height, region).with_layer(layers::HEIGHT, layer(state.water));
         let sediment_field =
@@ -489,6 +509,26 @@ mod tests {
                 .content_hash()
         };
         assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn a_zero_mask_protects_the_terrain() {
+        // Soft-layer mask convention (as Thermal and Stream): a zero mask confines erosion to
+        // nowhere, so the heightfield output equals the input terrain exactly.
+        let input = ramp_field();
+        let mask = Field::new(32, 32, Region::UNIT)
+            .with_layer(layers::HEIGHT, Arc::new(Layer::filled(32, 32, 0.0)));
+        let before = input.layer(layers::HEIGHT).unwrap().content_hash();
+        let required = [&input];
+        let optional = [Some(&mask)];
+        let out = HydraulicErosion
+            .eval(Inputs::new(&required, &optional), &params(20), &ctx())
+            .unwrap();
+        assert_eq!(
+            before,
+            out[0].layer(layers::HEIGHT).unwrap().content_hash(),
+            "a zero mask must protect the terrain from erosion"
+        );
     }
 
     #[test]

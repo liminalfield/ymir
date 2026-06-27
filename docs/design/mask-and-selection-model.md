@@ -106,6 +106,19 @@ Every effect reads it the same way; no node reinterprets it. Want the complement
 Invert the selection (a field op) — do not give nodes per-node "mask meaning"
 toggles.
 
+### Erosion nodes (Thermal, Stream, Hydraulic)
+
+All three erosion nodes follow this convention through an optional `mask` input under the
+soft-layer contract: an explicit mask input wins, else the input's own `mask` layer, else `1.0`
+(erode everywhere), so a mask never gates the connection. The mask **confines** the result
+(`lerp(original, eroded, mask)`): a masked-out cell keeps its original height exactly, a
+masked-in cell takes the eroded height, partials blend. This is a deliberate per-cell *protect*,
+chosen over *modulate* (varying a parameter spatially while the simulation still runs
+everywhere — Gaea's "Selective Processing"). Modulate is the richer directability option and is
+deferred to a later directability phase; confine is the settled Phase 0 convention. Tapped
+byproduct outputs (flow, water, sediment, debris) report the full simulation, not the masked
+composite.
+
 ## Mask sources are unconstrained
 
 A mask has no special source: **any field can be one.** A heightfield from an
