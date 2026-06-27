@@ -62,7 +62,7 @@ impl Operator for ThermalErosion {
                 // input's own mask layer is used by convention, else erode everywhere.
                 PortSpec::optional("mask"),
             ],
-            outputs: vec![PortSpec::new("out")],
+            outputs: vec![PortSpec::new("heightfield"), PortSpec::new("debris")],
             params: vec![
                 ParamSpec::new(
                     "talus",
@@ -168,9 +168,19 @@ impl Operator for ThermalErosion {
             let m = mask.get(x, y).unwrap_or(1.0);
             original + (heights[idx] - original) * m
         });
-        let mut out = input.clone();
-        out.set_layer(layers::HEIGHT, Arc::new(blended));
-        Ok(vec![out])
+        let mut heightfield = input.clone();
+        heightfield.set_layer(layers::HEIGHT, Arc::new(blended));
+
+        // Tapped `debris` output: the scree/talus that accumulated, i.e. where the unmasked
+        // relaxation left the surface higher than it started; the bare faces it slid off read
+        // zero. Reports the full simulation (not the masked composite), like Stream's flow tap.
+        let debris = Layer::from_fn(width, height, |x, y| {
+            let idx = y * width + x;
+            (heights[idx] - source.get(x, y).unwrap_or(0.0)).max(0.0)
+        });
+        let debris_field =
+            Field::new(width, height, input.region()).with_layer(layers::HEIGHT, Arc::new(debris));
+        Ok(vec![heightfield, debris_field])
     }
 }
 
@@ -335,6 +345,33 @@ mod tests {
         assert!(
             (before - after).abs() < 1e-4,
             "mass changed: {before} -> {after}"
+        );
+    }
+
+    #[test]
+    fn spec_has_heightfield_and_debris_outputs() {
+        let spec = ThermalErosion.spec();
+        let names: Vec<&str> = spec.outputs.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["heightfield", "debris"]);
+    }
+
+    #[test]
+    fn debris_output_records_accumulated_talus() {
+        // A spike sheds material to its neighbours; the debris tap is high where talus piled up
+        // and zero at the peak, which only lost material.
+        let input = spike_field(false);
+        let out = ThermalErosion
+            .eval(Inputs::required_only(&[&input]), &Params::default(), &ctx())
+            .unwrap();
+        let debris = out[1].layer(layers::HEIGHT).unwrap();
+        assert!(
+            debris.get(17, 16).unwrap() > 0.0,
+            "talus should accumulate beside the spike"
+        );
+        assert_eq!(
+            debris.get(16, 16).unwrap(),
+            0.0,
+            "the shedding peak holds no debris"
         );
     }
 
