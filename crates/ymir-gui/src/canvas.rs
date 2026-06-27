@@ -822,7 +822,8 @@ mod tests {
         assert_eq!(viewer.outputs(&head_handle), 1);
         // Thermal has a required `in` plus an optional `mask`, so two input ports.
         assert_eq!(viewer.inputs(&modr_handle), 2);
-        assert_eq!(viewer.outputs(&modr_handle), 1);
+        // Thermal taps the heightfield plus a debris output, so two output ports.
+        assert_eq!(viewer.outputs(&modr_handle), 2);
     }
 
     #[test]
