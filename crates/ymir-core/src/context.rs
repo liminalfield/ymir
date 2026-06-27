@@ -26,6 +26,10 @@ pub struct EvalContext {
     /// and [`world_to_cells`](Self::world_to_cells), which fold in resolution and
     /// region correctly.
     world_extent: f64,
+    /// Physical vertical span (meters) that a normalized height of `1.0` represents.
+    /// Private so slope-aware operators go through [`real_slope_scale`](Self::real_slope_scale),
+    /// which combines it with the horizontal cell size into a true rise-over-run scale.
+    world_height: f64,
     cancel: CancelToken,
 }
 
@@ -39,6 +43,7 @@ impl EvalContext {
             region,
             seed,
             world_extent: 1.0,
+            world_height: 1.0,
             cancel: CancelToken::new(),
         }
     }
@@ -58,6 +63,25 @@ impl EvalContext {
     pub fn with_world_extent(mut self, world_extent: f64) -> Self {
         self.world_extent = world_extent;
         self
+    }
+
+    /// Sets the world's vertical span (meters) that a normalized height of `1.0` represents.
+    /// Defaults to `1.0`. Together with the horizontal cell size this gives slope-aware
+    /// operators a true rise-over-run via [`real_slope_scale`](Self::real_slope_scale).
+    #[must_use]
+    pub fn with_world_height(mut self, world_height: f64) -> Self {
+        self.world_height = world_height;
+        self
+    }
+
+    /// The factor that turns a *per-cell* normalized height delta into a true slope
+    /// (rise over run): `world_height / meters_per_cell`. A slope-aware operator multiplies its
+    /// normalized `delta_height / cell_distance` by this to get a real tangent, so a talus angle
+    /// or a slope selection means real degrees rather than normalized units, and scales
+    /// correctly with the world's vertical and horizontal extents.
+    #[must_use]
+    pub fn real_slope_scale(&self) -> f64 {
+        self.world_height / self.meters_per_cell()
     }
 
     /// World units (meters) spanned by one cell at this resolution and extent.
@@ -119,6 +143,25 @@ mod tests {
         // The round-trip recovers the physical length at both resolutions.
         assert!((cells_lo * lo.meters_per_cell() - 50.0).abs() < 1e-9);
         assert!((cells_hi * hi.meters_per_cell() - 50.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn real_slope_scale_combines_vertical_and_horizontal_extent() {
+        // 1 km wide over 1024 cells, 256 m tall: a per-cell normalized delta scales by
+        // world_height / meters_per_cell into a true rise-over-run.
+        let ctx = EvalContext::new(1024, 1024, Region::UNIT, 0)
+            .with_world_extent(1000.0)
+            .with_world_height(256.0);
+        let mpc = 1000.0 / 1024.0;
+        assert!((ctx.real_slope_scale() - 256.0 / mpc).abs() < 1e-9);
+    }
+
+    #[test]
+    fn world_height_defaults_to_a_unit_world() {
+        // Unit vertical and horizontal extent over 256 cells: meters_per_cell is 1/256, so the
+        // scale is its reciprocal.
+        let ctx = EvalContext::new(256, 256, Region::UNIT, 0);
+        assert!((ctx.real_slope_scale() - 256.0).abs() < 1e-9);
     }
 
     #[test]

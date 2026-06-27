@@ -45,6 +45,10 @@ pub struct EvalRequest {
     /// Physical size of the full `UNIT` region along x, in world units (meters);
     /// threaded into each node's [`EvalContext`]. Defaults to `1.0`.
     world_extent: f64,
+    /// Physical vertical span (meters) a normalized height of `1.0` represents; threaded into
+    /// each node's [`EvalContext`] so slope-aware nodes get a true rise-over-run. Defaults to
+    /// `1.0`.
+    world_height: f64,
     /// Cancellation signal, threaded into each node's context; defaults to
     /// never-cancel.
     cancel: CancelToken,
@@ -60,6 +64,7 @@ impl EvalRequest {
             region,
             seed,
             world_extent: 1.0,
+            world_height: 1.0,
             cancel: CancelToken::new(),
         }
     }
@@ -81,6 +86,15 @@ impl EvalRequest {
     #[must_use]
     pub fn with_world_extent(mut self, world_extent: f64) -> Self {
         self.world_extent = world_extent;
+        self
+    }
+
+    /// Sets the world's vertical span, in world units (meters) for a normalized height of `1.0`.
+    /// Defaults to `1.0`. The evaluator threads it into each node's [`EvalContext`], where
+    /// slope-aware operators turn it into a true rise-over-run.
+    #[must_use]
+    pub fn with_world_height(mut self, world_height: f64) -> Self {
+        self.world_height = world_height;
         self
     }
 }
@@ -412,7 +426,8 @@ impl Graph {
 
         let ctx = EvalContext::new(request.width, request.height, request.region, seed)
             .with_cancel(request.cancel.clone())
-            .with_world_extent(request.world_extent);
+            .with_world_extent(request.world_extent)
+            .with_world_height(request.world_height);
         let inputs = Inputs::new(&required, &optional);
         let outputs = Arc::new(node.operator.eval(inputs, &node.params, &ctx)?);
 
@@ -602,6 +617,10 @@ fn compute_key(
     h.write_usize(request.height);
     request.region.hash_into(&mut h);
     h.write_f64_bits(request.world_extent);
+    // Keyed unconditionally, like world_extent: changing the vertical scale invalidates every
+    // node. world_height is a world setting, changed rarely, so this is acceptable; per-node
+    // context dependence (so non-slope nodes are spared) is a future optimization for both.
+    h.write_f64_bits(request.world_height);
     h.write_u64(seed);
     h.finish().to_u64()
 }
@@ -953,6 +972,20 @@ mod tests {
         let a = EvalRequest::new(64, 64, Region::UNIT, 0).with_world_extent(1000.0);
         let b = EvalRequest::new(64, 64, Region::UNIT, 0).with_world_extent(2000.0);
         // The extent is part of the cache key, so a different extent is a different key.
+        assert_ne!(
+            graph.output_key(probe, &a).unwrap(),
+            graph.output_key(probe, &b).unwrap()
+        );
+    }
+
+    #[test]
+    fn changing_world_height_invalidates_the_cache() {
+        let mut graph = Graph::new();
+        let probe = graph.add_op(Box::new(ProbeExtent), Params::new());
+        let a = EvalRequest::new(64, 64, Region::UNIT, 0).with_world_height(256.0);
+        let b = EvalRequest::new(64, 64, Region::UNIT, 0).with_world_height(512.0);
+        // The vertical scale is part of the cache key too, so a different height is a different
+        // key (and threads through to each node's context).
         assert_ne!(
             graph.output_key(probe, &a).unwrap(),
             graph.output_key(probe, &b).unwrap()
