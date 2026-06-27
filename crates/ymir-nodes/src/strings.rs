@@ -151,6 +151,14 @@ pub fn tr(key: &str) -> &str {
              min..max degrees, softening over the falloff. Scale it with an upstream Blur."
         }
 
+        // Flow selector.
+        "node-modifier.flow" => "Flow",
+        "node-modifier.flow-desc" => {
+            "Selects drainage channels by flow accumulation, computed on demand from the \
+             terrain: high where upstream water collects, within a normalized band. The \
+             drainage counterpart to Slope and Curvature."
+        }
+
         // Invert.
         "node-modifier.invert" => "Invert",
         "node-modifier.invert-desc" => "Flips the height layer (1 - height).",

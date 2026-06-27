@@ -38,7 +38,7 @@ use ymir_core::{
 };
 
 use crate::hydrology::{
-    Grid, Receivers, build_stack, drainage_area_mfd, fill_depressions, receivers,
+    Grid, Receivers, build_stack, drainage_area_mfd, fill_depressions, log_normalize, receivers,
 };
 
 /// Stable type identifier and registry key.
@@ -205,16 +205,6 @@ fn incise(
         let lowered = (z[c] + f * z[r]) / (1.0 + f);
         z[c] = z[c].min(lowered);
     }
-}
-
-/// Maps the raw accumulation (which spans orders of magnitude) to `[0, 1]` through
-/// `log(1 + a) / log(1 + max)`, so tributaries stay visible instead of being swamped by the
-/// main channels. Values above `max` clamp to 1.
-fn log_normalize(acc: &[f32], max: f32) -> Vec<f32> {
-    let denom = (1.0 + max).ln().max(1e-6);
-    acc.iter()
-        .map(|&a| ((1.0 + a).ln() / denom).clamp(0.0, 1.0))
-        .collect()
 }
 
 inventory::submit! {

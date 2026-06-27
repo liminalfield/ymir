@@ -249,6 +249,31 @@ pub(crate) fn drainage_area_mfd(
     area
 }
 
+/// Maps a raw accumulation (which spans orders of magnitude) to `[0, 1]` through
+/// `log(1 + a) / log(1 + max)`, so tributaries stay visible alongside the trunks instead of
+/// being swamped. Values at or above `max` clamp to 1. Used by Stream's flow output as a
+/// relative weight (the floor is the accumulation `0`, not the field's minimum).
+pub(crate) fn log_normalize(acc: &[f32], max: f32) -> Vec<f32> {
+    let denom = (1.0 + max).ln().max(1e-6);
+    acc.iter()
+        .map(|&a| ((1.0 + a).ln() / denom).clamp(0.0, 1.0))
+        .collect()
+}
+
+/// Log-stretches an accumulation across its own `[min, max]` to a full `[0, 1]`: the least-
+/// drained cell reads `0`, the most-drained reads `1`. Unlike [`log_normalize`], the floor is
+/// the field's actual minimum, so a uniform per-cell seed (e.g. physical cell area) cancels and
+/// the result always spans the whole range, which is what a *selection* band needs.
+pub(crate) fn log_normalize_span(acc: &[f32]) -> Vec<f32> {
+    let min = acc.iter().copied().fold(f32::INFINITY, f32::min);
+    let max = acc.iter().copied().fold(0.0_f32, f32::max);
+    let lo = (1.0 + min.max(0.0)).ln();
+    let span = ((1.0 + max).ln() - lo).max(1e-6);
+    acc.iter()
+        .map(|&a| (((1.0 + a).ln() - lo) / span).clamp(0.0, 1.0))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

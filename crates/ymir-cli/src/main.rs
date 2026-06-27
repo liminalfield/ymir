@@ -103,6 +103,7 @@ mod tests {
                 "modifier.curvature",
                 "modifier.curve",
                 "modifier.expression",
+                "modifier.flow",
                 "modifier.height",
                 "modifier.hydraulic_erosion",
                 "modifier.invert",
