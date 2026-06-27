@@ -29,6 +29,7 @@ mod gradient;
 mod height;
 mod hybrid;
 mod hydraulic;
+mod hydrology;
 mod import;
 mod invert;
 mod levels;
