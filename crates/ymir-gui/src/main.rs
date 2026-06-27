@@ -903,6 +903,17 @@ fn menu_rows(entries: &[NodeEntry], search: &str, drilled: Option<&'static str>)
     }
 }
 
+/// The top-level row index of the category `id`, used to land the highlight on the
+/// category just left when stepping back out of it (#89). The top level lists
+/// `categories_sorted()` in order, so a category's position there is its row. Falls
+/// back to the first row if the id is unknown.
+fn category_row_index(id: &str) -> usize {
+    categories_sorted()
+        .iter()
+        .position(|c| c.id == id)
+        .unwrap_or(0)
+}
+
 /// The display label for a menu row. `>` / `<` are plain ASCII so they always render
 /// (the triangle glyphs are absent from egui's default fonts).
 fn menu_row_label(row: MenuRow) -> String {
@@ -2093,8 +2104,13 @@ fn node_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
             // when entering a category) and refocus the search so typing continues.
             MenuRow::Back => {
                 if let Some(menu) = state.node_menu.as_mut() {
+                    // Land on the category just left, not the top of the list, so a
+                    // mistaken drill-in is one keystroke to undo (#89). The top-level
+                    // rows are `categories_sorted()` in order, so the category's index
+                    // there is the row to highlight.
+                    let from = menu.drilled;
                     menu.drilled = None;
-                    menu.highlight = 0;
+                    menu.highlight = from.map_or(0, category_row_index);
                     menu.focus_search = true;
                 }
             }
@@ -3429,6 +3445,23 @@ mod tests {
         assert!(drilled.contains(&MenuRow::Node("modifier.invert")));
         // No node row outside the drilled category.
         assert!(!drilled.contains(&MenuRow::Node("generator.fbm")));
+    }
+
+    #[test]
+    fn back_lands_on_the_category_just_left() {
+        // Stepping back out of a drilled-in category highlights that category in the
+        // top-level list (its row index there), not the top of the list (#89).
+        let top = menu_rows(&node_entries(), "", None);
+        for id in ["selector", "geology", "output"] {
+            let idx = category_row_index(id);
+            assert_eq!(
+                top[idx],
+                MenuRow::Category(id),
+                "back from {id:?} should highlight its own category row"
+            );
+        }
+        // An unknown id degrades to the first row rather than panicking.
+        assert_eq!(category_row_index("does-not-exist"), 0);
     }
 
     #[test]
