@@ -21,6 +21,7 @@ use crate::cancel::CancelToken;
 use crate::context::EvalContext;
 use crate::error::{Error, Result};
 use crate::field::Field;
+use crate::field_store::FieldStore;
 use crate::graph::{Graph, NodeId};
 use crate::hash::Fnv1a64;
 use crate::operator::Inputs;
@@ -98,6 +99,9 @@ pub struct EvalCache {
     byte_budget: usize,
     /// Running sum of the cached entries' approximate byte sizes.
     total_bytes: usize,
+    /// Optional warm tier: a content-addressed disk store consulted on a memory miss and
+    /// written through on insert. `None` makes the cache memory-only.
+    disk: Option<FieldStore>,
     tick: u64,
 }
 
@@ -131,6 +135,7 @@ impl EvalCache {
             capacity,
             byte_budget: usize::MAX,
             total_bytes: 0,
+            disk: None,
             tick: 0,
         }
     }
@@ -146,8 +151,18 @@ impl EvalCache {
             capacity: usize::MAX,
             byte_budget,
             total_bytes: 0,
+            disk: None,
             tick: 0,
         }
+    }
+
+    /// Attaches a disk store as the warm tier: a `get` that misses memory falls through to
+    /// disk (promoting a hit back into memory), and an `insert` writes through to disk. Without
+    /// it the cache is memory-only. Builder, so it composes with the constructors above.
+    #[must_use]
+    pub fn with_disk(mut self, store: FieldStore) -> Self {
+        self.disk = Some(store);
+        self
     }
 
     /// Whether `id`'s cached result is still valid for `key` (read-only; does not
@@ -156,20 +171,36 @@ impl EvalCache {
         self.entries.get(&id).is_some_and(|e| e.key == key)
     }
 
-    /// Returns the cached outputs for `id` if present and still keyed by `key`.
+    /// Returns the cached outputs for `id` if present and still keyed by `key`, consulting the
+    /// memory tier first and then the disk tier (promoting a disk hit back into memory).
     fn get(&mut self, id: NodeId, key: u64) -> Option<Arc<Vec<Field>>> {
-        let entry = self.entries.get_mut(&id)?;
-        if entry.key != key {
-            return None;
+        if let Some(entry) = self.entries.get_mut(&id)
+            && entry.key == key
+        {
+            self.tick += 1;
+            entry.last_used = self.tick;
+            return Some(Arc::clone(&entry.outputs));
         }
-        self.tick += 1;
-        entry.last_used = self.tick;
-        Some(Arc::clone(&entry.outputs))
+        // Memory miss (absent or a stale key): fall through to the disk tier, and promote a
+        // hit into memory so repeat reads in this session stay fast.
+        let outputs = Arc::new(self.disk.as_ref()?.load(key)?);
+        self.insert_memory(id, key, Arc::clone(&outputs));
+        Some(outputs)
     }
 
-    /// Inserts or replaces `id`'s result, evicting least-recently-used entries while either
-    /// the entry-count or the byte bound is exceeded.
+    /// Inserts a freshly computed result: into the memory tier, and written through to the
+    /// disk tier if one is attached.
     fn insert(&mut self, id: NodeId, key: u64, outputs: Arc<Vec<Field>>) {
+        if let Some(disk) = &self.disk {
+            disk.store(key, &outputs);
+        }
+        self.insert_memory(id, key, outputs);
+    }
+
+    /// Inserts or replaces `id`'s result in the memory tier only (byte tracking and eviction).
+    /// Used by [`insert`](Self::insert) and when promoting a disk hit, which must not write
+    /// back to the disk it just came from.
+    fn insert_memory(&mut self, id: NodeId, key: u64, outputs: Arc<Vec<Field>>) {
         let bytes = fields_bytes(&outputs);
 
         // A result bigger than the entire budget can never be retained; drop any stale entry
@@ -1158,6 +1189,40 @@ mod tests {
             cache.get(c, 3).is_some(),
             "the oversized insert must not evict existing entries"
         );
+    }
+
+    #[test]
+    fn disk_tier_serves_results_evicted_from_memory() {
+        let dir = std::env::temp_dir().join(format!("ymir-evalcache-disk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir); // shortcut-ok: pre-clean any stale dir
+        let store = FieldStore::open(dir.clone(), 1 << 20).expect("disk store opens");
+
+        let field = |v: f32| {
+            Arc::new(vec![
+                Field::new(10, 10, Region::UNIT)
+                    .with_layer(layers::HEIGHT, Arc::new(Layer::filled(10, 10, v))),
+            ])
+        };
+        let mut graph = Graph::new();
+        let a = graph.add_op(Box::new(ProbeExtent), Params::new());
+        let b = graph.add_op(Box::new(ProbeExtent), Params::new());
+
+        // Memory holds one 400-byte result; the disk budget holds both.
+        let mut cache = EvalCache::with_memory_budget(600).with_disk(store);
+        cache.insert(a, 1, field(0.1)); // memory + disk
+        cache.insert(b, 2, field(0.2)); // evicts a from memory; disk retains it
+
+        // a is gone from memory, but the disk tier serves it (and re-promotes it).
+        assert!(
+            cache.get(a, 1).is_some(),
+            "a result evicted from memory is served from disk"
+        );
+        assert!(
+            cache.get(b, 2).is_some(),
+            "the other result is still served"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir); // shortcut-ok: best-effort test cleanup
     }
 
     #[test]
