@@ -465,7 +465,23 @@ pub enum Unit {
     Degrees,
 }
 
-/// The schema for one parameter: its name, kind, default value, and optional unit.
+/// How a numeric parameter's values are distributed across its range: a hint the inspector
+/// uses to pick a linear or a logarithmic control. A ratio like a frequency or a scale is
+/// perceptually logarithmic, so equal slider travel should cover an equal *ratio*, not an
+/// equal increment, and the low end is not crushed into a sliver of the track. Semantic, not
+/// a widget choice: the schema states the value's nature, the inspector picks the control.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Scale {
+    /// Equal increments across the range (the default).
+    #[default]
+    Linear,
+    /// Equal ratios across the range, a logarithmic control. The range should be strictly
+    /// positive (a logarithmic axis has no zero).
+    Logarithmic,
+}
+
+/// The schema for one parameter: its name, kind, default value, optional unit, and value
+/// distribution.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParamSpec {
     /// Parameter name, the key used in [`Params`].
@@ -477,6 +493,9 @@ pub struct ParamSpec {
     /// An optional physical unit for a numeric parameter (e.g. meters for a
     /// world-unit length). `None` for a bare, unit-less ratio.
     pub unit: Option<Unit>,
+    /// How the value is distributed across its range, for choosing a linear or logarithmic
+    /// control. [`Scale::Linear`] unless declared otherwise.
+    pub scale: Scale,
 }
 
 impl ParamSpec {
@@ -493,6 +512,7 @@ impl ParamSpec {
             kind,
             default,
             unit: None,
+            scale: Scale::Linear,
         }
     }
 
@@ -502,6 +522,15 @@ impl ParamSpec {
     #[must_use]
     pub fn with_unit(mut self, unit: Unit) -> Self {
         self.unit = Some(unit);
+        self
+    }
+
+    /// Marks a numeric parameter as logarithmically distributed, so the inspector edits it
+    /// with a logarithmic control (equal travel covers an equal ratio). The range should be
+    /// strictly positive.
+    #[must_use]
+    pub fn logarithmic(mut self) -> Self {
+        self.scale = Scale::Logarithmic;
         self
     }
 }

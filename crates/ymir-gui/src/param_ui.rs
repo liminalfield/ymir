@@ -6,14 +6,19 @@
 //! are written back to the canonical graph by the caller via `Graph::set_params`.
 
 use eframe::egui;
-use ymir_core::{ParamKind, ParamSpec, ParamValue, Params, Unit};
+use ymir_core::{ParamKind, ParamSpec, ParamValue, Params, Scale, Unit};
 
 /// The editor widget a parameter kind maps to. Derived purely from the schema, so
 /// the mapping is unit-testable without egui.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Widget {
-    /// A slider over `[min, max]` for a bounded, unit-less float (a ratio).
-    Slider { min: f64, max: f64 },
+    /// A slider over `[min, max]` for a bounded, unit-less float (a ratio). `logarithmic`
+    /// distributes the track by ratio rather than increment (for a frequency or a scale).
+    Slider {
+        min: f64,
+        max: f64,
+        logarithmic: bool,
+    },
     /// A value field over `[min, max]` for a float carrying a unit (an open physical
     /// quantity, e.g. a world-unit length), shown with the unit as a suffix. A slider
     /// over a wide world-unit range is too coarse and unlabelled; this is precise and
@@ -51,6 +56,7 @@ pub(crate) fn widget_for(spec: &ParamSpec) -> Widget {
             None => Widget::Slider {
                 min: *min,
                 max: *max,
+                logarithmic: spec.scale == Scale::Logarithmic,
             },
         },
         ParamKind::Int { min, max } => Widget::IntDrag {
@@ -111,7 +117,14 @@ pub(crate) fn edit(
 ) -> Option<ParamValue> {
     let name = spec.name.as_str();
     match (widget_for(spec), current) {
-        (Widget::Slider { min, max }, ParamValue::Float(v)) => {
+        (
+            Widget::Slider {
+                min,
+                max,
+                logarithmic,
+            },
+            ParamValue::Float(v),
+        ) => {
             // egui's built-in slider value is a drag-value it won't let us configure,
             // so it keeps smart-aim and snaps coarsely (about 1/100 of the range). Hide
             // it and pair the handle with our own DragValue: smart-aim off on both for
@@ -145,6 +158,7 @@ pub(crate) fn edit(
                         egui::Slider::new(&mut x, min..=max)
                             .show_value(false)
                             .smart_aim(false)
+                            .logarithmic(logarithmic)
                             .text(name),
                     );
                     value | handle
@@ -291,13 +305,52 @@ mod tests {
     }
 
     #[test]
+    fn a_logarithmic_float_maps_to_a_log_slider() {
+        let linear = spec(
+            ParamKind::Float {
+                min: 1.0,
+                max: 64.0,
+            },
+            ParamValue::Float(2.0),
+        );
+        assert_eq!(
+            widget_for(&linear),
+            Widget::Slider {
+                min: 1.0,
+                max: 64.0,
+                logarithmic: false,
+            }
+        );
+        let log = spec(
+            ParamKind::Float {
+                min: 1.0,
+                max: 64.0,
+            },
+            ParamValue::Float(2.0),
+        )
+        .logarithmic();
+        assert_eq!(
+            widget_for(&log),
+            Widget::Slider {
+                min: 1.0,
+                max: 64.0,
+                logarithmic: true,
+            }
+        );
+    }
+
+    #[test]
     fn each_kind_maps_to_its_widget() {
         assert_eq!(
             widget_for(&spec(
                 ParamKind::Float { min: 0.0, max: 1.0 },
                 ParamValue::Float(0.0)
             )),
-            Widget::Slider { min: 0.0, max: 1.0 }
+            Widget::Slider {
+                min: 0.0,
+                max: 1.0,
+                logarithmic: false,
+            }
         );
         assert_eq!(
             widget_for(&spec(

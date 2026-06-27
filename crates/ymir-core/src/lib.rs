@@ -50,7 +50,7 @@ pub use graph::{Graph, NodeId};
 pub use hash::ContentHash;
 pub use layer::Layer;
 pub use operator::{Inputs, Operator, OperatorClone};
-pub use param::{Curve, ParamKind, ParamSpec, ParamValue, Params, Unit};
+pub use param::{Curve, ParamKind, ParamSpec, ParamValue, Params, Scale, Unit};
 pub use project::{Connection, FORMAT_VERSION, NodeDocument, ProjectDocument};
 pub use region::Region;
 pub use spec::{NodeKind, NodeSpec, PortSpec};
