@@ -12,8 +12,10 @@
 use std::collections::HashSet;
 
 use eframe::egui::{self, Pos2};
-use egui_snarl::ui::{AnyPins, PinInfo, SnarlPin, SnarlViewer};
+use egui_snarl::ui::{AnyPins, BackgroundPattern, PinInfo, SnarlPin, SnarlStyle, SnarlViewer};
 use egui_snarl::{InPin, InPinId, NodeId as SnarlNodeId, OutPin, OutPinId, Snarl};
+
+use crate::project_file::{Frame, LabelPlacement};
 
 use ymir_core::{EvalRequest, Graph, NodeId, Params, Region, registry};
 use ymir_nodes::tr;
@@ -27,6 +29,10 @@ const THUMB_DISPLAY_SIZE: f32 = 72.0;
 const THUMB_TOP_GAP: f32 = 6.0;
 /// Corner radius of the thumbnail and its border.
 const THUMB_CORNER_RADIUS: f32 = 4.0;
+/// Corner radius of a canvas frame's box and border (#94).
+const FRAME_CORNER_RADIUS: f32 = 6.0;
+/// Inset of a frame's label from the top edge (graph units, #94).
+const FRAME_LABEL_PAD: f32 = 6.0;
 /// Fixed node width (px). A uniform width keeps the canvas tidy and matters once a
 /// grid and snapping arrive. Applied as a minimum on the header and footer rows; an
 /// unusually long title is the only thing that can push a node wider.
@@ -156,6 +162,8 @@ pub(crate) struct GraphViewer<'a> {
     /// canvas can apply selection changes through the state after this borrow. Input,
     /// read-only.
     pub(crate) selection: HashSet<Handle>,
+    /// Canvas frames to draw behind the nodes (#94). Input, read-only.
+    pub(crate) frames: &'a [Frame],
     /// Each node's final rect with its handle, collected during rendering. These
     /// are in the canvas's local (graph) space, not screen space. The canvas
     /// resolves a plain click to a node from these after the frame, rather than
@@ -196,6 +204,10 @@ pub(crate) struct GraphViewer<'a> {
     /// the user asked to add a node; the canvas reads it after the frame to open the
     /// node menu there (#60). Output.
     pub(crate) add_node_at: Option<egui::Pos2>,
+    /// Set by the graph context menu ("Add frame") to the graph-space position where the
+    /// user asked to add a canvas frame; the canvas creates one there after the frame
+    /// (#94). Output.
+    pub(crate) add_frame_at: Option<egui::Pos2>,
     /// A node the viewer asks the canvas to select after the frame (e.g. a duplicate),
     /// keeping selection logic in one place. Output.
     pub(crate) select_after: Option<Handle>,
@@ -232,6 +244,7 @@ impl<'a> GraphViewer<'a> {
         Self {
             graph,
             selection: HashSet::new(),
+            frames: &[],
             node_rects: Vec::new(),
             to_global: egui::emath::TSTransform::IDENTITY,
             wire_click: false,
@@ -242,6 +255,7 @@ impl<'a> GraphViewer<'a> {
             status: None,
             pinned: None,
             add_node_at: None,
+            add_frame_at: None,
             select_after: None,
             rename_request: None,
             pin_request: None,
@@ -522,6 +536,58 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
         self.to_global = *to_global;
     }
 
+    fn draw_background(
+        &mut self,
+        background: Option<&BackgroundPattern>,
+        viewport: &egui::Rect,
+        snarl_style: &SnarlStyle,
+        style: &egui::Style,
+        painter: &egui::Painter,
+        _snarl: &Snarl<Handle>,
+    ) {
+        // The grid first, then frames on top of it so a frame tints the grid without
+        // hiding it (#94). This hook draws behind the nodes and wires, on the snarl layer
+        // whose transform is already applied, so the painter works in graph space, the
+        // same coordinates the frame rects are stored in.
+        if let Some(background) = background {
+            background.draw(viewport, snarl_style, style, painter);
+        }
+        for frame in self.frames {
+            let rect = egui::Rect::from_min_max(
+                egui::pos2(frame.rect[0], frame.rect[1]),
+                egui::pos2(frame.rect[2], frame.rect[3]),
+            );
+            let fill = egui::Color32::from_rgba_unmultiplied(
+                frame.fill[0],
+                frame.fill[1],
+                frame.fill[2],
+                frame.fill[3],
+            );
+            let border = egui::Color32::from_rgb(frame.border[0], frame.border[1], frame.border[2]);
+            painter.rect_filled(rect, FRAME_CORNER_RADIUS, fill);
+            painter.rect_stroke(
+                rect,
+                FRAME_CORNER_RADIUS,
+                egui::Stroke::new(1.0, border),
+                egui::StrokeKind::Inside,
+            );
+            if !frame.label.is_empty() {
+                let font = egui::TextStyle::Body.resolve(style);
+                let (pos, anchor) = match frame.label_placement {
+                    LabelPlacement::TopLeft => (
+                        egui::pos2(rect.left() + FRAME_LABEL_PAD, rect.top() + FRAME_LABEL_PAD),
+                        egui::Align2::LEFT_TOP,
+                    ),
+                    LabelPlacement::TopCenter => (
+                        egui::pos2(rect.center().x, rect.top() + FRAME_LABEL_PAD),
+                        egui::Align2::CENTER_TOP,
+                    ),
+                };
+                painter.text(pos, anchor, &frame.label, font, crate::theme::TEXT_PRIMARY);
+            }
+        }
+    }
+
     /// Output-producing nodes get a footer: a small heightmap thumbnail below the
     /// ports (#42), unless thumbnails are toggled off (#74). Endpoints (no output) have
     /// nothing to preview, so no footer.
@@ -770,6 +836,10 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
         style_context_menu(ui);
         if ui.button("Add node").clicked() {
             self.add_node_at = Some(pos);
+            ui.close();
+        }
+        if ui.button("Add frame").clicked() {
+            self.add_frame_at = Some(pos);
             ui.close();
         }
         if ui.button("Zoom to graph").clicked() {

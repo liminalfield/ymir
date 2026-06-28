@@ -1480,6 +1480,23 @@ fn category_tab(
     }
 }
 
+/// A new default canvas frame with its top-left at `pos` (graph space): a subtle
+/// translucent tint with a matching border and a placeholder label, ready to recolour and
+/// relabel in the inspector (#94).
+fn new_frame(pos: egui::Pos2) -> project_file::Frame {
+    /// Default frame size in graph units.
+    const SIZE: egui::Vec2 = egui::vec2(240.0, 160.0);
+    let c = theme::LINE_STRONG;
+    project_file::Frame {
+        rect: [pos.x, pos.y, pos.x + SIZE.x, pos.y + SIZE.y],
+        // A low alpha so the fill tints the canvas grid rather than hiding it.
+        fill: [c.r(), c.g(), c.b(), 36],
+        border: [c.r(), c.g(), c.b()],
+        label: "Frame".to_string(),
+        label_placement: project_file::LabelPlacement::TopLeft,
+    }
+}
+
 fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
     let cats = categories_sorted();
     if state.active_tab.is_none() {
@@ -2388,11 +2405,13 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         graph,
         snarl,
         thumbnails,
+        frames,
         ..
     } = &mut *state;
     let mut viewer = canvas::GraphViewer {
         graph,
         selection,
+        frames: frames.as_slice(),
         node_rects: Vec::new(),
         to_global: egui::emath::TSTransform::IDENTITY,
         wire_click: false,
@@ -2403,6 +2422,7 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         status,
         pinned,
         add_node_at: None,
+        add_frame_at: None,
         select_after: None,
         rename_request: None,
         pin_request: None,
@@ -2478,6 +2498,8 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     };
     // A graph-space spot from a right-click "Add node", if any (#60).
     let add_node_at = viewer.add_node_at;
+    // A graph-space spot from a right-click "Add frame", if any (#94).
+    let add_frame_at = viewer.add_frame_at;
     // A node the viewer asks to select (e.g. a duplicate, #61).
     let select_after = viewer.select_after;
     // A node the viewer asks to rename (context-menu "Rename", #61).
@@ -2653,6 +2675,11 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         if anchor.is_finite() {
             state.node_menu = Some(open_node_menu(anchor, view, Some(wire)));
         }
+    }
+
+    // Right-click "Add frame" drops a default frame at the clicked graph spot (#94).
+    if let Some(graph_pos) = add_frame_at {
+        state.frames.push(new_frame(graph_pos));
     }
 
     // Right-click "Add node" (snarl graph menu) opens the node menu at the clicked
