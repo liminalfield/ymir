@@ -225,9 +225,9 @@ struct AppState {
     /// The selected canvas frame, by index into `frames` (#94): the target of Delete and
     /// the frame inspector. `None` when no frame is selected.
     selected_frame: Option<usize>,
-    /// An in-progress frame move (#94): the frame being dragged and the nodes it carries,
-    /// captured at drag-start so a node cannot escape mid-drag. `None` when not dragging.
-    frame_drag: Option<FrameDrag>,
+    /// An in-progress frame gesture (#94): the frame being moved or resized (and, for a
+    /// move, the nodes it carries, captured at drag-start so none escape). `None` when idle.
+    frame_drag: Option<FrameGesture>,
     /// The wire snarl reports as armed this frame, mirrored from the viewer each frame for
     /// wire-to-create (#123): when the node menu picks a node, this is the wire it connects.
     /// `None` when no wire is in flight; self-correcting, so a cancelled wire clears it.
@@ -2948,12 +2948,35 @@ fn offset_selected_except(
     }
 }
 
-/// An in-progress frame move (#94): the dragged frame and the nodes it carries.
-struct FrameDrag {
+/// Width (graph units) of a frame's edge/corner resize bands, just inside the border (#94).
+const FRAME_RESIZE_BAND: f32 = 8.0;
+/// Smallest a frame can be resized to on either axis (graph units, #94).
+const FRAME_MIN_SIZE: f32 = 60.0;
+
+/// What part of a frame a press grabbed (#94): the title bar moves it, an edge or corner
+/// resizes it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FrameHandle {
+    /// The title bar: moves the frame and its contents.
+    Move,
+    North,
+    South,
+    East,
+    West,
+    NorthWest,
+    NorthEast,
+    SouthWest,
+    SouthEast,
+}
+
+/// An in-progress frame gesture (#94): the frame, what was grabbed, and (for a move) the
+/// nodes it carries.
+struct FrameGesture {
     /// Index into [`AppState::frames`].
     index: usize,
-    /// The nodes contained when the drag began, moved by the same delta as the frame so a
-    /// node cannot escape mid-drag.
+    /// Which part of the frame is being dragged.
+    handle: FrameHandle,
+    /// Nodes contained when a *move* began, carried by the same delta. Empty for a resize.
     contained: Vec<Handle>,
 }
 
@@ -2965,34 +2988,98 @@ fn frame_rect(frame: &project_file::Frame) -> egui::Rect {
     )
 }
 
-/// The topmost frame whose title bar contains `graph_pos`, if any. Later frames draw on
-/// top, so they are searched first.
-fn frame_title_at(graph_pos: egui::Pos2, frames: &[project_file::Frame]) -> Option<usize> {
-    frames.iter().enumerate().rev().find_map(|(i, frame)| {
-        let r = frame_rect(frame);
-        let title =
-            egui::Rect::from_min_max(r.min, egui::pos2(r.max.x, r.min.y + canvas::FRAME_TITLE_H));
-        title.contains(graph_pos).then_some(i)
+/// The handle at `graph_pos` within `rect`: an edge/corner band (corners win where two
+/// bands meet), else the title bar (the move handle), else `None` for the body interior or
+/// outside the frame.
+fn frame_handle_at(graph_pos: egui::Pos2, rect: egui::Rect) -> Option<FrameHandle> {
+    if !rect.contains(graph_pos) {
+        return None;
+    }
+    let west = graph_pos.x - rect.left() <= FRAME_RESIZE_BAND;
+    let east = rect.right() - graph_pos.x <= FRAME_RESIZE_BAND;
+    let north = graph_pos.y - rect.top() <= FRAME_RESIZE_BAND;
+    let south = rect.bottom() - graph_pos.y <= FRAME_RESIZE_BAND;
+    Some(match (west, east, north, south) {
+        (true, _, true, _) => FrameHandle::NorthWest,
+        (_, true, true, _) => FrameHandle::NorthEast,
+        (true, _, _, true) => FrameHandle::SouthWest,
+        (_, true, _, true) => FrameHandle::SouthEast,
+        (true, _, _, _) => FrameHandle::West,
+        (_, true, _, _) => FrameHandle::East,
+        (_, _, true, _) => FrameHandle::North,
+        (_, _, _, true) => FrameHandle::South,
+        // Not on an edge band: the title bar moves the frame; the body is not a handle.
+        _ if graph_pos.y - rect.top() <= canvas::FRAME_TITLE_H => FrameHandle::Move,
+        _ => return None,
     })
 }
 
-/// Frame select and move (#94). A press on a frame's title bar (and not on a node, which
-/// takes precedence as it is drawn on top) selects the frame and begins a move that carries
-/// the nodes contained at drag-start; a press on the bare canvas clears the frame selection.
-/// Returns whether a frame owns this gesture, so the caller suppresses the marquee. Resize
-/// and the inspector are separate steps.
+/// The topmost frame and the handle at `graph_pos`, if any. Later frames draw on top, so
+/// they are searched first.
+fn frame_handle_hit(
+    graph_pos: egui::Pos2,
+    frames: &[project_file::Frame],
+) -> Option<(usize, FrameHandle)> {
+    frames
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(i, frame)| frame_handle_at(graph_pos, frame_rect(frame)).map(|h| (i, h)))
+}
+
+/// The cursor that signals what a frame handle does.
+fn frame_cursor(handle: FrameHandle) -> egui::CursorIcon {
+    match handle {
+        FrameHandle::Move => egui::CursorIcon::Grab,
+        FrameHandle::North | FrameHandle::South => egui::CursorIcon::ResizeVertical,
+        FrameHandle::East | FrameHandle::West => egui::CursorIcon::ResizeHorizontal,
+        FrameHandle::NorthWest | FrameHandle::SouthEast => egui::CursorIcon::ResizeNwSe,
+        FrameHandle::NorthEast | FrameHandle::SouthWest => egui::CursorIcon::ResizeNeSw,
+    }
+}
+
+/// Applies a resize `delta` (graph space) to `rect` (`[min_x, min_y, max_x, max_y]`) for the
+/// dragged `handle`, moving the relevant edge(s) and clamping to [`FRAME_MIN_SIZE`].
+fn resize_frame(rect: &mut [f32; 4], handle: FrameHandle, d: egui::Vec2) {
+    use FrameHandle::{East, North, NorthEast, NorthWest, South, SouthEast, SouthWest, West};
+    if matches!(handle, West | NorthWest | SouthWest) {
+        rect[0] += d.x;
+    }
+    if matches!(handle, East | NorthEast | SouthEast) {
+        rect[2] += d.x;
+    }
+    if matches!(handle, North | NorthWest | NorthEast) {
+        rect[1] += d.y;
+    }
+    if matches!(handle, South | SouthWest | SouthEast) {
+        rect[3] += d.y;
+    }
+    // Keep at least the minimum span: a moved edge cannot cross the opposite one.
+    rect[0] = rect[0].min(rect[2] - FRAME_MIN_SIZE);
+    rect[1] = rect[1].min(rect[3] - FRAME_MIN_SIZE);
+    rect[2] = rect[2].max(rect[0] + FRAME_MIN_SIZE);
+    rect[3] = rect[3].max(rect[1] + FRAME_MIN_SIZE);
+}
+
+/// Frame select, move, and resize (#94). A press on a frame's title bar selects and moves
+/// it (carrying the nodes contained at drag-start); a press on an edge/corner resizes it;
+/// nodes take precedence (drawn on top), and a press on the bare canvas clears the frame
+/// selection. While not dragging, the hovered handle sets a matching cursor so the handles
+/// are discoverable. Returns whether a frame owns this gesture, so the caller suppresses the
+/// marquee.
 fn handle_frame_interaction(
     ui: &egui::Ui,
     state: &mut AppState,
     to_global: egui::emath::TSTransform,
     node_rects: &[(Handle, egui::Rect)],
 ) -> bool {
-    let (pressed, down, origin, delta) = ui.input(|i| {
+    let (pressed, down, origin, delta, hover) = ui.input(|i| {
         (
             i.pointer.primary_pressed(),
             i.pointer.primary_down(),
             i.pointer.press_origin(),
             i.pointer.delta(),
+            i.pointer.hover_pos(),
         )
     });
 
@@ -3002,30 +3089,38 @@ fn handle_frame_interaction(
         && !node_at(origin, node_rects, to_global)
     {
         let graph_pos = to_global.inverse() * origin;
-        if let Some(index) = frame_title_at(graph_pos, &state.frames) {
-            // Select the frame (replacing any node selection) and begin a move, capturing
-            // the nodes whose centre is inside the frame right now.
+        if let Some((index, handle)) = frame_handle_hit(graph_pos, &state.frames) {
+            // Select the frame (replacing any node selection). A move captures the nodes
+            // whose centre is inside the frame right now; a resize carries no nodes.
             state.selected_frame = Some(index);
             state.clear_selection();
-            let rect = frame_rect(&state.frames[index]);
-            let contained = node_rects
-                .iter()
-                .filter(|(_, r)| rect.contains(r.center()))
-                .map(|(handle, _)| *handle)
-                .collect();
-            state.frame_drag = Some(FrameDrag { index, contained });
+            let contained = if handle == FrameHandle::Move {
+                let rect = frame_rect(&state.frames[index]);
+                node_rects
+                    .iter()
+                    .filter(|(_, r)| rect.contains(r.center()))
+                    .map(|(handle, _)| *handle)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            state.frame_drag = Some(FrameGesture {
+                index,
+                handle,
+                contained,
+            });
         } else {
             state.selected_frame = None;
         }
     }
 
-    // Apply or end an in-progress move. Copy the drag's fields out first so the frames and
-    // snarl can be mutated without the `frame_drag` borrow held.
+    // Apply or end an in-progress gesture. Copy the fields out first so the frames and snarl
+    // can be mutated without the `frame_drag` borrow held.
     let active = state
         .frame_drag
         .as_ref()
-        .map(|d| (d.index, d.contained.clone()));
-    if let Some((index, contained)) = active {
+        .map(|g| (g.index, g.handle, g.contained.clone()));
+    if let Some((index, handle, contained)) = active {
         let scale = to_global.scaling;
         if !down {
             state.frame_drag = None;
@@ -3033,19 +3128,33 @@ fn handle_frame_interaction(
             // The pointer delta is screen space; divide by the zoom to move in graph space.
             let d = delta / scale;
             if let Some(frame) = state.frames.get_mut(index) {
-                frame.rect[0] += d.x;
-                frame.rect[1] += d.y;
-                frame.rect[2] += d.x;
-                frame.rect[3] += d.y;
+                if handle == FrameHandle::Move {
+                    frame.rect[0] += d.x;
+                    frame.rect[1] += d.y;
+                    frame.rect[2] += d.x;
+                    frame.rect[3] += d.y;
+                } else {
+                    resize_frame(&mut frame.rect, handle, d);
+                }
             }
-            for handle in &contained {
-                if let Some(snarl_id) = canvas::snarl_node_of(&state.snarl, *handle)
-                    && let Some(node) = state.snarl.get_node_info_mut(snarl_id)
-                {
-                    node.pos += d;
+            if handle == FrameHandle::Move {
+                for handle in &contained {
+                    if let Some(snarl_id) = canvas::snarl_node_of(&state.snarl, *handle)
+                        && let Some(node) = state.snarl.get_node_info_mut(snarl_id)
+                    {
+                        node.pos += d;
+                    }
                 }
             }
         }
+        ui.ctx().set_cursor_icon(frame_cursor(handle));
+    } else if let Some(hover) = hover
+        && over_canvas_surface(ui, hover)
+        && !node_at(hover, node_rects, to_global)
+        && let Some((_, handle)) = frame_handle_hit(to_global.inverse() * hover, &state.frames)
+    {
+        // Not dragging: show the handle's cursor so resize/move zones are discoverable.
+        ui.ctx().set_cursor_icon(frame_cursor(handle));
     }
 
     state.frame_drag.is_some()
