@@ -228,6 +228,16 @@ struct AppState {
     /// An in-progress frame gesture (#94): the frame being moved or resized (and, for a
     /// move, the nodes it carries, captured at drag-start so none escape). `None` when idle.
     frame_drag: Option<FrameGesture>,
+    /// Transient HSVA buffers for the selected frame's fill, border, and label-text colour
+    /// pickers (`(index, fill, border, text)`, #94). The pickers edit in HSVA so the hue stays
+    /// put while dragging; editing the stored `[u8; _]` re-derives the hue from RGB each frame,
+    /// which jumps near gray. Seeded when the selection changes, quantized back to the frame.
+    frame_color_edit: Option<(
+        usize,
+        egui::ecolor::Hsva,
+        egui::ecolor::Hsva,
+        egui::ecolor::Hsva,
+    )>,
     /// The wire snarl reports as armed this frame, mirrored from the viewer each frame for
     /// wire-to-create (#123): when the node menu picks a node, this is the wire it connects.
     /// `None` when no wire is in flight; self-correcting, so a cancelled wire clears it.
@@ -409,6 +419,7 @@ impl AppState {
             group_drag_leader: None,
             selected_frame: None,
             frame_drag: None,
+            frame_color_edit: None,
             pending_wire: None,
             consume_wire: false,
             seed: 0,
@@ -468,6 +479,7 @@ impl AppState {
         self.frames = restored.frames;
         self.selected_frame = None;
         self.frame_drag = None;
+        self.frame_color_edit = None;
         self.seed = restored.seed;
         self.world_extent = restored.world_extent;
         self.world_height = restored.world_height;
@@ -501,6 +513,7 @@ impl AppState {
         self.frames = Vec::new();
         self.selected_frame = None;
         self.frame_drag = None;
+        self.frame_color_edit = None;
         self.seed = seed;
         self.world_extent = world_extent;
         self.world_height = world_height;
@@ -588,6 +601,7 @@ impl AppState {
                 self.frames = restored.frames;
                 self.selected_frame = None;
                 self.frame_drag = None;
+                self.frame_color_edit = None;
                 self.seed = restored.seed;
                 self.world_extent = restored.world_extent;
                 self.world_height = restored.world_height;
@@ -655,11 +669,14 @@ impl AppState {
         self.selection.clear();
         self.selection.insert(handle);
         self.primary = Some(handle);
+        // Node and frame selection are mutually exclusive (#94): the inspector shows one.
+        self.selected_frame = None;
     }
 
     /// Toggles `handle` in the selection (Ctrl-click): adding it makes it primary,
     /// removing it moves primary to another selected node or clears it when empty.
     fn toggle_selection(&mut self, handle: Handle) {
+        self.selected_frame = None;
         if self.selection.remove(&handle) {
             if self.primary == Some(handle) {
                 self.primary = self.selection.iter().copied().next();
@@ -1501,11 +1518,13 @@ fn new_frame(pos: egui::Pos2) -> project_file::Frame {
     /// Default frame size in graph units.
     const SIZE: egui::Vec2 = egui::vec2(240.0, 160.0);
     let c = theme::LINE_STRONG;
+    let t = theme::TEXT_PRIMARY;
     project_file::Frame {
         rect: [pos.x, pos.y, pos.x + SIZE.x, pos.y + SIZE.y],
         // A low alpha so the fill tints the canvas grid rather than hiding it.
         fill: [c.r(), c.g(), c.b(), 36],
         border: [c.r(), c.g(), c.b()],
+        text: [t.r(), t.g(), t.b()],
         label: "Frame".to_string(),
         label_placement: project_file::LabelPlacement::TopLeft,
     }
@@ -1671,7 +1690,12 @@ fn right_panel_pane(ui: &mut egui::Ui, state: &mut AppState) {
                         .inner_margin(egui::Margin::symmetric(4, 2)),
                 )
                 .show_inside(ui, |ui| preview_2d_pane(ui, state));
-            egui::CentralPanel::default().show_inside(ui, |ui| node_inspector(ui, state));
+            // A selected frame shows the frame inspector here instead of the node inspector
+            // (selection is mutually exclusive, #94).
+            egui::CentralPanel::default().show_inside(ui, |ui| match state.selected_frame {
+                Some(index) => frame_inspector(ui, state, index),
+                None => node_inspector(ui, state),
+            });
         }
         ParamTab::World => {
             egui::CentralPanel::default().show_inside(ui, |ui| world_settings(ui, state));
@@ -1762,6 +1786,103 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
         // The node would have to vanish mid-frame to reach here; surface it rather
         // than swallow it.
         ui.colored_label(ui.visuals().error_fg_color, err.to_string());
+    }
+}
+
+/// The selected frame's inspector (#94): edits its label, fill colour and opacity, border
+/// colour, and label placement, plus a delete action. Shown in place of the node inspector
+/// while a frame is selected.
+fn frame_inspector(ui: &mut egui::Ui, state: &mut AppState, index: usize) {
+    use egui::widgets::color_picker::{Alpha, color_edit_button_hsva};
+
+    // The frame can vanish (deleted, or a session swapped in) between selection and draw.
+    if index >= state.frames.len() {
+        ui.weak("No frame selected.");
+        return;
+    }
+
+    // Seed the HSVA edit buffers when the selected frame changes, so the colour pickers edit
+    // in HSVA (hue preserved) rather than re-deriving the hue from the stored RGB each frame,
+    // which jumps around near gray.
+    if state.frame_color_edit.map(|(i, ..)| i) != Some(index) {
+        let frame = &state.frames[index];
+        let opaque =
+            |c: [u8; 3]| egui::ecolor::Hsva::from_srgba_unmultiplied([c[0], c[1], c[2], 255]);
+        let fill = egui::ecolor::Hsva::from_srgba_unmultiplied(frame.fill);
+        let border = opaque(frame.border);
+        let text = opaque(frame.text);
+        state.frame_color_edit = Some((index, fill, border, text));
+    }
+    // Just seeded above, so this is always `Some`; fall through harmlessly if not.
+    let Some((_, mut fill_hsva, mut border_hsva, mut text_hsva)) = state.frame_color_edit else {
+        return;
+    };
+
+    ui.horizontal(|ui| {
+        ui.label("Label");
+        ui.add(
+            egui::TextEdit::singleline(&mut state.frames[index].label)
+                .hint_text("Frame")
+                .desired_width(f32::INFINITY),
+        );
+    });
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label("Fill");
+        // OnlyBlend keeps the alpha a normal 0..1 opacity (no additive/HDR mode).
+        if color_edit_button_hsva(ui, &mut fill_hsva, Alpha::OnlyBlend).changed() {
+            state.frames[index].fill = fill_hsva.to_srgba_unmultiplied();
+        }
+    });
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label("Border");
+        if color_edit_button_hsva(ui, &mut border_hsva, Alpha::Opaque).changed() {
+            let c = border_hsva.to_srgba_unmultiplied();
+            state.frames[index].border = [c[0], c[1], c[2]];
+        }
+    });
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label("Label text");
+        // A dark text colour stays readable on a bright header where the light default does not.
+        if color_edit_button_hsva(ui, &mut text_hsva, Alpha::Opaque).changed() {
+            let c = text_hsva.to_srgba_unmultiplied();
+            state.frames[index].text = [c[0], c[1], c[2]];
+        }
+    });
+    // Persist the (possibly dragged) HSVA buffers so the hue carries to the next frame.
+    state.frame_color_edit = Some((index, fill_hsva, border_hsva, text_hsva));
+
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label("Label position");
+        let current = state.frames[index].label_placement;
+        let label = match current {
+            project_file::LabelPlacement::TopLeft => "Top left",
+            project_file::LabelPlacement::TopCenter => "Top centre",
+        };
+        egui::ComboBox::from_id_salt("frame-label-placement")
+            .selected_text(label)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut state.frames[index].label_placement,
+                    project_file::LabelPlacement::TopLeft,
+                    "Top left",
+                );
+                ui.selectable_value(
+                    &mut state.frames[index].label_placement,
+                    project_file::LabelPlacement::TopCenter,
+                    "Top centre",
+                );
+            });
+    });
+
+    ui.add_space(10.0);
+    if ui.button("Delete frame").clicked() {
+        state.frames.remove(index);
+        state.selected_frame = None;
+        state.frame_color_edit = None;
     }
 }
 
@@ -2632,7 +2753,7 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // Frame select/move (#94): a press on a frame's title bar selects and drags it (with
     // its contents). Runs before the marquee so a press on a frame handle does not also
     // start a box-select; nodes still take precedence (it skips a press over a node).
-    let frame_owns = handle_frame_interaction(ui, state, to_global, &node_rects);
+    let frame_owns = handle_frame_interaction(ui, state, canvas_rect, to_global, &node_rects);
 
     // Marquee box-select on left-drag over empty canvas (panning moved to middle-mouse
     // by the snarl patch, #84). Runs after the click so a drag that began on a node
@@ -3070,6 +3191,7 @@ fn resize_frame(rect: &mut [f32; 4], handle: FrameHandle, d: egui::Vec2) {
 fn handle_frame_interaction(
     ui: &egui::Ui,
     state: &mut AppState,
+    canvas_rect: egui::Rect,
     to_global: egui::emath::TSTransform,
     node_rects: &[(Handle, egui::Rect)],
 ) -> bool {
@@ -3083,8 +3205,12 @@ fn handle_frame_interaction(
         )
     });
 
+    // Only presses on the canvas count: a press in the side panel (e.g. the frame
+    // inspector's own controls) must not be read as a canvas click that deselects the
+    // frame. `over_canvas_surface` only excludes floating windows, not the sibling panels.
     if pressed
         && let Some(origin) = origin
+        && canvas_rect.contains(origin)
         && over_canvas_surface(ui, origin)
         && !node_at(origin, node_rects, to_global)
     {
@@ -3149,6 +3275,7 @@ fn handle_frame_interaction(
         }
         ui.ctx().set_cursor_icon(frame_cursor(handle));
     } else if let Some(hover) = hover
+        && canvas_rect.contains(hover)
         && over_canvas_surface(ui, hover)
         && !node_at(hover, node_rects, to_global)
         && let Some((_, handle)) = frame_handle_hit(to_global.inverse() * hover, &state.frames)

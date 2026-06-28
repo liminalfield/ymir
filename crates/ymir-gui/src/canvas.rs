@@ -615,7 +615,9 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
                     ),
                     LabelPlacement::TopCenter => (header.center(), egui::Align2::CENTER_CENTER),
                 };
-                painter.text(pos, anchor, &frame.label, font, crate::theme::TEXT_PRIMARY);
+                let text_color =
+                    egui::Color32::from_rgb(frame.text[0], frame.text[1], frame.text[2]);
+                painter.text(pos, anchor, &frame.label, font, text_color);
             }
         }
     }

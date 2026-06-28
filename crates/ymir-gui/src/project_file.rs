@@ -68,6 +68,13 @@ pub(crate) struct WorldSettings {
     pub world_height: f64,
 }
 
+/// The default frame label colour: the brand's light text, readable on the dark default
+/// header. A frame saved before [`Frame::text`] existed restores to this, and a new frame
+/// starts here, leaving a dark choice available for a bright header.
+fn default_frame_text() -> [u8; 3] {
+    [0xd6, 0xe0, 0xf0]
+}
+
 /// Where a frame's label sits. The first cut renders over the top border; modelled as an
 /// enum so placement can grow without a format change.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,6 +98,10 @@ pub(crate) struct Frame {
     pub fill: [u8; 4],
     /// Border colour `[r, g, b]`.
     pub border: [u8; 3],
+    /// Label text colour `[r, g, b]`. Defaulted (the brand's light text) so a frame saved
+    /// before it existed stays readable, and so it can be set dark for a bright header.
+    #[serde(default = "default_frame_text")]
+    pub text: [u8; 3],
     /// The frame's text label.
     pub label: String,
     /// Where the label sits relative to the frame. Optional so a future placement value
@@ -403,6 +414,7 @@ mod tests {
             rect: [10.0, 20.0, 110.0, 90.0],
             fill: [30, 39, 56, 64],
             border: [43, 54, 80],
+            text: [12, 14, 20],
             label: "Generators".to_string(),
             label_placement: LabelPlacement::TopCenter,
         }];
