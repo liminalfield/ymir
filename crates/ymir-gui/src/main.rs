@@ -2408,14 +2408,16 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // returns an unbounded `EVERYTHING` rect, so it cannot be used for hit-testing
     // or to locate the visible centre.
     let canvas_rect = ui.max_rect();
-    // Wires default to ~1px in a muted colour, which is hard to read; thicken them
-    // and tie their colour (and the pin fill, which wires inherit) to the active
-    // widget foreground so they stand out. Width/colour become user settings later
-    // (#57).
-    let wire_color = ui.visuals().widgets.active.fg_stroke.color;
+    // Wires default to ~1px in a muted colour, which is hard to read; thicken them and
+    // colour them (and the pin fill, which wires inherit) with accent-frost, the brand's
+    // wire/connection accent (#104). Width/colour become user settings later (#57).
     let style = egui_snarl::ui::SnarlStyle {
         wire_width: Some(2.5),
-        pin_fill: Some(wire_color),
+        pin_fill: Some(theme::ACCENT_FROST),
+        // The canvas backdrop reads as the base layer, a step darker than the surface
+        // panels, with a subtle line grid, so the graph sits below the panels (#104).
+        bg_frame: Some(egui::Frame::new().fill(theme::BG_BASE)),
+        bg_pattern_stroke: Some(egui::Stroke::new(1.0, theme::LINE)),
         // Clamp zoom so the graph can't shrink to an unfindable speck (snarl's
         // default min is 0.2 = 5x out); "zoom to graph" handles seeing a big graph
         // whole (#65).
