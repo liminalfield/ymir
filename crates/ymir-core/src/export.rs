@@ -29,7 +29,7 @@
 //! output names must not match that pattern.
 
 use std::fs::File;
-use std::io::{self, BufWriter, Write};
+use std::io::{self, BufWriter, Seek, Write};
 use std::path::Path;
 
 use crate::error::{Error, Result};
@@ -191,6 +191,61 @@ pub fn export_r16_to<W: Write>(field: &Field, mut writer: W, range: HeightRange)
     }
     writer.write_all(&data)?;
     writer.flush()?;
+    Ok(())
+}
+
+/// Writes the field's `height` layer to `path` as a single-channel 32-bit float EXR,
+/// multiplying every value by `scale`.
+///
+/// With `scale == 1.0` the file carries normalized height; with `scale == world_height`
+/// (meters that a height of `1.0` represents) it carries **absolute elevation in meters**,
+/// self-describing for any DCC. Unlike the 16-bit formats, the float channel stores the
+/// actual values losslessly, with no range remap and no clamping.
+///
+/// # Errors
+///
+/// Returns [`Error::Io`] if the file cannot be created, [`Error::MissingLayer`] if the
+/// field has no `height` layer, or [`Error::ExrEncode`] if encoding fails.
+pub fn export_exr(field: &Field, path: impl AsRef<Path>, scale: f32) -> Result<()> {
+    let file = File::create(path)?;
+    export_exr_to(field, BufWriter::new(file), scale)
+}
+
+/// Encodes the field's `height` layer as a single-channel 32-bit float EXR into `writer`.
+///
+/// EXR writes an offset table, so the sink must be [`Seek`] as well as [`Write`] (a file,
+/// or a `Cursor` over an in-memory buffer). See [`export_exr`] for the `scale` meaning.
+///
+/// # Errors
+///
+/// Returns [`Error::MissingLayer`] if the field has no `height` layer, or
+/// [`Error::ExrEncode`] if encoding or the write fails.
+pub fn export_exr_to<W: Write + Seek>(field: &Field, writer: W, scale: f32) -> Result<()> {
+    // Import only the items needed: a `use exr::prelude::*` would shadow this crate's
+    // `Error`/`Result`. `WritableImage` provides `Image::write`.
+    use exr::prelude::{Image, SpecificChannels, WritableImage};
+
+    // The height layer is genuinely required: an export with no height has nothing to
+    // write. Mirrors the PNG and r16 exporters.
+    let layer = field
+        .layer(layers::HEIGHT)
+        .ok_or_else(|| Error::MissingLayer {
+            name: layers::HEIGHT.to_string(),
+        })?;
+    let width = layer.width();
+    let height = layer.height();
+    let values = layer.as_slice();
+
+    // One float channel ("Y", the conventional single-luminance channel) of the height
+    // values scaled by `scale`, stored losslessly. `pos` is (x, y) in cells.
+    let channels = SpecificChannels::build()
+        .with_channel("Y")
+        .with_pixel_fn(|pos| (values[pos.1 * width + pos.0] * scale,));
+    let image = Image::from_channels((width, height), channels);
+    image
+        .write()
+        .to_unbuffered(writer)
+        .map_err(|err| Error::ExrEncode(err.to_string()))?;
     Ok(())
 }
 
@@ -374,6 +429,80 @@ mod tests {
         let field = Field::new(2, 2, Region::UNIT);
         let mut bytes = Vec::new();
         let err = export_r16_to(&field, &mut bytes, HeightRange::Normalized).unwrap_err();
+        assert!(matches!(err, Error::MissingLayer { name } if name == layers::HEIGHT));
+    }
+
+    /// Reads the single `Y` channel of an EXR file back as a row-major `f32` buffer.
+    fn read_exr_y(path: &std::path::Path, width: usize) -> Vec<f32> {
+        use exr::prelude::*;
+        let image = read()
+            .no_deep_data()
+            .largest_resolution_level()
+            .specific_channels()
+            .required("Y")
+            .collect_pixels(
+                |res: Vec2<usize>, _| vec![0.0f32; res.width() * res.height()],
+                move |buf: &mut Vec<f32>, pos: Vec2<usize>, (y,): (f32,)| {
+                    buf[pos.y() * width + pos.x()] = y;
+                },
+            )
+            .first_valid_layer()
+            .all_attributes()
+            .from_file(path)
+            .expect("read exr back");
+        image.layer_data.channel_data.pixels
+    }
+
+    #[test]
+    fn exr_writes_scaled_float_values_losslessly() {
+        // scale 4.0 (a world_height) turns normalized 0.25 / 0.5 into absolute 1.0 / 2.0,
+        // stored as exact floats with no clamping or range remap.
+        let dir = std::env::temp_dir().join("ymir-export-exr-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("scaled.exr");
+        let field = field_with_heights(2, 1, &[0.25, 0.5]);
+
+        export_exr(&field, &path, 4.0).unwrap();
+        let pixels = read_exr_y(&path, 2);
+        let _ = std::fs::remove_file(&path); // shortcut-ok: best-effort cleanup
+
+        assert!((pixels[0] - 1.0).abs() < 1e-6, "0.25 * 4 = 1.0");
+        assert!((pixels[1] - 2.0).abs() < 1e-6, "0.5 * 4 = 2.0");
+    }
+
+    #[test]
+    fn exr_scale_one_preserves_values_including_out_of_range() {
+        // Normalized export (scale 1.0) is lossless: it keeps values that ran below 0 or
+        // above 1, unlike the 16-bit formats which clamp.
+        let dir = std::env::temp_dir().join("ymir-export-exr-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("raw.exr");
+        let field = field_with_heights(3, 1, &[-0.5, 0.5, 1.5]);
+
+        export_exr(&field, &path, 1.0).unwrap();
+        let pixels = read_exr_y(&path, 3);
+        let _ = std::fs::remove_file(&path); // shortcut-ok: best-effort cleanup
+
+        assert!((pixels[0] - -0.5).abs() < 1e-6);
+        assert!((pixels[1] - 0.5).abs() < 1e-6);
+        assert!((pixels[2] - 1.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn exr_to_writes_the_openexr_magic() {
+        // export_exr_to into an in-memory cursor produces a real EXR (magic 0x76 2f 31 01).
+        let field = field_with_heights(2, 2, &[0.0, 1.0, 0.5, 0.25]);
+        let mut buf = std::io::Cursor::new(Vec::new());
+        export_exr_to(&field, &mut buf, 1.0).unwrap();
+        let bytes = buf.into_inner();
+        assert_eq!(&bytes[..4], &[0x76, 0x2f, 0x31, 0x01], "OpenEXR magic");
+    }
+
+    #[test]
+    fn exr_missing_height_layer_is_an_error() {
+        let field = Field::new(2, 2, Region::UNIT);
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let err = export_exr_to(&field, &mut buf, 1.0).unwrap_err();
         assert!(matches!(err, Error::MissingLayer { name } if name == layers::HEIGHT));
     }
 }

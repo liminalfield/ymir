@@ -34,6 +34,11 @@ pub enum Error {
     #[error("PNG decoding failed: {0}")]
     PngDecode(#[from] png::DecodingError),
 
+    /// The EXR encoder rejected the image or failed to write it. Stringified so the
+    /// `exr` error type stays out of this crate's public API.
+    #[error("EXR encoding failed: {0}")]
+    ExrEncode(String),
+
     /// A project file could not be written or parsed as JSON (malformed file, or a
     /// serialization failure).
     #[error("project JSON error: {0}")]

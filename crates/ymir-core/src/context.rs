@@ -84,6 +84,16 @@ impl EvalContext {
         self.world_height / self.meters_per_cell()
     }
 
+    /// The world's vertical span (meters) that a normalized height of `1.0` represents.
+    ///
+    /// Export reads this to write absolute-meters heightmaps (`height × world_height`).
+    /// Slope-aware operators want [`real_slope_scale`](Self::real_slope_scale) instead,
+    /// which folds in the horizontal cell size to give a true rise-over-run.
+    #[must_use]
+    pub fn world_height(&self) -> f64 {
+        self.world_height
+    }
+
     /// World units (meters) spanned by one cell at this resolution and extent.
     ///
     /// Region-aware (`region.width()` is the normalized span being evaluated), so a

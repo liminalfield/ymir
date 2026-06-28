@@ -230,6 +230,13 @@ pub fn tr(key: &str) -> &str {
              native heightmap format. Same range mapping as the PNG, no header."
         }
 
+        // EXR (32-bit float) export.
+        "node-endpoint.export_exr" => "Export EXR",
+        "node-endpoint.export_exr-desc" => {
+            "Writes the height layer to a 32-bit float EXR: lossless, and can bake absolute \
+             elevation in meters (height x world height) so the file is self-describing."
+        }
+
         // Unknown: echo the key so the gap is visible.
         other => other,
     }
