@@ -1443,6 +1443,34 @@ fn apply_default(state: &mut AppState) {
     }
 }
 
+/// A category tab whose width is reserved at its full text width, so the per-state
+/// difference in egui's button frame margin (it subtracts the state's border width from
+/// the padding) cannot change a tab's footprint and reflow the row on hover or selection.
+/// Sets the button's `min_size` to `text + 2·button_padding`, which no state's natural
+/// width exceeds, pinning every state to that one width.
+fn category_tab(
+    ui: &mut egui::Ui,
+    active: &mut Option<ActiveTab>,
+    value: Option<ActiveTab>,
+    label: &str,
+) {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let text_w = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), font, egui::Color32::WHITE)
+        .rect
+        .width();
+    let width = text_w + 2.0 * ui.spacing().button_padding.x;
+    let height = ui.spacing().interact_size.y;
+    let selected = *active == value;
+    if ui
+        .add(egui::Button::selectable(selected, label).min_size(egui::vec2(width, height)))
+        .clicked()
+    {
+        *active = value;
+    }
+}
+
 fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
     let cats = categories_sorted();
     if state.active_tab.is_none() {
@@ -1459,14 +1487,16 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
             ui.horizontal(|ui| {
                 for cat in &cats {
                     let key = format!("category-{}", cat.id);
-                    ui.selectable_value(
+                    category_tab(
+                        ui,
                         &mut state.active_tab,
                         Some(ActiveTab::Category(cat.id)),
                         tr(&key),
                     );
                 }
                 if has_uncategorized_nodes() {
-                    ui.selectable_value(
+                    category_tab(
+                        ui,
                         &mut state.active_tab,
                         Some(ActiveTab::Uncategorized),
                         "Uncategorized",
