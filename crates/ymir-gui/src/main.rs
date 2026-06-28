@@ -39,6 +39,8 @@ mod build;
 mod project_file;
 // The built-in starter graph a fresh session opens with (#76).
 mod starter;
+// The Ymir Dark brand palette and egui Visuals built from it (#104).
+mod theme;
 // The 3D viewport: custom wgpu rendering inside an egui pane (#7).
 mod viewport;
 // Snapshot-based undo/redo over the session (#82).
@@ -3205,6 +3207,9 @@ impl YmirApp {
         // border (where the pointer's corner sits). Menu row height is set per-menu
         // (button_padding) so the ribbon's buttons are not bloated.
         cc.egui_ctx.global_style_mut(|style| {
+            // The Ymir Dark theme (#104): a depth ramp and visible borders so menus,
+            // panels, and the canvas read as distinct surfaces instead of dark-on-dark.
+            style.visuals = theme::visuals();
             style.animation_time = 0.15;
             style.spacing.menu_margin = egui::Margin::same(8);
         });
