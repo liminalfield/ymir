@@ -201,6 +201,9 @@ struct AppState {
     /// The canvas view over `graph`: snarl holds only node handles (`stable_id`)
     /// and view-state (positions), never a copy of node data.
     snarl: Snarl<Handle>,
+    /// Canvas frames (#94): labelled boxes that group nodes visually and move them
+    /// together. Pure view-state, persisted with the project, never seen by `ymir-core`.
+    frames: Vec<project_file::Frame>,
     /// The canvas's pan/zoom view from the last frame, for placing new nodes in
     /// view. `None` until the canvas has drawn once.
     canvas_view: Option<CanvasView>,
@@ -386,11 +389,13 @@ impl AppState {
             0,
             DEFAULT_WORLD_EXTENT,
             project_file::DEFAULT_WORLD_HEIGHT,
+            &[],
         );
         let history = EditHistory::new(initial.clone());
         Self {
             graph,
             snarl,
+            frames: Vec::new(),
             canvas_view: None,
             selection: HashSet::new(),
             primary: None,
@@ -452,6 +457,7 @@ impl AppState {
     ) {
         self.graph = restored.graph;
         self.snarl = restored.snarl;
+        self.frames = restored.frames;
         self.seed = restored.seed;
         self.world_extent = restored.world_extent;
         self.world_height = restored.world_height;
@@ -482,6 +488,7 @@ impl AppState {
     ) {
         self.graph = graph;
         self.snarl = snarl;
+        self.frames = Vec::new();
         self.seed = seed;
         self.world_extent = world_extent;
         self.world_height = world_height;
@@ -539,6 +546,7 @@ impl AppState {
             self.seed,
             self.world_extent,
             self.world_height,
+            &self.frames,
         )
     }
 
@@ -565,6 +573,7 @@ impl AppState {
             Ok(restored) => {
                 self.graph = restored.graph;
                 self.snarl = restored.snarl;
+                self.frames = restored.frames;
                 self.seed = restored.seed;
                 self.world_extent = restored.world_extent;
                 self.world_height = restored.world_height;
@@ -3823,7 +3832,7 @@ mod tests {
         // Exercises the real file I/O wrappers (the in-memory serde path is covered in
         // project_file): write a session to disk, read it back, confirm it matches.
         let (graph, snarl) = starter::starter_graph();
-        let file = project_file::ProjectFile::capture(&graph, &snarl, 7, 2048.0, 640.0);
+        let file = project_file::ProjectFile::capture(&graph, &snarl, 7, 2048.0, 640.0, &[]);
         let path =
             std::env::temp_dir().join(format!("ymir-default-test-{}.ymir", std::process::id()));
 

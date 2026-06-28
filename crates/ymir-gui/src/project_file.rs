@@ -68,12 +68,49 @@ pub(crate) struct WorldSettings {
     pub world_height: f64,
 }
 
-/// GUI view-state: where each node sits on the canvas, keyed by `stable_id`.
+/// Where a frame's label sits. The first cut renders over the top border; modelled as an
+/// enum so placement can grow without a format change.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LabelPlacement {
+    /// Over the top border, left-aligned (a title-bar feel).
+    #[default]
+    TopLeft,
+    /// Over the top border, centred.
+    TopCenter,
+}
+
+/// A canvas frame (#94): a labelled, translucent box drawn behind a set of nodes that
+/// groups them visually and moves them together. Pure view-state, never a graph node, so
+/// `ymir-core` never learns about it. Stored in [`ViewState`], persisted with the project.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Frame {
+    /// Bounds in canvas (graph) space: `[min_x, min_y, max_x, max_y]`.
+    pub rect: [f32; 4],
+    /// Fill colour `[r, g, b, a]`; the alpha gives the translucent tint over the grid.
+    pub fill: [u8; 4],
+    /// Border colour `[r, g, b]`.
+    pub border: [u8; 3],
+    /// The frame's text label.
+    pub label: String,
+    /// Where the label sits relative to the frame. Optional so a future placement value
+    /// added to an entry stays backward-compatible.
+    #[serde(default)]
+    pub label_placement: LabelPlacement,
+}
+
+/// GUI view-state: where each node sits on the canvas, keyed by `stable_id`, plus any
+/// canvas frames.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ViewState {
     /// Canvas position `[x, y]` per node, keyed by `stable_id`. A `BTreeMap` keeps
     /// the keys ordered for clean diffs.
     pub nodes: BTreeMap<u64, [f32; 2]>,
+    /// Canvas frames (#94), in creation order. Optional and defaulted, so a project saved
+    /// before frames existed opens with none (no format bump, like `world_height`). Kept
+    /// last so adding or moving a frame localizes its diff.
+    #[serde(default)]
+    pub frames: Vec<Frame>,
 }
 
 /// The pieces restored from a [`ProjectFile`], ready to install into the app state.
@@ -88,6 +125,8 @@ pub(crate) struct RestoredProject {
     pub world_extent: f64,
     /// The restored world height (meters).
     pub world_height: f64,
+    /// The restored canvas frames (#94).
+    pub frames: Vec<Frame>,
 }
 
 impl ProjectFile {
@@ -99,6 +138,7 @@ impl ProjectFile {
         seed: u64,
         world_extent: f64,
         world_height: f64,
+        frames: &[Frame],
     ) -> Self {
         let nodes = snarl
             .node_ids()
@@ -115,7 +155,10 @@ impl ProjectFile {
                 world_height,
             },
             graph: graph.to_document(),
-            view: ViewState { nodes },
+            view: ViewState {
+                nodes,
+                frames: frames.to_vec(),
+            },
         }
     }
 
@@ -126,7 +169,10 @@ impl ProjectFile {
     /// coalesce a run of moves to a *single* node into one step, while a move of a
     /// different node opens a fresh step (#82).
     pub(crate) fn single_moved_node(&self, other: &Self) -> Option<u64> {
-        if self.world != other.world || self.graph != other.graph {
+        if self.world != other.world
+            || self.graph != other.graph
+            || self.view.frames != other.view.frames
+        {
             return None;
         }
         let here = &self.view.nodes;
@@ -214,6 +260,7 @@ impl ProjectFile {
             seed: self.world.seed,
             world_extent: self.world.world_extent,
             world_height: self.world.world_height,
+            frames: self.view.frames.clone(),
         })
     }
 }
@@ -260,7 +307,7 @@ mod tests {
         .expect("thermal");
         graph.connect(generator, 0, erosion, 0).expect("connect");
 
-        let file = ProjectFile::capture(&graph, &snarl, 99, 4096.0, 800.0);
+        let file = ProjectFile::capture(&graph, &snarl, 99, 4096.0, 800.0, &[]);
 
         // Through JSON, to exercise the real serialization path.
         let json = serde_json::to_string(&file).expect("serialize");
@@ -302,7 +349,7 @@ mod tests {
         add_node(&mut graph, &mut snarl, "generator.fbm", Pos2::ZERO).expect("fbm");
 
         // Drop the view section entirely, as a headless or fragment file would have.
-        let mut file = ProjectFile::capture(&graph, &snarl, 0, 1024.0, 256.0);
+        let mut file = ProjectFile::capture(&graph, &snarl, 0, 1024.0, 256.0, &[]);
         file.view.nodes.clear();
 
         let restored = file.restore().expect("restore");
@@ -321,7 +368,7 @@ mod tests {
     fn restore_rejects_an_unknown_envelope_version() {
         let graph = Graph::new();
         let snarl = Snarl::<Handle>::new();
-        let mut file = ProjectFile::capture(&graph, &snarl, 0, 1024.0, 256.0);
+        let mut file = ProjectFile::capture(&graph, &snarl, 0, 1024.0, 256.0, &[]);
         file.format_version = PROJECT_FORMAT_VERSION + 1;
         assert!(matches!(
             file.restore(),
@@ -344,5 +391,42 @@ mod tests {
         let restored = file.restore().expect("restore legacy file");
         assert_eq!(restored.world_extent, 2048.0);
         assert_eq!(restored.world_height, DEFAULT_WORLD_HEIGHT);
+    }
+
+    #[test]
+    fn frames_round_trip_through_json_and_restore() {
+        let mut graph = Graph::new();
+        let mut snarl = Snarl::<Handle>::new();
+        add_node(&mut graph, &mut snarl, "generator.fbm", Pos2::ZERO).expect("fbm");
+
+        let frames = vec![Frame {
+            rect: [10.0, 20.0, 110.0, 90.0],
+            fill: [30, 39, 56, 64],
+            border: [43, 54, 80],
+            label: "Generators".to_string(),
+            label_placement: LabelPlacement::TopCenter,
+        }];
+        let file = ProjectFile::capture(&graph, &snarl, 1, 1024.0, 256.0, &frames);
+
+        let json = serde_json::to_string(&file).expect("serialize");
+        let parsed: ProjectFile = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed, file);
+        assert_eq!(parsed.restore().expect("restore").frames, frames);
+    }
+
+    #[test]
+    fn a_file_without_a_frames_field_restores_with_none() {
+        // A project saved before frames existed has a `view` with only `nodes`. It must
+        // still load, with no frames, rather than failing to deserialize (the additive
+        // optional field, no format bump).
+        let json = r#"{
+            "format_version": 1,
+            "world": { "seed": 0, "world_extent": 1024.0, "world_height": 256.0 },
+            "graph": { "format_version": 1, "next_stable_id": 0, "nodes": [] },
+            "view": { "nodes": {} }
+        }"#;
+        let file: ProjectFile = serde_json::from_str(json).expect("deserialize pre-frames file");
+        assert!(file.view.frames.is_empty());
+        assert!(file.restore().expect("restore").frames.is_empty());
     }
 }
