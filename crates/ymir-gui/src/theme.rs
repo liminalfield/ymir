@@ -12,8 +12,8 @@
 //! distinct elevations, and the line colours give them visible borders.
 //!
 //! Only the colours currently used are defined here; the rest of the palette
-//! (`text-secondary/muted/faint`, `accent-violet/ice`, `success`) lives in the brand kit
-//! and is added as later theming steps adopt it (status dots, canvas, the text ramp).
+//! (`text-secondary/muted/faint`, `accent-violet/ice`) lives in the brand kit and is
+//! added as later theming steps adopt it (the canvas, the text ramp).
 
 use eframe::egui::{Color32, Stroke, Visuals};
 
@@ -42,6 +42,8 @@ pub const ACCENT_PRIMARY: Color32 = Color32::from_rgb(0x6d, 0x9f, 0xef);
 pub const ACCENT_FROST: Color32 = Color32::from_rgb(0x34, 0xc3, 0xc0);
 
 // --- semantic (used sparingly) ---
+/// Solved / valid state.
+pub const SUCCESS: Color32 = Color32::from_rgb(0x5f, 0xcf, 0x9a);
 /// Warnings (the one warm accent).
 pub const WARNING: Color32 = Color32::from_rgb(0xe6, 0xb1, 0x5c);
 /// Errors (cooled rose).

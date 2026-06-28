@@ -26,9 +26,10 @@ pub(crate) const LIGHT_DIAL_SIZE: f32 = 40.0;
 /// this cadence instead of queuing a job every frame; the final, settled value is
 /// always submitted once the interval elapses (the trailing value wins).
 const DEBOUNCE_SECS: f64 = 0.08;
-/// Status-indicator colours. Red reuses the theme's error colour at render time.
-const STATUS_OK: egui::Color32 = egui::Color32::from_rgb(0x53, 0xb0, 0x5a);
-const STATUS_BUSY: egui::Color32 = egui::Color32::from_rgb(0xe0, 0xa8, 0x2e);
+/// Status-indicator colours, from the Ymir Dark palette (#104): up-to-date is `success`,
+/// processing is `warning`. The error state reuses the theme's error colour at render time.
+const STATUS_OK: egui::Color32 = crate::theme::SUCCESS;
+const STATUS_BUSY: egui::Color32 = crate::theme::WARNING;
 
 /// A unit of preview work: a graph snapshot to evaluate for one target node.
 struct Job {
