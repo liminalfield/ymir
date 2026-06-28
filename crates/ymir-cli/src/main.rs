@@ -83,6 +83,7 @@ mod tests {
             type_ids,
             [
                 "endpoint.export",
+                "endpoint.export_r16",
                 "generator.billow",
                 "generator.cellular_bumps",
                 "generator.cellular_cracks",

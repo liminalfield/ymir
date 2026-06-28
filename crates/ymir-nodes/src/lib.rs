@@ -20,6 +20,7 @@ mod cellular_regions;
 mod curvature;
 mod curve;
 mod export;
+mod export_r16;
 mod expr;
 mod expression;
 mod falloff;

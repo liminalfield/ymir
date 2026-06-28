@@ -223,6 +223,13 @@ pub fn tr(key: &str) -> &str {
         "node-endpoint.export" => "Export PNG",
         "node-endpoint.export-desc" => "Writes the height layer to a 16-bit grayscale PNG.",
 
+        // Raw .r16 export.
+        "node-endpoint.export_r16" => "Export R16",
+        "node-endpoint.export_r16-desc" => {
+            "Writes the height layer to a raw 16-bit little-endian .r16 file, Unreal's other \
+             native heightmap format. Same range mapping as the PNG, no header."
+        }
+
         // Unknown: echo the key so the gap is visible.
         other => other,
     }

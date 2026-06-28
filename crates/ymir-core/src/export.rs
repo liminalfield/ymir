@@ -3,12 +3,17 @@
 //! Currently one format: 16-bit single-channel grayscale PNG of the `height`
 //! layer. Height is always 16-bit; 8-bit terraces and is never used for height.
 //!
+//! Formats:
+//!
+//! - 16-bit grayscale PNG ([`export_png`]).
+//! - `.r16`: raw 16-bit little-endian samples, no header ([`export_r16`]). Unreal's
+//!   other native heightmap format. Same range mapping as the PNG; the only
+//!   differences are byte order (little-endian, not PNG's big-endian) and the
+//!   absence of any header, so UE infers the (square) dimensions from the file size.
+//!
 //! Planned sibling exporters, recorded here so the intent is not lost (NOT built
 //! yet):
 //!
-//! - `.r16`: raw 16-bit little-endian samples, no header. Needs no encoder, just
-//!   the `u16` values written little-endian. It is Unreal's other native
-//!   heightmap format, so it comes next.
 //! - EXR (32-bit float): high-precision interchange with DCC tools like Houdini.
 //! - Weightmap/splatmap (8-bit masks for material layers), derived from `mask`
 //!   layers.
@@ -144,6 +149,51 @@ pub fn export_png_to<W: Write>(field: &Field, writer: W, range: HeightRange) -> 
     Ok(())
 }
 
+/// Writes the field's `height` layer to `path` as raw 16-bit little-endian samples
+/// (`.r16`), no header: Unreal's other native heightmap format. Uses the same
+/// [`HeightRange`] mapping as the PNG exporter, so a value maps to the same 16-bit
+/// sample; only the byte order and the lack of a header differ.
+///
+/// # Errors
+///
+/// Returns [`Error::Io`] if the file cannot be created or written, or
+/// [`Error::MissingLayer`] if the field has no `height` layer.
+pub fn export_r16(field: &Field, path: impl AsRef<Path>, range: HeightRange) -> Result<()> {
+    let file = File::create(path)?;
+    let writer = BufWriter::new(file);
+    export_r16_to(field, writer, range)
+}
+
+/// Encodes the field's `height` layer as raw 16-bit little-endian samples into `writer`.
+///
+/// Generic over [`Write`], so a caller can encode to a file, an in-memory buffer, or any
+/// other sink without going through the filesystem.
+///
+/// # Errors
+///
+/// Returns [`Error::MissingLayer`] if the field has no `height` layer, or [`Error::Io`] if
+/// the write fails.
+pub fn export_r16_to<W: Write>(field: &Field, mut writer: W, range: HeightRange) -> Result<()> {
+    // The height layer is genuinely required: an export asked to write a field with no
+    // height has nothing to write. Mirrors `export_png_to`.
+    let layer = field
+        .layer(layers::HEIGHT)
+        .ok_or_else(|| Error::MissingLayer {
+            name: layers::HEIGHT.to_string(),
+        })?;
+
+    // Same range resolution and per-sample mapping as the PNG, but little-endian and with
+    // no header, row-major, so the file is exactly `width * height` `u16` samples.
+    let (min, max) = range.resolve(layer);
+    let mut data = Vec::with_capacity(layer.len() * 2);
+    for &value in layer.as_slice() {
+        data.extend_from_slice(&sample(value, min, max).to_le_bytes());
+    }
+    writer.write_all(&data)?;
+    writer.flush()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,6 +314,66 @@ mod tests {
         let field = Field::new(2, 2, Region::UNIT);
         let mut bytes = Vec::new();
         let err = export_png_to(&field, &mut bytes, HeightRange::Normalized).unwrap_err();
+        assert!(matches!(err, Error::MissingLayer { name } if name == layers::HEIGHT));
+    }
+
+    /// Decodes raw little-endian `.r16` bytes into `u16` samples.
+    fn decode_r16(bytes: &[u8]) -> Vec<u16> {
+        bytes
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect()
+    }
+
+    #[test]
+    fn r16_is_raw_little_endian_with_no_header() {
+        let field = field_with_heights(2, 2, &[0.0, 1.0, 0.5, 0.25]);
+        let mut bytes = Vec::new();
+        export_r16_to(&field, &mut bytes, HeightRange::Normalized).unwrap();
+
+        // Exactly width*height u16 samples, no header.
+        assert_eq!(bytes.len(), 4 * 2);
+        let samples = decode_r16(&bytes);
+        assert_eq!(samples[0], 0); // 0.0
+        assert_eq!(samples[1], 65535); // 1.0
+        assert_eq!(samples[2], 32768); // 0.5, rounds up
+        assert_eq!(samples[3], 16384); // 0.25, rounds up
+        // Little-endian: 65535 = 0xFFFF writes both bytes 0xFF; 16384 = 0x4000 writes
+        // 0x00 then 0x40, proving low-byte-first order.
+        assert_eq!(&bytes[6..8], &[0x00, 0x40]);
+    }
+
+    #[test]
+    fn r16_values_match_the_png_mapping() {
+        // The acceptance criterion: a `.r16` sample equals the PNG sample for the same
+        // value and range, differing only in byte order.
+        let field = field_with_heights(2, 2, &[-0.5, 0.5, 1.5, 2.0]);
+        let mut png = Vec::new();
+        let mut r16 = Vec::new();
+        export_png_to(&field, &mut png, HeightRange::Auto).unwrap();
+        export_r16_to(&field, &mut r16, HeightRange::Auto).unwrap();
+
+        let (_, _, png_samples) = decode(&png);
+        assert_eq!(decode_r16(&r16), png_samples);
+    }
+
+    #[test]
+    fn r16_is_byte_identical_twice() {
+        let values: Vec<f32> = (0..16).map(|i| i as f32 / 15.0).collect();
+        let field = field_with_heights(4, 4, &values);
+
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        export_r16_to(&field, &mut a, HeightRange::Normalized).unwrap();
+        export_r16_to(&field, &mut b, HeightRange::Normalized).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn r16_missing_height_layer_is_an_error() {
+        let field = Field::new(2, 2, Region::UNIT);
+        let mut bytes = Vec::new();
+        let err = export_r16_to(&field, &mut bytes, HeightRange::Normalized).unwrap_err();
         assert!(matches!(err, Error::MissingLayer { name } if name == layers::HEIGHT));
     }
 }
