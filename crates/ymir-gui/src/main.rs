@@ -927,12 +927,14 @@ fn category_row_index(id: &str) -> usize {
         .unwrap_or(0)
 }
 
-/// The display label for a menu row. `>` / `<` are plain ASCII so they always render
-/// (the triangle glyphs are absent from egui's default fonts).
-fn menu_row_label(row: MenuRow) -> String {
+/// The display text of a menu row: a bare category or node name, or the Back
+/// affordance. A category's disclosure caret is *painted* by [`menu_row`] at the row's
+/// right edge rather than baked into the text, so the carets line up in a column (#93).
+/// Back leads with a Phosphor left caret so it reads as "up a level" and unlike a node row.
+fn menu_row_text(row: MenuRow) -> String {
     match row {
-        MenuRow::Back => "< back".to_string(),
-        MenuRow::Category(id) => format!("{}  >", tr(&format!("category-{id}"))),
+        MenuRow::Back => format!("{}  Back", egui_phosphor::regular::CARET_LEFT),
+        MenuRow::Category(id) => tr(&format!("category-{id}")).to_string(),
         MenuRow::Node(type_id) => tr(&format!("node-{type_id}")).to_string(),
     }
 }
@@ -2075,7 +2077,7 @@ fn node_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
                 let pointer_moved = ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO);
                 let mut hovered = None;
                 for (i, &row) in rows.iter().enumerate() {
-                    let resp = menu_row(ui, &menu_row_label(row), i == menu.highlight);
+                    let resp = menu_row(ui, row, i == menu.highlight);
                     if resp.hovered() {
                         hovered = Some(i);
                     }
@@ -2183,11 +2185,26 @@ fn node_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
     }
 }
 
-/// A menu row: a borderless selectable button that fills the row width under the
-/// caller's justified layout (so it never queries `available_width`). `selected`
-/// draws the keyboard highlight.
-fn menu_row(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Response {
-    ui.add(egui::Button::selectable(selected, text))
+/// One menu row: a full-width selectable button showing the row's [`menu_row_text`],
+/// with a disclosure chevron painted at the right edge for a category, so the chevrons
+/// align in a column instead of trailing each name at a different x (#93). `selected`
+/// draws the keyboard/hover highlight.
+fn menu_row(ui: &mut egui::Ui, row: MenuRow, selected: bool) -> egui::Response {
+    let resp = ui.add(egui::Button::selectable(selected, menu_row_text(row)));
+    if matches!(row, MenuRow::Category(_)) {
+        // Pin the disclosure caret to the right edge (inset by the row padding), in the
+        // row's current text colour so it tracks the selection highlight.
+        let color = ui.style().interact_selectable(&resp, selected).text_color();
+        let x = resp.rect.right() - ui.spacing().button_padding.x;
+        ui.painter().text(
+            egui::pos2(x, resp.rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            egui_phosphor::regular::CARET_RIGHT,
+            egui::TextStyle::Button.resolve(ui.style()),
+            color,
+        );
+    }
+    resp
 }
 
 /// The pan/zoom transform that frames every node within `canvas` (#65): the
@@ -3175,6 +3192,13 @@ struct YmirApp {
 
 impl YmirApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // Install the Phosphor icon font as a fallback in the proportional family, so an
+        // icon const (a disclosure caret, etc.) renders anywhere text does. The default
+        // egui font has no triangle glyphs, which is why the node menu used ASCII chevrons.
+        let mut fonts = egui::FontDefinitions::default();
+        egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+        cc.egui_ctx.set_fonts(fonts);
+
         // Calmer, more deliberate menus (#63, #64). Two global dials: a touch more
         // animation so hover highlights glide and popups ease open/closed instead of
         // snapping, and more menu inner margin so text is not jammed against the
@@ -3579,12 +3603,15 @@ mod tests {
     }
 
     #[test]
-    fn menu_row_labels_use_ascii_affordances() {
-        // The flyout/back affordances are plain ASCII (the triangle glyphs are absent
-        // from egui's default fonts and render as tofu).
-        assert_eq!(menu_row_label(MenuRow::Back), "< back");
-        assert!(menu_row_label(MenuRow::Category("adjust")).ends_with("  >"));
-        assert_eq!(menu_row_label(MenuRow::Node("modifier.invert")), "Invert");
+    fn menu_row_text_is_bare_names_with_a_back_caret() {
+        // Category carets are painted by `menu_row`, not baked into the text, so a category
+        // and a node read as bare names; Back leads with the Phosphor left caret so it reads
+        // as "up a level".
+        let back = menu_row_text(MenuRow::Back);
+        assert!(back.starts_with(egui_phosphor::regular::CARET_LEFT));
+        assert!(back.ends_with("Back"));
+        assert_eq!(menu_row_text(MenuRow::Category("adjust")), "Adjust");
+        assert_eq!(menu_row_text(MenuRow::Node("modifier.invert")), "Invert");
     }
 
     #[test]

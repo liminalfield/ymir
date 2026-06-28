@@ -27,6 +27,11 @@ inventory = "0.3"
 # actively; upgrades are a deliberate, egui-lockstep step. 0.10.0 resolves against
 # the workspace's egui 0.34 with no duplicate egui in the tree.
 egui-snarl = "=0.10.0"
+# Phosphor icon font for egui: real disclosure carets and UI glyphs the default font
+# lacks (it has no triangle glyphs, which forced ASCII chevrons in the node menu). One
+# crate, part of the pinned egui stack; 0.12 targets egui 0.34. Installed as a fallback
+# in the Proportional font family, so an icon const renders anywhere text does.
+egui-phosphor = "0.12"
 # Decodes the embedded window-icon PNG into RGBA for eframe. Already in the tree via
 # ymir-core, so this reuses it rather than pulling eframe's heavier `image`-based
 # icon helper.
