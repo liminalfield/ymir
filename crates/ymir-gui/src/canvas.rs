@@ -31,8 +31,12 @@ const THUMB_TOP_GAP: f32 = 6.0;
 const THUMB_CORNER_RADIUS: f32 = 4.0;
 /// Corner radius of a canvas frame's box and border (#94).
 const FRAME_CORNER_RADIUS: f32 = 6.0;
-/// Inset of a frame's label from the top edge (graph units, #94).
-const FRAME_LABEL_PAD: f32 = 6.0;
+/// Left inset of a frame's label within its header bar (graph units, #94).
+const FRAME_LABEL_PAD: f32 = 8.0;
+/// Height of a frame's title-bar / header (graph units): the strip that is its move and
+/// select handle (#94). The interaction in `main.rs` hit-tests this same strip, so the
+/// visible header is exactly the draggable region.
+pub(crate) const FRAME_TITLE_H: f32 = 24.0;
 /// Fixed node width (px). A uniform width keeps the canvas tidy and matters once a
 /// grid and snapping arrive. Applied as a minimum on the header and footer rows; an
 /// unusually long title is the only thing that can push a node wider.
@@ -164,6 +168,8 @@ pub(crate) struct GraphViewer<'a> {
     pub(crate) selection: HashSet<Handle>,
     /// Canvas frames to draw behind the nodes (#94). Input, read-only.
     pub(crate) frames: &'a [Frame],
+    /// The selected frame's index, drawn with an accent border. Input, read-only (#94).
+    pub(crate) selected_frame: Option<usize>,
     /// Each node's final rect with its handle, collected during rendering. These
     /// are in the canvas's local (graph) space, not screen space. The canvas
     /// resolves a plain click to a node from these after the frame, rather than
@@ -245,6 +251,7 @@ impl<'a> GraphViewer<'a> {
             graph,
             selection: HashSet::new(),
             frames: &[],
+            selected_frame: None,
             node_rects: Vec::new(),
             to_global: egui::emath::TSTransform::IDENTITY,
             wire_click: false,
@@ -552,7 +559,7 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
         if let Some(background) = background {
             background.draw(viewport, snarl_style, style, painter);
         }
-        for frame in self.frames {
+        for (index, frame) in self.frames.iter().enumerate() {
             let rect = egui::Rect::from_min_max(
                 egui::pos2(frame.rect[0], frame.rect[1]),
                 egui::pos2(frame.rect[2], frame.rect[3]),
@@ -563,25 +570,50 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
                 frame.fill[2],
                 frame.fill[3],
             );
-            let border = egui::Color32::from_rgb(frame.border[0], frame.border[1], frame.border[2]);
             painter.rect_filled(rect, FRAME_CORNER_RADIUS, fill);
-            painter.rect_stroke(
-                rect,
-                FRAME_CORNER_RADIUS,
-                egui::Stroke::new(1.0, border),
-                egui::StrokeKind::Inside,
+            let selected = self.selected_frame == Some(index);
+            let border = egui::Color32::from_rgb(frame.border[0], frame.border[1], frame.border[2]);
+
+            // A header band across the top makes the draggable strip obvious. It is the
+            // border colour, more opaque than the body, with only the top corners rounded so
+            // it meets the body cleanly. Clamp its height for a very short frame.
+            let header = egui::Rect::from_min_max(
+                rect.min,
+                egui::pos2(rect.max.x, (rect.top() + FRAME_TITLE_H).min(rect.bottom())),
             );
+            let header_fill =
+                egui::Color32::from_rgb(frame.border[0], frame.border[1], frame.border[2])
+                    .gamma_multiply(0.85);
+            let corner = FRAME_CORNER_RADIUS as u8;
+            painter.rect_filled(
+                header,
+                egui::CornerRadius {
+                    nw: corner,
+                    ne: corner,
+                    sw: 0,
+                    se: 0,
+                },
+                header_fill,
+            );
+
+            // The selected frame gets a brighter, thicker accent border; the rest use their
+            // own border colour at 1px (#94).
+            let stroke = if selected {
+                egui::Stroke::new(2.0, crate::theme::ACCENT_PRIMARY)
+            } else {
+                egui::Stroke::new(1.0, border)
+            };
+            painter.rect_stroke(rect, FRAME_CORNER_RADIUS, stroke, egui::StrokeKind::Inside);
+
             if !frame.label.is_empty() {
                 let font = egui::TextStyle::Body.resolve(style);
+                // Centred vertically in the header band, so it reads as a title bar.
                 let (pos, anchor) = match frame.label_placement {
                     LabelPlacement::TopLeft => (
-                        egui::pos2(rect.left() + FRAME_LABEL_PAD, rect.top() + FRAME_LABEL_PAD),
-                        egui::Align2::LEFT_TOP,
+                        egui::pos2(header.left() + FRAME_LABEL_PAD, header.center().y),
+                        egui::Align2::LEFT_CENTER,
                     ),
-                    LabelPlacement::TopCenter => (
-                        egui::pos2(rect.center().x, rect.top() + FRAME_LABEL_PAD),
-                        egui::Align2::CENTER_TOP,
-                    ),
+                    LabelPlacement::TopCenter => (header.center(), egui::Align2::CENTER_CENTER),
                 };
                 painter.text(pos, anchor, &frame.label, font, crate::theme::TEXT_PRIMARY);
             }

@@ -222,6 +222,12 @@ struct AppState {
     /// selection follows the leader by the same delta each frame, since snarl moves only the
     /// dragged node.
     group_drag_leader: Option<Handle>,
+    /// The selected canvas frame, by index into `frames` (#94): the target of Delete and
+    /// the frame inspector. `None` when no frame is selected.
+    selected_frame: Option<usize>,
+    /// An in-progress frame move (#94): the frame being dragged and the nodes it carries,
+    /// captured at drag-start so a node cannot escape mid-drag. `None` when not dragging.
+    frame_drag: Option<FrameDrag>,
     /// The wire snarl reports as armed this frame, mirrored from the viewer each frame for
     /// wire-to-create (#123): when the node menu picks a node, this is the wire it connects.
     /// `None` when no wire is in flight; self-correcting, so a cancelled wire clears it.
@@ -401,6 +407,8 @@ impl AppState {
             primary: None,
             marquee_start: None,
             group_drag_leader: None,
+            selected_frame: None,
+            frame_drag: None,
             pending_wire: None,
             consume_wire: false,
             seed: 0,
@@ -458,6 +466,8 @@ impl AppState {
         self.graph = restored.graph;
         self.snarl = restored.snarl;
         self.frames = restored.frames;
+        self.selected_frame = None;
+        self.frame_drag = None;
         self.seed = restored.seed;
         self.world_extent = restored.world_extent;
         self.world_height = restored.world_height;
@@ -489,6 +499,8 @@ impl AppState {
         self.graph = graph;
         self.snarl = snarl;
         self.frames = Vec::new();
+        self.selected_frame = None;
+        self.frame_drag = None;
         self.seed = seed;
         self.world_extent = world_extent;
         self.world_height = world_height;
@@ -574,6 +586,8 @@ impl AppState {
                 self.graph = restored.graph;
                 self.snarl = restored.snarl;
                 self.frames = restored.frames;
+                self.selected_frame = None;
+                self.frame_drag = None;
                 self.seed = restored.seed;
                 self.world_extent = restored.world_extent;
                 self.world_height = restored.world_height;
@@ -2397,8 +2411,9 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // changes through the state after the disjoint borrow ends.
     let selection = state.selection.clone();
     // Read before the disjoint borrow below: whether to drop the armed wire this frame
-    // (set last frame by wire-to-create, #123).
+    // (set last frame by wire-to-create, #123), and the selected frame (#94).
     let consume_wire = state.consume_wire;
+    let selected_frame = state.selected_frame;
     // Disjoint borrows: the viewer holds the graph while snarl is rendered. Both
     // are distinct fields of the state, so this split is sound.
     let AppState {
@@ -2412,6 +2427,7 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         graph,
         selection,
         frames: frames.as_slice(),
+        selected_frame,
         node_rects: Vec::new(),
         to_global: egui::emath::TSTransform::IDENTITY,
         wire_click: false,
@@ -2613,10 +2629,23 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         state.select_only(handle);
     }
 
+    // Frame select/move (#94): a press on a frame's title bar selects and drags it (with
+    // its contents). Runs before the marquee so a press on a frame handle does not also
+    // start a box-select; nodes still take precedence (it skips a press over a node).
+    let frame_owns = handle_frame_interaction(ui, state, to_global, &node_rects);
+
     // Marquee box-select on left-drag over empty canvas (panning moved to middle-mouse
     // by the snarl patch, #84). Runs after the click so a drag that began on a node
-    // (a move) is excluded by the node_at test at its origin.
-    handle_marquee(ui, state, canvas_rect, to_global, &node_rects, menu_open);
+    // (a move) is excluded by the node_at test at its origin; a frame-handle press is
+    // excluded by `frame_owns`.
+    handle_marquee(
+        ui,
+        state,
+        canvas_rect,
+        to_global,
+        &node_rects,
+        menu_open || frame_owns,
+    );
 
     // Drag one selected node and the rest of the selection follows (#84 follow-up). Runs
     // after the marquee, which is mutually exclusive (a marquee begins on empty canvas, a
@@ -2917,6 +2946,109 @@ fn offset_selected_except(
             node.pos += delta;
         }
     }
+}
+
+/// An in-progress frame move (#94): the dragged frame and the nodes it carries.
+struct FrameDrag {
+    /// Index into [`AppState::frames`].
+    index: usize,
+    /// The nodes contained when the drag began, moved by the same delta as the frame so a
+    /// node cannot escape mid-drag.
+    contained: Vec<Handle>,
+}
+
+/// A frame's bounds as an egui rect (graph space).
+fn frame_rect(frame: &project_file::Frame) -> egui::Rect {
+    egui::Rect::from_min_max(
+        egui::pos2(frame.rect[0], frame.rect[1]),
+        egui::pos2(frame.rect[2], frame.rect[3]),
+    )
+}
+
+/// The topmost frame whose title bar contains `graph_pos`, if any. Later frames draw on
+/// top, so they are searched first.
+fn frame_title_at(graph_pos: egui::Pos2, frames: &[project_file::Frame]) -> Option<usize> {
+    frames.iter().enumerate().rev().find_map(|(i, frame)| {
+        let r = frame_rect(frame);
+        let title =
+            egui::Rect::from_min_max(r.min, egui::pos2(r.max.x, r.min.y + canvas::FRAME_TITLE_H));
+        title.contains(graph_pos).then_some(i)
+    })
+}
+
+/// Frame select and move (#94). A press on a frame's title bar (and not on a node, which
+/// takes precedence as it is drawn on top) selects the frame and begins a move that carries
+/// the nodes contained at drag-start; a press on the bare canvas clears the frame selection.
+/// Returns whether a frame owns this gesture, so the caller suppresses the marquee. Resize
+/// and the inspector are separate steps.
+fn handle_frame_interaction(
+    ui: &egui::Ui,
+    state: &mut AppState,
+    to_global: egui::emath::TSTransform,
+    node_rects: &[(Handle, egui::Rect)],
+) -> bool {
+    let (pressed, down, origin, delta) = ui.input(|i| {
+        (
+            i.pointer.primary_pressed(),
+            i.pointer.primary_down(),
+            i.pointer.press_origin(),
+            i.pointer.delta(),
+        )
+    });
+
+    if pressed
+        && let Some(origin) = origin
+        && over_canvas_surface(ui, origin)
+        && !node_at(origin, node_rects, to_global)
+    {
+        let graph_pos = to_global.inverse() * origin;
+        if let Some(index) = frame_title_at(graph_pos, &state.frames) {
+            // Select the frame (replacing any node selection) and begin a move, capturing
+            // the nodes whose centre is inside the frame right now.
+            state.selected_frame = Some(index);
+            state.clear_selection();
+            let rect = frame_rect(&state.frames[index]);
+            let contained = node_rects
+                .iter()
+                .filter(|(_, r)| rect.contains(r.center()))
+                .map(|(handle, _)| *handle)
+                .collect();
+            state.frame_drag = Some(FrameDrag { index, contained });
+        } else {
+            state.selected_frame = None;
+        }
+    }
+
+    // Apply or end an in-progress move. Copy the drag's fields out first so the frames and
+    // snarl can be mutated without the `frame_drag` borrow held.
+    let active = state
+        .frame_drag
+        .as_ref()
+        .map(|d| (d.index, d.contained.clone()));
+    if let Some((index, contained)) = active {
+        let scale = to_global.scaling;
+        if !down {
+            state.frame_drag = None;
+        } else if delta != egui::Vec2::ZERO && scale != 0.0 {
+            // The pointer delta is screen space; divide by the zoom to move in graph space.
+            let d = delta / scale;
+            if let Some(frame) = state.frames.get_mut(index) {
+                frame.rect[0] += d.x;
+                frame.rect[1] += d.y;
+                frame.rect[2] += d.x;
+                frame.rect[3] += d.y;
+            }
+            for handle in &contained {
+                if let Some(snarl_id) = canvas::snarl_node_of(&state.snarl, *handle)
+                    && let Some(node) = state.snarl.get_node_info_mut(snarl_id)
+                {
+                    node.pos += d;
+                }
+            }
+        }
+    }
+
+    state.frame_drag.is_some()
 }
 
 /// Draws the node-rename dialog when open, and applies its result. A no-op when the
@@ -3458,9 +3590,16 @@ fn handle_shortcuts(ctx: &egui::Context, state: &mut AppState) {
     if ctx.input_mut(|i| i.consume_shortcut(&select_all)) {
         state.select_all();
     }
-    // Delete and Backspace both remove the selected nodes.
+    // Delete and Backspace remove the selected frame if one is selected (leaving its nodes
+    // in place, #94), otherwise the selected nodes.
     if ctx.input(|i| i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace)) {
-        state.delete_selection();
+        if let Some(index) = state.selected_frame.take() {
+            if index < state.frames.len() {
+                state.frames.remove(index);
+            }
+        } else {
+            state.delete_selection();
+        }
     }
 }
 
