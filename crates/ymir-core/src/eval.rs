@@ -291,6 +291,61 @@ impl Graph {
         Ok(result)
     }
 
+    /// Evaluates a set of outputs with some source nodes' results supplied directly
+    /// rather than computed, reusing the same memoized [`pull`](Self::pull) as
+    /// [`evaluate`](Self::evaluate).
+    ///
+    /// `bound` pairs a node with the field to stand in as that node's single output: the
+    /// evaluator returns it instead of running the node's operator, and everything
+    /// downstream sees it. `outputs` names the `(source node, output port)` pairs to
+    /// produce, all sharing one working set so a shared ancestor of two outputs evaluates
+    /// once.
+    ///
+    /// This is the kernel a subgraph container uses to run its inner graph: the bound
+    /// nodes are the inner input markers (fed the boundary fields) and `outputs` are the
+    /// sources feeding the inner output markers. It is a building block, not the editor's
+    /// entry point; ordinary evaluation uses [`evaluate`](Self::evaluate). Unlike
+    /// `evaluate` it does not flush into the persistent cache: a container runs it against
+    /// a transient inner cache, so there is nothing worth carrying across calls (yet; a
+    /// path-namespaced cache is the planned optimization).
+    ///
+    /// # Errors
+    ///
+    /// The same structural errors as [`evaluate`](Self::evaluate), plus
+    /// [`Error::InvalidPort`] if an `outputs` port index exceeds what its node produced.
+    pub fn evaluate_bound(
+        &self,
+        bound: &[(NodeId, Field)],
+        outputs: &[(NodeId, usize)],
+        request: &EvalRequest,
+        cache: &mut EvalCache,
+    ) -> Result<Vec<Field>> {
+        let mut computed: HashMap<NodeId, (u64, Arc<Vec<Field>>)> = HashMap::new();
+        let mut in_progress: HashSet<NodeId> = HashSet::new();
+
+        // Seed each bound node as already produced, so `pull`'s "already produced" check
+        // returns the supplied field and never runs the node's operator. The key is the
+        // field's content hash, so a downstream cache key tracks the actual input value.
+        for (node, field) in bound {
+            let key = field.content_hash().to_u64();
+            computed.insert(*node, (key, Arc::new(vec![field.clone()])));
+        }
+
+        let mut result = Vec::with_capacity(outputs.len());
+        for &(source, port) in outputs {
+            let fields = self.pull(source, request, cache, &mut computed, &mut in_progress)?;
+            let field = fields
+                .get(port)
+                .ok_or_else(|| Error::InvalidPort {
+                    type_id: self.node(source).map_or("<missing>", |n| n.type_id),
+                    port,
+                })?
+                .clone();
+            result.push(field);
+        }
+        Ok(result)
+    }
+
     fn pull(
         &self,
         id: NodeId,
@@ -843,6 +898,99 @@ mod tests {
         let base = height.as_slice()[0];
         assert!(height.as_slice().iter().all(|&v| (v - base).abs() < 1e-6));
         assert!(base >= 0.25);
+    }
+
+    #[test]
+    fn evaluate_bound_injects_inputs_instead_of_computing_them() {
+        // head -> add. Binding `head` to a constant field makes `add` consume that field
+        // instead of head's computed output, and head's operator never runs.
+        let gen_calls = Arc::new(AtomicUsize::new(0));
+        let mut graph = Graph::new();
+        let head = graph.add_op(
+            Box::new(CountingGen {
+                calls: Arc::clone(&gen_calls),
+            }),
+            Params::new(),
+        );
+        let add = graph.add_op(
+            Box::new(CountingAdd {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new().with("delta", ParamValue::Float(0.25)),
+        );
+        graph.connect(head, 0, add, 0).unwrap();
+
+        let bound = Field::new(16, 16, Region::UNIT)
+            .with_layer(layers::HEIGHT, Arc::new(Layer::filled(16, 16, 0.5)));
+        let mut cache = EvalCache::new(8);
+        let out = graph
+            .evaluate_bound(&[(head, bound)], &[(add, 0)], &request(), &mut cache)
+            .unwrap();
+
+        // add applied its delta to the bound 0.5, not to head's own value.
+        assert!((first_height(&out) - 0.75).abs() < 1e-6);
+        // The bound node's operator was never evaluated.
+        assert_eq!(gen_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn evaluate_bound_returns_multiple_outputs_over_one_working_set() {
+        // A bound node feeding two consumers: both outputs are produced, the bound node
+        // is returned directly, and (a shared ancestor) it is touched once.
+        let gen_calls = Arc::new(AtomicUsize::new(0));
+        let mut graph = Graph::new();
+        let head = graph.add_op(
+            Box::new(CountingGen {
+                calls: Arc::clone(&gen_calls),
+            }),
+            Params::new(),
+        );
+        let add = graph.add_op(
+            Box::new(CountingAdd {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new().with("delta", ParamValue::Float(0.1)),
+        );
+        graph.connect(head, 0, add, 0).unwrap();
+
+        let bound = Field::new(16, 16, Region::UNIT)
+            .with_layer(layers::HEIGHT, Arc::new(Layer::filled(16, 16, 0.2)));
+        let mut cache = EvalCache::new(8);
+        let out = graph
+            .evaluate_bound(
+                &[(head, bound)],
+                &[(head, 0), (add, 0)],
+                &request(),
+                &mut cache,
+            )
+            .unwrap();
+
+        assert_eq!(out.len(), 2);
+        // First output is the bound field itself; second is add over it.
+        assert!((out[0].layer(layers::HEIGHT).unwrap().as_slice()[0] - 0.2).abs() < 1e-6);
+        assert!((out[1].layer(layers::HEIGHT).unwrap().as_slice()[0] - 0.3).abs() < 1e-6);
+        assert_eq!(
+            gen_calls.load(Ordering::Relaxed),
+            0,
+            "bound node never computes"
+        );
+    }
+
+    #[test]
+    fn evaluate_bound_reports_an_out_of_range_output_port() {
+        let mut graph = Graph::new();
+        let head = graph.add_op(
+            Box::new(CountingGen {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new(),
+        );
+        let mut cache = EvalCache::new(8);
+        // The generator has one output (port 0); asking for port 5 is an invalid port.
+        let err = graph
+            .evaluate_bound(&[], &[(head, 5)], &request(), &mut cache)
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidPort { port: 5, .. }));
     }
 
     #[test]
