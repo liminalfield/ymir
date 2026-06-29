@@ -151,13 +151,6 @@ impl ProjectFile {
         world_height: f64,
         frames: &[Frame],
     ) -> Self {
-        let nodes = snarl
-            .node_ids()
-            .filter_map(|(snarl_id, &handle)| {
-                let pos = snarl.get_node_info(snarl_id)?.pos;
-                Some((handle, [pos.x, pos.y]))
-            })
-            .collect();
         Self {
             format_version: PROJECT_FORMAT_VERSION,
             world: WorldSettings {
@@ -167,7 +160,7 @@ impl ProjectFile {
             },
             graph: graph.to_document(),
             view: ViewState {
-                nodes,
+                nodes: snarl_positions(snarl),
                 frames: frames.to_vec(),
             },
         }
@@ -227,43 +220,7 @@ impl ProjectFile {
         }
 
         let graph = Graph::from_document(&self.graph)?;
-
-        // Insert every node into the canvas, recording its snarl id so the wires can
-        // be reattached by stable_id below.
-        let mut snarl = Snarl::<Handle>::new();
-        let mut snarl_of: HashMap<u64, SnarlNodeId> =
-            HashMap::with_capacity(self.graph.nodes.len());
-        for (index, nd) in self.graph.nodes.iter().enumerate() {
-            let pos = self
-                .view
-                .nodes
-                .get(&nd.stable_id)
-                .map_or_else(|| cascade_pos(index), |p| Pos2::new(p[0], p[1]));
-            let snarl_id = snarl.insert_node(pos, nd.stable_id);
-            snarl_of.insert(nd.stable_id, snarl_id);
-        }
-
-        // Reattach wires. The document's connections are already in stable_id terms,
-        // so this needs no lookup into the rebuilt graph.
-        for nd in &self.graph.nodes {
-            let Some(&dest) = snarl_of.get(&nd.stable_id) else {
-                continue;
-            };
-            for conn in &nd.connections {
-                if let Some(&source) = snarl_of.get(&conn.source) {
-                    snarl.connect(
-                        OutPinId {
-                            node: source,
-                            output: conn.output,
-                        },
-                        InPinId {
-                            node: dest,
-                            input: conn.input,
-                        },
-                    );
-                }
-            }
-        }
+        let snarl = build_snarl(&graph, &self.view.nodes);
 
         Ok(RestoredProject {
             graph,
@@ -281,6 +238,58 @@ impl ProjectFile {
 fn cascade_pos(index: usize) -> Pos2 {
     let step = index as f32 * CASCADE_STEP;
     Pos2::new(40.0 + step, 40.0 + step)
+}
+
+/// Builds a fresh canvas snarl for `graph`, placing each node at its saved position in
+/// `positions` (keyed by `stable_id`) or a cascade fallback, and reattaching every wire
+/// from the graph's connections.
+///
+/// Shared by project restore and by diving into or out of a subgraph, which both rebuild
+/// the canvas for a different graph (the inner graph, or the parent on the way back).
+pub(crate) fn build_snarl(graph: &Graph, positions: &BTreeMap<u64, [f32; 2]>) -> Snarl<Handle> {
+    let doc = graph.to_document();
+    let mut snarl = Snarl::<Handle>::new();
+    let mut snarl_of: HashMap<u64, SnarlNodeId> = HashMap::with_capacity(doc.nodes.len());
+    for (index, nd) in doc.nodes.iter().enumerate() {
+        let pos = positions
+            .get(&nd.stable_id)
+            .map_or_else(|| cascade_pos(index), |p| Pos2::new(p[0], p[1]));
+        snarl_of.insert(nd.stable_id, snarl.insert_node(pos, nd.stable_id));
+    }
+    // The document's connections are already in stable_id terms, so no lookup into the
+    // rebuilt graph is needed.
+    for nd in &doc.nodes {
+        let Some(&dest) = snarl_of.get(&nd.stable_id) else {
+            continue;
+        };
+        for conn in &nd.connections {
+            if let Some(&source) = snarl_of.get(&conn.source) {
+                snarl.connect(
+                    OutPinId {
+                        node: source,
+                        output: conn.output,
+                    },
+                    InPinId {
+                        node: dest,
+                        input: conn.input,
+                    },
+                );
+            }
+        }
+    }
+    snarl
+}
+
+/// Captures each node's canvas position from `snarl`, keyed by `stable_id`, for saving or
+/// for suspending a context when diving into a subgraph.
+pub(crate) fn snarl_positions(snarl: &Snarl<Handle>) -> BTreeMap<u64, [f32; 2]> {
+    snarl
+        .node_ids()
+        .filter_map(|(snarl_id, &handle)| {
+            let pos = snarl.get_node_info(snarl_id)?.pos;
+            Some((handle, [pos.x, pos.y]))
+        })
+        .collect()
 }
 
 #[cfg(test)]
