@@ -510,6 +510,34 @@ mod tests {
     }
 
     #[test]
+    fn nested_and_set_nested_read_and_replace_the_inner_graph() {
+        let (inner, _, _) = identity_inner();
+        let mut outer = Graph::new();
+        let sg = outer.add_op(Box::new(SubgraphNode::new(inner)), Params::new());
+        let plain = outer.add_op(Box::new(SeedGen), Params::new());
+
+        // nested() exposes a container's inner graph and is None for an ordinary node.
+        assert!(outer.nested(sg).is_some());
+        assert!(outer.nested(plain).is_none());
+
+        // set_nested swaps the inner graph and refreshes the container's ports.
+        let mut new_inner = Graph::new();
+        let i1 = new_inner.add_op(Box::new(InputNode), Params::new());
+        new_inner.add_op(Box::new(InputNode), Params::new()); // a second input marker
+        let o = new_inner.add_op(Box::new(OutputNode), Params::new());
+        new_inner.connect(i1, 0, o, 0).unwrap();
+        outer.set_nested(sg, new_inner).unwrap();
+        assert_eq!(
+            outer.spec(sg).unwrap().inputs.len(),
+            2,
+            "ports follow the installed inner graph"
+        );
+        // set_nested on an ordinary node leaves it intact (default rebuild_nested ignores it).
+        outer.set_nested(plain, Graph::new()).unwrap();
+        assert!(outer.nested(plain).is_none());
+    }
+
+    #[test]
     fn a_subgraph_round_trips_through_a_document() {
         let (inner, _, _) = identity_inner();
         let mut outer = Graph::new();

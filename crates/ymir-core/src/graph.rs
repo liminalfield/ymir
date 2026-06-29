@@ -179,6 +179,35 @@ impl Graph {
         Ok(())
     }
 
+    /// The inner graph held by a container node (a subgraph), or `None` for an ordinary
+    /// node. The editor uses this to detect a container and to read its inner graph when
+    /// diving in. A structural query through the operator's
+    /// [`Operator::nested`](crate::Operator::nested) hook, not a check on a concrete type.
+    #[must_use]
+    pub fn nested(&self, id: NodeId) -> Option<&Graph> {
+        self.node(id).and_then(|n| n.operator.nested())
+    }
+
+    /// Installs `inner` as a container node's inner graph, refreshing the node's ports to
+    /// match. The editor uses this to write edits made while diving into a subgraph back
+    /// into its container. It goes through the operator's
+    /// [`rebuild_nested`](crate::Operator::rebuild_nested) hook and
+    /// [`set_operator`](Self::set_operator), so it never names a concrete node type, and the
+    /// node's identity, params (including the seed), name, and bypass are preserved. On an
+    /// ordinary node the default `rebuild_nested` ignores `inner`, leaving the node as it was.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NodeNotFound`] if `id` is not in the graph.
+    pub fn set_nested(&mut self, id: NodeId, inner: Graph) -> Result<()> {
+        let rebuilt = self
+            .node(id)
+            .ok_or(Error::NodeNotFound)?
+            .operator
+            .rebuild_nested(inner);
+        self.set_operator(id, rebuilt)
+    }
+
     /// Replaces a node's parameters.
     ///
     /// # Errors
