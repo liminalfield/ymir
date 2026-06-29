@@ -313,6 +313,84 @@ impl Graph {
         true
     }
 
+    /// Copies a set of nodes into this graph, minting a fresh `stable_id` and runtime
+    /// id for each, and returns a map from every source node's id to its copy.
+    ///
+    /// This is the shared kernel under multi-node duplicate, "create subgraph from a
+    /// selection", and dropping a saved subgraph into a graph: each needs an
+    /// independent copy of a node set that preserves how those nodes wire to one
+    /// another. Edges *internal* to the set (both endpoints in `nodes`) are reproduced
+    /// among the copies; edges crossing the set boundary are dropped, so the result is
+    /// a self-contained fragment with the same inner shape and no link to the originals
+    /// or their neighbours. Each copy carries the source's operator, params, name
+    /// override, and bypass state; only its identity and wiring are new.
+    ///
+    /// Ids in `nodes` that are absent are skipped, and a repeated id is copied once.
+    /// Copies are created in ascending source-`stable_id` order, so the same selection
+    /// always yields the same id assignment (determinism the seed and cache depend on),
+    /// independent of the order `nodes` is given in.
+    pub fn copy_subgraph(&mut self, nodes: &[NodeId]) -> HashMap<NodeId, NodeId> {
+        // Deduplicate to the live nodes paired with their stable_id, then order by it,
+        // so fresh ids are assigned deterministically regardless of the caller's order.
+        let unique: HashSet<NodeId> = nodes.iter().copied().collect();
+        let mut sources: Vec<(NodeId, u64)> = unique
+            .iter()
+            .filter_map(|&id| self.nodes.get(id).map(|n| (id, n.stable_id)))
+            .collect();
+        sources.sort_by_key(|&(_, stable_id)| stable_id);
+
+        // Pass one: clone each node's payload with a fresh identity and no wiring,
+        // recording old -> new so pass two can translate internal edges.
+        let mut map: HashMap<NodeId, NodeId> = HashMap::with_capacity(sources.len());
+        for &(old, _) in &sources {
+            let Some(src) = self.nodes.get(old) else {
+                continue;
+            };
+            let mut clone = src.clone();
+            clone.stable_id = self.next_stable_id;
+            self.next_stable_id += 1;
+            for slot in &mut clone.inputs {
+                *slot = None;
+            }
+            let new = self.nodes.insert(clone);
+            map.insert(old, new);
+        }
+
+        // Pass two: reproduce edges whose source is also copied, translated onto the
+        // copies. An edge from outside the set has no entry in `map` and is left
+        // dropped, so the boundary is cut cleanly.
+        for &(old, _) in &sources {
+            let Some(src) = self.nodes.get(old) else {
+                continue;
+            };
+            let internal: Vec<(usize, NodeId, usize)> = src
+                .inputs
+                .iter()
+                .enumerate()
+                .filter_map(|(port, slot)| {
+                    let conn = slot.as_ref()?;
+                    map.get(&conn.source)
+                        .map(|&new_source| (port, new_source, conn.output))
+                })
+                .collect();
+            let Some(&new_dest) = map.get(&old) else {
+                continue;
+            };
+            // The copy has the same input arity as its source, so every `port` here is
+            // in range; rewrite the slots directly (no port to revalidate).
+            if let Some(dest_node) = self.nodes.get_mut(new_dest) {
+                for (port, new_source, output) in internal {
+                    dest_node.inputs[port] = Some(InputConn {
+                        source: new_source,
+                        output,
+                    });
+                }
+            }
+        }
+
+        map
+    }
+
     /// Whether connecting `source` into `dest` would create a cycle.
     ///
     /// Connection itself ([`connect`](Self::connect)) is deliberately lenient and
@@ -914,6 +992,101 @@ mod tests {
                 dest: 0
             })
         ));
+    }
+
+    #[test]
+    fn copy_subgraph_clones_payload_with_fresh_identity() {
+        use crate::param::ParamValue;
+
+        let mut g = Graph::new();
+        let head = add(&mut g, "test.head", 0, 1);
+        let modr = add(&mut g, "test.mod", 1, 1);
+        g.connect(head, 0, modr, 0).expect("connect");
+        g.set_name(modr, Some("Shaper".to_string())).expect("name");
+        g.set_params(modr, Params::new().with("k", ParamValue::Int(7)))
+            .expect("params");
+        g.set_bypassed(modr, true).expect("bypass");
+
+        let map = g.copy_subgraph(&[head, modr]);
+        assert_eq!(map.len(), 2);
+        assert_eq!(g.node_count(), 4, "originals plus their copies");
+
+        // The copy has a fresh identity but carries the source's payload.
+        let copy_mod = map[&modr];
+        assert_ne!(g.stable_id(copy_mod), g.stable_id(modr));
+        assert_eq!(g.name(copy_mod), Some("Shaper"));
+        assert_eq!(
+            g.params(copy_mod).and_then(|p| p.get("k")),
+            Some(&ParamValue::Int(7))
+        );
+        assert!(g.is_bypassed(copy_mod));
+        // The original is untouched.
+        assert_eq!(g.name(modr), Some("Shaper"));
+    }
+
+    #[test]
+    fn copy_subgraph_keeps_internal_edges_and_drops_boundary() {
+        let mut g = Graph::new();
+        let head = add(&mut g, "test.head", 0, 1);
+        let a = add(&mut g, "test.mod", 1, 1);
+        let b = add(&mut g, "test.mod", 1, 1);
+        g.connect(head, 0, a, 0).expect("head->a");
+        g.connect(a, 0, b, 0).expect("a->b");
+
+        // Select only {a, b}: head->a crosses the boundary, a->b is internal.
+        let map = g.copy_subgraph(&[a, b]);
+        let (ca, cb) = (map[&a], map[&b]);
+        // The boundary edge is not reproduced: the copy of a is unconnected.
+        assert_eq!(g.input_source(ca, 0), None);
+        // The internal edge is reproduced among the copies.
+        assert_eq!(g.input_source(cb, 0), Some((ca, 0)));
+        // Originals keep their wiring; copies link to nothing outside the set.
+        assert_eq!(g.input_source(a, 0), Some((head, 0)));
+        assert_eq!(g.input_source(b, 0), Some((a, 0)));
+    }
+
+    #[test]
+    fn copy_subgraph_preserves_internal_fan_out() {
+        let mut g = Graph::new();
+        let src = add(&mut g, "test.head", 0, 1);
+        let b = add(&mut g, "test.mod", 1, 1);
+        let c = add(&mut g, "test.mod", 1, 1);
+        g.connect(src, 0, b, 0).expect("src->b");
+        g.connect(src, 0, c, 0).expect("src->c");
+
+        let map = g.copy_subgraph(&[src, b, c]);
+        let (cs, cb, cc) = (map[&src], map[&b], map[&c]);
+        // One source fanning out to two destinations is preserved on both copies.
+        assert_eq!(g.input_source(cb, 0), Some((cs, 0)));
+        assert_eq!(g.input_source(cc, 0), Some((cs, 0)));
+    }
+
+    #[test]
+    fn copy_subgraph_assigns_ids_in_source_order_regardless_of_input_order() {
+        let mut g = Graph::new();
+        let head = add(&mut g, "test.head", 0, 1); // stable_id 0
+        let modr = add(&mut g, "test.mod", 1, 1); // stable_id 1
+
+        // Pass the selection reversed; ids are still assigned by source stable_id.
+        let map = g.copy_subgraph(&[modr, head]);
+        assert_eq!(g.stable_id(map[&head]), Some(2));
+        assert_eq!(g.stable_id(map[&modr]), Some(3));
+    }
+
+    #[test]
+    fn copy_subgraph_ignores_empty_and_absent_ids() {
+        let mut g = Graph::new();
+        let head = add(&mut g, "test.head", 0, 1);
+        assert!(g.copy_subgraph(&[]).is_empty());
+        assert_eq!(g.node_count(), 1, "an empty selection copies nothing");
+
+        let removed = add(&mut g, "test.mod", 1, 1);
+        assert!(g.remove_node(removed));
+        // A stale id is skipped, not panicked on; the live node still copies.
+        let map = g.copy_subgraph(&[removed, head]);
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key(&head));
+        assert_eq!(g.node_count(), 2);
     }
 
     #[test]
