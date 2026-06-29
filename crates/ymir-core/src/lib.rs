@@ -42,6 +42,7 @@ mod operator;
 mod param;
 mod region;
 mod spec;
+mod subgraph;
 
 pub use cancel::CancelToken;
 pub use context::EvalContext;

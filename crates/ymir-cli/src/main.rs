@@ -114,7 +114,11 @@ mod tests {
                 "modifier.slope",
                 "modifier.stream_erosion",
                 "modifier.thermal_erosion",
-                "modifier.warp"
+                "modifier.warp",
+                // Subgraph boundary markers live in ymir-core (the named exception to
+                // "no concrete nodes in core"); see crates/ymir-core/src/subgraph.rs.
+                "subgraph.input",
+                "subgraph.output"
             ],
         );
     }

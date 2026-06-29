@@ -219,6 +219,16 @@ pub fn tr(key: &str) -> &str {
             "Passes the field through unchanged: a point to view, reroute, or anchor wiring."
         }
 
+        // Subgraph boundary markers (the ports of a subgraph container, set inside it).
+        "node-subgraph.input" => "Input",
+        "node-subgraph.input-desc" => {
+            "Marks a field a subgraph takes in: each one becomes an input port on the container."
+        }
+        "node-subgraph.output" => "Output",
+        "node-subgraph.output-desc" => {
+            "Marks a field a subgraph hands out: each one becomes an output port on the container."
+        }
+
         // PNG export.
         "node-endpoint.export" => "Export PNG",
         "node-endpoint.export-desc" => "Writes the height layer to a 16-bit grayscale PNG.",
