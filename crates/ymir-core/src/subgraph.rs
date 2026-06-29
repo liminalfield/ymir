@@ -24,7 +24,7 @@ use crate::graph::{Graph, NodeId};
 use crate::layer::Layer;
 use crate::layers;
 use crate::operator::{Inputs, Operator};
-use crate::param::Params;
+use crate::param::{ParamKind, ParamSpec, ParamValue, Params};
 use crate::registry::OperatorEntry;
 use crate::spec::{NodeSpec, PortSpec};
 
@@ -158,7 +158,18 @@ impl Operator for SubgraphNode {
             category: "utility",
             inputs: self.boundary_ports(INPUT_TYPE_ID, "in"),
             outputs: self.boundary_ports(OUTPUT_TYPE_ID, "out"),
-            params: Vec::new(),
+            // The subgraph's own seed, used as the *absolute* global seed for its inner
+            // graph (not an offset to the host's world seed, as a generator's seed is).
+            // That self-containment is what lets a shared subgraph reproduce the same
+            // terrain in any project; reseeding here is the "vary this instance" switch.
+            params: vec![ParamSpec::new(
+                "seed",
+                ParamKind::Int {
+                    min: 0,
+                    max: i64::from(i32::MAX),
+                },
+                ParamValue::Int(0),
+            )],
         }
     }
 
@@ -174,7 +185,7 @@ impl Operator for SubgraphNode {
         Box::new(SubgraphNode::new(inner))
     }
 
-    fn eval(&self, inputs: Inputs, _params: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
+    fn eval(&self, inputs: Inputs, params: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
         // Stack-safety backstop. Nesting is finite by construction, so this only catches a
         // pathologically deep but finite graph, reporting instead of overflowing the stack.
         if ctx.depth() >= MAX_NESTING_DEPTH {
@@ -206,12 +217,17 @@ impl Operator for SubgraphNode {
             outputs.push(source);
         }
 
+        // The inner graph runs under the subgraph's own captured seed (absolute, not the
+        // host's world seed), so a shared subgraph reproduces the same terrain in any
+        // project; 0 is the default. Reseeding this param is the "vary this instance" switch.
+        let inner_seed = params.get_i64("seed", 0) as u64;
+
         // Run the inner graph one nesting level deeper, threading the world settings and
         // cancellation through. The inner cache is transient (see issue #125): the container
         // itself memoizes in the outer cache, so an unchanged subgraph is never re-run, and
         // within this one call the evaluator's working set pins the active path regardless of
         // cache capacity.
-        let request = EvalRequest::new(ctx.width, ctx.height, ctx.region, ctx.seed)
+        let request = EvalRequest::new(ctx.width, ctx.height, ctx.region, inner_seed)
             .with_world_extent(ctx.world_extent())
             .with_world_height(ctx.world_height())
             .with_cancel(ctx.cancel_token())
@@ -301,6 +317,33 @@ mod tests {
                 Field::new(ctx.width, ctx.height, ctx.region).with_layer(
                     layers::HEIGHT,
                     Arc::new(Layer::filled(ctx.width, ctx.height, self.value)),
+                ),
+            ])
+        }
+    }
+
+    /// A test-only generator whose uniform height is derived from the per-node seed, so a
+    /// test can observe which seed the inner evaluation ran under. Never registered.
+    #[derive(Clone)]
+    struct SeedGen;
+
+    impl Operator for SeedGen {
+        fn spec(&self) -> NodeSpec {
+            NodeSpec {
+                type_id: "test.seedgen",
+                category: "test",
+                inputs: Vec::new(),
+                outputs: vec![PortSpec::new("out")],
+                params: Vec::new(),
+            }
+        }
+
+        fn eval(&self, _: Inputs, _: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
+            let value = (ctx.seed % 1000) as f32 / 1000.0;
+            Ok(vec![
+                Field::new(ctx.width, ctx.height, ctx.region).with_layer(
+                    layers::HEIGHT,
+                    Arc::new(Layer::filled(ctx.width, ctx.height, value)),
                 ),
             ])
         }
@@ -499,6 +542,64 @@ mod tests {
             )
             .unwrap();
         assert!((out[0].layer(layers::HEIGHT).unwrap().as_slice()[0] - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn subgraph_declares_a_seed_param() {
+        let spec = SubgraphNode::empty().spec();
+        assert!(
+            spec.params.iter().any(|p| p.name == "seed"),
+            "the captured seed is a visible param"
+        );
+    }
+
+    #[test]
+    fn the_seed_param_is_absolute_so_a_shared_subgraph_reproduces() {
+        // inner: a seed-driven generator -> Output. The subgraph's output depends on the
+        // inner global seed, which is the subgraph's own seed param, not the host's.
+        let mut inner = Graph::new();
+        let g = inner.add_op(Box::new(SeedGen), Params::new());
+        let out = inner.add_op(Box::new(OutputNode), Params::new());
+        inner.connect(g, 0, out, 0).unwrap();
+        let sg = SubgraphNode::new(inner);
+
+        let value_at = |host_seed: u64, params: &Params| {
+            let ctx = EvalContext::new(8, 8, Region::UNIT, host_seed);
+            sg.eval(Inputs::required_only(&[]), params, &ctx).unwrap()[0]
+                .layer(layers::HEIGHT)
+                .unwrap()
+                .as_slice()[0]
+        };
+
+        let default_seed = Params::new(); // seed defaults to 0
+        // The host's world seed does not change the subgraph's output: it is self-contained,
+        // so sharing it into any project reproduces the same terrain.
+        assert!(
+            (value_at(7, &default_seed) - value_at(999, &default_seed)).abs() < 1e-9,
+            "output is independent of the host world seed"
+        );
+        // Changing the captured seed does change the output: the reseed/vary switch.
+        let reseeded = Params::new().with("seed", ParamValue::Int(5));
+        assert!(
+            (value_at(7, &default_seed) - value_at(7, &reseeded)).abs() > 1e-9,
+            "the captured seed selects the terrain"
+        );
+    }
+
+    #[test]
+    fn the_captured_seed_survives_a_round_trip() {
+        let (inner, _, _) = identity_inner();
+        let mut outer = Graph::new();
+        let sg = outer.add_op(
+            Box::new(SubgraphNode::new(inner)),
+            Params::new().with("seed", ParamValue::Int(123)),
+        );
+        let sid = outer.stable_id(sg).unwrap();
+
+        let rebuilt = Graph::from_document(&outer.to_document()).expect("rebuild");
+        let sg2 = rebuilt.node_id_of(sid).unwrap();
+        // The captured seed travels with the project (and so with a shared subgraph file).
+        assert_eq!(rebuilt.params(sg2).unwrap().get_i64("seed", 0), 123);
     }
 
     #[test]
