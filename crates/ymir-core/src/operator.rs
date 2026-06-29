@@ -103,6 +103,16 @@ pub trait Operator: OperatorClone + Send + Sync {
     /// Returns an [`Error`](crate::Error) if the node cannot produce its output;
     /// the evaluator surfaces that as a failed node rather than panicking.
     fn eval(&self, inputs: Inputs, params: &Params, ctx: &EvalContext) -> Result<Vec<Field>>;
+
+    /// An optional content fingerprint folded into this node's cache key, for an operator
+    /// whose output depends on per-instance data beyond its [`params`](Params) (a subgraph
+    /// container's inner graph). `None` (the default) for an ordinary stateless operator,
+    /// which leaves its cache key exactly as it was. Must be stable for equal content and
+    /// machine-independent (the same guarantees as the rest of the key), and cheap to
+    /// return, since the evaluator calls it whenever it computes a key (precompute it).
+    fn content_hash(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// Clones a `Box<dyn Operator>`. Blanket-implemented for every `Clone` operator, so

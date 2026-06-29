@@ -219,7 +219,11 @@ pub fn tr(key: &str) -> &str {
             "Passes the field through unchanged: a point to view, reroute, or anchor wiring."
         }
 
-        // Subgraph boundary markers (the ports of a subgraph container, set inside it).
+        // Subgraph container and its boundary markers (the ports, set inside it).
+        "node-subgraph" => "Subgraph",
+        "node-subgraph-desc" => {
+            "A node holding an inner graph; dive in to build it, its ports set by Input/Output nodes."
+        }
         "node-subgraph.input" => "Input",
         "node-subgraph.input-desc" => {
             "Marks a field a subgraph takes in: each one becomes an input port on the container."

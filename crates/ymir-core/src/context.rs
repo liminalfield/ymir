@@ -30,6 +30,10 @@ pub struct EvalContext {
     /// Private so slope-aware operators go through [`real_slope_scale`](Self::real_slope_scale),
     /// which combines it with the horizontal cell size into a true rise-over-run scale.
     world_height: f64,
+    /// Subgraph nesting depth: 0 at the top level, raised by one each time a subgraph
+    /// container evaluates its inner graph. A container checks it against the nesting limit
+    /// so a pathologically deep stack reports rather than overflows.
+    depth: u32,
     cancel: CancelToken,
 }
 
@@ -44,6 +48,7 @@ impl EvalContext {
             seed,
             world_extent: 1.0,
             world_height: 1.0,
+            depth: 0,
             cancel: CancelToken::new(),
         }
     }
@@ -92,6 +97,39 @@ impl EvalContext {
     #[must_use]
     pub fn world_height(&self) -> f64 {
         self.world_height
+    }
+
+    /// The world's physical size along x, in world units (meters) across the full `UNIT`
+    /// region. A subgraph container reads it to thread the same extent into its inner
+    /// evaluation; ordinary operators want [`meters_per_cell`](Self::meters_per_cell) or
+    /// [`world_to_cells`](Self::world_to_cells), which fold in resolution and region.
+    #[must_use]
+    pub fn world_extent(&self) -> f64 {
+        self.world_extent
+    }
+
+    /// The subgraph nesting depth of this evaluation: 0 at the top level. A subgraph
+    /// container checks it against the nesting limit and sets it one deeper for its inner
+    /// evaluation.
+    #[must_use]
+    pub fn depth(&self) -> u32 {
+        self.depth
+    }
+
+    /// Sets the subgraph nesting depth. The evaluator threads the request's depth in; a
+    /// subgraph container sets it one deeper before evaluating its inner graph.
+    #[must_use]
+    pub fn with_depth(mut self, depth: u32) -> Self {
+        self.depth = depth;
+        self
+    }
+
+    /// A clone of the cancellation token, so a subgraph container can thread the same
+    /// cancellation into its inner evaluation. Ordinary operators poll
+    /// [`is_cancelled`](Self::is_cancelled) instead.
+    #[must_use]
+    pub fn cancel_token(&self) -> CancelToken {
+        self.cancel.clone()
     }
 
     /// World units (meters) spanned by one cell at this resolution and extent.

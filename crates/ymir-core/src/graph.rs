@@ -12,6 +12,7 @@ use std::path::Path;
 use slotmap::{SlotMap, new_key_type};
 
 use crate::error::{Error, Result};
+use crate::hash::Fnv1a64;
 use crate::operator::Operator;
 use crate::param::Params;
 use crate::project::{Connection, FORMAT_VERSION, NodeDocument, ProjectDocument};
@@ -429,6 +430,53 @@ impl Graph {
     /// Borrows a node by id, for the evaluator.
     pub(crate) fn node(&self, id: NodeId) -> Option<&Node> {
         self.nodes.get(id)
+    }
+
+    /// The runtime node ids of every node whose `type_id` is `type_id`, in ascending
+    /// `stable_id` order.
+    ///
+    /// The subgraph container uses this to find its boundary markers deterministically,
+    /// so its derived input/output ports keep a stable order regardless of node insertion
+    /// order. Crate-internal: it exposes identity by type, which only the nesting
+    /// machinery needs.
+    pub(crate) fn nodes_of_type(&self, type_id: &str) -> Vec<NodeId> {
+        let mut ids: Vec<(NodeId, u64)> = self
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.type_id == type_id)
+            .map(|(id, n)| (id, n.stable_id))
+            .collect();
+        ids.sort_by_key(|&(_, stable_id)| stable_id);
+        ids.into_iter().map(|(id, _)| id).collect()
+    }
+
+    /// A canonical, machine-independent content hash of the graph's output-determining
+    /// state: each node's `stable_id`, `type_id`, params, bypass, and connections, in
+    /// deterministic order (built from the canonical [`to_document`](Self::to_document)).
+    ///
+    /// Equal graphs hash equal on any machine. A subgraph container folds this into its
+    /// cache key (via [`Operator::content_hash`](crate::Operator::content_hash)) so editing
+    /// the inner graph invalidates the container's cached output. Display-name overrides are
+    /// excluded deliberately: like everywhere else, a rename is cosmetic and never changes
+    /// output or a cache key.
+    #[must_use]
+    pub fn content_hash(&self) -> u64 {
+        let doc = self.to_document();
+        let mut h = Fnv1a64::new();
+        h.write_usize(doc.nodes.len());
+        for node in &doc.nodes {
+            h.write_u64(node.stable_id);
+            h.write_str(&node.type_id);
+            h.write_u64(node.params.content_hash().to_u64());
+            h.write_u64(u64::from(node.bypassed));
+            h.write_usize(node.connections.len());
+            for conn in &node.connections {
+                h.write_usize(conn.input);
+                h.write_u64(conn.source);
+                h.write_usize(conn.output);
+            }
+        }
+        h.finish().to_u64()
     }
 
     /// Serializes the graph into a [`ProjectDocument`]: its persistent state only

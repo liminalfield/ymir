@@ -128,6 +128,16 @@ pub enum Error {
     /// so it is recoverable, never fatal.
     #[error("field cache decode error: {0}")]
     FieldCacheDecode(String),
+
+    /// Subgraph nesting exceeded the depth limit during evaluation. Nesting is finite by
+    /// construction (a subgraph holds a concrete copy of its inner graph, so it cannot
+    /// contain itself), so this guards only a pathologically deep but finite stack,
+    /// reporting rather than letting evaluation overflow it.
+    #[error("subgraph nesting too deep (limit {limit})")]
+    NestingTooDeep {
+        /// The maximum nesting depth this build allows.
+        limit: u32,
+    },
 }
 
 /// Convenience alias for results carrying the crate [`Error`].

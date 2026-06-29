@@ -49,6 +49,10 @@ pub struct EvalRequest {
     /// each node's [`EvalContext`] so slope-aware nodes get a true rise-over-run. Defaults to
     /// `1.0`.
     world_height: f64,
+    /// Subgraph nesting depth this request evaluates at; 0 at the top level. The evaluator
+    /// threads it into each node's context, and a subgraph container raises it by one for
+    /// its inner evaluation. Not part of the cache key: depth never changes a node's output.
+    depth: u32,
     /// Cancellation signal, threaded into each node's context; defaults to
     /// never-cancel.
     cancel: CancelToken,
@@ -65,8 +69,18 @@ impl EvalRequest {
             seed,
             world_extent: 1.0,
             world_height: 1.0,
+            depth: 0,
             cancel: CancelToken::new(),
         }
+    }
+
+    /// Sets the subgraph nesting depth this request evaluates at. The top level is 0; a
+    /// subgraph container sets it one deeper before evaluating its inner graph, so the
+    /// nesting backstop can report on a pathologically deep stack.
+    #[must_use]
+    pub fn with_depth(mut self, depth: u32) -> Self {
+        self.depth = depth;
+        self
     }
 
     /// Attaches a cancellation token. The GUI cancels it when a newer change
@@ -433,7 +447,14 @@ impl Graph {
         }
 
         let seed = derive_seed(request.seed, node.stable_id);
-        let key = compute_key(node.type_id, &node.params, &input_keys, request, seed);
+        let key = compute_key(
+            node.type_id,
+            &node.params,
+            &input_keys,
+            request,
+            seed,
+            node.operator.content_hash(),
+        );
 
         // An endpoint produces no field, so there is nothing to memoize: its job
         // is the side effect (e.g. writing a file), which must happen on every
@@ -482,7 +503,8 @@ impl Graph {
         let ctx = EvalContext::new(request.width, request.height, request.region, seed)
             .with_cancel(request.cancel.clone())
             .with_world_extent(request.world_extent)
-            .with_world_height(request.world_height);
+            .with_world_height(request.world_height)
+            .with_depth(request.depth);
         let inputs = Inputs::new(&required, &optional);
         let outputs = Arc::new(node.operator.eval(inputs, &node.params, &ctx)?);
 
@@ -596,7 +618,14 @@ impl Graph {
         }
 
         let seed = derive_seed(request.seed, node.stable_id);
-        let key = compute_key(node.type_id, &node.params, &input_keys, request, seed);
+        let key = compute_key(
+            node.type_id,
+            &node.params,
+            &input_keys,
+            request,
+            seed,
+            node.operator.content_hash(),
+        );
         keys.insert(id, key);
         in_progress.remove(&id);
         Ok(key)
@@ -644,14 +673,21 @@ fn derive_seed(global_seed: u64, stable_id: u64) -> u64 {
     h
 }
 
-/// Composes a node's cache key from its type, params, upstream keys, and the
-/// request context (resolution, region, world extent, derived seed).
+/// Composes a node's cache key from its type, params, upstream keys, the request
+/// context (resolution, region, world extent, derived seed), and an optional operator
+/// content fingerprint.
+///
+/// `op_content` is folded in only when present, so an ordinary operator (returning
+/// `None` from [`Operator::content_hash`](crate::Operator::content_hash)) produces
+/// exactly the same key as before this existed; a subgraph container passes its inner
+/// graph's hash so editing the inside invalidates the cached output.
 fn compute_key(
     type_id: &str,
     params: &Params,
     input_keys: &[Option<u64>],
     request: &EvalRequest,
     seed: u64,
+    op_content: Option<u64>,
 ) -> u64 {
     let mut h = Fnv1a64::new();
     h.write_str(type_id);
@@ -677,6 +713,11 @@ fn compute_key(
     // context dependence (so non-slope nodes are spared) is a future optimization for both.
     h.write_f64_bits(request.world_height);
     h.write_u64(seed);
+    // Folded only when present, so an ordinary operator's key is byte-identical to before
+    // this hook existed; a subgraph folds its inner-graph hash so inner edits invalidate.
+    if let Some(content) = op_content {
+        h.write_u64(content);
+    }
     h.finish().to_u64()
 }
 

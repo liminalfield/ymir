@@ -115,8 +115,10 @@ mod tests {
                 "modifier.stream_erosion",
                 "modifier.thermal_erosion",
                 "modifier.warp",
-                // Subgraph boundary markers live in ymir-core (the named exception to
-                // "no concrete nodes in core"); see crates/ymir-core/src/subgraph.rs.
+                // The subgraph container and its boundary markers live in ymir-core (the
+                // named exception to "no concrete nodes in core"); see
+                // crates/ymir-core/src/subgraph.rs.
+                "subgraph",
                 "subgraph.input",
                 "subgraph.output"
             ],
