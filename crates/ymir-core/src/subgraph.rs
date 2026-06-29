@@ -166,6 +166,14 @@ impl Operator for SubgraphNode {
         Some(self.inner_hash)
     }
 
+    fn nested(&self) -> Option<&Graph> {
+        Some(&self.inner)
+    }
+
+    fn rebuild_nested(&self, inner: Graph) -> Box<dyn Operator> {
+        Box::new(SubgraphNode::new(inner))
+    }
+
     fn eval(&self, inputs: Inputs, _params: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
         // Stack-safety backstop. Nesting is finite by construction, so this only catches a
         // pathologically deep but finite graph, reporting instead of overflowing the stack.
@@ -456,5 +464,69 @@ mod tests {
             2,
             "ports refresh from the edited inner graph"
         );
+    }
+
+    #[test]
+    fn a_subgraph_round_trips_through_a_document() {
+        let (inner, _, _) = identity_inner();
+        let mut outer = Graph::new();
+        let sg = outer.add_op(Box::new(SubgraphNode::new(inner)), Params::new());
+        let sid = outer.stable_id(sg).unwrap();
+
+        let doc = outer.to_document();
+        assert!(
+            doc.nodes[0].subgraph.is_some(),
+            "the inner graph is captured in the document"
+        );
+
+        let rebuilt = Graph::from_document(&doc).expect("rebuild");
+        // Document equality proves the whole nested structure round-trips.
+        assert_eq!(rebuilt.to_document(), doc);
+
+        // The restored container has its derived port back and still runs as identity.
+        let sg2 = rebuilt.node_id_of(sid).unwrap();
+        assert_eq!(rebuilt.spec(sg2).unwrap().inputs.len(), 1);
+        let field = Field::new(4, 4, Region::UNIT)
+            .with_layer(layers::HEIGHT, Arc::new(Layer::filled(4, 4, 0.9)));
+        let out = rebuilt
+            .node(sg2)
+            .unwrap()
+            .operator
+            .eval(
+                Inputs::required_only(&[&field]),
+                &Params::default(),
+                &EvalContext::new(4, 4, Region::UNIT, 0),
+            )
+            .unwrap();
+        assert!((out[0].layer(layers::HEIGHT).unwrap().as_slice()[0] - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn nested_subgraphs_round_trip() {
+        // A subgraph whose inner graph contains another subgraph (Input -> sub -> Output).
+        let (inner_inner, _, _) = identity_inner();
+        let mut mid = Graph::new();
+        let mi = mid.add_op(Box::new(InputNode), Params::new());
+        let msub = mid.add_op(Box::new(SubgraphNode::new(inner_inner)), Params::new());
+        let mo = mid.add_op(Box::new(OutputNode), Params::new());
+        mid.connect(mi, 0, msub, 0).unwrap();
+        mid.connect(msub, 0, mo, 0).unwrap();
+
+        let mut outer = Graph::new();
+        outer.add_op(Box::new(SubgraphNode::new(mid)), Params::new());
+
+        let doc = outer.to_document();
+        // Two levels of nesting are present in the document.
+        let mid_doc = doc.nodes[0]
+            .subgraph
+            .as_ref()
+            .expect("first level captured");
+        assert!(
+            mid_doc.nodes.iter().any(|n| n.subgraph.is_some()),
+            "the second level is captured too"
+        );
+
+        let rebuilt = Graph::from_document(&doc).expect("rebuild");
+        assert_eq!(rebuilt.to_document(), doc, "nested structure round-trips");
     }
 }

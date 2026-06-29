@@ -113,6 +113,23 @@ pub trait Operator: OperatorClone + Send + Sync {
     fn content_hash(&self) -> Option<u64> {
         None
     }
+
+    /// The inner graph this operator contains, if it is a container (a subgraph), so the
+    /// document writer can capture it and the editor can recurse into it. `None` (the
+    /// default) for an ordinary operator. A structural distinction, not semantic dispatch:
+    /// a caller asks "does this hold a graph?", never "which node is this?".
+    fn nested(&self) -> Option<&crate::graph::Graph> {
+        None
+    }
+
+    /// Rebuilds this operator with `inner` installed as its nested graph, used when loading
+    /// a saved container. The default ignores `inner` and clones self, which is correct for
+    /// an ordinary operator (one never carries nested data in a well-formed file); a
+    /// container returns a fresh instance wrapping `inner`. Keeping this on the trait is
+    /// what lets the document loader restore a container without naming its concrete type.
+    fn rebuild_nested(&self, _inner: crate::graph::Graph) -> Box<dyn Operator> {
+        self.clone_box()
+    }
 }
 
 /// Clones a `Box<dyn Operator>`. Blanket-implemented for every `Clone` operator, so

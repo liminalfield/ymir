@@ -58,6 +58,14 @@ pub struct NodeDocument {
     /// from the file when not bypassed, so existing projects load unchanged.
     #[serde(default, skip_serializing_if = "is_false")]
     pub bypassed: bool,
+    /// For a container node (a subgraph), the serialized inner graph it holds; `None`
+    /// (omitted) for an ordinary node, so existing projects and non-container nodes are
+    /// unchanged and the format version need not bump. Boxed so the document type is not
+    /// infinitely sized, and recursive so nested subgraphs round-trip. A structural field,
+    /// captured from the operator's [`nested`](crate::Operator::nested) hook, never by
+    /// naming a concrete node type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subgraph: Option<Box<ProjectDocument>>,
 }
 
 /// Serde predicate: omit a `bool` field from the file when it is `false`.
@@ -105,6 +113,7 @@ mod tests {
                     params,
                     connections: Vec::new(),
                     bypassed: false,
+                    subgraph: None,
                 },
                 NodeDocument {
                     stable_id: 1,
@@ -117,6 +126,7 @@ mod tests {
                         output: 0,
                     }],
                     bypassed: true,
+                    subgraph: None,
                 },
             ],
         }

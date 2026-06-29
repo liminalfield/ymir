@@ -575,6 +575,13 @@ impl Graph {
                     params: node.params.clone(),
                     connections,
                     bypassed: node.bypassed,
+                    // A container captures its inner graph (recursively); an ordinary node
+                    // has no nested graph, so this is omitted from the file. Structural, via
+                    // the operator's hook, never by naming a concrete type.
+                    subgraph: node
+                        .operator
+                        .nested()
+                        .map(|inner| Box::new(inner.to_document())),
                 }
             })
             .collect();
@@ -636,6 +643,19 @@ impl Graph {
                 node.stable_id = nd.stable_id;
                 node.name = nd.name.clone();
                 node.bypassed = nd.bypassed;
+            }
+            // Restore a container's inner graph (recursively), then refresh this node's
+            // arity from it so pass-two connections land on the right ports. Structural:
+            // we act on the presence of nested data and the operator's rebuild hook, never
+            // on the node's concrete type.
+            if let Some(inner_doc) = &nd.subgraph {
+                let inner = Graph::from_document(inner_doc)?;
+                let rebuilt = graph
+                    .node(id)
+                    .ok_or(Error::NodeNotFound)?
+                    .operator
+                    .rebuild_nested(inner);
+                graph.set_operator(id, rebuilt)?;
             }
             if by_stable.insert(nd.stable_id, id).is_some() {
                 return Err(Error::DuplicateStableId {
@@ -1014,6 +1034,7 @@ mod tests {
                 params: Params::new(),
                 connections: Vec::new(),
                 bypassed: false,
+                subgraph: None,
             }],
         };
         assert!(matches!(
@@ -1031,6 +1052,7 @@ mod tests {
             params: Params::new(),
             connections: Vec::new(),
             bypassed: false,
+            subgraph: None,
         };
         let doc = ProjectDocument {
             format_version: FORMAT_VERSION,
@@ -1085,6 +1107,7 @@ mod tests {
                     output: 0,
                 }],
                 bypassed: false,
+                subgraph: None,
             }],
         };
         assert!(matches!(
