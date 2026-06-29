@@ -435,4 +435,26 @@ mod tests {
     fn subgraph_container_is_registered() {
         assert!(crate::registry::make(SUBGRAPH_TYPE_ID).is_some());
     }
+
+    #[test]
+    fn replacing_a_container_operator_refreshes_its_ports() {
+        // A container with one input marker exposes one input port.
+        let (inner, _, _) = identity_inner();
+        let mut outer = Graph::new();
+        let sg = outer.add_op(Box::new(SubgraphNode::new(inner.clone())), Params::new());
+        assert_eq!(outer.spec(sg).unwrap().inputs.len(), 1);
+
+        // Edit the inner graph (add a second input marker) and swap the operator in:
+        // the container's derived ports follow.
+        let mut edited = inner;
+        edited.add_op(Box::new(InputNode), Params::new());
+        outer
+            .set_operator(sg, Box::new(SubgraphNode::new(edited)))
+            .unwrap();
+        assert_eq!(
+            outer.spec(sg).unwrap().inputs.len(),
+            2,
+            "ports refresh from the edited inner graph"
+        );
+    }
 }

@@ -125,6 +125,60 @@ impl Graph {
         })
     }
 
+    /// Replaces a node's operator in place, re-deriving its port arity from the new
+    /// operator's spec while preserving the node's identity (`stable_id`), name override,
+    /// bypass state, and params.
+    ///
+    /// A node's arity is cached at [`add_op`](Self::add_op) time, but a subgraph
+    /// container's ports are dynamic: editing its inner graph swaps in a new operator that
+    /// may declare more or fewer ports. This refreshes that cache and keeps the wiring
+    /// consistent. Connections into input ports that no longer exist are dropped, and edges
+    /// elsewhere that fed from an output port this node no longer has are cleared, so no
+    /// connection is left dangling. Surviving ports keep their connections, by index.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NodeNotFound`] if `id` is not in the graph.
+    pub fn set_operator(&mut self, id: NodeId, operator: Box<dyn Operator>) -> Result<()> {
+        let spec = operator.spec();
+        let type_id = spec.type_id;
+        let input_count = spec.inputs.len();
+        let required_input_count = spec.inputs.iter().filter(|p| !p.optional).count();
+        let output_count = spec.outputs.len();
+
+        // Optional ports must trail the required ones, the same invariant `add_op` checks.
+        debug_assert!(
+            spec.inputs
+                .iter()
+                .enumerate()
+                .all(|(i, p)| p.optional == (i >= required_input_count)),
+            "operator {type_id:?} declares an optional input port before a required one"
+        );
+
+        let node = self.nodes.get_mut(id).ok_or(Error::NodeNotFound)?;
+        node.operator = operator;
+        node.type_id = type_id;
+        node.required_input_count = required_input_count;
+        node.output_count = output_count;
+        // Resize the input slots to the new arity: surviving ports keep their connection
+        // (by index), removed ports are dropped, and new ports start unconnected.
+        node.inputs.resize_with(input_count, || None);
+
+        // Clear edges anywhere that fed from an output port this node no longer has, so no
+        // connection dangles past a shrunk output count.
+        for other in self.nodes.values_mut() {
+            for slot in &mut other.inputs {
+                if slot
+                    .as_ref()
+                    .is_some_and(|conn| conn.source == id && conn.output >= output_count)
+                {
+                    *slot = None;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Replaces a node's parameters.
     ///
     /// # Errors
@@ -1039,6 +1093,102 @@ mod tests {
                 source_id: 99,
                 dest: 0
             })
+        ));
+    }
+
+    #[test]
+    fn set_operator_refreshes_arity_and_preserves_identity() {
+        let mut g = Graph::new();
+        let n = add(&mut g, "test.mod", 1, 1);
+        g.set_name(n, Some("Shaper".to_string())).expect("name");
+        g.set_bypassed(n, true).expect("bypass");
+        let sid = g.stable_id(n).expect("sid");
+
+        g.set_operator(
+            n,
+            Box::new(Stub {
+                type_id: "test.mod2",
+                inputs: 2,
+                outputs: 3,
+            }),
+        )
+        .expect("set operator");
+
+        let spec = g.spec(n).expect("spec");
+        assert_eq!(spec.type_id, "test.mod2");
+        assert_eq!(spec.inputs.len(), 2, "input arity refreshed");
+        assert_eq!(spec.outputs.len(), 3, "output arity refreshed");
+        // Identity and the cosmetic/eval-neutral fields survive the swap.
+        assert_eq!(g.stable_id(n), Some(sid));
+        assert_eq!(g.name(n), Some("Shaper"));
+        assert!(g.is_bypassed(n));
+    }
+
+    #[test]
+    fn set_operator_drops_connections_to_removed_input_ports() {
+        let mut g = Graph::new();
+        let head = add(&mut g, "test.head", 0, 1);
+        let head2 = add(&mut g, "test.head", 0, 1);
+        let n = add(&mut g, "test.mod", 2, 1);
+        g.connect(head, 0, n, 0).expect("head->n.0");
+        g.connect(head2, 0, n, 1).expect("head2->n.1");
+
+        // Shrink to one input: port 0 keeps its wire, port 1 is gone.
+        g.set_operator(
+            n,
+            Box::new(Stub {
+                type_id: "test.mod",
+                inputs: 1,
+                outputs: 1,
+            }),
+        )
+        .expect("set operator");
+        assert_eq!(g.input_source(n, 0), Some((head, 0)));
+        assert_eq!(g.input_source(n, 1), None, "removed port has no connection");
+    }
+
+    #[test]
+    fn set_operator_prunes_downstream_edges_to_removed_output_ports() {
+        let mut g = Graph::new();
+        let src = add(&mut g, "test.src", 0, 2);
+        let a = add(&mut g, "test.mod", 1, 1);
+        let b = add(&mut g, "test.mod", 1, 1);
+        g.connect(src, 0, a, 0).expect("src.0->a");
+        g.connect(src, 1, b, 0).expect("src.1->b");
+
+        // Shrink src to one output: the edge from its now-missing output 1 (into b) is cut.
+        g.set_operator(
+            src,
+            Box::new(Stub {
+                type_id: "test.src",
+                inputs: 0,
+                outputs: 1,
+            }),
+        )
+        .expect("set operator");
+        assert_eq!(
+            g.input_source(a, 0),
+            Some((src, 0)),
+            "surviving output kept"
+        );
+        assert_eq!(g.input_source(b, 0), None, "edge to removed output pruned");
+    }
+
+    #[test]
+    fn set_operator_on_an_absent_node_errors() {
+        let mut g = Graph::new();
+        let n = add(&mut g, "test.mod", 1, 1);
+        assert!(g.remove_node(n));
+        assert!(matches!(
+            g.set_operator(
+                n,
+                Box::new(Stub {
+                    type_id: "test.mod",
+                    inputs: 1,
+                    outputs: 1,
+                }),
+            ),
+            Err(Error::NodeNotFound)
         ));
     }
 
