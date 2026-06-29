@@ -9,7 +9,7 @@
 //! accepted edges to core first, mutating snarl's wires only to mirror what core
 //! holds. Node add and delete sync to core the same way.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use eframe::egui::{self, Pos2};
 use egui_snarl::ui::{AnyPins, BackgroundPattern, PinInfo, SnarlPin, SnarlStyle, SnarlViewer};
@@ -214,9 +214,10 @@ pub(crate) struct GraphViewer<'a> {
     /// user asked to add a canvas frame; the canvas creates one there after the frame
     /// (#94). Output.
     pub(crate) add_frame_at: Option<egui::Pos2>,
-    /// A node the viewer asks the canvas to select after the frame (e.g. a duplicate),
-    /// keeping selection logic in one place. Output.
-    pub(crate) select_after: Option<Handle>,
+    /// Nodes the viewer asks the canvas to select after the frame (e.g. duplicates),
+    /// keeping selection logic in one place. Several handles (a multi-node duplicate)
+    /// all become the new selection. Empty when nothing is requested. Output.
+    pub(crate) select_after: Vec<Handle>,
     /// A node the viewer asks the canvas to rename (context-menu "Rename"); the canvas
     /// opens the rename dialog for it after the frame (#61). Output.
     pub(crate) rename_request: Option<Handle>,
@@ -263,7 +264,7 @@ impl<'a> GraphViewer<'a> {
             pinned: None,
             add_node_at: None,
             add_frame_at: None,
-            select_after: None,
+            select_after: Vec::new(),
             rename_request: None,
             pin_request: None,
             bypass_request: None,
@@ -326,29 +327,96 @@ impl GraphViewer<'_> {
         )
     }
 
-    /// Duplicates `node` (same type and params, a fresh `stable_id`, unconnected) at
-    /// a small offset, and asks the canvas to select it (#61). The name override is
-    /// not copied, so the copy is distinguishable and does not share a label.
-    fn duplicate_node(&mut self, node: SnarlNodeId, snarl: &mut Snarl<Handle>) {
-        let Some(src) = self.core_id_of_snarl(snarl, node) else {
-            return;
+    /// Duplicates `node`, or the whole selection when `node` is part of it (#61, #84),
+    /// preserving the wiring internal to the duplicated set. Each copy lands at a small
+    /// offset and the copies become the new selection. Built on
+    /// [`Graph::copy_subgraph`](ymir_core::Graph::copy_subgraph), which clones the nodes
+    /// with fresh ids and reproduces only their internal edges; the snarl wires for those
+    /// edges are mirrored here so the canvas matches core. The name override is cleared on
+    /// each copy, so a duplicate stays distinguishable and does not share a label.
+    fn duplicate_node_or_selection(&mut self, node: SnarlNodeId, snarl: &mut Snarl<Handle>) {
+        /// Canvas offset of a copy from its source, so it does not land exactly on top.
+        const OFFSET: egui::Vec2 = egui::vec2(30.0, 30.0);
+
+        // Duplicate the whole selection when the clicked node is in it, else just it.
+        let in_selection = snarl
+            .get_node(node)
+            .is_some_and(|h| self.selection.contains(h));
+        let snarl_nodes: Vec<SnarlNodeId> = if in_selection {
+            snarl
+                .node_ids()
+                .filter(|(_, h)| self.selection.contains(h))
+                .map(|(id, _)| id)
+                .collect()
+        } else {
+            vec![node]
         };
-        let Some(spec) = self.graph.spec(src) else {
+
+        // Resolve each to its core id and canvas position, dropping any that no longer
+        // resolve. The position pairs a copy with where its source sits.
+        let sources: Vec<(NodeId, Pos2)> = snarl_nodes
+            .iter()
+            .filter_map(|&sn| {
+                let core = self.core_id_of_snarl(snarl, sn)?;
+                let pos = snarl.get_node_info(sn)?.pos;
+                Some((core, pos))
+            })
+            .collect();
+        if sources.is_empty() {
             return;
-        };
-        let Some(operator) = registry::make(spec.type_id) else {
-            return;
-        };
-        let params = self.graph.params(src).cloned().unwrap_or_default();
-        let new_id = self.graph.add_op(operator, params);
-        let Some(handle) = self.graph.stable_id(new_id) else {
-            return;
-        };
-        let pos = snarl
-            .get_node_info(node)
-            .map_or(Pos2::ZERO, |info| info.pos + egui::vec2(30.0, 30.0));
-        snarl.insert_node(pos, handle);
-        self.select_after = Some(handle);
+        }
+
+        // Copy in core: fresh ids, internal edges reproduced, boundary edges dropped.
+        let core_ids: Vec<NodeId> = sources.iter().map(|&(id, _)| id).collect();
+        let map = self.graph.copy_subgraph(&core_ids);
+
+        // Place each copy in snarl at an offset, clear its name, and record its snarl id
+        // by copy core id so the internal edges can be mirrored next.
+        let mut new_snarl: HashMap<NodeId, SnarlNodeId> = HashMap::with_capacity(map.len());
+        let mut to_select: Vec<Handle> = Vec::with_capacity(map.len());
+        for &(src_core, pos) in &sources {
+            let Some(&new_core) = map.get(&src_core) else {
+                continue;
+            };
+            // A just-created node always resolves; skip rather than panic if it does not.
+            if self.graph.set_name(new_core, None).is_err() {
+                continue;
+            }
+            let Some(handle) = self.graph.stable_id(new_core) else {
+                continue;
+            };
+            let snarl_id = snarl.insert_node(pos + OFFSET, handle);
+            new_snarl.insert(new_core, snarl_id);
+            to_select.push(handle);
+        }
+
+        // Mirror the copies' internal edges (already in core) into snarl. The copies are
+        // freshly inserted with empty inputs, so a plain connect needs no prior drop.
+        for &new_dst in new_snarl.keys() {
+            let input_count = self.graph.spec(new_dst).map_or(0, |s| s.inputs.len());
+            for input in 0..input_count {
+                let Some((new_src, output)) = self.graph.input_source(new_dst, input) else {
+                    continue;
+                };
+                let (Some(&from_node), Some(&to_node)) =
+                    (new_snarl.get(&new_src), new_snarl.get(&new_dst))
+                else {
+                    continue;
+                };
+                snarl.connect(
+                    OutPinId {
+                        node: from_node,
+                        output,
+                    },
+                    InPinId {
+                        node: to_node,
+                        input,
+                    },
+                );
+            }
+        }
+
+        self.select_after = to_select;
     }
 
     /// Disconnects every wire touching `node` (inputs and outputs), in core and snarl
@@ -797,8 +865,18 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
         snarl: &mut Snarl<Handle>,
     ) {
         style_context_menu(ui);
-        if ui.button("Duplicate").clicked() {
-            self.duplicate_node(node, snarl);
+        // Duplicate the clicked node, or the whole selection when it is part of it (#84).
+        let selected_count = snarl
+            .get_node(node)
+            .filter(|h| self.selection.contains(h))
+            .map_or(0, |_| self.selection.len());
+        let duplicate_label = if selected_count > 1 {
+            format!("Duplicate {selected_count} nodes")
+        } else {
+            "Duplicate".to_string()
+        };
+        if ui.button(duplicate_label).clicked() {
+            self.duplicate_node_or_selection(node, snarl);
             ui.close();
         }
         if ui.button("Rename").clicked() {
@@ -1315,7 +1393,7 @@ mod tests {
         let s_src = snarl_id(&snarl, &graph, src);
         let src_handle = graph.stable_id(src).expect("handle");
 
-        GraphViewer::for_test(&mut graph).duplicate_node(s_src, &mut snarl);
+        GraphViewer::for_test(&mut graph).duplicate_node_or_selection(s_src, &mut snarl);
 
         assert_eq!(graph.node_count(), 2, "a node was added");
         assert_eq!(snarl.nodes().count(), 2);
@@ -1331,6 +1409,58 @@ mod tests {
             "modifier.thermal_erosion"
         );
         assert!((graph.params(dup_id).expect("params").get_f64("talus", 0.0) - 0.05).abs() < 1e-9);
+        assert_in_sync(&graph, &snarl);
+    }
+
+    #[test]
+    fn duplicate_selection_keeps_internal_wiring_and_drops_boundary() {
+        let mut graph = Graph::new();
+        let mut snarl = Snarl::<Handle>::new();
+        // feeder -> a -> b. Selecting only {a, b} makes feeder->a a boundary edge and
+        // a->b an internal one.
+        let feeder = add_node(&mut graph, &mut snarl, FBM, Pos2::new(0.0, 0.0)).expect("feeder");
+        let a = add_node(&mut graph, &mut snarl, THERMAL, Pos2::new(50.0, 0.0)).expect("a");
+        let b = add_node(&mut graph, &mut snarl, THERMAL, Pos2::new(100.0, 0.0)).expect("b");
+        let (sf, sa, sb) = (
+            snarl_id(&snarl, &graph, feeder),
+            snarl_id(&snarl, &graph, a),
+            snarl_id(&snarl, &graph, b),
+        );
+        assert!(connect_pins(&mut graph, &mut snarl, sf, 0, sa, 0));
+        assert!(connect_pins(&mut graph, &mut snarl, sa, 0, sb, 0));
+        let (ha, hb) = (graph.stable_id(a).unwrap(), graph.stable_id(b).unwrap());
+
+        {
+            let mut viewer = GraphViewer::for_test(&mut graph);
+            viewer.selection.insert(ha);
+            viewer.selection.insert(hb);
+            viewer.duplicate_node_or_selection(sa, &mut snarl);
+        }
+
+        // Two copies were added; the unselected feeder is untouched.
+        assert_eq!(graph.node_count(), 5);
+        let originals = [graph.stable_id(feeder).unwrap(), ha, hb];
+        let copies: Vec<NodeId> = snarl
+            .node_ids()
+            .map(|(_, &h)| h)
+            .filter(|h| !originals.contains(h))
+            .map(|h| graph.node_id_of(h).expect("copy id"))
+            .collect();
+        assert_eq!(copies.len(), 2);
+
+        // Exactly one copy (the copy of a) has its input dropped: feeder->a crossed the
+        // boundary. The other (the copy of b) keeps the internal a->b edge.
+        let copy_a = *copies
+            .iter()
+            .find(|&&id| graph.input_source(id, 0).is_none())
+            .expect("copy of a has its boundary input dropped");
+        let copy_b = *copies.iter().find(|&&id| id != copy_a).expect("copy of b");
+        assert_eq!(
+            graph.input_source(copy_b, 0),
+            Some((copy_a, 0)),
+            "internal edge reproduced among the copies"
+        );
+        // The mirrored snarl wire matches core.
         assert_in_sync(&graph, &snarl);
     }
 

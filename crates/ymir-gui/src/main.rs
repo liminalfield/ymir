@@ -2560,7 +2560,7 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         pinned,
         add_node_at: None,
         add_frame_at: None,
-        select_after: None,
+        select_after: Vec::new(),
         rename_request: None,
         pin_request: None,
         bypass_request: None,
@@ -2637,8 +2637,8 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     let add_node_at = viewer.add_node_at;
     // A graph-space spot from a right-click "Add frame", if any (#94).
     let add_frame_at = viewer.add_frame_at;
-    // A node the viewer asks to select (e.g. a duplicate, #61).
-    let select_after = viewer.select_after;
+    // Nodes the viewer asks to select (e.g. duplicates, #61/#84).
+    let select_after = std::mem::take(&mut viewer.select_after);
     // A node the viewer asks to rename (context-menu "Rename", #61).
     let rename_request = viewer.rename_request;
     // A preview-pin change the viewer requests (context-menu Pin/Unpin, #39).
@@ -2745,9 +2745,11 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
             ClickHit::Empty => {}
         }
     }
-    // A viewer-requested selection (e.g. a duplicate) wins over the click (#61).
-    if let Some(handle) = select_after {
-        state.select_only(handle);
+    // A viewer-requested selection (e.g. duplicates) wins over the click (#61). All the
+    // requested handles become the new selection (a multi-node duplicate, #84).
+    if !select_after.is_empty() {
+        state.marquee_select(&select_after, false);
+        state.selected_frame = None;
     }
 
     // Frame select/move (#94): a press on a frame's title bar selects and drags it (with
