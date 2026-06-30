@@ -11,7 +11,9 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::thread::{self, JoinHandle};
 
 use eframe::egui;
-use ymir_core::{CancelToken, Error, EvalCache, EvalRequest, Field, Graph, NodeId, layers};
+use ymir_core::{
+    CancelToken, Error, EvalCache, EvalRequest, Field, Graph, NodeId, OUTPUT_TYPE_ID, layers,
+};
 
 use crate::shade::{DEFAULT_LIGHT, HeightScale, ShadeMode, field_to_image};
 
@@ -39,6 +41,10 @@ struct Job {
     target: u64,
     request: EvalRequest,
     generation: u64,
+    /// When previewing inside a subgraph (#106), the live fields to bind to its Input
+    /// markers so the preview shows real data instead of the zero stand-in. `None` at the
+    /// top level.
+    binding: Option<crate::SubgraphInputs>,
 }
 
 /// The worker's reply for one job.
@@ -227,7 +233,14 @@ impl PreviewEngine {
     /// Submits a fresh evaluation if the previewed output would differ from the last
     /// one submitted. A structural error (disconnected input, cycle) is detected
     /// here, synchronously and cheaply, and shown instead of submitting work.
-    pub(crate) fn sync(&mut self, graph: &Graph, target: NodeId, request: EvalRequest, now: f64) {
+    pub(crate) fn sync(
+        &mut self,
+        graph: &Graph,
+        target: NodeId,
+        request: EvalRequest,
+        now: f64,
+        binding: Option<&crate::SubgraphInputs>,
+    ) {
         match graph.output_key(target, &request) {
             Ok(key) => {
                 self.structural_error = None;
@@ -251,11 +264,17 @@ impl PreviewEngine {
             self.submitted_key = Some(key);
             self.pending_key = None;
             self.last_submit_time = now;
-            self.submit(graph, target, request);
+            self.submit(graph, target, request, binding);
         }
     }
 
-    fn submit(&mut self, graph: &Graph, target: NodeId, request: EvalRequest) {
+    fn submit(
+        &mut self,
+        graph: &Graph,
+        target: NodeId,
+        request: EvalRequest,
+        binding: Option<&crate::SubgraphInputs>,
+    ) {
         let Some(target) = graph.stable_id(target) else {
             return;
         };
@@ -269,6 +288,7 @@ impl PreviewEngine {
             target,
             request: request.with_cancel(cancel),
             generation: self.generation,
+            binding: binding.cloned(),
         };
         if self.job_tx.send(job).is_err() {
             self.eval_error = Some("preview worker stopped".to_string());
@@ -515,20 +535,56 @@ fn evaluate_job(job: &Job, cache: &mut EvalCache) -> Option<Outcome> {
             message: "node was removed".to_string(),
         });
     };
-    match job.graph.evaluate(target, &job.request, cache) {
+    // Inside a subgraph (#106), bind the live input fields so the preview shows real data
+    // rather than the Input markers' zero stand-in.
+    let bound = job
+        .binding
+        .as_ref()
+        .map(|b| b.bound_fields(&job.graph, &job.request));
+    // The (source, port) pairs to display: a normal node's own outputs (so a multi-output
+    // node previews all of them), or for an Output marker the single field feeding it (the
+    // subgraph's result), since the marker itself is an endpoint with no output.
+    let is_output_marker = job
+        .graph
+        .spec(target)
+        .is_some_and(|spec| spec.type_id == OUTPUT_TYPE_ID);
+    let outs: Vec<(NodeId, usize)> = if is_output_marker {
+        job.graph.input_source(target, 0).into_iter().collect()
+    } else {
+        let output_count = job.graph.spec(target).map_or(0, |spec| spec.outputs.len());
+        (0..output_count).map(|i| (target, i)).collect()
+    };
+    let result = match &bound {
+        Some(bound) => job.graph.evaluate_bound(bound, &outs, &job.request, cache),
+        // An Output marker reads the field feeding it, so it goes through evaluate_bound
+        // (with no bindings) even at the top level.
+        None if is_output_marker => job.graph.evaluate_bound(&[], &outs, &job.request, cache),
+        // A normal node evaluates directly, which flushes the worker cache for cross-job reuse.
+        None => job
+            .graph
+            .evaluate(target, &job.request, cache)
+            .map(|a| a.to_vec()),
+    };
+    match result {
         Ok(outputs) => Some(if outputs.is_empty() {
             Outcome::Failed {
                 generation,
                 message: "node has no output to preview".to_string(),
             }
         } else {
+            let histogram = match &bound {
+                Some(bound) => {
+                    bound_input_histogram(&job.graph, target, &job.request, cache, bound)
+                }
+                // The node's input source is upstream of the target, so it is already in
+                // the cache from the eval above; this re-eval is a cheap hit.
+                None => input_histogram(&job.graph, target, &job.request, cache),
+            };
             Outcome::Ready {
                 generation,
                 target: job.target,
-                fields: outputs.to_vec(),
-                // The node's input source is upstream of the target, so it is already in
-                // the cache from the eval above; this re-eval is a cheap hit.
-                histogram: input_histogram(&job.graph, target, &job.request, cache),
+                fields: outputs,
+                histogram,
             }
         }),
         Err(Error::Cancelled) => None,
@@ -552,6 +608,23 @@ fn input_histogram(
     let fields = graph.evaluate(source, request, cache).ok()?;
     let field = fields.get(port)?;
     Some(field_histogram(field, HISTOGRAM_BINS))
+}
+
+/// Like [`input_histogram`], but inside a subgraph (#106): the input source is evaluated
+/// with the live fields bound to the Input markers, so the histogram matches the real input
+/// the curve/levels editor is shaping rather than a flat zero.
+fn bound_input_histogram(
+    graph: &Graph,
+    target: NodeId,
+    request: &EvalRequest,
+    cache: &mut EvalCache,
+    bound: &[(NodeId, Field)],
+) -> Option<Vec<f32>> {
+    let (source, port) = graph.input_source(target, 0)?;
+    let fields = graph
+        .evaluate_bound(bound, &[(source, port)], request, cache)
+        .ok()?;
+    Some(field_histogram(fields.first()?, HISTOGRAM_BINS))
 }
 
 /// Bins a field's `height` layer into `bins` buckets over `[0, 1]`, returning each
@@ -626,11 +699,45 @@ mod tests {
             target,
             request: EvalRequest::new(32, 32, Region::UNIT, 0).with_cancel(cancel),
             generation: 1,
+            binding: None,
         };
 
         // A superseded (pre-cancelled) job evaluates to nothing, so the worker
         // reports no stale result.
         let mut cache = EvalCache::new(4);
         assert!(evaluate_job(&job, &mut cache).is_none());
+    }
+
+    #[test]
+    fn output_marker_previews_the_field_feeding_it() {
+        use ymir_core::{Params, Region, registry};
+
+        // An Output marker is an endpoint, but previewing it shows the field wired into it
+        // (the subgraph's result), not a "no output" failure.
+        let mut graph = Graph::new();
+        let source = graph.add_op(registry::make("generator.fbm").expect("fbm"), Params::new());
+        let marker = graph.add_op(
+            registry::make("subgraph.output").expect("output marker"),
+            Params::new(),
+        );
+        graph
+            .connect(source, 0, marker, 0)
+            .expect("source -> marker");
+        let target = graph.stable_id(marker).expect("handle");
+        let job = Job {
+            graph,
+            target,
+            request: EvalRequest::new(16, 16, Region::UNIT, 0),
+            generation: 1,
+            binding: None,
+        };
+
+        let mut cache = EvalCache::new(4);
+        match evaluate_job(&job, &mut cache).expect("not cancelled") {
+            Outcome::Ready { fields, .. } => {
+                assert_eq!(fields.len(), 1, "previews the field feeding the marker");
+            }
+            Outcome::Failed { message, .. } => panic!("expected a preview, got: {message}"),
+        }
     }
 }

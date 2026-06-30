@@ -14,7 +14,10 @@ use eframe::egui;
 use egui_snarl::ui::SnarlWidget;
 use egui_snarl::{NodeId as SnarlNodeId, Snarl};
 use ymir_core::registry;
-use ymir_core::{EvalRequest, Field, FieldStore, Graph, NodeId, ParamValue, Region};
+use ymir_core::{
+    EvalCache, EvalRequest, Field, FieldStore, Graph, INPUT_TYPE_ID, NodeId, OUTPUT_TYPE_ID,
+    ParamValue, Region,
+};
 use ymir_nodes::{CategoryDef, categories, find_category, tr};
 
 // The node-editor canvas (GUI step 5, issue #6): egui-snarl as a pure view over the
@@ -194,6 +197,50 @@ impl CanvasView {
 
 /// The data panes draw from. Panes receive `&mut AppState`, never the app shell,
 /// so they stay mount-agnostic.
+/// The real fields feeding the subgraph currently being edited, used to evaluate its
+/// interior with live inputs instead of the Input markers' flat zero stand-in (#106), so a
+/// node's thumbnail and the 2D preview show real data while diving in. Carries a clone of the
+/// parent graph and, per inner Input marker, the parent source that feeds the matching
+/// container port; bound fields are computed off-thread by the preview/thumbnail workers.
+#[derive(Clone)]
+pub(crate) struct SubgraphInputs {
+    /// The immediate parent graph (a snapshot), evaluated to produce the input fields.
+    parent: Graph,
+    /// Per inner Input marker: `(marker handle, parent source stable_id, source output port)`.
+    markers: Vec<(Handle, u64, usize)>,
+}
+
+impl SubgraphInputs {
+    /// Evaluates each parent source at `request` and pairs the field with its inner Input
+    /// marker's node id in `inner`, ready to bind via
+    /// [`Graph::evaluate_bound`](ymir_core::Graph::evaluate_bound). A source that fails (or a
+    /// marker no longer present) is skipped, so its marker falls back to its zero stand-in.
+    /// Called on a worker thread, so the parent evaluation never blocks the UI.
+    pub(crate) fn bound_fields(
+        &self,
+        inner: &Graph,
+        request: &EvalRequest,
+    ) -> Vec<(NodeId, Field)> {
+        let mut cache = EvalCache::new(THUMB_INPUT_CACHE_CAP);
+        self.markers
+            .iter()
+            .filter_map(|&(marker, source, output)| {
+                let source_id = self.parent.node_id_of(source)?;
+                let field = self
+                    .parent
+                    .evaluate(source_id, request, &mut cache)
+                    .ok()?
+                    .get(output)?
+                    .clone();
+                Some((inner.node_id_of(marker)?, field))
+            })
+            .collect()
+    }
+}
+
+/// Worker-cache capacity for evaluating a subgraph's parent-side input fields.
+const THUMB_INPUT_CACHE_CAP: usize = 64;
+
 /// A suspended parent editing context, pushed when diving into a subgraph (#106). The
 /// active context lives in [`AppState`]'s `graph`/`snarl`/`frames`/`selection`; this holds
 /// what they were at the parent level so popping out can restore them and fold the edited
@@ -683,6 +730,29 @@ impl AppState {
         self.nav.iter().map(|frame| frame.container).collect()
     }
 
+    /// The live inputs feeding the subgraph currently being edited (#106): a clone of the
+    /// parent graph plus, per inner Input marker, the parent source feeding the matching
+    /// container port. `None` at the top level or when no input is wired, in which case the
+    /// interior evaluates with the markers' zero stand-in as before. The preview and thumbnail
+    /// engines bind these so the inside shows real data.
+    fn subgraph_inputs(&self) -> Option<SubgraphInputs> {
+        let frame = self.nav.last()?;
+        let container = frame.graph.node_id_of(frame.container)?;
+        let mut markers = Vec::new();
+        for (port, &marker_id) in self.graph.nodes_of_type(INPUT_TYPE_ID).iter().enumerate() {
+            if let Some(marker) = self.graph.stable_id(marker_id)
+                && let Some((source, output)) = frame.graph.input_source(container, port)
+                && let Some(source_stable) = frame.graph.stable_id(source)
+            {
+                markers.push((marker, source_stable, output));
+            }
+        }
+        (!markers.is_empty()).then(|| SubgraphInputs {
+            parent: frame.graph.clone(),
+            markers,
+        })
+    }
+
     /// Dives into a subgraph node to edit its inner graph: suspends the current context onto
     /// `nav` and makes the inner graph active, rebuilding the canvas for it (#106). A no-op
     /// if `handle` is not a container.
@@ -896,13 +966,14 @@ impl AppState {
         }
     }
 
-    /// Whether `handle` resolves to a live node that produces an output, so it can be
-    /// previewed (an endpoint or a deleted node cannot).
+    /// Whether `handle` resolves to a live node that can be previewed in the 2D pane: one
+    /// that produces an output, or a subgraph Output marker (an endpoint, but its preview is
+    /// the field feeding it — the subgraph's result, #106). A deleted node cannot.
     fn is_previewable(&self, handle: Handle) -> bool {
         self.graph
             .node_id_of(handle)
             .and_then(|id| self.graph.spec(id))
-            .is_some_and(|spec| !spec.outputs.is_empty())
+            .is_some_and(|spec| !spec.outputs.is_empty() || spec.type_id == OUTPUT_TYPE_ID)
     }
 
     /// Selects exactly `handle`, replacing any prior selection, and makes it primary.
@@ -1032,7 +1103,11 @@ impl AppState {
             .with_world_extent(self.world_extent)
             .with_world_height(self.world_height);
         let now = ctx.input(|i| i.time);
-        self.preview.sync(&self.graph, id, request, now);
+        // Inside a subgraph, bind the live input fields so the 2D preview shows real data
+        // rather than the Input markers' zero stand-in (#106). `None` at the top level.
+        let binding = self.subgraph_inputs();
+        self.preview
+            .sync(&self.graph, id, request, now, binding.as_ref());
         self.preview.poll(ctx);
     }
 }
@@ -2786,18 +2861,19 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // large graph evaluates only what is on screen. Disabled entirely from the View
     // menu.
     let visible: Vec<canvas::Handle> = if state.thumbnails_enabled {
-        // Output-producing nodes paired with their canvas position.
+        // Nodes that get a thumbnail, paired with their canvas position: output-producing
+        // ones, plus subgraph Output markers (which show the field feeding them, #106).
         let candidates: Vec<(canvas::Handle, egui::Pos2)> = state
             .snarl
             .node_ids()
             .filter_map(|(snarl_id, &h)| {
-                let produces_output = state
+                let has_thumbnail = state
                     .graph
                     .node_id_of(h)
                     .and_then(|id| state.graph.spec(id))
-                    .is_some_and(|spec| !spec.outputs.is_empty());
+                    .is_some_and(|spec| !spec.outputs.is_empty() || spec.type_id == OUTPUT_TYPE_ID);
                 let pos = state.snarl.get_node_info(snarl_id).map(|info| info.pos);
-                produces_output.then_some(()).and(pos).map(|p| (h, p))
+                has_thumbnail.then_some(()).and(pos).map(|p| (h, p))
             })
             .collect();
         match state.canvas_view {
@@ -2816,9 +2892,16 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         Vec::new()
     };
     let now = ui.input(|i| i.time);
-    state
-        .thumbnails
-        .sync(&state.graph, &visible, &thumb_request, now);
+    // Inside a subgraph, bind the live input fields so interior thumbnails show real data
+    // rather than the Input markers' zero stand-in (#106). `None` at the top level.
+    let binding = state.subgraph_inputs();
+    state.thumbnails.sync(
+        &state.graph,
+        &visible,
+        &thumb_request,
+        now,
+        binding.as_ref(),
+    );
     state.thumbnails.poll(ui.ctx());
 
     // The selection to highlight this frame, cloned so the click handling below can apply
@@ -4382,6 +4465,57 @@ mod tests {
         let spec = state.graph.spec(container_id).expect("spec");
         assert_eq!(spec.inputs.len(), 1);
         assert_eq!(spec.outputs.len(), 1);
+    }
+
+    #[test]
+    fn subgraph_inputs_bind_the_real_upstream_field() {
+        let mut state = AppState::new();
+        state.new_project();
+        // fbm -> null -> export; wrap {null} into a subgraph.
+        let f = canvas::add_node(
+            &mut state.graph,
+            &mut state.snarl,
+            "generator.fbm",
+            egui::Pos2::ZERO,
+        )
+        .expect("fbm");
+        let n = canvas::add_node(
+            &mut state.graph,
+            &mut state.snarl,
+            "modifier.null",
+            egui::Pos2::new(50.0, 0.0),
+        )
+        .expect("null");
+        let sink = canvas::add_node(
+            &mut state.graph,
+            &mut state.snarl,
+            "endpoint.export",
+            egui::Pos2::new(100.0, 0.0),
+        )
+        .expect("export");
+        state.graph.connect(f, 0, n, 0).expect("f->n");
+        state.graph.connect(n, 0, sink, 0).expect("n->sink");
+        let hn = state.graph.stable_id(n).unwrap();
+
+        state.create_subgraph_from(&[hn]);
+        let container = state.primary.expect("container selected");
+        state.dive_in(container);
+
+        // Inside, the lone Input marker binds to the fbm feeding the container.
+        let inputs = state.subgraph_inputs().expect("bound inputs exist");
+        let request = EvalRequest::new(16, 16, Region::UNIT, state.seed);
+        let bound = inputs.bound_fields(&state.graph, &request);
+        assert_eq!(bound.len(), 1, "one input marker is bound");
+        let (_, field) = &bound[0];
+        // It is the real fbm field (has variation), not the markers' flat zero stand-in.
+        let height = field
+            .layer(ymir_core::layers::HEIGHT)
+            .expect("height layer");
+        let first = height.as_slice()[0];
+        assert!(
+            height.as_slice().iter().any(|&v| (v - first).abs() > 1e-6),
+            "the bound input is the real upstream field, not a flat zero"
+        );
     }
 
     #[test]

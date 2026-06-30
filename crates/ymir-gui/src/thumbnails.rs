@@ -14,7 +14,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::{self, JoinHandle};
 
 use eframe::egui;
-use ymir_core::{CancelToken, EvalCache, EvalRequest, Graph};
+use ymir_core::{CancelToken, EvalCache, EvalRequest, Graph, OUTPUT_TYPE_ID};
 
 use crate::canvas::Handle;
 use crate::shade::{HeightScale, height_image};
@@ -45,6 +45,9 @@ struct Job {
     graph: Graph,
     targets: Vec<Target>,
     request: EvalRequest,
+    /// When evaluating inside a subgraph (#106), the live fields to bind to its Input markers
+    /// so the interior shows real data instead of the zero stand-in. `None` at the top level.
+    binding: Option<crate::SubgraphInputs>,
 }
 
 /// One shaded node result.
@@ -103,6 +106,7 @@ impl ThumbnailEngine {
         visible: &[Handle],
         request: &EvalRequest,
         now: f64,
+        binding: Option<&crate::SubgraphInputs>,
     ) {
         // Forget nodes that are no longer visible (drops their textures).
         let present: HashSet<Handle> = visible.iter().copied().collect();
@@ -131,7 +135,7 @@ impl ThumbnailEngine {
         if targets.is_empty() {
             return;
         }
-        self.submit(graph, &targets, request);
+        self.submit(graph, &targets, request, binding);
         for t in &targets {
             if let Some(e) = self.entries.get_mut(&t.handle) {
                 e.in_flight_key = Some(t.key);
@@ -140,7 +144,13 @@ impl ThumbnailEngine {
         self.last_submit_time = now;
     }
 
-    fn submit(&mut self, graph: &Graph, targets: &[Target], request: &EvalRequest) {
+    fn submit(
+        &mut self,
+        graph: &Graph,
+        targets: &[Target],
+        request: &EvalRequest,
+        binding: Option<&crate::SubgraphInputs>,
+    ) {
         // Abort whatever the worker is computing: it is now superseded.
         self.current_cancel.cancel();
         let cancel = CancelToken::new();
@@ -149,6 +159,7 @@ impl ThumbnailEngine {
             graph: graph.clone(),
             targets: targets.to_vec(),
             request: request.clone().with_cancel(cancel),
+            binding: binding.cloned(),
         };
         let _ = self.job_tx.send(job); // shortcut-ok: worker only stops at app exit; nothing to recover
     }
@@ -252,20 +263,54 @@ fn worker_loop(job_rx: &Receiver<Job>, result_tx: &Sender<Shaded>) {
 /// operator error) simply yields no thumbnail this round.
 fn evaluate_thumb_job(job: &Job, cache: &mut EvalCache) -> Vec<Shaded> {
     let mut out = Vec::new();
+    // Thumbnails always show the height layer, auto-ranged, so each node's shape is legible
+    // at a glance regardless of its amplitude.
+    let push = |out: &mut Vec<Shaded>, t: &Target, field: &ymir_core::Field| {
+        out.push(Shaded {
+            handle: t.handle,
+            key: t.key,
+            image: height_image(field, ymir_core::layers::HEIGHT, HeightScale::Auto),
+        });
+    };
+    // Inside a subgraph (#106), bind the live input fields to the Input markers, so the
+    // interior is shaded against real data rather than the markers' zero stand-in.
+    let bound = job
+        .binding
+        .as_ref()
+        .map(|b| b.bound_fields(&job.graph, &job.request));
     for t in &job.targets {
         let Some(node_id) = job.graph.node_id_of(t.handle) else {
             continue;
         };
-        if let Ok(outputs) = job.graph.evaluate(node_id, &job.request, cache)
-            && let Some(field) = outputs.first()
-        {
-            out.push(Shaded {
-                handle: t.handle,
-                key: t.key,
-                // Thumbnails always show the height layer, auto-ranged, so each node's shape
-                // is legible at a glance regardless of its amplitude.
-                image: height_image(field, ymir_core::layers::HEIGHT, HeightScale::Auto),
-            });
+        // The field a node's thumbnail shows: its own output 0, except an Output marker
+        // (an endpoint, #106) which shows the field feeding it — the subgraph's result at
+        // that port. An unwired Output marker has nothing to show.
+        let is_output_marker = job
+            .graph
+            .spec(node_id)
+            .is_some_and(|spec| spec.type_id == OUTPUT_TYPE_ID);
+        let source = if is_output_marker {
+            match job.graph.input_source(node_id, 0) {
+                Some(source) => source,
+                None => continue,
+            }
+        } else {
+            (node_id, 0)
+        };
+        let field = match &bound {
+            Some(bound) => job
+                .graph
+                .evaluate_bound(bound, &[source], &job.request, cache)
+                .ok()
+                .and_then(|fields| fields.into_iter().next()),
+            None => job
+                .graph
+                .evaluate(source.0, &job.request, cache)
+                .ok()
+                .and_then(|outputs| outputs.get(source.1).cloned()),
+        };
+        if let Some(field) = field {
+            push(&mut out, t, &field);
         }
     }
     out
@@ -307,6 +352,33 @@ mod tests {
     }
 
     #[test]
+    fn output_marker_thumbnail_shows_the_field_feeding_it() {
+        // An Output marker is an endpoint, but its thumbnail shows the field wired into it
+        // (the subgraph's result), not its own (absent) output.
+        let mut graph = Graph::new();
+        let source = graph.add_op(registry::make("generator.fbm").expect("fbm"), Params::new());
+        let marker = graph.add_op(
+            registry::make("subgraph.output").expect("output marker"),
+            Params::new(),
+        );
+        graph
+            .connect(source, 0, marker, 0)
+            .expect("source -> marker");
+        let handle = graph.stable_id(marker).expect("handle");
+        let job = Job {
+            graph,
+            targets: vec![Target { handle, key: 1 }],
+            request: EvalRequest::new(16, 16, Region::UNIT, 0),
+            binding: None,
+        };
+        let mut cache = EvalCache::new(8);
+        let images = evaluate_thumb_job(&job, &mut cache);
+        assert_eq!(images.len(), 1, "the marker shows its incoming field");
+        assert_eq!(images[0].handle, handle);
+        assert_eq!(images[0].image.size, [16, 16]);
+    }
+
+    #[test]
     fn evaluate_thumb_job_produces_a_sized_image() {
         let mut graph = Graph::new();
         let id = graph.add_op(registry::make("generator.fbm").expect("fbm"), Params::new());
@@ -315,6 +387,7 @@ mod tests {
             graph,
             targets: vec![Target { handle, key: 7 }],
             request: EvalRequest::new(16, 16, Region::UNIT, 0),
+            binding: None,
         };
         let mut cache = EvalCache::new(8);
         let images = evaluate_thumb_job(&job, &mut cache);

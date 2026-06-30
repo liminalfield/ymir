@@ -717,13 +717,15 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
 
     /// Output-producing nodes get a footer: a small heightmap thumbnail below the
     /// ports (#42), unless thumbnails are toggled off (#74). Endpoints (no output) have
-    /// nothing to preview, so no footer.
+    /// nothing to preview and so have no footer, with one exception: a subgraph Output
+    /// marker shows the field feeding it (the subgraph's result), so it gets a footer too
+    /// (#106).
     fn has_footer(&mut self, node: &Handle) -> bool {
         self.show_thumbnails
             && self
                 .core_id(*node)
                 .and_then(|id| self.graph.spec(id))
-                .is_some_and(|spec| !spec.outputs.is_empty())
+                .is_some_and(|spec| !spec.outputs.is_empty() || spec.type_id == OUTPUT_TYPE_ID)
     }
 
     /// Draws the node's thumbnail below its ports, or a muted placeholder of the same
