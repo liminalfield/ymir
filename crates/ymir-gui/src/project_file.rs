@@ -151,6 +151,28 @@ impl ProjectFile {
         world_height: f64,
         frames: &[Frame],
     ) -> Self {
+        Self::capture_with(
+            graph,
+            snarl_positions(snarl),
+            seed,
+            world_extent,
+            world_height,
+            frames,
+        )
+    }
+
+    /// Captures a project from a graph and an explicit node-position map, rather than from a
+    /// live snarl. Used when diving into a subgraph (#106): the active canvas shows the inner
+    /// graph, so the top-level snapshot is built from the folded top graph and the saved
+    /// top-level positions instead.
+    pub(crate) fn capture_with(
+        graph: &Graph,
+        nodes: BTreeMap<u64, [f32; 2]>,
+        seed: u64,
+        world_extent: f64,
+        world_height: f64,
+        frames: &[Frame],
+    ) -> Self {
         Self {
             format_version: PROJECT_FORMAT_VERSION,
             world: WorldSettings {
@@ -160,7 +182,7 @@ impl ProjectFile {
             },
             graph: graph.to_document(),
             view: ViewState {
-                nodes: snarl_positions(snarl),
+                nodes,
                 frames: frames.to_vec(),
             },
         }

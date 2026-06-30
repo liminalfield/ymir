@@ -8,7 +8,7 @@
 //! ([`preview`]) evaluates the selected node's output on a worker thread. All
 //! display strings resolve through `tr(key)`, so this crate holds no node prose.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use eframe::egui;
 use egui_snarl::ui::SnarlWidget;
@@ -194,9 +194,34 @@ impl CanvasView {
 
 /// The data panes draw from. Panes receive `&mut AppState`, never the app shell,
 /// so they stay mount-agnostic.
+/// A suspended parent editing context, pushed when diving into a subgraph (#106). The
+/// active context lives in [`AppState`]'s `graph`/`snarl`/`frames`/`selection`; this holds
+/// what they were at the parent level so popping out can restore them and fold the edited
+/// child back into the container.
+struct NavFrame {
+    /// The parent graph as it was when diving in. On pop, the edited child is installed
+    /// back into its container here (via [`Graph::set_nested`]).
+    graph: Graph,
+    /// The parent's canvas node positions, to rebuild its snarl on the way back.
+    positions: BTreeMap<u64, [f32; 2]>,
+    /// The parent's canvas frames.
+    frames: Vec<project_file::Frame>,
+    /// The parent's node selection.
+    selection: HashSet<Handle>,
+    /// The parent's primary (inspected) node.
+    primary: Option<Handle>,
+    /// The parent's pinned preview node.
+    preview_pin: Option<Handle>,
+    /// The `stable_id` of the container node (in `graph`) that was dived into.
+    container: Handle,
+    /// The container's display name, for the breadcrumb.
+    label: String,
+}
+
 struct AppState {
     /// The canonical graph being composed. The canvas renders it and edits flow
-    /// back into it; the evaluator (step 6) runs it.
+    /// back into it; the evaluator (step 6) runs it. When diving into a subgraph (#106)
+    /// this is the *active* inner graph; the suspended parents live in `nav`.
     graph: Graph,
     /// The canvas view over `graph`: snarl holds only node handles (`stable_id`)
     /// and view-state (positions), never a copy of node data.
@@ -351,6 +376,15 @@ struct AppState {
     /// Set once the user has confirmed quitting (saved or discarded), so the next window
     /// close request is allowed through instead of re-raising the prompt (#83).
     allow_close: bool,
+    /// The subgraph navigation stack (#106): suspended parent contexts, outermost first.
+    /// Empty at the top level. Diving into a subgraph pushes the current context here and
+    /// makes the inner graph active; popping folds the edited child back into its container.
+    nav: Vec<NavFrame>,
+    /// In-session canvas layouts for subgraph interiors, keyed by the navigation path (the
+    /// container `stable_id`s from the top). Remembered on exit and restored on re-dive, so
+    /// arranging a subgraph's insides is not lost when stepping out and back in. In-memory
+    /// only for now; persisting it to the project file is a follow-up.
+    subgraph_layouts: HashMap<Vec<u64>, BTreeMap<u64, [f32; 2]>>,
 }
 
 /// An action that would discard unsaved changes, deferred behind the unsaved-changes
@@ -461,6 +495,8 @@ impl AppState {
             modified: false,
             pending_action: None,
             allow_close: false,
+            nav: Vec::new(),
+            subgraph_layouts: HashMap::new(),
         }
     }
 
@@ -474,6 +510,8 @@ impl AppState {
         restored: project_file::RestoredProject,
         path: std::path::PathBuf,
     ) {
+        self.nav.clear();
+        self.subgraph_layouts.clear();
         self.graph = restored.graph;
         self.snarl = restored.snarl;
         self.frames = restored.frames;
@@ -508,6 +546,8 @@ impl AppState {
         world_extent: f64,
         world_height: f64,
     ) {
+        self.nav.clear();
+        self.subgraph_layouts.clear();
         self.graph = graph;
         self.snarl = snarl;
         self.frames = Vec::new();
@@ -564,15 +604,137 @@ impl AppState {
 
     /// A snapshot of the current session (graph, canvas positions, world settings),
     /// the unit the undo history and the project file both work in.
+    ///
+    /// Always the effective *top-level* project, even when diving into a subgraph: the
+    /// active inner graph is folded back up through `nav`, and the top-level positions and
+    /// frames come from the outermost suspended context. So save, dirty tracking, and undo
+    /// all operate on the whole project regardless of how deep the user is editing.
     fn snapshot(&self) -> project_file::ProjectFile {
-        project_file::ProjectFile::capture(
-            &self.graph,
-            &self.snarl,
+        if self.nav.is_empty() {
+            return project_file::ProjectFile::capture(
+                &self.graph,
+                &self.snarl,
+                self.seed,
+                self.world_extent,
+                self.world_height,
+                &self.frames,
+            );
+        }
+        let top = self.top_graph();
+        project_file::ProjectFile::capture_with(
+            &top,
+            self.nav[0].positions.clone(),
             self.seed,
             self.world_extent,
             self.world_height,
-            &self.frames,
+            &self.nav[0].frames,
         )
+    }
+
+    /// The effective top-level graph: the active graph if at the top, otherwise the active
+    /// inner graph folded back up through every suspended parent. The build runs this so it
+    /// always produces the whole project, not whatever subgraph is open.
+    fn top_graph(&self) -> Graph {
+        if self.nav.is_empty() {
+            return self.graph.clone();
+        }
+        // The fold only fails if a container vanished from a parent snapshot, which cannot
+        // happen here; fall back to the outermost parent rather than panic.
+        fold_to_top(self.graph.clone(), &self.nav).unwrap_or_else(|_| self.nav[0].graph.clone())
+    }
+
+    /// The current navigation path: the `stable_id`s of the containers dived through, from
+    /// the top. Empty at the top level; identifies the active context for layout memory.
+    fn current_path(&self) -> Vec<u64> {
+        self.nav.iter().map(|frame| frame.container).collect()
+    }
+
+    /// Dives into a subgraph node to edit its inner graph: suspends the current context onto
+    /// `nav` and makes the inner graph active, rebuilding the canvas for it (#106). A no-op
+    /// if `handle` is not a container.
+    fn dive_in(&mut self, handle: Handle) {
+        let Some(id) = self.graph.node_id_of(handle) else {
+            return;
+        };
+        let Some(inner) = self.graph.nested(id).cloned() else {
+            return; // not a container
+        };
+        let label = node_display_name(&self.graph, id);
+        let mut child_path = self.current_path();
+        child_path.push(handle);
+
+        self.nav.push(NavFrame {
+            positions: project_file::snarl_positions(&self.snarl),
+            frames: std::mem::take(&mut self.frames),
+            selection: std::mem::take(&mut self.selection),
+            primary: self.primary.take(),
+            preview_pin: self.preview_pin.take(),
+            container: handle,
+            label,
+            graph: std::mem::replace(&mut self.graph, inner),
+        });
+
+        let positions = self
+            .subgraph_layouts
+            .get(&child_path)
+            .cloned()
+            .unwrap_or_default();
+        self.snarl = project_file::build_snarl(&self.graph, &positions);
+        self.reset_canvas_transients();
+        self.frame_to_graph_request = true;
+    }
+
+    /// Pops one level out of the current subgraph: remembers its layout, installs the edited
+    /// inner graph back into its container, and restores the parent context (#106). A no-op
+    /// at the top level.
+    fn exit_subgraph(&mut self) {
+        let Some(frame) = self.nav.pop() else {
+            return;
+        };
+        // Remember this context's layout (keyed by its full path) for an in-session re-dive.
+        let mut active_path: Vec<u64> = self.nav.iter().map(|f| f.container).collect();
+        active_path.push(frame.container);
+        self.subgraph_layouts
+            .insert(active_path, project_file::snarl_positions(&self.snarl));
+
+        let child = std::mem::replace(&mut self.graph, frame.graph);
+        if let Some(container_id) = self.graph.node_id_of(frame.container) {
+            // The container is present (it is the node we dived into), so this cannot fail;
+            // on the impossible error keep the parent without the child's edits, not a panic.
+            if self.graph.set_nested(container_id, child).is_err() {
+                self.status = Some("Could not save subgraph edits".to_string());
+            }
+        }
+        self.snarl = project_file::build_snarl(&self.graph, &frame.positions);
+        self.frames = frame.frames;
+        self.selection = frame.selection;
+        self.primary = frame.primary;
+        self.preview_pin = frame.preview_pin;
+        self.reset_canvas_transients();
+    }
+
+    /// Pops out until the navigation stack is `depth` deep, the action behind a breadcrumb
+    /// click (depth 0 is the top level). A no-op when already at or above `depth`.
+    fn exit_to(&mut self, depth: usize) {
+        while self.nav.len() > depth {
+            self.exit_subgraph();
+        }
+    }
+
+    /// Clears transient canvas interaction state on a context switch, so an in-flight
+    /// gesture or open popup does not carry across into a different graph. Selection,
+    /// primary, and the preview pin are handled separately (cleared on dive, restored on
+    /// exit), so they are not touched here.
+    fn reset_canvas_transients(&mut self) {
+        self.selected_frame = None;
+        self.frame_drag = None;
+        self.frame_color_edit = None;
+        self.group_drag_leader = None;
+        self.marquee_start = None;
+        self.pending_wire = None;
+        self.consume_wire = false;
+        self.node_menu = None;
+        self.rename = None;
     }
 
     /// Re-anchors the undo history at the current session and clears its stacks, after
@@ -596,6 +758,10 @@ impl AppState {
     fn apply_snapshot(&mut self, snapshot: &project_file::ProjectFile) {
         match snapshot.restore() {
             Ok(restored) => {
+                // Undo/redo restores the whole (top-level) project, so step back out of any
+                // subgraph rather than leave a stale navigation stack over a new graph.
+                self.nav.clear();
+                self.subgraph_layouts.clear();
                 self.graph = restored.graph;
                 self.snarl = restored.snarl;
                 self.frames = restored.frames;
@@ -1582,7 +1748,10 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
                         .add_enabled(!building, egui::Button::new("Build"))
                         .clicked()
                     {
-                        let targets = included_endpoints(state);
+                        // Build the whole project: the effective top-level graph, even if a
+                        // subgraph is currently open on the canvas.
+                        let top = state.top_graph();
+                        let targets = included_endpoints(&top);
                         if targets.is_empty() {
                             state
                                 .build
@@ -1597,7 +1766,7 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
                             let request = EvalRequest::new(res, res, Region::UNIT, state.seed)
                                 .with_world_extent(state.world_extent)
                                 .with_world_height(state.world_height);
-                            state.build.start(state.graph.clone(), targets, request);
+                            state.build.start(top, targets, request);
                         }
                     }
                     state.build.show(ui);
@@ -1639,23 +1808,46 @@ fn name_override(text: &str) -> Option<String> {
     (!text.trim().is_empty()).then(|| text.to_string())
 }
 
-/// The `stable_id`s of the output endpoints a Build should write: nodes with no
-/// outputs whose `build` flag is on (default on). Reads from the canvas's snarl (it
-/// holds every node handle) since the core graph has no node iterator.
-fn included_endpoints(state: &AppState) -> Vec<u64> {
-    state
-        .snarl
-        .node_ids()
-        .filter_map(|(_, &handle)| state.graph.node_id_of(handle).map(|id| (handle, id)))
-        .filter(|(_, id)| state.graph.spec(*id).is_some_and(|s| s.outputs.is_empty()))
-        .filter(|(_, id)| {
-            state
-                .graph
-                .params(*id)
-                .is_none_or(|p| p.get_bool("build", true))
+/// The `stable_id`s of the output endpoints a Build should write: nodes with no outputs
+/// whose `build` flag is on (default on). Iterates the graph itself (via its document, in
+/// `stable_id` order) so it works on the effective top-level graph even while a subgraph is
+/// open on the canvas.
+fn included_endpoints(graph: &Graph) -> Vec<u64> {
+    graph
+        .to_document()
+        .nodes
+        .iter()
+        .filter_map(|nd| {
+            let id = graph.node_id_of(nd.stable_id)?;
+            let spec = graph.spec(id)?;
+            let included = spec.outputs.is_empty()
+                && graph.params(id).is_none_or(|p| p.get_bool("build", true));
+            included.then_some(nd.stable_id)
         })
-        .map(|(handle, _)| handle)
         .collect()
+}
+
+/// Folds an active inner graph back up through its suspended parents to the top-level
+/// graph (#106): for each parent from innermost out, installs the child into its container
+/// via [`Graph::set_nested`] and continues with that parent. With an empty stack this is
+/// just `active`. Used for save, dirty tracking, and Build, which all act on the whole
+/// project regardless of which subgraph is open.
+///
+/// # Errors
+///
+/// Returns the error from [`Graph::set_nested`] if a container `stable_id` is no longer in
+/// its parent graph, which cannot happen for a live navigation stack.
+fn fold_to_top(active: Graph, nav: &[NavFrame]) -> Result<Graph, ymir_core::Error> {
+    let mut active = active;
+    for frame in nav.iter().rev() {
+        let mut parent = frame.graph.clone();
+        let container = parent
+            .node_id_of(frame.container)
+            .ok_or(ymir_core::Error::NodeNotFound)?;
+        parent.set_nested(container, active)?;
+        active = parent;
+    }
+    Ok(active)
 }
 
 /// A node's display name: its per-instance override if set (#59), else its type's
@@ -2456,6 +2648,32 @@ enum ClickHit {
 }
 
 fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
+    // Breadcrumb while inside a subgraph (#106): "Project › Mountain › …", each earlier
+    // segment a link that pops back out to that level. Shown only when dived in, so the
+    // top-level canvas is unchanged. Runs first so a click swaps the active context before
+    // the canvas below renders it this frame.
+    if !state.nav.is_empty() {
+        let depth = state.nav.len();
+        let mut exit_target: Option<usize> = None;
+        ui.horizontal(|ui| {
+            if ui.link("Project").clicked() {
+                exit_target = Some(0);
+            }
+            for (i, frame) in state.nav.iter().enumerate() {
+                ui.weak("›");
+                if i + 1 == depth {
+                    ui.strong(&frame.label); // the current context: not a link
+                } else if ui.link(&frame.label).clicked() {
+                    exit_target = Some(i + 1);
+                }
+            }
+        });
+        ui.separator();
+        if let Some(target) = exit_target {
+            state.exit_to(target);
+        }
+    }
+
     // While the node menu is open it owns the pointer: skip canvas selection so a
     // click on a menu row does not also select or clear under it.
     let menu_open = state.node_menu.is_some();
@@ -2562,6 +2780,7 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         add_frame_at: None,
         select_after: Vec::new(),
         rename_request: None,
+        dive_request: None,
         pin_request: None,
         bypass_request: None,
         pending_view,
@@ -2641,6 +2860,9 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     let select_after = std::mem::take(&mut viewer.select_after);
     // A node the viewer asks to rename (context-menu "Rename", #61).
     let rename_request = viewer.rename_request;
+    // A subgraph container the viewer asks to dive into (context-menu "Edit subgraph",
+    // #106). Applied at the end of the pane, after this frame's other edits.
+    let dive_request = viewer.dive_request;
     // A preview-pin change the viewer requests (context-menu Pin/Unpin, #39).
     let pin_request = viewer.pin_request;
     // Whether this frame's primary click was a click-to-wire gesture on a pin (#50). When
@@ -2866,6 +3088,13 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     }
     node_menu_ui(ui, state);
     rename_dialog_ui(ui, state);
+
+    // Dive into a subgraph the context menu asked to edit (#106). Done last, after this
+    // frame's other edits have been applied to the current context; the inner graph becomes
+    // active for the next frame.
+    if let Some(handle) = dive_request {
+        state.dive_in(handle);
+    }
 }
 inventory::submit! { PaneKind { id: "canvas", draw: canvas_pane } }
 
@@ -3856,6 +4085,153 @@ mod tests {
         assert!(
             categories_sorted().len() >= 3,
             "categories not registered in the GUI"
+        );
+    }
+
+    /// Builds an Input -> Output inner graph for a subgraph, via the registry and public
+    /// graph API (the GUI never names the concrete subgraph types).
+    #[cfg(test)]
+    fn identity_inner() -> ymir_core::Graph {
+        let mut inner = ymir_core::Graph::new();
+        let i = inner.add_op(
+            ymir_core::registry::make("subgraph.input").expect("input op"),
+            ymir_core::Params::default(),
+        );
+        let o = inner.add_op(
+            ymir_core::registry::make("subgraph.output").expect("output op"),
+            ymir_core::Params::default(),
+        );
+        inner.connect(i, 0, o, 0).expect("wire inner");
+        inner
+    }
+
+    #[test]
+    fn diving_into_a_subgraph_and_exiting_folds_inner_edits_back() {
+        let mut state = AppState::new();
+        state.new_project(); // empty top-level canvas
+
+        // A subgraph container with an Input -> Output inner graph.
+        let sg = canvas::add_node(
+            &mut state.graph,
+            &mut state.snarl,
+            "subgraph",
+            egui::Pos2::ZERO,
+        )
+        .expect("add subgraph");
+        let handle = state.graph.stable_id(sg).expect("handle");
+        state
+            .graph
+            .set_nested(sg, identity_inner())
+            .expect("install inner");
+        assert_eq!(state.graph.spec(sg).expect("spec").inputs.len(), 1);
+
+        // Dive in: the inner graph becomes the active canvas.
+        state.dive_in(handle);
+        assert_eq!(state.nav.len(), 1, "one level deep");
+        assert_eq!(
+            state.graph.node_count(),
+            2,
+            "active graph is the inner graph"
+        );
+
+        // Add a second Input marker inside the subgraph.
+        canvas::add_node(
+            &mut state.graph,
+            &mut state.snarl,
+            "subgraph.input",
+            egui::Pos2::ZERO,
+        )
+        .expect("add inner input");
+
+        // Exit: the edit folds back into the container, which now has two input ports.
+        state.exit_subgraph();
+        assert_eq!(state.nav.len(), 0, "back at the top");
+        let sg = state.graph.node_id_of(handle).expect("container survives");
+        assert_eq!(
+            state.graph.spec(sg).expect("spec").inputs.len(),
+            2,
+            "the inner edit folded back into the container"
+        );
+    }
+
+    #[test]
+    fn snapshot_reflects_the_top_project_while_dived_in() {
+        let mut state = AppState::new();
+        state.new_project();
+        let sg = canvas::add_node(
+            &mut state.graph,
+            &mut state.snarl,
+            "subgraph",
+            egui::Pos2::ZERO,
+        )
+        .expect("add subgraph");
+        let handle = state.graph.stable_id(sg).expect("handle");
+
+        state.dive_in(handle);
+        // Edit inside the (empty) subgraph: add one Input marker.
+        canvas::add_node(
+            &mut state.graph,
+            &mut state.snarl,
+            "subgraph.input",
+            egui::Pos2::ZERO,
+        )
+        .expect("add inner input");
+
+        // The snapshot (the unit save/undo/dirty use) is the whole project, with the
+        // container's inner graph carrying the edit, even though the canvas shows the inner.
+        let snap = state.snapshot();
+        let container = snap
+            .graph
+            .nodes
+            .iter()
+            .find(|n| n.stable_id == handle)
+            .expect("container in snapshot");
+        let inner = container.subgraph.as_ref().expect("inner graph captured");
+        assert_eq!(
+            inner.nodes.len(),
+            1,
+            "the inner edit is in the top snapshot"
+        );
+    }
+
+    #[test]
+    fn subgraph_layout_is_remembered_across_a_re_dive() {
+        let mut state = AppState::new();
+        state.new_project();
+        let sg = canvas::add_node(
+            &mut state.graph,
+            &mut state.snarl,
+            "subgraph",
+            egui::Pos2::ZERO,
+        )
+        .expect("add subgraph");
+        let handle = state.graph.stable_id(sg).expect("handle");
+        state
+            .graph
+            .set_nested(sg, identity_inner())
+            .expect("install inner");
+
+        // Dive in, move the first inner node to a distinctive spot, exit.
+        state.dive_in(handle);
+        let (snarl_id, inner_handle) = state
+            .snarl
+            .node_ids()
+            .map(|(id, &h)| (id, h))
+            .next()
+            .expect("an inner node");
+        let moved = egui::Pos2::new(321.0, 123.0);
+        if let Some(info) = state.snarl.get_node_info_mut(snarl_id) {
+            info.pos = moved;
+        }
+        state.exit_subgraph();
+
+        // Re-dive: the moved node returns to where it was left.
+        state.dive_in(handle);
+        let re_id = canvas::snarl_node_of(&state.snarl, inner_handle).expect("node back");
+        let pos = state.snarl.get_node_info(re_id).expect("info").pos;
+        assert!(
+            (pos - moved).length() < 1e-3,
+            "inner layout remembered across re-dive"
         );
     }
 

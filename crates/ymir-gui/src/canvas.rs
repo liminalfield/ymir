@@ -221,6 +221,10 @@ pub(crate) struct GraphViewer<'a> {
     /// A node the viewer asks the canvas to rename (context-menu "Rename"); the canvas
     /// opens the rename dialog for it after the frame (#61). Output.
     pub(crate) rename_request: Option<Handle>,
+    /// A subgraph container the viewer asks the canvas to dive into (context-menu "Edit
+    /// subgraph", #106); the canvas opens its inner graph for editing after the frame.
+    /// Output.
+    pub(crate) dive_request: Option<Handle>,
     /// A preview-pin change the viewer requests (context-menu Pin/Unpin, #39): the
     /// inner value is the new pin (`Some(node)` to pin, `None` to unpin). Output.
     pub(crate) pin_request: Option<Option<Handle>>,
@@ -266,6 +270,7 @@ impl<'a> GraphViewer<'a> {
             add_frame_at: None,
             select_after: Vec::new(),
             rename_request: None,
+            dive_request: None,
             pin_request: None,
             bypass_request: None,
             pending_view: None,
@@ -877,6 +882,17 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
         };
         if ui.button(duplicate_label).clicked() {
             self.duplicate_node_or_selection(node, snarl);
+            ui.close();
+        }
+        // Dive into a subgraph container to edit its inner graph (#106). Only containers
+        // (nodes holding an inner graph) qualify.
+        if let Some(handle) = snarl.get_node(node).copied()
+            && self
+                .core_id(handle)
+                .is_some_and(|id| self.graph.nested(id).is_some())
+            && ui.button("Edit subgraph").clicked()
+        {
+            self.dive_request = Some(handle);
             ui.close();
         }
         if ui.button("Rename").clicked() {
