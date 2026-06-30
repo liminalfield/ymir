@@ -1297,6 +1297,14 @@ fn menu_row_text(row: MenuRow) -> String {
     }
 }
 
+/// Whether a node type can be added in the current context. The subgraph boundary markers
+/// (#106) only make sense inside a subgraph, so outside one they are *disabled* rather than
+/// hidden: the palette and node menu still show them (so their existence and category stay
+/// discoverable) but they cannot be created at the top level.
+fn node_addable(type_id: &str, inside_subgraph: bool) -> bool {
+    inside_subgraph || (type_id != INPUT_TYPE_ID && type_id != OUTPUT_TYPE_ID)
+}
+
 /// A spawn position (in graph space) for the next node placed from the ribbon.
 ///
 /// Anchored at the centre of the currently visible canvas so the node lands where
@@ -1932,10 +1940,17 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
         .inner_margin(egui::Margin::symmetric(8, 6))
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
+            // Subgraph boundary markers are disabled (shown greyed) outside a subgraph (#106).
+            let inside_subgraph = !state.nav.is_empty();
             ui.horizontal_wrapped(|ui| {
                 for entry in shown {
                     let key = format!("node-{}", entry.type_id);
-                    if ui.button(tr(&key)).clicked() {
+                    let enabled = node_addable(entry.type_id, inside_subgraph);
+                    let clicked = ui
+                        .add_enabled(enabled, egui::Button::new(tr(&key)))
+                        .on_disabled_hover_text("Available inside a subgraph")
+                        .clicked();
+                    if clicked {
                         let pos = spawn_pos(state.canvas_view, state.graph.node_count());
                         if let Some(id) =
                             canvas::add_node(&mut state.graph, &mut state.snarl, entry.type_id, pos)
@@ -2512,6 +2527,9 @@ fn node_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
     if state.node_menu.is_some() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         state.node_menu = None;
     }
+    // Captured before borrowing the menu: subgraph boundary markers are disabled (shown
+    // greyed) outside a subgraph (#106), in the menu the same as in the palette.
+    let inside_subgraph = !state.nav.is_empty();
     let Some(menu) = state.node_menu.as_mut() else {
         return;
     };
@@ -2612,7 +2630,11 @@ fn node_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
                 let pointer_moved = ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO);
                 let mut hovered = None;
                 for (i, &row) in rows.iter().enumerate() {
-                    let resp = menu_row(ui, row, i == menu.highlight);
+                    let enabled = match row {
+                        MenuRow::Node(type_id) => node_addable(type_id, inside_subgraph),
+                        _ => true,
+                    };
+                    let resp = menu_row(ui, row, i == menu.highlight, enabled);
                     if resp.hovered() {
                         hovered = Some(i);
                     }
@@ -2672,6 +2694,9 @@ fn node_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
                     menu.focus_search = true;
                 }
             }
+            // A disabled marker (top level) is a no-op: keyboard Enter on it keeps the menu
+            // open rather than creating it (the mouse path is already blocked by add_enabled).
+            MenuRow::Node(type_id) if !node_addable(type_id, inside_subgraph) => {}
             MenuRow::Node(type_id) => {
                 let pos = view.graph_pos_finite(anchor);
                 if let Some(id) = canvas::add_node(&mut state.graph, &mut state.snarl, type_id, pos)
@@ -2724,8 +2749,13 @@ fn node_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
 /// with a disclosure chevron painted at the right edge for a category, so the chevrons
 /// align in a column instead of trailing each name at a different x (#93). `selected`
 /// draws the keyboard/hover highlight.
-fn menu_row(ui: &mut egui::Ui, row: MenuRow, selected: bool) -> egui::Response {
-    let resp = ui.add(egui::Button::selectable(selected, menu_row_text(row)));
+fn menu_row(ui: &mut egui::Ui, row: MenuRow, selected: bool, enabled: bool) -> egui::Response {
+    let resp = ui
+        .add_enabled(
+            enabled,
+            egui::Button::selectable(selected, menu_row_text(row)),
+        )
+        .on_disabled_hover_text("Only available inside a subgraph");
     if matches!(row, MenuRow::Category(_)) {
         // Pin the disclosure caret to the right edge (inset by the row padding), in the
         // row's current text colour so it tracks the selection highlight.
@@ -4740,6 +4770,18 @@ mod tests {
         }
         // An unknown id degrades to the first row rather than panicking.
         assert_eq!(category_row_index("does-not-exist"), 0);
+    }
+
+    #[test]
+    fn boundary_markers_are_addable_only_inside_a_subgraph() {
+        // Outside a subgraph the markers are disabled (not addable); inside, addable.
+        assert!(!node_addable("subgraph.input", false));
+        assert!(!node_addable("subgraph.output", false));
+        assert!(node_addable("subgraph.input", true));
+        assert!(node_addable("subgraph.output", true));
+        // Ordinary nodes are addable at any level.
+        assert!(node_addable("generator.fbm", false));
+        assert!(node_addable("modifier.null", true));
     }
 
     #[test]
