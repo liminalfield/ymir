@@ -29,11 +29,25 @@ use crate::registry::OperatorEntry;
 use crate::spec::{NodeSpec, PortSpec};
 
 /// Type id of a subgraph input marker.
-pub(crate) const INPUT_TYPE_ID: &str = "subgraph.input";
+pub const INPUT_TYPE_ID: &str = "subgraph.input";
 /// Type id of a subgraph output marker.
-pub(crate) const OUTPUT_TYPE_ID: &str = "subgraph.output";
+pub const OUTPUT_TYPE_ID: &str = "subgraph.output";
 /// Type id of the subgraph container.
 pub(crate) const SUBGRAPH_TYPE_ID: &str = "subgraph";
+
+/// The default display label for a subgraph boundary marker and its derived container port,
+/// 1-based (e.g. `"Input 1"`, `"Output 2"`). Shared by the container's port naming and the
+/// editor's marker-node title so the two always read identically. `index` is the marker's
+/// 0-based position among markers of its type, ordered by `stable_id`.
+#[must_use]
+pub fn marker_port_label(type_id: &str, index: usize) -> String {
+    let kind = if type_id == OUTPUT_TYPE_ID {
+        "Output"
+    } else {
+        "Input"
+    };
+    format!("{kind} {}", index + 1)
+}
 
 /// Maximum subgraph nesting depth. Generous on purpose: nesting is finite by construction
 /// (template instantiation, so a subgraph cannot contain itself), so this only guards a
@@ -133,8 +147,9 @@ impl SubgraphNode {
     }
 
     /// Builds the boundary ports for `marker_type`, ordered by `stable_id` and named from
-    /// each marker's name override, falling back to a positional default (`in0`, `out1`).
-    fn boundary_ports(&self, marker_type: &str, default_prefix: &str) -> Vec<PortSpec> {
+    /// each marker's name override, falling back to the shared default label
+    /// ([`marker_port_label`], e.g. `"Input 1"`).
+    fn boundary_ports(&self, marker_type: &str) -> Vec<PortSpec> {
         self.inner
             .nodes_of_type(marker_type)
             .into_iter()
@@ -144,7 +159,7 @@ impl SubgraphNode {
                     .inner
                     .name(id)
                     .map(str::to_owned)
-                    .unwrap_or_else(|| format!("{default_prefix}{i}"));
+                    .unwrap_or_else(|| marker_port_label(marker_type, i));
                 PortSpec::new(name)
             })
             .collect()
@@ -156,8 +171,8 @@ impl Operator for SubgraphNode {
         NodeSpec {
             type_id: SUBGRAPH_TYPE_ID,
             category: "utility",
-            inputs: self.boundary_ports(INPUT_TYPE_ID, "in"),
-            outputs: self.boundary_ports(OUTPUT_TYPE_ID, "out"),
+            inputs: self.boundary_ports(INPUT_TYPE_ID),
+            outputs: self.boundary_ports(OUTPUT_TYPE_ID),
             // The subgraph's own seed, used as the *absolute* global seed for its inner
             // graph (not an offset to the host's world seed, as a generator's seed is).
             // That self-containment is what lets a shared subgraph reproduce the same
@@ -375,7 +390,7 @@ mod tests {
         // a has the smaller stable_id, so it is the first port, named from its override;
         // b falls back to the positional default.
         assert_eq!(spec.inputs[0].name, "base");
-        assert_eq!(spec.inputs[1].name, "in1");
+        assert_eq!(spec.inputs[1].name, "Input 2"); // 1-based default label
         assert_eq!(spec.outputs.len(), 1);
     }
 
@@ -628,6 +643,35 @@ mod tests {
         let sg2 = rebuilt.node_id_of(sid).unwrap();
         // The captured seed travels with the project (and so with a shared subgraph file).
         assert_eq!(rebuilt.params(sg2).unwrap().get_i64("seed", 0), 123);
+    }
+
+    #[test]
+    fn extract_subgraph_preserves_a_wrapped_subgraph() {
+        // src -> A (a subgraph with identity inner) -> sink.
+        let (inner, _, _) = identity_inner();
+        let mut g = Graph::new();
+        let src = g.add_op(Box::new(SeedGen), Params::new());
+        let a = g.add_op(Box::new(SubgraphNode::new(inner)), Params::new());
+        let sink = g.add_op(Box::new(OutputNode), Params::new());
+        g.connect(src, 0, a, 0).unwrap();
+        g.connect(a, 0, sink, 0).unwrap();
+
+        // Wrapping A must keep the copied A a container with its own inner graph intact
+        // (operators are cloned, not rebuilt from type, so nesting survives).
+        let container = g.extract_subgraph(&[a]).unwrap();
+        let outer_inner = g.nested(container).expect("container inner");
+        let wrapped_a = outer_inner
+            .to_document()
+            .nodes
+            .iter()
+            .filter_map(|nd| outer_inner.node_id_of(nd.stable_id))
+            .find(|&id| outer_inner.nested(id).is_some())
+            .expect("the wrapped subgraph survives");
+        assert_eq!(
+            outer_inner.nested(wrapped_a).unwrap().node_count(),
+            2,
+            "its identity inner (input + output marker) is intact"
+        );
     }
 
     #[test]

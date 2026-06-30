@@ -718,6 +718,47 @@ impl AppState {
         self.frame_to_graph_request = true;
     }
 
+    /// Wraps the given nodes into a new subgraph container in the active graph (#106): the
+    /// top-down "Create subgraph" path. The container takes the selection's place (positioned
+    /// at its centroid) with ports derived from the boundary-crossing wires, and becomes the
+    /// new selection. A no-op if none of the handles resolve.
+    fn create_subgraph_from(&mut self, handles: &[Handle]) {
+        let node_ids: Vec<NodeId> = handles
+            .iter()
+            .filter_map(|&h| self.graph.node_id_of(h))
+            .collect();
+        if node_ids.is_empty() {
+            return;
+        }
+
+        // Place the container at the centroid of the wrapped nodes' canvas positions.
+        let mut positions = project_file::snarl_positions(&self.snarl);
+        let mut sum = egui::Vec2::ZERO;
+        let mut count = 0.0_f32;
+        for &h in handles {
+            if let Some(p) = positions.get(&h) {
+                sum += egui::vec2(p[0], p[1]);
+                count += 1.0;
+            }
+        }
+        let centroid = if count > 0.0 {
+            (sum / count).to_pos2()
+        } else {
+            egui::Pos2::ZERO
+        };
+
+        match self.graph.extract_subgraph(&node_ids) {
+            Ok(container) => {
+                if let Some(handle) = self.graph.stable_id(container) {
+                    positions.insert(handle, [centroid.x, centroid.y]);
+                    self.snarl = project_file::build_snarl(&self.graph, &positions);
+                    self.select_only(handle);
+                }
+            }
+            Err(err) => self.status = Some(format!("Create subgraph failed: {err}")),
+        }
+    }
+
     /// Pops one level out of the current subgraph: remembers its layout, installs the edited
     /// inner graph back into its container, and restores the parent context (#106). A no-op
     /// at the top level.
@@ -2815,6 +2856,7 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         select_after: Vec::new(),
         rename_request: None,
         dive_request: None,
+        create_subgraph_request: None,
         pin_request: None,
         bypass_request: None,
         pending_view,
@@ -2897,6 +2939,9 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // A subgraph container the viewer asks to dive into (context-menu "Edit subgraph",
     // #106). Applied at the end of the pane, after this frame's other edits.
     let dive_request = viewer.dive_request;
+    // Nodes the viewer asks to wrap into a new subgraph (context-menu "Create subgraph",
+    // #106). Applied at the end of the pane.
+    let create_subgraph_request = std::mem::take(&mut viewer.create_subgraph_request);
     // A preview-pin change the viewer requests (context-menu Pin/Unpin, #39).
     let pin_request = viewer.pin_request;
     // Whether this frame's primary click was a click-to-wire gesture on a pin (#50). When
@@ -3123,9 +3168,12 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     node_menu_ui(ui, state);
     rename_dialog_ui(ui, state);
 
-    // Dive into a subgraph the context menu asked to edit (#106). Done last, after this
-    // frame's other edits have been applied to the current context; the inner graph becomes
-    // active for the next frame.
+    // Wrap a selection into a new subgraph the context menu asked to create (#106), then
+    // dive into one the menu asked to edit. Both run last, after this frame's other edits;
+    // only one fires per frame (distinct menu items).
+    if let Some(nodes) = create_subgraph_request {
+        state.create_subgraph_from(&nodes);
+    }
     if let Some(handle) = dive_request {
         state.dive_in(handle);
     }
@@ -4271,6 +4319,69 @@ mod tests {
             (pos[0] - moved.x).abs() < 1e-3 && (pos[1] - moved.y).abs() < 1e-3,
             "the inner node's saved position survived save + restore"
         );
+    }
+
+    #[test]
+    fn create_subgraph_from_wraps_a_selection_into_a_container() {
+        let mut state = AppState::new();
+        state.new_project();
+        let f = canvas::add_node(
+            &mut state.graph,
+            &mut state.snarl,
+            "generator.fbm",
+            egui::Pos2::ZERO,
+        )
+        .expect("f");
+        let a = canvas::add_node(
+            &mut state.graph,
+            &mut state.snarl,
+            "modifier.null",
+            egui::Pos2::new(50.0, 0.0),
+        )
+        .expect("a");
+        let b = canvas::add_node(
+            &mut state.graph,
+            &mut state.snarl,
+            "modifier.null",
+            egui::Pos2::new(100.0, 0.0),
+        )
+        .expect("b");
+        let sink = canvas::add_node(
+            &mut state.graph,
+            &mut state.snarl,
+            "endpoint.export",
+            egui::Pos2::new(150.0, 0.0),
+        )
+        .expect("sink");
+        state.graph.connect(f, 0, a, 0).expect("f->a");
+        state.graph.connect(a, 0, b, 0).expect("a->b");
+        state.graph.connect(b, 0, sink, 0).expect("b->sink");
+        let (ha, hb) = (
+            state.graph.stable_id(a).unwrap(),
+            state.graph.stable_id(b).unwrap(),
+        );
+
+        state.create_subgraph_from(&[ha, hb]);
+
+        // a and b are wrapped: feeder, container, sink remain, and the canvas matches.
+        assert_eq!(state.graph.node_count(), 3);
+        assert_eq!(
+            state.snarl.node_ids().count(),
+            3,
+            "canvas matches the graph"
+        );
+        // The container is the new selection, a subgraph with one derived input and output.
+        let container = state.primary.expect("container selected");
+        let container_id = state.graph.node_id_of(container).expect("container id");
+        let inner = state.graph.nested(container_id).expect("is a container");
+        assert_eq!(
+            inner.node_count(),
+            4,
+            "a, b, plus one input and one output marker"
+        );
+        let spec = state.graph.spec(container_id).expect("spec");
+        assert_eq!(spec.inputs.len(), 1);
+        assert_eq!(spec.outputs.len(), 1);
     }
 
     #[test]

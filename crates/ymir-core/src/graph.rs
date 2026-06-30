@@ -475,6 +475,148 @@ impl Graph {
         map
     }
 
+    /// Wraps `nodes` into a new subgraph container that replaces them in this graph (#106).
+    ///
+    /// The selected nodes move into the container's inner graph (operators cloned faithfully,
+    /// so a nested subgraph survives being wrapped), Input/Output boundary markers are
+    /// generated for every wire that crossed the selection, and the surrounding graph is
+    /// rewired to the container's derived ports. Ports follow the boundary: one input port
+    /// per selected input pin fed from outside, one output port per selected output pin
+    /// feeding outside (fan-out shares one port). Internal wiring is preserved inside; the
+    /// originals are removed. Ports are ordered deterministically by `stable_id`. Absent ids
+    /// are ignored. Returns the new container's id.
+    ///
+    /// # Errors
+    ///
+    /// Propagates an error only if an internal or external reconnection is rejected, which
+    /// does not happen for a well-formed selection (every port is copied from a live node).
+    pub fn extract_subgraph(&mut self, nodes: &[NodeId]) -> Result<NodeId> {
+        use crate::subgraph::{InputNode, OutputNode, SubgraphNode};
+
+        // Live, de-duplicated selection in ascending stable_id order, for deterministic port
+        // and inner-id assignment.
+        let mut selected: Vec<(NodeId, u64)> = nodes
+            .iter()
+            .copied()
+            .collect::<HashSet<NodeId>>()
+            .into_iter()
+            .filter_map(|id| self.nodes.get(id).map(|n| (id, n.stable_id)))
+            .collect();
+        selected.sort_by_key(|&(_, stable_id)| stable_id);
+        let selected: Vec<NodeId> = selected.into_iter().map(|(id, _)| id).collect();
+        let set: HashSet<NodeId> = selected.iter().copied().collect();
+
+        // Boundary inputs: a selected input pin fed from outside the selection. One container
+        // input port each, in (selected stable_id, port) order.
+        let mut boundary_inputs: Vec<(NodeId, usize, NodeId, usize)> = Vec::new();
+        for &s in &selected {
+            let Some(node) = self.nodes.get(s) else {
+                continue;
+            };
+            for (port, slot) in node.inputs.iter().enumerate() {
+                if let Some(conn) = slot.as_ref()
+                    && !set.contains(&conn.source)
+                {
+                    boundary_inputs.push((s, port, conn.source, conn.output));
+                }
+            }
+        }
+
+        // Boundary outputs: a selected output pin feeding outside. Group external consumers
+        // by (selected src, out); the ports are ordered by (src stable_id, out).
+        let mut consumers_by_output: HashMap<(NodeId, usize), Vec<(NodeId, usize)>> =
+            HashMap::new();
+        for (dest, node) in self.nodes.iter() {
+            if set.contains(&dest) {
+                continue;
+            }
+            for (port, slot) in node.inputs.iter().enumerate() {
+                if let Some(conn) = slot.as_ref()
+                    && set.contains(&conn.source)
+                {
+                    consumers_by_output
+                        .entry((conn.source, conn.output))
+                        .or_default()
+                        .push((dest, port));
+                }
+            }
+        }
+        let mut output_keys: Vec<(NodeId, usize)> = consumers_by_output.keys().copied().collect();
+        output_keys
+            .sort_by_key(|&(src, out)| (self.nodes.get(src).map_or(0, |n| n.stable_id), out));
+
+        // Build the inner graph: a faithful copy of each selected node (operator cloned, so
+        // nested subgraphs survive), then its internal wiring, then the boundary markers.
+        let mut inner = Graph::new();
+        let mut inner_of: HashMap<NodeId, NodeId> = HashMap::new();
+        for &s in &selected {
+            let Some((operator, params, name, bypassed)) = self.nodes.get(s).map(|n| {
+                (
+                    n.operator.clone_box(),
+                    n.params.clone(),
+                    n.name.clone(),
+                    n.bypassed,
+                )
+            }) else {
+                continue;
+            };
+            let inner_id = inner.add_op(operator, params);
+            inner.set_name(inner_id, name)?;
+            inner.set_bypassed(inner_id, bypassed)?;
+            inner_of.insert(s, inner_id);
+        }
+        for &s in &selected {
+            let edges: Vec<(usize, NodeId, usize)> = match self.nodes.get(s) {
+                Some(node) => node
+                    .inputs
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(port, slot)| {
+                        let conn = slot.as_ref()?;
+                        set.contains(&conn.source)
+                            .then_some((port, conn.source, conn.output))
+                    })
+                    .collect(),
+                None => continue,
+            };
+            let dest = inner_of[&s];
+            for (port, src, out) in edges {
+                inner.connect(inner_of[&src], out, dest, port)?;
+            }
+        }
+        // Input markers, in boundary-input order, so container input port i is boundary i.
+        for &(dest, port, _, _) in &boundary_inputs {
+            let marker = inner.add_op(Box::new(InputNode), Params::default());
+            inner.connect(marker, 0, inner_of[&dest], port)?;
+        }
+        // Output markers, in output-port order, so container output port i is output_keys[i].
+        for &(src, out) in &output_keys {
+            let marker = inner.add_op(Box::new(OutputNode), Params::default());
+            inner.connect(inner_of[&src], out, marker, 0)?;
+        }
+
+        // Create the container (its ports derive from the markers just added) and rewire the
+        // surrounding graph to it.
+        let container = self.add_op(Box::new(SubgraphNode::new(inner)), Params::default());
+        for (port, &(_, _, ext_src, ext_out)) in boundary_inputs.iter().enumerate() {
+            self.connect(ext_src, ext_out, container, port)?;
+        }
+        for (port, key) in output_keys.iter().enumerate() {
+            let mut consumers = consumers_by_output.get(key).cloned().unwrap_or_default();
+            consumers
+                .sort_by_key(|&(dest, q)| (self.nodes.get(dest).map_or(0, |n| n.stable_id), q));
+            for (dest, q) in consumers {
+                self.connect(container, port, dest, q)?;
+            }
+        }
+        // Remove the now-wrapped originals; their external edges were rewired to the
+        // container above, and their internal edges live inside it.
+        for &s in &selected {
+            self.remove_node(s);
+        }
+        Ok(container)
+    }
+
     /// Whether connecting `source` into `dest` would create a cycle.
     ///
     /// Connection itself ([`connect`](Self::connect)) is deliberately lenient and
@@ -520,9 +662,10 @@ impl Graph {
     ///
     /// The subgraph container uses this to find its boundary markers deterministically,
     /// so its derived input/output ports keep a stable order regardless of node insertion
-    /// order. Crate-internal: it exposes identity by type, which only the nesting
-    /// machinery needs.
-    pub(crate) fn nodes_of_type(&self, type_id: &str) -> Vec<NodeId> {
+    /// order. The editor uses it to number a marker node, whose index here (by `stable_id`)
+    /// matches the container's derived port order.
+    #[must_use]
+    pub fn nodes_of_type(&self, type_id: &str) -> Vec<NodeId> {
         let mut ids: Vec<(NodeId, u64)> = self
             .nodes
             .iter()
@@ -1337,6 +1480,55 @@ mod tests {
         assert_eq!(map.len(), 1);
         assert!(map.contains_key(&head));
         assert_eq!(g.node_count(), 2);
+    }
+
+    #[test]
+    fn extract_subgraph_wraps_a_chain_with_derived_ports() {
+        let mut g = Graph::new();
+        let feeder = add(&mut g, "test.gen", 0, 1);
+        let a = add(&mut g, "test.mod", 1, 1);
+        let b = add(&mut g, "test.mod", 1, 1);
+        let sink = add(&mut g, "test.sink", 1, 0);
+        g.connect(feeder, 0, a, 0).expect("feeder->a");
+        g.connect(a, 0, b, 0).expect("a->b");
+        g.connect(b, 0, sink, 0).expect("b->sink");
+
+        // Wrap {a, b}: feeder->a is a boundary input, b->sink a boundary output.
+        let container = g.extract_subgraph(&[a, b]).expect("extract");
+
+        // feeder, container, sink remain; a and b are gone.
+        assert_eq!(g.node_count(), 3);
+        assert!(g.node_id_of(g.stable_id(container).unwrap()).is_some());
+        // The container has one derived input and one derived output.
+        let spec = g.spec(container).expect("spec");
+        assert_eq!(spec.inputs.len(), 1);
+        assert_eq!(spec.outputs.len(), 1);
+        // The surrounding graph is rewired through the container.
+        assert_eq!(g.input_source(container, 0), Some((feeder, 0)));
+        assert_eq!(g.input_source(sink, 0), Some((container, 0)));
+        // Inside: the two wrapped nodes plus one input and one output marker.
+        assert_eq!(g.nested(container).expect("inner").node_count(), 4);
+    }
+
+    #[test]
+    fn extract_subgraph_shares_one_output_port_for_fan_out() {
+        let mut g = Graph::new();
+        let feeder = add(&mut g, "test.gen", 0, 1);
+        let a = add(&mut g, "test.mod", 1, 1);
+        let c = add(&mut g, "test.mod", 1, 1);
+        let d = add(&mut g, "test.mod", 1, 1);
+        g.connect(feeder, 0, a, 0).expect("feeder->a");
+        g.connect(a, 0, c, 0).expect("a->c");
+        g.connect(a, 0, d, 0).expect("a->d");
+
+        // Wrap {a}: its output fans out to c and d, which is one boundary output port.
+        let container = g.extract_subgraph(&[a]).expect("extract");
+        let spec = g.spec(container).expect("spec");
+        assert_eq!(spec.inputs.len(), 1);
+        assert_eq!(spec.outputs.len(), 1, "fan-out is one shared output port");
+        // Both external consumers now read from the container's single output.
+        assert_eq!(g.input_source(c, 0), Some((container, 0)));
+        assert_eq!(g.input_source(d, 0), Some((container, 0)));
     }
 
     #[test]

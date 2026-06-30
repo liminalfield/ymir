@@ -17,7 +17,10 @@ use egui_snarl::{InPin, InPinId, NodeId as SnarlNodeId, OutPin, OutPinId, Snarl}
 
 use crate::project_file::{Frame, LabelPlacement};
 
-use ymir_core::{EvalRequest, Graph, NodeId, Params, Region, registry};
+use ymir_core::{
+    EvalRequest, Graph, INPUT_TYPE_ID, NodeId, OUTPUT_TYPE_ID, Params, Region, marker_port_label,
+    registry,
+};
 use ymir_nodes::tr;
 
 use crate::thumbnails::ThumbnailEngine;
@@ -225,6 +228,9 @@ pub(crate) struct GraphViewer<'a> {
     /// subgraph", #106); the canvas opens its inner graph for editing after the frame.
     /// Output.
     pub(crate) dive_request: Option<Handle>,
+    /// Nodes the viewer asks the canvas to wrap into a new subgraph (context-menu "Create
+    /// subgraph", #106); the canvas extracts them into a container after the frame. Output.
+    pub(crate) create_subgraph_request: Option<Vec<Handle>>,
     /// A preview-pin change the viewer requests (context-menu Pin/Unpin, #39): the
     /// inner value is the new pin (`Some(node)` to pin, `None` to unpin). Output.
     pub(crate) pin_request: Option<Option<Handle>>,
@@ -271,6 +277,7 @@ impl<'a> GraphViewer<'a> {
             select_after: Vec::new(),
             rename_request: None,
             dive_request: None,
+            create_subgraph_request: None,
             pin_request: None,
             bypass_request: None,
             pending_view: None,
@@ -326,10 +333,23 @@ impl GraphViewer<'_> {
         if let Some(name) = self.graph.name(id) {
             return name.to_string();
         }
-        self.graph.spec(id).map_or_else(
-            || "<missing>".to_string(),
-            |spec| tr(&format!("node-{}", spec.type_id)).to_string(),
-        )
+        let Some(spec) = self.graph.spec(id) else {
+            return "<missing>".to_string();
+        };
+        // A subgraph boundary marker shows its derived, numbered port label (e.g. "Input 1"),
+        // matching the container's port names, instead of a bare "Input". Its index is its
+        // position among markers of its type by stable_id, the same order the container ports
+        // derive from.
+        if spec.type_id == INPUT_TYPE_ID || spec.type_id == OUTPUT_TYPE_ID {
+            let index = self
+                .graph
+                .nodes_of_type(spec.type_id)
+                .iter()
+                .position(|&n| n == id)
+                .unwrap_or(0);
+            return marker_port_label(spec.type_id, index);
+        }
+        tr(&format!("node-{}", spec.type_id)).to_string()
     }
 
     /// Duplicates `node`, or the whole selection when `node` is part of it (#61, #84),
@@ -894,6 +914,24 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
         {
             self.dive_request = Some(handle);
             ui.close();
+        }
+        // Wrap the clicked node, or the whole selection when it is part of it, into a new
+        // subgraph container (#106).
+        if let Some(handle) = snarl.get_node(node).copied() {
+            let nodes: Vec<Handle> = if self.selection.contains(&handle) {
+                self.selection.iter().copied().collect()
+            } else {
+                vec![handle]
+            };
+            let label = if nodes.len() > 1 {
+                format!("Create subgraph ({} nodes)", nodes.len())
+            } else {
+                "Create subgraph".to_string()
+            };
+            if ui.button(label).clicked() {
+                self.create_subgraph_request = Some(nodes);
+                ui.close();
+            }
         }
         if ui.button("Rename").clicked() {
             self.rename_request = snarl.get_node(node).copied();
