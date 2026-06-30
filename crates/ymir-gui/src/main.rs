@@ -263,6 +263,9 @@ struct NavFrame {
     container: Handle,
     /// The container's display name, for the breadcrumb.
     label: String,
+    /// The parent canvas's pan/zoom at dive time, restored on the way back so popping out
+    /// returns to the same view rather than wherever the interior was last scrolled to.
+    view: Option<egui::emath::TSTransform>,
 }
 
 struct AppState {
@@ -775,6 +778,8 @@ impl AppState {
             preview_pin: self.preview_pin.take(),
             container: handle,
             label,
+            // Remember the current pan/zoom so popping back out restores this view.
+            view: self.canvas_view.map(|v| v.to_global),
             graph: std::mem::replace(&mut self.graph, inner),
         });
 
@@ -855,6 +860,9 @@ impl AppState {
         self.selection = frame.selection;
         self.primary = frame.primary;
         self.preview_pin = frame.preview_pin;
+        // Restore the parent's pan/zoom so popping out returns to the same view; without
+        // this the canvas keeps the interior's scroll, losing sight of the parent graph.
+        self.pending_view = frame.view;
         self.reset_canvas_transients();
     }
 
@@ -4577,6 +4585,32 @@ mod tests {
             height.as_slice().iter().any(|&v| (v - first).abs() > 1e-6),
             "the bound input is the real upstream field, not a flat zero"
         );
+    }
+
+    #[test]
+    fn exiting_a_subgraph_restores_the_parent_view() {
+        let mut state = AppState::new();
+        state.new_project();
+        let sg = canvas::add_node(
+            &mut state.graph,
+            &mut state.snarl,
+            "subgraph",
+            egui::Pos2::ZERO,
+        )
+        .expect("add subgraph");
+        let handle = state.graph.stable_id(sg).expect("handle");
+
+        // A distinctive parent pan/zoom; dive in, then pop out.
+        let parent_view = egui::emath::TSTransform::new(egui::vec2(123.0, 45.0), 1.7);
+        state.canvas_view = Some(CanvasView {
+            to_global: parent_view,
+            rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0)),
+        });
+        state.dive_in(handle);
+        state.exit_subgraph();
+
+        // Popping out requests the parent's view again, rather than keeping the interior's.
+        assert_eq!(state.pending_view, Some(parent_view));
     }
 
     #[test]
