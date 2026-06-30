@@ -511,10 +511,10 @@ impl AppState {
         path: std::path::PathBuf,
     ) {
         self.nav.clear();
-        self.subgraph_layouts.clear();
         self.graph = restored.graph;
         self.snarl = restored.snarl;
         self.frames = restored.frames;
+        self.subgraph_layouts = restored.subgraph_layouts;
         self.selected_frame = None;
         self.frame_drag = None;
         self.frame_color_edit = None;
@@ -545,9 +545,10 @@ impl AppState {
         seed: u64,
         world_extent: f64,
         world_height: f64,
+        subgraph_layouts: HashMap<Vec<u64>, BTreeMap<u64, [f32; 2]>>,
     ) {
         self.nav.clear();
-        self.subgraph_layouts.clear();
+        self.subgraph_layouts = subgraph_layouts;
         self.graph = graph;
         self.snarl = snarl;
         self.frames = Vec::new();
@@ -578,6 +579,7 @@ impl AppState {
             0,
             DEFAULT_WORLD_EXTENT,
             project_file::DEFAULT_WORLD_HEIGHT,
+            HashMap::new(),
         );
     }
 
@@ -588,7 +590,14 @@ impl AppState {
             .filter(|p| p.exists())
             .and_then(|p| read_project(&p).ok());
         match loaded {
-            Some(r) => self.install_fresh(r.graph, r.snarl, r.seed, r.world_extent, r.world_height),
+            Some(r) => self.install_fresh(
+                r.graph,
+                r.snarl,
+                r.seed,
+                r.world_extent,
+                r.world_height,
+                r.subgraph_layouts,
+            ),
             None => {
                 let (graph, snarl) = starter::starter_graph();
                 self.install_fresh(
@@ -597,6 +606,7 @@ impl AppState {
                     0,
                     DEFAULT_WORLD_EXTENT,
                     project_file::DEFAULT_WORLD_HEIGHT,
+                    HashMap::new(),
                 );
             }
         }
@@ -610,25 +620,49 @@ impl AppState {
     /// frames come from the outermost suspended context. So save, dirty tracking, and undo
     /// all operate on the whole project regardless of how deep the user is editing.
     fn snapshot(&self) -> project_file::ProjectFile {
+        let layouts = self.all_known_layouts();
         if self.nav.is_empty() {
-            return project_file::ProjectFile::capture(
+            project_file::ProjectFile::capture_with(
                 &self.graph,
-                &self.snarl,
+                project_file::snarl_positions(&self.snarl),
                 self.seed,
                 self.world_extent,
                 self.world_height,
                 &self.frames,
+                &layouts,
+            )
+        } else {
+            project_file::ProjectFile::capture_with(
+                &self.top_graph(),
+                self.nav[0].positions.clone(),
+                self.seed,
+                self.world_extent,
+                self.world_height,
+                &self.nav[0].frames,
+                &layouts,
+            )
+        }
+    }
+
+    /// Every known subgraph interior layout, keyed by navigation path: the remembered
+    /// (exited) ones, plus the currently-suspended parents and the active context, so a save
+    /// while diving in captures the live interior arrangements too (#106).
+    fn all_known_layouts(&self) -> HashMap<Vec<u64>, BTreeMap<u64, [f32; 2]>> {
+        let mut layouts = self.subgraph_layouts.clone();
+        // Suspended subgraph parents. `nav[0]` is the top level (not a subgraph); `nav[i]`
+        // for i >= 1 is the graph reached through the first `i` containers.
+        for i in 1..self.nav.len() {
+            let path: Vec<u64> = self.nav[..i].iter().map(|f| f.container).collect();
+            layouts.insert(path, self.nav[i].positions.clone());
+        }
+        // The active context, when inside a subgraph: its live canvas positions.
+        if !self.nav.is_empty() {
+            layouts.insert(
+                self.current_path(),
+                project_file::snarl_positions(&self.snarl),
             );
         }
-        let top = self.top_graph();
-        project_file::ProjectFile::capture_with(
-            &top,
-            self.nav[0].positions.clone(),
-            self.seed,
-            self.world_extent,
-            self.world_height,
-            &self.nav[0].frames,
-        )
+        layouts
     }
 
     /// The effective top-level graph: the active graph if at the top, otherwise the active
@@ -761,10 +795,10 @@ impl AppState {
                 // Undo/redo restores the whole (top-level) project, so step back out of any
                 // subgraph rather than leave a stale navigation stack over a new graph.
                 self.nav.clear();
-                self.subgraph_layouts.clear();
                 self.graph = restored.graph;
                 self.snarl = restored.snarl;
                 self.frames = restored.frames;
+                self.subgraph_layouts = restored.subgraph_layouts;
                 self.selected_frame = None;
                 self.frame_drag = None;
                 self.frame_color_edit = None;
@@ -4191,6 +4225,51 @@ mod tests {
             inner.nodes.len(),
             1,
             "the inner edit is in the top snapshot"
+        );
+    }
+
+    #[test]
+    fn subgraph_interior_layout_persists_through_save_and_restore() {
+        let mut state = AppState::new();
+        state.new_project();
+        let sg = canvas::add_node(
+            &mut state.graph,
+            &mut state.snarl,
+            "subgraph",
+            egui::Pos2::ZERO,
+        )
+        .expect("add subgraph");
+        let handle = state.graph.stable_id(sg).expect("handle");
+        state
+            .graph
+            .set_nested(sg, identity_inner())
+            .expect("install inner");
+
+        // Dive in, move an inner node, exit (so the layout lands in subgraph_layouts).
+        state.dive_in(handle);
+        let (snarl_id, inner_handle) = state
+            .snarl
+            .node_ids()
+            .map(|(id, &h)| (id, h))
+            .next()
+            .expect("an inner node");
+        let moved = egui::Pos2::new(250.0, 175.0);
+        if let Some(info) = state.snarl.get_node_info_mut(snarl_id) {
+            info.pos = moved;
+        }
+        state.exit_subgraph();
+
+        // Snapshot (what Save writes) then restore (what Open reads): the interior layout
+        // survives the round-trip rather than re-cascading.
+        let restored = state.snapshot().restore().expect("restore");
+        let positions = restored
+            .subgraph_layouts
+            .get(&vec![handle])
+            .expect("inner layout restored");
+        let pos = positions.get(&inner_handle).expect("inner node position");
+        assert!(
+            (pos[0] - moved.x).abs() < 1e-3 && (pos[1] - moved.y).abs() < 1e-3,
+            "the inner node's saved position survived save + restore"
         );
     }
 

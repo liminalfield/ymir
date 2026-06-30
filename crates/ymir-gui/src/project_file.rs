@@ -122,6 +122,13 @@ pub(crate) struct ViewState {
     /// last so adding or moving a frame localizes its diff.
     #[serde(default)]
     pub frames: Vec<Frame>,
+    /// Interior layouts of subgraph containers (#106), keyed by the container's `stable_id`,
+    /// recursively mirroring the graph's nesting: each entry is the inner graph's own
+    /// view-state. Only visited subgraphs appear (an unopened one cascades on first dive).
+    /// Optional and defaulted, so projects without subgraphs are unchanged and the format
+    /// version does not bump.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub subgraphs: BTreeMap<u64, ViewState>,
 }
 
 /// The pieces restored from a [`ProjectFile`], ready to install into the app state.
@@ -138,6 +145,9 @@ pub(crate) struct RestoredProject {
     pub world_height: f64,
     /// The restored canvas frames (#94).
     pub frames: Vec<Frame>,
+    /// The restored interior layouts of subgraph containers, flattened to a path-keyed map
+    /// (the container `stable_id`s from the top) for the editor's in-session layout cache.
+    pub subgraph_layouts: HashMap<Vec<u64>, BTreeMap<u64, [f32; 2]>>,
 }
 
 impl ProjectFile {
@@ -158,13 +168,16 @@ impl ProjectFile {
             world_extent,
             world_height,
             frames,
+            &HashMap::new(),
         )
     }
 
-    /// Captures a project from a graph and an explicit node-position map, rather than from a
-    /// live snarl. Used when diving into a subgraph (#106): the active canvas shows the inner
-    /// graph, so the top-level snapshot is built from the folded top graph and the saved
-    /// top-level positions instead.
+    /// Captures a project from a graph, an explicit top-level node-position map, and the
+    /// interior layouts of its subgraphs (path-keyed by container `stable_id`s, #106).
+    ///
+    /// Used when diving into a subgraph: the active canvas shows the inner graph, so the
+    /// top-level snapshot is built from the folded top graph and the saved top-level
+    /// positions, and the subgraph interiors come from `layouts` rather than a live snarl.
     pub(crate) fn capture_with(
         graph: &Graph,
         nodes: BTreeMap<u64, [f32; 2]>,
@@ -172,6 +185,7 @@ impl ProjectFile {
         world_extent: f64,
         world_height: f64,
         frames: &[Frame],
+        layouts: &HashMap<Vec<u64>, BTreeMap<u64, [f32; 2]>>,
     ) -> Self {
         Self {
             format_version: PROJECT_FORMAT_VERSION,
@@ -184,6 +198,7 @@ impl ProjectFile {
             view: ViewState {
                 nodes,
                 frames: frames.to_vec(),
+                subgraphs: subgraph_view(graph, &[], layouts),
             },
         }
     }
@@ -244,6 +259,9 @@ impl ProjectFile {
         let graph = Graph::from_document(&self.graph)?;
         let snarl = build_snarl(&graph, &self.view.nodes);
 
+        let mut subgraph_layouts = HashMap::new();
+        flatten_subgraphs(&self.view.subgraphs, &[], &mut subgraph_layouts);
+
         Ok(RestoredProject {
             graph,
             snarl,
@@ -251,6 +269,7 @@ impl ProjectFile {
             world_extent: self.world.world_extent,
             world_height: self.world.world_height,
             frames: self.view.frames.clone(),
+            subgraph_layouts,
         })
     }
 }
@@ -302,6 +321,61 @@ pub(crate) fn build_snarl(graph: &Graph, positions: &BTreeMap<u64, [f32; 2]>) ->
     snarl
 }
 
+/// Builds the recursive subgraph view-state for `graph` (#106): for each container node,
+/// if a layout is known for its path (in `layouts`) or any deeper subgraph is, an entry
+/// mirroring the inner graph's view-state. `path` is the container `stable_id`s from the
+/// top to `graph`. Interior frames are not persisted yet, so each entry's `frames` is empty.
+fn subgraph_view(
+    graph: &Graph,
+    path: &[u64],
+    layouts: &HashMap<Vec<u64>, BTreeMap<u64, [f32; 2]>>,
+) -> BTreeMap<u64, ViewState> {
+    let mut out = BTreeMap::new();
+    for nd in &graph.to_document().nodes {
+        let Some(id) = graph.node_id_of(nd.stable_id) else {
+            continue;
+        };
+        let Some(inner) = graph.nested(id) else {
+            continue; // only container nodes have an interior
+        };
+        let mut child_path = path.to_vec();
+        child_path.push(nd.stable_id);
+        let nodes = layouts.get(&child_path).cloned().unwrap_or_default();
+        let nested = subgraph_view(inner, &child_path, layouts);
+        // Skip a container with no known interior layout (and no nested one): it cascades
+        // on first dive, and omitting it keeps the file small and the diff clean.
+        if !nodes.is_empty() || !nested.is_empty() {
+            out.insert(
+                nd.stable_id,
+                ViewState {
+                    nodes,
+                    frames: Vec::new(),
+                    subgraphs: nested,
+                },
+            );
+        }
+    }
+    out
+}
+
+/// Flattens a recursive subgraph view-state into a path-keyed layout map (the inverse of
+/// [`subgraph_view`]), for the editor's in-session layout cache. `path` is the container
+/// `stable_id`s from the top to `subgraphs`.
+fn flatten_subgraphs(
+    subgraphs: &BTreeMap<u64, ViewState>,
+    path: &[u64],
+    out: &mut HashMap<Vec<u64>, BTreeMap<u64, [f32; 2]>>,
+) {
+    for (container, view) in subgraphs {
+        let mut child_path = path.to_vec();
+        child_path.push(*container);
+        if !view.nodes.is_empty() {
+            out.insert(child_path.clone(), view.nodes.clone());
+        }
+        flatten_subgraphs(&view.subgraphs, &child_path, out);
+    }
+}
+
 /// Captures each node's canvas position from `snarl`, keyed by `stable_id`, for saving or
 /// for suspending a context when diving into a subgraph.
 pub(crate) fn snarl_positions(snarl: &Snarl<Handle>) -> BTreeMap<u64, [f32; 2]> {
@@ -318,6 +392,19 @@ pub(crate) fn snarl_positions(snarl: &Snarl<Handle>) -> BTreeMap<u64, [f32; 2]> 
 mod tests {
     use super::*;
     use crate::canvas::add_node;
+
+    #[test]
+    fn view_state_with_nested_subgraphs_round_trips() {
+        let mut inner = ViewState::default();
+        inner.nodes.insert(5, [1.0, 2.0]);
+        let mut view = ViewState::default();
+        view.nodes.insert(0, [0.0, 0.0]);
+        view.subgraphs.insert(9, inner);
+
+        let json = serde_json::to_string(&view).expect("serialize");
+        let back: ViewState = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(view, back, "recursive subgraph view-state round-trips");
+    }
 
     /// The snarl node id whose handle is `stable_id`.
     fn snarl_id_of(snarl: &Snarl<Handle>, stable_id: u64) -> SnarlNodeId {
