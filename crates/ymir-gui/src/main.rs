@@ -3128,6 +3128,35 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
             }
         });
 
+    // Double-click a node body to dive into it if it is a subgraph (#106): the mouse
+    // counterpart to the context-menu "Edit subgraph". Hit-tested like a select click (node
+    // body, excluding the collapse chevron); applied at the end, where dive_in no-ops for a
+    // non-container.
+    let double_click_dive = ui
+        .ctx()
+        .input(|i| {
+            i.pointer
+                .button_double_clicked(egui::PointerButton::Primary)
+                .then(|| i.pointer.interact_pos())
+        })
+        .flatten()
+        .filter(|_| !menu_open)
+        .filter(|p| canvas_rect.contains(*p))
+        .filter(|p| over_canvas_surface(ui, *p))
+        .and_then(|screen_pos| {
+            let pos = to_global.inverse() * screen_pos;
+            node_rects
+                .iter()
+                .find(|(_, rect)| rect.contains(pos))
+                .and_then(|(handle, rect)| {
+                    let chevron = egui::Rect::from_min_size(
+                        rect.min,
+                        egui::Vec2::splat(ui.spacing().icon_width + 12.0),
+                    );
+                    (!chevron.contains(pos)).then_some(*handle)
+                })
+        });
+
     // Keep the view as long as its rect is finite; a degenerate transform is handled
     // by CanvasView::center falling back to the screen centre, so placement stays
     // finite (a NaN position panics egui's layout) and on the canvas.
@@ -3287,7 +3316,9 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     if let Some(nodes) = create_subgraph_request {
         state.create_subgraph_from(&nodes);
     }
-    if let Some(handle) = dive_request {
+    // Dive in from the context menu, or from a double-click on a container (dive_in is a
+    // no-op for a non-container, so a double-click on an ordinary node does nothing).
+    if let Some(handle) = dive_request.or(double_click_dive) {
         state.dive_in(handle);
     }
 }
