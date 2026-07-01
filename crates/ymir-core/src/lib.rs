@@ -51,7 +51,7 @@ pub use eval::{EvalCache, EvalRequest};
 pub use field::Field;
 pub use field_cache::{read_fields, write_fields};
 pub use field_store::FieldStore;
-pub use graph::{Graph, NodeId};
+pub use graph::{Extraction, Graph, NodeId};
 pub use hash::ContentHash;
 pub use layer::Layer;
 pub use operator::{Inputs, Operator, OperatorClone};

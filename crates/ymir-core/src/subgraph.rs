@@ -658,7 +658,7 @@ mod tests {
 
         // Wrapping A must keep the copied A a container with its own inner graph intact
         // (operators are cloned, not rebuilt from type, so nesting survives).
-        let container = g.extract_subgraph(&[a]).unwrap();
+        let container = g.extract_subgraph(&[a]).unwrap().container;
         let outer_inner = g.nested(container).expect("container inner");
         let wrapped_a = outer_inner
             .to_document()

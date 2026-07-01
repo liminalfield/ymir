@@ -15,8 +15,8 @@ use egui_snarl::ui::SnarlWidget;
 use egui_snarl::{NodeId as SnarlNodeId, Snarl};
 use ymir_core::registry;
 use ymir_core::{
-    EvalCache, EvalRequest, Field, FieldStore, Graph, INPUT_TYPE_ID, NodeId, OUTPUT_TYPE_ID,
-    ParamValue, Region,
+    EvalCache, EvalRequest, Extraction, Field, FieldStore, Graph, INPUT_TYPE_ID, NodeId,
+    OUTPUT_TYPE_ID, ParamValue, Region,
 };
 use ymir_nodes::{CategoryDef, categories, find_category, tr};
 
@@ -823,9 +823,19 @@ impl AppState {
         };
 
         match self.graph.extract_subgraph(&node_ids) {
-            Ok(container) => {
-                if let Some(handle) = self.graph.stable_id(container) {
+            Ok(extraction) => {
+                if let Some(handle) = self.graph.stable_id(extraction.container) {
                     positions.insert(handle, [centroid.x, centroid.y]);
+                    // Lay the new interior out so diving in shows an untangled graph: the
+                    // wrapped nodes keep their relative positions, Input markers to their
+                    // left and Output markers to their right (#106), rather than cascading on
+                    // top of each other.
+                    let mut child_path = self.current_path();
+                    child_path.push(handle);
+                    self.subgraph_layouts.insert(
+                        child_path,
+                        subgraph_interior_layout(&extraction, &positions),
+                    );
                     self.snarl = project_file::build_snarl(&self.graph, &positions);
                     self.select_only(handle);
                 }
@@ -2021,6 +2031,43 @@ fn fold_to_top(active: Graph, nav: &[NavFrame]) -> Result<Graph, ymir_core::Erro
         active = parent;
     }
     Ok(active)
+}
+
+/// The interior canvas layout for a freshly created subgraph (#106): each wrapped node keeps
+/// its original canvas position (carried from `outer_positions` via the extraction's
+/// outer->inner mapping), with the Input markers stacked in a column to the left of the
+/// wrapped cluster and the Output markers to its right. Returns an empty map (so the dive
+/// falls back to a cascade) when no wrapped node had a known position.
+fn subgraph_interior_layout(
+    extraction: &Extraction,
+    outer_positions: &BTreeMap<u64, [f32; 2]>,
+) -> BTreeMap<u64, [f32; 2]> {
+    /// Horizontal gap from the wrapped cluster to a marker column.
+    const MARKER_GAP: f32 = 220.0;
+    /// Vertical spacing between stacked markers.
+    const MARKER_ROW: f32 = 110.0;
+
+    let mut layout = BTreeMap::new();
+    let (mut min_x, mut min_y, mut max_x) = (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY);
+    for &(outer, inner) in &extraction.moved {
+        if let Some(&p) = outer_positions.get(&outer) {
+            layout.insert(inner, p);
+            min_x = min_x.min(p[0]);
+            min_y = min_y.min(p[1]);
+            max_x = max_x.max(p[0]);
+        }
+    }
+    // No positioned wrapped nodes to anchor the markers to: let the dive cascade instead.
+    if !min_x.is_finite() {
+        return BTreeMap::new();
+    }
+    for (i, &marker) in extraction.inputs.iter().enumerate() {
+        layout.insert(marker, [min_x - MARKER_GAP, min_y + i as f32 * MARKER_ROW]);
+    }
+    for (i, &marker) in extraction.outputs.iter().enumerate() {
+        layout.insert(marker, [max_x + MARKER_GAP, min_y + i as f32 * MARKER_ROW]);
+    }
+    layout
 }
 
 /// A node's display name: its per-instance override if set (#59), else its type's
@@ -4534,6 +4581,26 @@ mod tests {
         let spec = state.graph.spec(container_id).expect("spec");
         assert_eq!(spec.inputs.len(), 1);
         assert_eq!(spec.outputs.len(), 1);
+
+        // The interior layout is stored untangled, not cascaded: the two wrapped nodes keep
+        // their positions (a at x=50, b at x=100) and the markers sit to either side.
+        let layout = state
+            .subgraph_layouts
+            .get(&vec![container])
+            .expect("interior layout stored");
+        assert_eq!(
+            layout.len(),
+            4,
+            "two wrapped nodes plus two markers, placed"
+        );
+        assert!(
+            layout.values().any(|p| p[0] < 50.0),
+            "an Input marker sits left of the wrapped cluster"
+        );
+        assert!(
+            layout.values().any(|p| p[0] > 100.0),
+            "an Output marker sits right of the wrapped cluster"
+        );
     }
 
     #[test]

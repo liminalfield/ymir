@@ -28,6 +28,22 @@ new_key_type! {
     pub struct NodeId;
 }
 
+/// The result of [`Graph::extract_subgraph`] (#106): the new container node plus the
+/// identity mapping the editor needs to lay the new interior out (preserve the wrapped
+/// nodes' relative positions, and place the boundary markers around them).
+#[derive(Debug, Clone)]
+pub struct Extraction {
+    /// The new container node.
+    pub container: NodeId,
+    /// Each wrapped node as `(outer stable_id, inner stable_id)`, so the editor can carry
+    /// the originals' canvas positions onto their copies inside.
+    pub moved: Vec<(u64, u64)>,
+    /// Inner Input marker `stable_id`s, in input-port order.
+    pub inputs: Vec<u64>,
+    /// Inner Output marker `stable_id`s, in output-port order.
+    pub outputs: Vec<u64>,
+}
+
 /// A connection feeding one input port: which upstream node and which of its
 /// output ports.
 #[derive(Clone)]
@@ -484,13 +500,14 @@ impl Graph {
     /// per selected input pin fed from outside, one output port per selected output pin
     /// feeding outside (fan-out shares one port). Internal wiring is preserved inside; the
     /// originals are removed. Ports are ordered deterministically by `stable_id`. Absent ids
-    /// are ignored. Returns the new container's id.
+    /// are ignored. Returns an [`Extraction`] (the container plus the identity mapping the
+    /// editor needs to lay the interior out).
     ///
     /// # Errors
     ///
     /// Propagates an error only if an internal or external reconnection is rejected, which
     /// does not happen for a well-formed selection (every port is copied from a live node).
-    pub fn extract_subgraph(&mut self, nodes: &[NodeId]) -> Result<NodeId> {
+    pub fn extract_subgraph(&mut self, nodes: &[NodeId]) -> Result<Extraction> {
         use crate::subgraph::{InputNode, OutputNode, SubgraphNode};
 
         // Live, de-duplicated selection in ascending stable_id order, for deterministic port
@@ -585,15 +602,38 @@ impl Graph {
             }
         }
         // Input markers, in boundary-input order, so container input port i is boundary i.
+        let mut input_markers = Vec::with_capacity(boundary_inputs.len());
         for &(dest, port, _, _) in &boundary_inputs {
             let marker = inner.add_op(Box::new(InputNode), Params::default());
             inner.connect(marker, 0, inner_of[&dest], port)?;
+            input_markers.push(marker);
         }
         // Output markers, in output-port order, so container output port i is output_keys[i].
+        let mut output_markers = Vec::with_capacity(output_keys.len());
         for &(src, out) in &output_keys {
             let marker = inner.add_op(Box::new(OutputNode), Params::default());
             inner.connect(inner_of[&src], out, marker, 0)?;
+            output_markers.push(marker);
         }
+
+        // Capture the inner identities (by stable_id) the editor needs to lay the interior
+        // out, before `inner` is moved into the container.
+        let moved: Vec<(u64, u64)> = selected
+            .iter()
+            .filter_map(|&s| {
+                let outer = self.nodes.get(s)?.stable_id;
+                let inner_id = inner.stable_id(inner_of[&s])?;
+                Some((outer, inner_id))
+            })
+            .collect();
+        let input_ids: Vec<u64> = input_markers
+            .iter()
+            .filter_map(|&m| inner.stable_id(m))
+            .collect();
+        let output_ids: Vec<u64> = output_markers
+            .iter()
+            .filter_map(|&m| inner.stable_id(m))
+            .collect();
 
         // Create the container (its ports derive from the markers just added) and rewire the
         // surrounding graph to it.
@@ -614,7 +654,12 @@ impl Graph {
         for &s in &selected {
             self.remove_node(s);
         }
-        Ok(container)
+        Ok(Extraction {
+            container,
+            moved,
+            inputs: input_ids,
+            outputs: output_ids,
+        })
     }
 
     /// Whether connecting `source` into `dest` would create a cycle.
@@ -1494,7 +1539,8 @@ mod tests {
         g.connect(b, 0, sink, 0).expect("b->sink");
 
         // Wrap {a, b}: feeder->a is a boundary input, b->sink a boundary output.
-        let container = g.extract_subgraph(&[a, b]).expect("extract");
+        let extraction = g.extract_subgraph(&[a, b]).expect("extract");
+        let container = extraction.container;
 
         // feeder, container, sink remain; a and b are gone.
         assert_eq!(g.node_count(), 3);
@@ -1508,6 +1554,10 @@ mod tests {
         assert_eq!(g.input_source(sink, 0), Some((container, 0)));
         // Inside: the two wrapped nodes plus one input and one output marker.
         assert_eq!(g.nested(container).expect("inner").node_count(), 4);
+        // The mapping reports both wrapped nodes and one marker on each side, for layout.
+        assert_eq!(extraction.moved.len(), 2);
+        assert_eq!(extraction.inputs.len(), 1);
+        assert_eq!(extraction.outputs.len(), 1);
     }
 
     #[test]
@@ -1522,7 +1572,7 @@ mod tests {
         g.connect(a, 0, d, 0).expect("a->d");
 
         // Wrap {a}: its output fans out to c and d, which is one boundary output port.
-        let container = g.extract_subgraph(&[a]).expect("extract");
+        let container = g.extract_subgraph(&[a]).expect("extract").container;
         let spec = g.spec(container).expect("spec");
         assert_eq!(spec.inputs.len(), 1);
         assert_eq!(spec.outputs.len(), 1, "fan-out is one shared output port");
