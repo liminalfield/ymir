@@ -1818,22 +1818,42 @@ fn recent_projects_path() -> Option<std::path::PathBuf> {
     )
 }
 
-/// Resolves a config file path from the XDG config base, given the `XDG_CONFIG_HOME`
-/// and `HOME` values and a `filename`. Pure (the env read lives in the caller), so the
-/// precedence is unit-tested without touching the process environment.
-fn config_path(
+/// Resolves an XDG base directory: the `xdg` override if set and non-empty, otherwise
+/// `$HOME/<home_subdir>` (e.g. `.config`, `.local/share`). `None` if neither is available.
+/// Pure (the env read lives in the caller), so precedence is unit-tested without touching
+/// the process environment.
+fn xdg_base(
     xdg: Option<std::ffi::OsString>,
     home: Option<std::ffi::OsString>,
-    filename: &str,
+    home_subdir: &str,
 ) -> Option<std::path::PathBuf> {
-    let base = xdg
-        .filter(|s| !s.is_empty())
+    xdg.filter(|s| !s.is_empty())
         .map(std::path::PathBuf::from)
         .or_else(|| {
             home.filter(|s| !s.is_empty())
-                .map(|h| std::path::PathBuf::from(h).join(".config"))
-        })?;
-    Some(base.join("ymir").join(filename))
+                .map(|h| std::path::PathBuf::from(h).join(home_subdir))
+        })
+}
+
+/// Resolves a file path under the XDG *config* base (`$XDG_CONFIG_HOME`, else
+/// `$HOME/.config`): `…/ymir/<rel>`. For user configuration and settings.
+fn config_path(
+    xdg: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+    rel: &str,
+) -> Option<std::path::PathBuf> {
+    Some(xdg_base(xdg, home, ".config")?.join("ymir").join(rel))
+}
+
+/// Resolves a path under the XDG *data* base (`$XDG_DATA_HOME`, else
+/// `$HOME/.local/share`): `…/ymir/<rel>`. For user-authored content the user would not
+/// want swept as cache, such as the subgraph library.
+fn data_path(
+    xdg: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+    rel: &str,
+) -> Option<std::path::PathBuf> {
+    Some(xdg_base(xdg, home, ".local/share")?.join("ymir").join(rel))
 }
 
 /// How many recent projects to remember.
@@ -5357,6 +5377,37 @@ mod tests {
             config_path(Some(OsString::new()), Some(OsString::new()), "default.ymir"),
             None
         );
+    }
+
+    #[test]
+    fn data_path_prefers_xdg_data_then_home_share_then_none() {
+        use std::ffi::OsString;
+        use std::path::PathBuf;
+        // XDG_DATA_HOME wins when set and non-empty.
+        assert_eq!(
+            data_path(
+                Some(OsString::from("/xdg-data")),
+                Some(OsString::from("/home/u")),
+                "subgraphs"
+            ),
+            Some(PathBuf::from("/xdg-data/ymir/subgraphs"))
+        );
+        // An empty XDG value falls through to HOME/.local/share (the XDG data default).
+        assert_eq!(
+            data_path(
+                Some(OsString::new()),
+                Some(OsString::from("/home/u")),
+                "subgraphs"
+            ),
+            Some(PathBuf::from("/home/u/.local/share/ymir/subgraphs"))
+        );
+        // No XDG: HOME/.local/share.
+        assert_eq!(
+            data_path(None, Some(OsString::from("/home/u")), "subgraphs"),
+            Some(PathBuf::from("/home/u/.local/share/ymir/subgraphs"))
+        );
+        // Neither set: unavailable.
+        assert_eq!(data_path(None, None, "subgraphs"), None);
     }
 
     #[test]
