@@ -231,6 +231,9 @@ pub(crate) struct GraphViewer<'a> {
     /// Nodes the viewer asks the canvas to wrap into a new subgraph (context-menu "Create
     /// subgraph", #106); the canvas extracts them into a container after the frame. Output.
     pub(crate) create_subgraph_request: Option<Vec<Handle>>,
+    /// A subgraph container the viewer asks to save to the library (context-menu "Save to
+    /// library", #106); the canvas opens the save dialog after the frame. Output.
+    pub(crate) save_to_library_request: Option<Handle>,
     /// A preview-pin change the viewer requests (context-menu Pin/Unpin, #39): the
     /// inner value is the new pin (`Some(node)` to pin, `None` to unpin). Output.
     pub(crate) pin_request: Option<Option<Handle>>,
@@ -278,6 +281,7 @@ impl<'a> GraphViewer<'a> {
             rename_request: None,
             dive_request: None,
             create_subgraph_request: None,
+            save_to_library_request: None,
             pin_request: None,
             bypass_request: None,
             pending_view: None,
@@ -915,6 +919,16 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
             && ui.button("Edit subgraph").clicked()
         {
             self.dive_request = Some(handle);
+            ui.close();
+        }
+        // Save a subgraph container to the library for reuse (#106). Containers only.
+        if let Some(handle) = snarl.get_node(node).copied()
+            && self
+                .core_id(handle)
+                .is_some_and(|id| self.graph.nested(id).is_some())
+            && ui.button("Save to library…").clicked()
+        {
+            self.save_to_library_request = Some(handle);
             ui.close();
         }
         // Wrap the clicked node, or the whole selection when it is part of it, into a new

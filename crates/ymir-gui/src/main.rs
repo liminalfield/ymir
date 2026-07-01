@@ -38,6 +38,8 @@ mod thumbnails;
 use thumbnails::ThumbnailEngine;
 // Off-thread full-resolution Build (#7).
 mod build;
+// The subgraph library: saved subgraphs as standalone files (#106).
+mod library;
 // The GUI project file: graph + canvas view-state, save/open (#75).
 mod project_file;
 // The built-in starter graph a fresh session opens with (#76).
@@ -348,6 +350,9 @@ struct AppState {
     /// The rename dialog (#61), open while the user edits a node's display name.
     /// `None` when closed.
     rename: Option<RenameDialog>,
+    /// The "Save to library" dialog (#106), open while documenting a subgraph being saved.
+    /// `None` when closed.
+    library_save: Option<LibrarySave>,
     /// The popped-out curve editor: a larger, draggable window for shaping a curve
     /// param with room to be precise and a coordinate readout. `None` when closed.
     curve_popout: Option<CurvePopout>,
@@ -463,6 +468,25 @@ struct RenameDialog {
     just_opened: bool,
 }
 
+/// The "Save to library" dialog (#106): a documentation template for a subgraph being saved,
+/// pre-filled from the container and edited by the author. `None` when closed.
+struct LibrarySave {
+    /// The container node being saved (its `stable_id`).
+    container: Handle,
+    /// The library display name (defaults to the node's name).
+    name: String,
+    /// A free-text category for grouping in the browser.
+    category: String,
+    /// What the subgraph produces.
+    description: String,
+    /// Per-input-port documentation, pre-filled with the port names.
+    inputs: Vec<library::PortDoc>,
+    /// Per-output-port documentation, pre-filled with the port names.
+    outputs: Vec<library::PortDoc>,
+    /// A save error to show in the dialog (e.g. a blank name or a write failure).
+    error: Option<String>,
+}
+
 /// Identifies the curve param shown in the popped-out editor window: a specific node
 /// and the param name on it. Tied to the node, not the current selection, so the window
 /// keeps editing the same curve even after another node is selected.
@@ -516,6 +540,7 @@ impl AppState {
             node_menu: None,
             preview_pin: None,
             rename: None,
+            library_save: None,
             curve_popout: None,
             pending_view: None,
             param_tab: ParamTab::Node,
@@ -575,6 +600,7 @@ impl AppState {
         self.preview_pin = None;
         self.node_menu = None;
         self.rename = None;
+        self.library_save = None;
         self.frame_to_graph_request = true;
         // The name indicator shows which file; the status only needs the action.
         self.status = Some("Opened".to_string());
@@ -612,6 +638,7 @@ impl AppState {
         self.preview_pin = None;
         self.node_menu = None;
         self.rename = None;
+        self.library_save = None;
         self.project_path = None;
         self.frame_to_graph_request = true;
         // No status line: the visible canvas change is feedback enough, and a transient
@@ -844,6 +871,111 @@ impl AppState {
         }
     }
 
+    /// Opens the "Save to library" dialog for a container, pre-filled from it (#106): its
+    /// name, and a documentation row per port seeded with the port name. A no-op for a
+    /// non-container.
+    fn open_library_save(&mut self, handle: Handle) {
+        let Some(id) = self.graph.node_id_of(handle) else {
+            return;
+        };
+        if self.graph.nested(id).is_none() {
+            return; // not a container
+        }
+        let Some(spec) = self.graph.spec(id) else {
+            return;
+        };
+        let docs = |ports: &[ymir_core::PortSpec]| {
+            ports
+                .iter()
+                .enumerate()
+                .map(|(index, port)| library::PortDoc {
+                    index,
+                    name: port.name.clone(),
+                    description: String::new(),
+                })
+                .collect()
+        };
+        self.library_save = Some(LibrarySave {
+            container: handle,
+            name: node_display_name(&self.graph, id),
+            category: String::new(),
+            description: String::new(),
+            inputs: docs(&spec.inputs),
+            outputs: docs(&spec.outputs),
+            error: None,
+        });
+    }
+
+    /// Builds a [`library::SubgraphFile`] from a container and the dialog's documentation:
+    /// the inner graph, its captured seed, its interior layout, and the doc block.
+    fn build_subgraph_file(&self, dialog: &LibrarySave) -> Result<library::SubgraphFile, String> {
+        let id = self
+            .graph
+            .node_id_of(dialog.container)
+            .ok_or_else(|| "the subgraph node is gone".to_string())?;
+        let inner = self
+            .graph
+            .nested(id)
+            .ok_or_else(|| "not a subgraph".to_string())?;
+        let seed = self.graph.params(id).map_or(0, |p| p.get_i64("seed", 0));
+        // The container's interior layout is stored under its path in the active context.
+        let mut path = self.current_path();
+        path.push(dialog.container);
+        let view = project_file::ViewState {
+            nodes: self
+                .subgraph_layouts
+                .get(&path)
+                .cloned()
+                .unwrap_or_default(),
+            ..Default::default()
+        };
+        Ok(library::SubgraphFile {
+            format_version: library::SUBGRAPH_FORMAT_VERSION,
+            name: dialog.name.trim().to_string(),
+            category: dialog.category.trim().to_string(),
+            description: dialog.description.trim().to_string(),
+            inputs: dialog.inputs.clone(),
+            outputs: dialog.outputs.clone(),
+            seed,
+            graph: inner.to_document(),
+            view,
+        })
+    }
+
+    /// Writes the dialog's subgraph to the user library, returning the file path on success.
+    fn write_subgraph_file(&self, dialog: &LibrarySave) -> Result<std::path::PathBuf, String> {
+        let file = self.build_subgraph_file(dialog)?;
+        let dir = library::library_dir().ok_or_else(|| "no library directory".to_string())?;
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let path = dir.join(format!("{}.ymirsub", sanitize_filename(&dialog.name)));
+        library::write_subgraph(&path, &file)?;
+        Ok(path)
+    }
+
+    /// Saves the open dialog's subgraph to the library: validates the name, writes the file,
+    /// and closes on success, or shows the error in the dialog.
+    fn save_subgraph_to_library(&mut self) {
+        let Some(dialog) = self.library_save.take() else {
+            return;
+        };
+        if dialog.name.trim().is_empty() {
+            self.library_save = Some(LibrarySave {
+                error: Some("A name is required.".to_string()),
+                ..dialog
+            });
+            return;
+        }
+        match self.write_subgraph_file(&dialog) {
+            Ok(path) => self.status = Some(format!("Saved to library: {}", path.display())),
+            Err(err) => {
+                self.library_save = Some(LibrarySave {
+                    error: Some(err),
+                    ..dialog
+                });
+            }
+        }
+    }
+
     /// Pops one level out of the current subgraph: remembers its layout, installs the edited
     /// inner graph back into its container, and restores the parent context (#106). A no-op
     /// at the top level.
@@ -898,6 +1030,7 @@ impl AppState {
         self.consume_wire = false;
         self.node_menu = None;
         self.rename = None;
+        self.library_save = None;
     }
 
     /// Re-anchors the undo history at the current session and clears its stacks, after
@@ -942,6 +1075,7 @@ impl AppState {
                     .filter(|&h| self.graph.node_id_of(h).is_some());
                 self.node_menu = None;
                 self.rename = None;
+                self.library_save = None;
             }
             // A snapshot we captured ourselves cannot fail to restore; surface it rather
             // than swallow it if the impossible happens.
@@ -2070,6 +2204,30 @@ fn subgraph_interior_layout(
     layout
 }
 
+/// A filesystem-safe stem for a library file, derived from the subgraph name: alphanumerics,
+/// dash, and underscore survive; anything else becomes a dash. Falls back to `subgraph` for
+/// an otherwise-empty result, so a name of only punctuation still yields a valid file.
+fn sanitize_filename(name: &str) -> String {
+    let stem: String = name
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    // An empty or all-dash stem carries no real name (an empty or punctuation-only input), so
+    // fall back rather than write a meaningless "-.ymirsub".
+    if stem.chars().all(|c| c == '-') {
+        "subgraph".to_string()
+    } else {
+        stem
+    }
+}
+
 /// A node's display name: its per-instance override if set (#59), else its type's
 /// name via `tr`. Mirrors the canvas title for the preview header.
 fn node_display_name(graph: &Graph, id: NodeId) -> String {
@@ -3025,6 +3183,7 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         rename_request: None,
         dive_request: None,
         create_subgraph_request: None,
+        save_to_library_request: None,
         pin_request: None,
         bypass_request: None,
         pending_view,
@@ -3110,6 +3269,9 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // Nodes the viewer asks to wrap into a new subgraph (context-menu "Create subgraph",
     // #106). Applied at the end of the pane.
     let create_subgraph_request = std::mem::take(&mut viewer.create_subgraph_request);
+    // A container the viewer asks to save to the library (context-menu "Save to library",
+    // #106). Opens the save dialog at the end of the pane.
+    let save_to_library_request = viewer.save_to_library_request;
     // A preview-pin change the viewer requests (context-menu Pin/Unpin, #39).
     let pin_request = viewer.pin_request;
     // Whether this frame's primary click was a click-to-wire gesture on a pin (#50). When
@@ -3370,6 +3532,10 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // only one fires per frame (distinct menu items).
     if let Some(nodes) = create_subgraph_request {
         state.create_subgraph_from(&nodes);
+    }
+    // Open the "Save to library" dialog for a container the context menu asked to save (#106).
+    if let Some(handle) = save_to_library_request {
+        state.open_library_save(handle);
     }
     // Dive in from the context menu, or from a double-click on a container (dive_in is a
     // no-op for a non-container, so a double-click on an ordinary node does nothing).
@@ -3851,6 +4017,92 @@ fn rename_dialog_ui(ui: &mut egui::Ui, state: &mut AppState) {
     }
 }
 
+/// The "Save to library" dialog (#106): a documentation form for a subgraph, saved to the
+/// user library on confirm. A no-op when the dialog is closed.
+fn library_save_dialog(ctx: &egui::Context, state: &mut AppState) {
+    if state.library_save.is_none() {
+        return;
+    }
+    let mut open = true;
+    let mut save = false;
+    let mut cancel = false;
+    egui::Window::new("Save subgraph to library")
+        .collapsible(false)
+        .resizable(true)
+        .open(&mut open)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            let Some(dialog) = state.library_save.as_mut() else {
+                return;
+            };
+            egui::Grid::new("library-save-meta")
+                .num_columns(2)
+                .spacing([8.0, 6.0])
+                .show(ui, |ui| {
+                    ui.label("Name");
+                    ui.add(egui::TextEdit::singleline(&mut dialog.name).desired_width(260.0));
+                    ui.end_row();
+                    ui.label("Category");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut dialog.category)
+                            .hint_text("optional")
+                            .desired_width(260.0),
+                    );
+                    ui.end_row();
+                });
+            ui.add_space(6.0);
+            ui.label("Description");
+            ui.add(
+                egui::TextEdit::multiline(&mut dialog.description)
+                    .hint_text("what this subgraph produces")
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(2),
+            );
+            port_docs_ui(ui, "Inputs", &mut dialog.inputs);
+            port_docs_ui(ui, "Outputs", &mut dialog.outputs);
+            if let Some(err) = &dialog.error {
+                ui.add_space(4.0);
+                ui.colored_label(ui.visuals().error_fg_color, err);
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("Save").clicked() {
+                    save = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+
+    if save {
+        state.save_subgraph_to_library();
+    } else if cancel || !open {
+        state.library_save = None;
+    }
+}
+
+/// A titled block of per-port documentation rows (the port name, then an editable
+/// description) for the Save-to-library dialog. Renders nothing for a portless side.
+fn port_docs_ui(ui: &mut egui::Ui, title: &str, ports: &mut [library::PortDoc]) {
+    if ports.is_empty() {
+        return;
+    }
+    ui.add_space(6.0);
+    ui.separator();
+    ui.strong(title);
+    for port in ports {
+        ui.horizontal(|ui| {
+            ui.label(format!("{}:", port.name));
+            ui.add(
+                egui::TextEdit::singleline(&mut port.description)
+                    .hint_text("description")
+                    .desired_width(f32::INFINITY),
+            );
+        });
+    }
+}
+
 /// Refreshes the cached build-quality outputs for the shown node. Recomputes the node's
 /// build-resolution content key (cheap, no evaluation) and, only when that key changes, loads
 /// the matching fields from the disk cache: a hit becomes the viewport's source, a miss leaves
@@ -4299,6 +4551,8 @@ impl eframe::App for YmirApp {
         mount(&default_layout(), ui, &mut self.state);
         // The popped-out curve editor floats over the panes when open (#70-style).
         curve_popout_window(ui.ctx(), &mut self.state);
+        // The "Save to library" dialog floats over the panes when open (#106).
+        library_save_dialog(ui.ctx(), &mut self.state);
         // Intercept a window close with unsaved changes: cancel it and raise the prompt
         // (#83). An already-confirmed close (allow_close) or a clean session goes through.
         if ui.ctx().input(|i| i.viewport().close_requested())
@@ -5103,6 +5357,19 @@ mod tests {
             config_path(Some(OsString::new()), Some(OsString::new()), "default.ymir"),
             None
         );
+    }
+
+    #[test]
+    fn sanitize_filename_keeps_safe_chars_and_falls_back() {
+        // Alphanumerics, dash, and underscore survive untouched.
+        assert_eq!(sanitize_filename("Mount_Fuji-2"), "Mount_Fuji-2");
+        // Spaces and path separators become dashes, so the stem is a single safe segment.
+        assert_eq!(sanitize_filename("rocky ridge/v2"), "rocky-ridge-v2");
+        // Surrounding whitespace is trimmed before mapping.
+        assert_eq!(sanitize_filename("  crater  "), "crater");
+        // A name of only punctuation would collapse to empty, so it falls back.
+        assert_eq!(sanitize_filename("///"), "subgraph");
+        assert_eq!(sanitize_filename(""), "subgraph");
     }
 
     #[test]
