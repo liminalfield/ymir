@@ -40,6 +40,8 @@ use thumbnails::ThumbnailEngine;
 mod build;
 // The subgraph library: saved subgraphs as standalone files (#106).
 mod library;
+
+mod preferences;
 // The GUI project file: graph + canvas view-state, save/open (#75).
 mod project_file;
 // The built-in starter graph a fresh session opens with (#76).
@@ -353,6 +355,12 @@ struct AppState {
     /// The "Save to library" dialog (#106), open while documenting a subgraph being saved.
     /// `None` when closed.
     library_save: Option<LibrarySave>,
+    /// The user's app-global preferences (the author profile, #106), loaded from config at
+    /// startup and edited via the Settings dialog. Persists across projects.
+    preferences: preferences::Preferences,
+    /// The Settings dialog's editable draft, `Some` while it is open. Committed to
+    /// `preferences` (and written to disk) on Save, discarded on Cancel.
+    settings_edit: Option<preferences::Preferences>,
     /// The popped-out curve editor: a larger, draggable window for shaping a curve
     /// param with room to be precise and a coordinate readout. `None` when closed.
     curve_popout: Option<CurvePopout>,
@@ -541,6 +549,10 @@ impl AppState {
             preview_pin: None,
             rename: None,
             library_save: None,
+            // Env-free default (empty profile); the real file is overlaid in the app shell so
+            // the test-constructed state never touches the filesystem, matching apply_default.
+            preferences: preferences::Preferences::default(),
+            settings_edit: None,
             curve_popout: None,
             pending_view: None,
             param_tab: ParamTab::Node,
@@ -973,6 +985,20 @@ impl AppState {
                     ..dialog
                 });
             }
+        }
+    }
+
+    /// Commits the open Settings dialog: installs its draft as the live preferences and writes
+    /// them to config. Reports the outcome on the status line and closes the dialog. A no-op if
+    /// the dialog is not open.
+    fn commit_settings(&mut self) {
+        let Some(draft) = self.settings_edit.take() else {
+            return;
+        };
+        self.preferences = draft;
+        match save_preferences(&self.preferences) {
+            Ok(()) => self.status = Some("Settings saved.".to_string()),
+            Err(err) => self.status = Some(format!("Settings could not be saved: {err}")),
         }
     }
 
@@ -1571,6 +1597,12 @@ fn menu_bar_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 state.redo();
                 ui.close();
             }
+            ui.separator();
+            if ui.button("Settings…").clicked() {
+                // Open the dialog on a copy of the live preferences, so Cancel discards edits.
+                state.settings_edit = Some(state.preferences.clone());
+                ui.close();
+            }
         });
         ui.menu_button("View", |ui| {
             ui.checkbox(&mut state.thumbnails_enabled, "Node thumbnails");
@@ -1976,6 +2008,37 @@ fn apply_default(state: &mut AppState) {
         Err(err) => {
             state.status = Some(format!("Default startup graph could not be loaded: {err}"));
         }
+    }
+}
+
+/// Writes the given preferences to the config directory, creating it if needed.
+///
+/// # Errors
+///
+/// Returns a message if no config directory can be resolved, or the directory or file write
+/// fails.
+fn save_preferences(prefs: &preferences::Preferences) -> Result<(), String> {
+    let path = preferences::preferences_path().ok_or_else(|| "no config directory".to_string())?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    preferences::write_preferences(&path, prefs)
+}
+
+/// Overlays the user's saved preferences onto `state` at startup, if a preferences file exists
+/// (#106). An absent file is the normal first-run case, leaving the empty default. A present but
+/// unreadable file is reported on the status line rather than failing the launch. Lives in the
+/// app shell, not `AppState::new`, so the test-constructed state never reads the filesystem.
+fn apply_preferences(state: &mut AppState) {
+    let Some(path) = preferences::preferences_path() else {
+        return;
+    };
+    if !path.exists() {
+        return;
+    }
+    match preferences::read_preferences(&path) {
+        Ok(prefs) => state.preferences = prefs,
+        Err(err) => state.status = Some(format!("Preferences could not be loaded: {err}")),
     }
 }
 
@@ -4123,6 +4186,76 @@ fn port_docs_ui(ui: &mut egui::Ui, title: &str, ports: &mut [library::PortDoc]) 
     }
 }
 
+/// The Settings dialog (#106): edits the app-global preferences draft. Today it holds the author
+/// profile, the optional identity attached to a shared subgraph. Save commits the draft and
+/// writes it to config; Cancel (or closing the window) discards it.
+fn settings_dialog(ctx: &egui::Context, state: &mut AppState) {
+    if state.settings_edit.is_none() {
+        return;
+    }
+    let mut open = true;
+    let mut save = false;
+    let mut cancel = false;
+    egui::Window::new("Settings")
+        .collapsible(false)
+        .resizable(true)
+        .open(&mut open)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            let Some(draft) = state.settings_edit.as_mut() else {
+                return;
+            };
+            ui.strong("Author");
+            ui.label(
+                egui::RichText::new(
+                    "Optional. Attached to subgraphs you save, so others know who made them and \
+                     how to reach you. Blank fields are left out.",
+                )
+                .weak(),
+            );
+            ui.add_space(6.0);
+            let author = &mut draft.author;
+            egui::Grid::new("settings-author")
+                .num_columns(2)
+                .spacing([8.0, 6.0])
+                .show(ui, |ui| {
+                    for (label, hint, field) in [
+                        ("Name", "your name or handle", &mut author.name),
+                        ("Email", "you@example.com", &mut author.email),
+                        ("Website", "https://example.com", &mut author.website),
+                        (
+                            "Documentation",
+                            "https://example.com/docs",
+                            &mut author.docs,
+                        ),
+                    ] {
+                        ui.label(label);
+                        ui.add(
+                            egui::TextEdit::singleline(field)
+                                .hint_text(hint)
+                                .desired_width(300.0),
+                        );
+                        ui.end_row();
+                    }
+                });
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("Save").clicked() {
+                    save = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+
+    if save {
+        state.commit_settings();
+    } else if cancel || !open {
+        state.settings_edit = None;
+    }
+}
+
 /// Refreshes the cached build-quality outputs for the shown node. Recomputes the node's
 /// build-resolution content key (cheap, no evaluation) and, only when that key changes, loads
 /// the matching fields from the disk cache: a hit becomes the viewport's source, a miss leaves
@@ -4439,6 +4572,9 @@ impl YmirApp {
         // process environment or the filesystem.
         let mut state = AppState::new();
         apply_default(&mut state);
+        // Overlay the user's saved preferences (the author profile, #106) from config, here in
+        // the app shell so the test-constructed state never touches the filesystem.
+        apply_preferences(&mut state);
         // Load the recent-projects list from config (empty on first run), here in the app
         // shell so the test-constructed state never touches the filesystem.
         state.recent = load_recent();
@@ -4573,6 +4709,7 @@ impl eframe::App for YmirApp {
         curve_popout_window(ui.ctx(), &mut self.state);
         // The "Save to library" dialog floats over the panes when open (#106).
         library_save_dialog(ui.ctx(), &mut self.state);
+        settings_dialog(ui.ctx(), &mut self.state);
         // Intercept a window close with unsaved changes: cancel it and raise the prompt
         // (#83). An already-confirmed close (allow_close) or a clean session goes through.
         if ui.ctx().input(|i| i.viewport().close_requested())
