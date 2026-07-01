@@ -33,6 +33,16 @@ pub(crate) struct AuthorProfile {
     pub docs: String,
 }
 
+impl AuthorProfile {
+    /// Whether every field is blank (whitespace counts as blank), so a saved subgraph with no
+    /// author omits the block entirely rather than writing an empty one.
+    pub fn is_empty(&self) -> bool {
+        [&self.name, &self.email, &self.website, &self.docs]
+            .iter()
+            .all(|s| s.trim().is_empty())
+    }
+}
+
 /// The root of the user's app-global settings. A thin container today (just the author profile),
 /// named so future settings hang off it and the Settings dialog grows sections without renaming
 /// the file.
@@ -79,6 +89,21 @@ pub(crate) fn write_preferences(path: &Path, prefs: &Preferences) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fresh_profile_is_empty() {
+        assert!(AuthorProfile::default().is_empty());
+        let spaces = AuthorProfile {
+            name: "  ".to_string(),
+            ..Default::default()
+        };
+        assert!(spaces.is_empty(), "whitespace-only fields count as empty");
+        let real = AuthorProfile {
+            website: "https://example.com".to_string(),
+            ..Default::default()
+        };
+        assert!(!real.is_empty());
+    }
 
     #[test]
     fn preferences_round_trip_through_json() {

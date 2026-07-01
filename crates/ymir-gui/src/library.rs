@@ -2,9 +2,10 @@
 //!
 //! A library entry is one self-describing JSON file: the subgraph's inner graph (a
 //! [`ProjectDocument`]) plus its captured seed, its interior canvas layout, and a small
-//! documentation block (a name, a description, and per-port name/description). Dropping an
-//! entry into a project is a *copy* with no link back (template instantiation, #79), so the
-//! captured seed is what makes a shared subgraph reproduce the same terrain everywhere.
+//! documentation block (a name, a description, per-port name/description, and an optional author
+//! identity and license for sharing). Dropping an entry into a project is a *copy* with no link
+//! back (template instantiation, #79), so the captured seed is what makes a shared subgraph
+//! reproduce the same terrain everywhere.
 //!
 //! Files reuse the same serde types as a project (so they stay diffable and forward
 //! compatible via a format version) and live in the user library directory
@@ -17,6 +18,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use ymir_core::ProjectDocument;
 
+use crate::preferences::AuthorProfile;
 use crate::project_file::ViewState;
 
 /// On-disk format version for a library file. Bumped only on a breaking schema change,
@@ -58,6 +60,16 @@ pub(crate) struct SubgraphFile {
     /// Documentation for each output port, in port order.
     #[serde(default)]
     pub outputs: Vec<PortDoc>,
+    /// The author's identity, pre-filled from their profile and editable per subgraph. Omitted
+    /// entirely when blank, so an anonymous subgraph carries no author block. A subgraph is the
+    /// user's own work and not a derivative of Ymir, so this identity is theirs to share or not.
+    #[serde(default, skip_serializing_if = "AuthorProfile::is_empty")]
+    pub author: AuthorProfile,
+    /// A license for the subgraph (e.g. an SPDX id like "CC0-1.0" or "GPL-3.0-or-later"), stating
+    /// reuse terms for this shared artifact. Ymir's own GPL does not reach a user's output, so the
+    /// author is free to choose any terms. Omitted when blank.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub license: String,
     /// The subgraph's captured seed (the container's `seed` param), so a dropped copy
     /// reproduces the same terrain regardless of the host project.
     #[serde(default)]
@@ -129,6 +141,13 @@ mod tests {
                 name: "Output 1".to_string(),
                 description: String::new(),
             }],
+            author: AuthorProfile {
+                name: "Ada".to_string(),
+                email: "ada@example.com".to_string(),
+                website: String::new(),
+                docs: String::new(),
+            },
+            license: "CC0-1.0".to_string(),
             seed: 42,
             graph: inner.to_document(),
             view,
@@ -139,6 +158,19 @@ mod tests {
     fn subgraph_file_round_trips_through_json() {
         let file = sample();
         let json = serde_json::to_string_pretty(&file).expect("serialize");
+        let back: SubgraphFile = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(file, back);
+    }
+
+    #[test]
+    fn a_blank_author_and_license_are_omitted_from_the_json() {
+        let mut file = sample();
+        file.author = AuthorProfile::default();
+        file.license = String::new();
+        let json = serde_json::to_string(&file).expect("serialize");
+        assert!(!json.contains("\"author\""), "blank author is omitted");
+        assert!(!json.contains("\"license\""), "blank license is omitted");
+        // And it still round-trips, the missing keys defaulting back to blank.
         let back: SubgraphFile = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(file, back);
     }

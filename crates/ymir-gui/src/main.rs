@@ -491,6 +491,10 @@ struct LibrarySave {
     inputs: Vec<library::PortDoc>,
     /// Per-output-port documentation, pre-filled with the port names.
     outputs: Vec<library::PortDoc>,
+    /// The author identity, pre-filled from the user's profile and editable for this subgraph.
+    author: preferences::AuthorProfile,
+    /// A license for the subgraph (SPDX id or free text), blank by default.
+    license: String,
     /// A save error to show in the dialog (e.g. a blank name or a write failure).
     error: Option<String>,
 }
@@ -914,6 +918,9 @@ impl AppState {
             description: String::new(),
             inputs: docs(&spec.inputs),
             outputs: docs(&spec.outputs),
+            // Pre-fill the author from the user's profile; they can edit or clear it per save.
+            author: self.preferences.author.clone(),
+            license: String::new(),
             error: None,
         });
     }
@@ -948,6 +955,8 @@ impl AppState {
             description: dialog.description.trim().to_string(),
             inputs: dialog.inputs.clone(),
             outputs: dialog.outputs.clone(),
+            author: dialog.author.clone(),
+            license: dialog.license.trim().to_string(),
             seed,
             graph: inner.to_document(),
             view,
@@ -4132,6 +4141,13 @@ fn library_save_dialog(ctx: &egui::Context, state: &mut AppState) {
                             .desired_width(260.0),
                     );
                     ui.end_row();
+                    ui.label("License");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut dialog.license)
+                            .hint_text("optional, e.g. CC0-1.0 or GPL-3.0-or-later")
+                            .desired_width(260.0),
+                    );
+                    ui.end_row();
                 });
             ui.add_space(6.0);
             ui.label("Description");
@@ -4143,6 +4159,13 @@ fn library_save_dialog(ctx: &egui::Context, state: &mut AppState) {
             );
             port_docs_ui(ui, "Inputs", &mut dialog.inputs);
             port_docs_ui(ui, "Outputs", &mut dialog.outputs);
+            ui.add_space(6.0);
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.strong("Author");
+                ui.label(egui::RichText::new("optional, from your Settings profile").weak());
+            });
+            author_fields_ui(ui, "library-save-author", &mut dialog.author);
             if let Some(err) = &dialog.error {
                 ui.add_space(4.0);
                 ui.colored_label(ui.visuals().error_fg_color, err);
@@ -4214,30 +4237,7 @@ fn settings_dialog(ctx: &egui::Context, state: &mut AppState) {
                 .weak(),
             );
             ui.add_space(6.0);
-            let author = &mut draft.author;
-            egui::Grid::new("settings-author")
-                .num_columns(2)
-                .spacing([8.0, 6.0])
-                .show(ui, |ui| {
-                    for (label, hint, field) in [
-                        ("Name", "your name or handle", &mut author.name),
-                        ("Email", "you@example.com", &mut author.email),
-                        ("Website", "https://example.com", &mut author.website),
-                        (
-                            "Documentation",
-                            "https://example.com/docs",
-                            &mut author.docs,
-                        ),
-                    ] {
-                        ui.label(label);
-                        ui.add(
-                            egui::TextEdit::singleline(field)
-                                .hint_text(hint)
-                                .desired_width(300.0),
-                        );
-                        ui.end_row();
-                    }
-                });
+            author_fields_ui(ui, "settings-author", &mut draft.author);
             ui.separator();
             ui.horizontal(|ui| {
                 if ui.button("Save").clicked() {
@@ -4254,6 +4254,35 @@ fn settings_dialog(ctx: &egui::Context, state: &mut AppState) {
     } else if cancel || !open {
         state.settings_edit = None;
     }
+}
+
+/// The author-identity fields (name, email, website, documentation) as a two-column grid,
+/// shared by the Settings dialog and the Save-to-library dialog. `id` names the grid so two
+/// instances never collide.
+fn author_fields_ui(ui: &mut egui::Ui, id: &str, author: &mut preferences::AuthorProfile) {
+    egui::Grid::new(id)
+        .num_columns(2)
+        .spacing([8.0, 6.0])
+        .show(ui, |ui| {
+            for (label, hint, field) in [
+                ("Name", "your name or handle", &mut author.name),
+                ("Email", "you@example.com", &mut author.email),
+                ("Website", "https://example.com", &mut author.website),
+                (
+                    "Documentation",
+                    "https://example.com/docs",
+                    &mut author.docs,
+                ),
+            ] {
+                ui.label(label);
+                ui.add(
+                    egui::TextEdit::singleline(field)
+                        .hint_text(hint)
+                        .desired_width(300.0),
+                );
+                ui.end_row();
+            }
+        });
 }
 
 /// Refreshes the cached build-quality outputs for the shown node. Recomputes the node's
