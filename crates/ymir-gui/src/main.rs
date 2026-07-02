@@ -4484,6 +4484,21 @@ fn mount(layout: &Layout, ui: &mut egui::Ui, state: &mut AppState) {
         .show_separator_line(false)
         .show_inside(ui, |ui| draw_pane(layout.menu_bar, ui, state));
 
+    // The ribbon (node category tabs + selection + node grid) is full-width top chrome under the
+    // menu (archetype 2): a global palette like a toolbar, so it spans the whole width and never
+    // moves when a side panel toggles. Its bottom border is drawn with the section borders below.
+    let palette = egui::Panel::top("palette-panel")
+        .show_separator_line(false)
+        // No inner margin (the ribbon draws its own full-width bands), filled to match the
+        // category band so the spacing between the two bands does not show the darker default
+        // fill through the gap.
+        .frame(
+            egui::Frame::side_top_panel(ui.style())
+                .fill(scale_color(ui.visuals().panel_fill, 1.5))
+                .inner_margin(0),
+        )
+        .show_inside(ui, |ui| draw_pane(layout.palette, ui, state));
+
     // Section 5: the footer (its top border is drawn below), a bit darker than the body.
     let footer = egui::Panel::bottom("footer-panel")
         .show_separator_line(false)
@@ -4492,10 +4507,11 @@ fn mount(layout: &Layout, ui: &mut egui::Ui, state: &mut AppState) {
         )
         .show_inside(ui, |ui| draw_pane(layout.footer, ui, state));
 
-    // Section 4: the right column — the preview over the inspector/world tabs. Fixed width
-    // (not resizable): sized to the square preview image plus a small margin, since the
-    // contents do not reflow nicely at other widths. Halved horizontal padding (4 here plus
-    // the preview's 4) so the image sits close to the edges.
+    // Section 4: the right column — the node inspector and preview. It sits BELOW the ribbon
+    // (archetype 2), flanking the canvas, so toggling it never shifts the ribbon. Fixed width
+    // (not resizable): sized to the square preview image plus a small margin, since the contents
+    // do not reflow nicely at other widths. Halved horizontal padding (4 here plus the preview's
+    // 4) so the image sits close to the edges.
     let section_4 = egui::Panel::right("section-4")
         // Not resizable: exact_size alone leaves the panel resizable, so the edge still shows
         // a resize cursor even though dragging does nothing.
@@ -4505,22 +4521,11 @@ fn mount(layout: &Layout, ui: &mut egui::Ui, state: &mut AppState) {
         .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::symmetric(4, 2)))
         .show_inside(ui, |ui| draw_pane(layout.right_panel, ui, state));
 
-    // Section 3: the workspace. Palette on top, then the canvas and the main viewport
-    // stacked. No frame margin, so the canvas hugs the section borders.
+    // Section 3: the workspace body — the canvas with the 3D viewport stacked beneath it,
+    // flanked by the side column. No frame margin, so the canvas hugs the section borders.
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE)
         .show_inside(ui, |ui| {
-            let palette = egui::Panel::top("palette-panel")
-                .show_separator_line(false)
-                // No inner margin (the ribbon draws its own full-width bands), filled to match
-                // the category band so the spacing between the two bands does not show the
-                // darker default fill through the gap.
-                .frame(
-                    egui::Frame::side_top_panel(ui.style())
-                        .fill(scale_color(ui.visuals().panel_fill, 1.5))
-                        .inner_margin(0),
-                )
-                .show_inside(ui, |ui| draw_pane(layout.palette, ui, state));
             let viewport = egui::Panel::bottom("viewport-panel")
                 .resizable(true)
                 .default_size(ui.available_height() * 0.4)
@@ -4530,28 +4535,26 @@ fn mount(layout: &Layout, ui: &mut egui::Ui, state: &mut AppState) {
                 .frame(egui::Frame::NONE)
                 .show_inside(ui, |ui| draw_pane(layout.canvas, ui, state));
 
-            // A heavier border under the node bar (like the workspace/side-column one), and
-            // a lighter one between the canvas and the viewport.
-            let painter = ui.painter();
-            painter.hline(
-                palette.response.rect.x_range(),
-                palette.response.rect.bottom(),
-                heavy,
-            );
-            painter.hline(
+            // A light border between the canvas and the viewport.
+            ui.painter().hline(
                 viewport.response.rect.x_range(),
                 viewport.response.rect.top(),
                 line,
             );
         });
 
-    // Section borders, drawn last so they sit on top: the full-width line under the menu,
-    // the footer's top edge, and the heavier workspace/side-column boundary.
+    // Section borders, drawn last so they sit on top: the full-width lines under the menu and
+    // the ribbon, the footer's top edge, and the heavier boundary left of the side column.
     let painter = ui.painter();
     painter.hline(
         menu.response.rect.x_range(),
         menu.response.rect.bottom(),
         line,
+    );
+    painter.hline(
+        palette.response.rect.x_range(),
+        palette.response.rect.bottom(),
+        heavy,
     );
     painter.hline(
         footer.response.rect.x_range(),
