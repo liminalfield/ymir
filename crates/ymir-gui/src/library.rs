@@ -105,6 +105,84 @@ pub(crate) fn write_subgraph(path: &Path, file: &SubgraphFile) -> Result<(), Str
     std::fs::write(path, json).map_err(|e| e.to_string())
 }
 
+/// Reads a subgraph from `path`, deserializing its JSON. Missing additive fields fall back to
+/// their defaults (via `#[serde(default)]`), so a file written by an older build still loads.
+///
+/// # Errors
+///
+/// Returns a message if the file cannot be read or is not valid JSON.
+pub(crate) fn read_subgraph(path: &Path) -> Result<SubgraphFile, String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    serde_json::from_slice(&bytes).map_err(|e| e.to_string())
+}
+
+/// One loaded library entry: the file it came from and its parsed contents. The browser lists
+/// these; dropping one into a project (a later step) reads `file.graph`.
+#[derive(Debug, Clone)]
+pub(crate) struct LibraryEntry {
+    /// The `.ymirsub` file this entry was read from.
+    pub path: PathBuf,
+    /// The parsed subgraph (documentation, seed, and inner graph).
+    pub file: SubgraphFile,
+}
+
+/// The result of scanning the library directory: the entries that parsed, plus a per-file error
+/// for each one that did not. A single corrupt file is reported without hiding the rest, so the
+/// browser can still list the good entries and surface the bad ones.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct LibraryListing {
+    /// The successfully parsed entries, sorted by display name then path for a stable order.
+    pub entries: Vec<LibraryEntry>,
+    /// Files that could not be read or parsed, paired with the reason.
+    pub errors: Vec<(PathBuf, String)>,
+}
+
+/// Scans the user library directory for saved subgraphs. A missing directory (nothing saved
+/// yet) or no resolvable library base yields an empty listing rather than an error. See
+/// [`load_library_from`] for the per-file behavior.
+pub(crate) fn load_library() -> LibraryListing {
+    match library_dir() {
+        Some(dir) => load_library_from(&dir),
+        None => LibraryListing::default(),
+    }
+}
+
+/// Scans `dir` for `*.ymirsub` files and parses each, collecting successes into `entries`
+/// (sorted by display name then path) and failures into `errors`. A missing directory yields an
+/// empty listing; any other directory-read failure is recorded as an error against `dir`.
+/// Non-`.ymirsub` files are ignored.
+pub(crate) fn load_library_from(dir: &Path) -> LibraryListing {
+    let mut listing = LibraryListing::default();
+    let read_dir = match std::fs::read_dir(dir) {
+        Ok(read_dir) => read_dir,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return listing,
+        Err(e) => {
+            listing.errors.push((dir.to_path_buf(), e.to_string()));
+            return listing;
+        }
+    };
+    for entry in read_dir {
+        let path = match entry {
+            Ok(entry) => entry.path(),
+            Err(e) => {
+                listing.errors.push((dir.to_path_buf(), e.to_string()));
+                continue;
+            }
+        };
+        if path.extension().and_then(|e| e.to_str()) != Some("ymirsub") {
+            continue;
+        }
+        match read_subgraph(&path) {
+            Ok(file) => listing.entries.push(LibraryEntry { path, file }),
+            Err(err) => listing.errors.push((path, err)),
+        }
+    }
+    listing
+        .entries
+        .sort_by(|a, b| a.file.name.cmp(&b.file.name).then(a.path.cmp(&b.path)));
+    listing
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,5 +267,62 @@ mod tests {
         );
         let back: SubgraphFile = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(file, back);
+    }
+
+    #[test]
+    fn write_then_read_round_trips_through_a_file() {
+        let file = sample();
+        let path =
+            std::env::temp_dir().join(format!("ymir-subgraph-rw-{}.ymirsub", std::process::id()));
+        write_subgraph(&path, &file).expect("write");
+        let back = read_subgraph(&path).expect("read");
+        std::fs::remove_file(&path).expect("cleanup");
+        assert_eq!(file, back);
+    }
+
+    #[test]
+    fn a_missing_directory_loads_as_an_empty_listing() {
+        let dir = std::env::temp_dir().join(format!("ymir-lib-missing-{}", std::process::id()));
+        // Deliberately not created.
+        let listing = load_library_from(&dir);
+        assert!(listing.entries.is_empty());
+        assert!(listing.errors.is_empty());
+    }
+
+    #[test]
+    fn load_lists_ymirsub_files_sorted_by_name_and_records_bad_ones() {
+        let dir = std::env::temp_dir().join(format!("ymir-lib-load-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+
+        // Two valid entries, written out of alphabetical order to prove the sort.
+        let mut zulu = sample();
+        zulu.name = "Zulu".to_string();
+        write_subgraph(&dir.join("zulu.ymirsub"), &zulu).expect("write zulu");
+        let mut alpha = sample();
+        alpha.name = "Alpha".to_string();
+        write_subgraph(&dir.join("alpha.ymirsub"), &alpha).expect("write alpha");
+        // A non-library file, ignored entirely.
+        std::fs::write(dir.join("notes.txt"), "ignore me").expect("write txt");
+        // A corrupt library file, reported as an error rather than dropped silently.
+        std::fs::write(dir.join("broken.ymirsub"), "{ not json").expect("write broken");
+
+        let listing = load_library_from(&dir);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+
+        let names: Vec<&str> = listing
+            .entries
+            .iter()
+            .map(|e| e.file.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            ["Alpha", "Zulu"],
+            "entries sorted by name, txt ignored"
+        );
+        assert_eq!(listing.errors.len(), 1, "the corrupt file is reported");
+        assert!(
+            listing.errors[0].0.ends_with("broken.ymirsub"),
+            "the error names the offending file"
+        );
     }
 }

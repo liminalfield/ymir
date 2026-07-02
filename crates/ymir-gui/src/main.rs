@@ -40,6 +40,8 @@ use thumbnails::ThumbnailEngine;
 mod build;
 // The subgraph library: saved subgraphs as standalone files (#106).
 mod library;
+// The collapsible left dock hosting project-scoped panes, the library first (#106).
+mod dock;
 
 mod preferences;
 // The GUI project file: graph + canvas view-state, save/open (#75).
@@ -355,6 +357,11 @@ struct AppState {
     /// The "Save to library" dialog (#106), open while documenting a subgraph being saved.
     /// `None` when closed.
     library_save: Option<LibrarySave>,
+    /// The subgraph library listing (#106): the saved subgraphs the left dock browses. Loaded
+    /// from disk in the app shell (never in `AppState::new`) and refreshed after a save.
+    library: library::LibraryListing,
+    /// The left dock's open/collapsed state and active pane (#106).
+    dock: dock::DockState,
     /// The user's app-global preferences (the author profile, #106), loaded from config at
     /// startup and edited via the Settings dialog. Persists across projects.
     preferences: preferences::Preferences,
@@ -553,6 +560,11 @@ impl AppState {
             preview_pin: None,
             rename: None,
             library_save: None,
+            // Env-free defaults (empty listing, collapsed dock); the real library is loaded in
+            // the app shell so the test-constructed state never touches the filesystem, matching
+            // apply_default.
+            library: library::LibraryListing::default(),
+            dock: dock::DockState::default(),
             // Env-free default (empty profile); the real file is overlaid in the app shell so
             // the test-constructed state never touches the filesystem, matching apply_default.
             preferences: preferences::Preferences::default(),
@@ -987,7 +999,11 @@ impl AppState {
             return;
         }
         match self.write_subgraph_file(&dialog) {
-            Ok(path) => self.status = Some(format!("Saved to library: {}", path.display())),
+            Ok(path) => {
+                self.status = Some(format!("Saved to library: {}", path.display()));
+                // Refresh the browser so the new entry appears without a restart.
+                self.reload_library();
+            }
             Err(err) => {
                 self.library_save = Some(LibrarySave {
                     error: Some(err),
@@ -995,6 +1011,12 @@ impl AppState {
                 });
             }
         }
+    }
+
+    /// Rescans the library directory into `self.library`. Called from the app shell at startup and
+    /// after a save, never from `AppState::new` (which must stay env-free).
+    fn reload_library(&mut self) {
+        self.library = library::load_library();
     }
 
     /// Commits the open Settings dialog: installs its draft as the live preferences and writes
@@ -2365,6 +2387,103 @@ fn right_panel_pane(ui: &mut egui::Ui, state: &mut AppState) {
     }
 }
 inventory::submit! { PaneKind { id: "right-panel", draw: right_panel_pane } }
+
+/// The subgraph library dock pane (#106): the saved subgraphs, grouped by category, for the user
+/// to browse. Each entry shows its documentation (description, ports, author, license) on hover.
+/// Dropping an entry into a project is a later step; corrupt files are surfaced at the bottom
+/// rather than hidden, so a bad file never silently disappears.
+fn library_pane(ui: &mut egui::Ui, state: &mut AppState) {
+    let listing = &state.library;
+    if listing.entries.is_empty() && listing.errors.is_empty() {
+        ui.add_space(8.0);
+        ui.weak("No saved subgraphs yet.");
+        ui.add_space(2.0);
+        ui.weak("Right-click a subgraph container on the canvas and choose \"Save to library\".");
+        return;
+    }
+
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            // Group by category (already name-sorted within each), non-empty categories
+            // alphabetically first, then a trailing "Uncategorized" group for the blank ones.
+            let mut by_category: BTreeMap<&str, Vec<&library::LibraryEntry>> = BTreeMap::new();
+            for entry in &listing.entries {
+                by_category
+                    .entry(entry.file.category.trim())
+                    .or_default()
+                    .push(entry);
+            }
+            for (category, entries) in by_category.iter().filter(|(c, _)| !c.is_empty()) {
+                egui::CollapsingHeader::new(*category)
+                    .default_open(true)
+                    .show(ui, |ui| library_entries(ui, entries));
+            }
+            if let Some(entries) = by_category.get("") {
+                egui::CollapsingHeader::new("Uncategorized")
+                    .default_open(true)
+                    .show(ui, |ui| library_entries(ui, entries));
+            }
+
+            if !listing.errors.is_empty() {
+                ui.add_space(8.0);
+                ui.separator();
+                let error = ui.visuals().error_fg_color;
+                ui.colored_label(error, "Could not load:");
+                for (path, err) in &listing.errors {
+                    let name = path.file_name().map_or_else(
+                        || path.display().to_string(),
+                        |n| n.to_string_lossy().into_owned(),
+                    );
+                    ui.colored_label(error, format!("• {name}"))
+                        .on_hover_text(err);
+                }
+            }
+        });
+}
+inventory::submit! {
+    dock::DockPane {
+        id: "library",
+        icon: egui_phosphor::regular::BOOKS,
+        title: "Library",
+        draw: library_pane,
+    }
+}
+
+/// Renders one category's library entries as rows, each showing its documentation on hover.
+/// Selection and insertion are a later step, so a click does nothing yet.
+fn library_entries(ui: &mut egui::Ui, entries: &[&library::LibraryEntry]) {
+    for entry in entries {
+        let file = &entry.file;
+        ui.selectable_label(false, &file.name)
+            .on_hover_ui(|ui| library_entry_tooltip(ui, file));
+    }
+}
+
+/// The hover card for a library entry: its name, description, port counts, and (when present)
+/// author and license.
+fn library_entry_tooltip(ui: &mut egui::Ui, file: &library::SubgraphFile) {
+    ui.strong(&file.name);
+    if !file.description.trim().is_empty() {
+        ui.label(&file.description);
+    }
+    ui.weak(format!(
+        "{} in, {} out",
+        file.inputs.len(),
+        file.outputs.len()
+    ));
+    if !file.author.is_empty() {
+        let who = if file.author.name.trim().is_empty() {
+            "(unnamed author)".to_string()
+        } else {
+            file.author.name.clone()
+        };
+        ui.weak(format!("by {who}"));
+    }
+    if !file.license.trim().is_empty() {
+        ui.weak(format!("License: {}", file.license));
+    }
+}
 
 /// The selected node's inspector: its display-name override and parameter widgets.
 fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
@@ -4467,6 +4586,90 @@ fn default_layout() -> Layout {
     }
 }
 
+/// The collapsed dock's width: a narrow icon rail, wide enough for one Phosphor glyph plus its
+/// button padding and the rail's own margin.
+const DOCK_RAIL_WIDTH: f32 = 36.0;
+
+/// Mounts the left dock (#106): archetype 2's project/global column, mirroring the right pane
+/// below the full-width ribbon. Collapsed, it is a narrow icon rail (one button per registered
+/// dock pane); open, it is a full pane with a switcher header (the pane icons plus a collapse
+/// button) over the active pane's body. Returns the panel response so the caller can draw its
+/// right border with the other section borders.
+fn mount_dock(ui: &mut egui::Ui, state: &mut AppState) -> egui::InnerResponse<()> {
+    let panes = dock::dock_panes();
+    // Resolve the active pane: an empty or stale id falls back to the first registered pane, so
+    // the dock always has something to show once opened.
+    let active_id: String = panes
+        .iter()
+        .find(|pane| pane.id == state.dock.active)
+        .or_else(|| panes.first())
+        .map_or_else(String::new, |pane| pane.id.to_string());
+
+    if state.dock.open {
+        egui::Panel::left("dock-panel")
+            .resizable(true)
+            .default_size(240.0)
+            .min_size(180.0)
+            .max_size(420.0)
+            .show_separator_line(false)
+            .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(0))
+            .show_inside(ui, |ui| {
+                // Switcher header: the pane icons on the left, a collapse button on the right.
+                header_strip(ui, |ui| {
+                    for pane in &panes {
+                        let selected = pane.id == active_id;
+                        if ui
+                            .selectable_label(selected, pane.icon)
+                            .on_hover_text(pane.title)
+                            .clicked()
+                        {
+                            state.dock.active = pane.id.to_string();
+                        }
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .button(egui_phosphor::regular::CARET_LEFT)
+                            .on_hover_text("Collapse")
+                            .clicked()
+                        {
+                            state.dock.open = false;
+                        }
+                    });
+                });
+                // The active pane's body.
+                egui::CentralPanel::default()
+                    .frame(
+                        egui::Frame::side_top_panel(ui.style())
+                            .inner_margin(egui::Margin::symmetric(8, 6)),
+                    )
+                    .show_inside(ui, |ui| {
+                        if let Some(pane) = dock::dock_pane(&active_id) {
+                            (pane.draw)(ui, state);
+                        }
+                    });
+            })
+    } else {
+        // Collapsed: a narrow icon rail. Clicking an icon opens the dock to that pane.
+        egui::Panel::left("dock-panel")
+            .resizable(false)
+            .exact_size(DOCK_RAIL_WIDTH)
+            .show_separator_line(false)
+            .frame(
+                egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::symmetric(4, 6)),
+            )
+            .show_inside(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    for pane in &panes {
+                        if ui.button(pane.icon).on_hover_text(pane.title).clicked() {
+                            state.dock.open = true;
+                            state.dock.active = pane.id.to_string();
+                        }
+                    }
+                });
+            })
+    }
+}
+
 /// The v1 layout backend: mounts the panes named by `layout` into the five-section
 /// structure (menu, workspace, side column, footer, beneath the OS title bar).
 ///
@@ -4521,6 +4724,11 @@ fn mount(layout: &Layout, ui: &mut egui::Ui, state: &mut AppState) {
         .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::symmetric(4, 2)))
         .show_inside(ui, |ui| draw_pane(layout.right_panel, ui, state));
 
+    // Section 3-left: the dock (archetype 2, left = project/global sources and tools). Like the
+    // right column it sits below the ribbon and flanks the canvas; its right border is drawn with
+    // the section borders below. Created after the right column so both bound the workspace.
+    let dock = mount_dock(ui, state);
+
     // Section 3: the workspace body — the canvas with the 3D viewport stacked beneath it,
     // flanked by the side column. No frame margin, so the canvas hugs the section borders.
     egui::CentralPanel::default()
@@ -4566,6 +4774,11 @@ fn mount(layout: &Layout, ui: &mut egui::Ui, state: &mut AppState) {
         section_4.response.rect.y_range(),
         heavy,
     );
+    painter.vline(
+        dock.response.rect.right(),
+        dock.response.rect.y_range(),
+        heavy,
+    );
 }
 
 // ---- app shell --------------------------------------------------------------
@@ -4607,6 +4820,9 @@ impl YmirApp {
         // Overlay the user's saved preferences (the author profile, #106) from config, here in
         // the app shell so the test-constructed state never touches the filesystem.
         apply_preferences(&mut state);
+        // Load the subgraph library listing for the left dock (#106), again in the app shell so
+        // the test-constructed state never touches the filesystem.
+        state.reload_library();
         // Load the recent-projects list from config (empty on first run), here in the app
         // shell so the test-constructed state never touches the filesystem.
         state.recent = load_recent();
