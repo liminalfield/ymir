@@ -16,7 +16,7 @@ use egui_snarl::{NodeId as SnarlNodeId, Snarl};
 use ymir_core::registry;
 use ymir_core::{
     EvalCache, EvalRequest, Extraction, Field, FieldStore, Graph, INPUT_TYPE_ID, NodeId,
-    OUTPUT_TYPE_ID, ParamValue, Region,
+    OUTPUT_TYPE_ID, ParamValue, Params, Region, SUBGRAPH_TYPE_ID,
 };
 use ymir_nodes::{CategoryDef, categories, find_category, tr};
 
@@ -362,6 +362,10 @@ struct AppState {
     library: library::LibraryListing,
     /// The left dock's open/collapsed state and active pane (#106).
     dock: dock::DockState,
+    /// The library entry selected for the detail view, by its file path (#106). `None` when
+    /// nothing is selected; a stale path (the file was removed by a reload) resolves to `None`
+    /// at render time. Selecting an entry reveals its documentation and an Insert action.
+    library_selection: Option<std::path::PathBuf>,
     /// The user's app-global preferences (the author profile, #106), loaded from config at
     /// startup and edited via the Settings dialog. Persists across projects.
     preferences: preferences::Preferences,
@@ -565,6 +569,7 @@ impl AppState {
             // apply_default.
             library: library::LibraryListing::default(),
             dock: dock::DockState::default(),
+            library_selection: None,
             // Env-free default (empty profile); the real file is overlaid in the app shell so
             // the test-constructed state never touches the filesystem, matching apply_default.
             preferences: preferences::Preferences::default(),
@@ -1017,6 +1022,48 @@ impl AppState {
     /// after a save, never from `AppState::new` (which must stay env-free).
     fn reload_library(&mut self) {
         self.library = library::load_library();
+    }
+
+    /// Inserts a saved library subgraph into the active canvas as a container node (#106): rebuilds
+    /// the saved inner graph, nests it, applies the saved seed and the library name, and registers
+    /// the saved interior layout so diving in opens to the author's arrangement. The new node is
+    /// selected and reported on the status line. A no-op (with a note) if the saved graph cannot be
+    /// rebuilt (a corrupt or version-incompatible file) or the container type is unregistered,
+    /// never a panic.
+    fn insert_subgraph_from_library(&mut self, file: &library::SubgraphFile) {
+        // Rebuild the inner graph first, so an unloadable document adds nothing to the canvas.
+        let inner = match Graph::from_document(&file.graph) {
+            Ok(inner) => inner,
+            Err(err) => {
+                self.status = Some(format!("Could not insert \"{}\": {err}", file.name));
+                return;
+            }
+        };
+        let pos = spawn_pos(self.canvas_view, self.graph.node_count());
+        let Some(id) = canvas::add_node(&mut self.graph, &mut self.snarl, SUBGRAPH_TYPE_ID, pos)
+        else {
+            self.status = Some("The subgraph node type is unavailable.".to_string());
+            return;
+        };
+        // The container was just created, so these edits cannot fail; on the impossible error,
+        // report it rather than panic, leaving the harmless empty container in place.
+        let params = Params::new().with("seed", ParamValue::Int(file.seed));
+        if self.graph.set_nested(id, inner).is_err()
+            || self.graph.set_params(id, params).is_err()
+            || self.graph.set_name(id, name_override(&file.name)).is_err()
+        {
+            self.status = Some(format!("Could not finish inserting \"{}\".", file.name));
+            return;
+        }
+        // Register the saved interior layout under the new container's path so a dive-in restores
+        // the author's arrangement. The node exists, so `stable_id` is present; guard, never unwrap.
+        if let Some(handle) = self.graph.stable_id(id) {
+            let mut path = self.current_path();
+            path.push(handle);
+            self.subgraph_layouts.insert(path, file.view.nodes.clone());
+            self.select_only(handle);
+        }
+        self.status = Some(format!("Inserted \"{}\".", file.name));
     }
 
     /// Commits the open Settings dialog: installs its draft as the live preferences and writes
@@ -2389,9 +2436,9 @@ fn right_panel_pane(ui: &mut egui::Ui, state: &mut AppState) {
 inventory::submit! { PaneKind { id: "right-panel", draw: right_panel_pane } }
 
 /// The subgraph library dock pane (#106): the saved subgraphs, grouped by category, for the user
-/// to browse. Each entry shows its documentation (description, ports, author, license) on hover.
-/// Dropping an entry into a project is a later step; corrupt files are surfaced at the bottom
-/// rather than hidden, so a bad file never silently disappears.
+/// to browse and insert. The scrolling list sits above a detail section that appears for the
+/// selected entry (its documentation and an Insert action); corrupt files are surfaced at the
+/// bottom of the list rather than hidden, so a bad file never silently disappears.
 fn library_pane(ui: &mut egui::Ui, state: &mut AppState) {
     let listing = &state.library;
     if listing.entries.is_empty() && listing.errors.is_empty() {
@@ -2402,44 +2449,24 @@ fn library_pane(ui: &mut egui::Ui, state: &mut AppState) {
         return;
     }
 
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            // Group by category (already name-sorted within each), non-empty categories
-            // alphabetically first, then a trailing "Uncategorized" group for the blank ones.
-            let mut by_category: BTreeMap<&str, Vec<&library::LibraryEntry>> = BTreeMap::new();
-            for entry in &listing.entries {
-                by_category
-                    .entry(entry.file.category.trim())
-                    .or_default()
-                    .push(entry);
-            }
-            for (category, entries) in by_category.iter().filter(|(c, _)| !c.is_empty()) {
-                egui::CollapsingHeader::new(*category)
-                    .default_open(true)
-                    .show(ui, |ui| library_entries(ui, entries));
-            }
-            if let Some(entries) = by_category.get("") {
-                egui::CollapsingHeader::new("Uncategorized")
-                    .default_open(true)
-                    .show(ui, |ui| library_entries(ui, entries));
-            }
+    // A selection whose file is gone (removed by a reload) resolves to none, so the detail
+    // section never references an entry the list no longer shows.
+    let has_selection = state
+        .library_selection
+        .as_ref()
+        .is_some_and(|path| state.library.entries.iter().any(|e| &e.path == path));
+    if !has_selection {
+        state.library_selection = None;
+    }
 
-            if !listing.errors.is_empty() {
-                ui.add_space(8.0);
-                ui.separator();
-                let error = ui.visuals().error_fg_color;
-                ui.colored_label(error, "Could not load:");
-                for (path, err) in &listing.errors {
-                    let name = path.file_name().map_or_else(
-                        || path.display().to_string(),
-                        |n| n.to_string_lossy().into_owned(),
-                    );
-                    ui.colored_label(error, format!("• {name}"))
-                        .on_hover_text(err);
-                }
-            }
-        });
+    // Detail is a bottom panel so it reserves its own height and the list scrolls above it. Added
+    // before the central list, as egui requires side/edge panels before the central region.
+    if has_selection {
+        egui::Panel::bottom("library-detail")
+            .resizable(false)
+            .show_inside(ui, |ui| library_detail(ui, state));
+    }
+    egui::CentralPanel::default().show_inside(ui, |ui| library_list(ui, state));
 }
 inventory::submit! {
     dock::DockPane {
@@ -2450,13 +2477,158 @@ inventory::submit! {
     }
 }
 
-/// Renders one category's library entries as rows, each showing its documentation on hover.
-/// Selection and insertion are a later step, so a click does nothing yet.
-fn library_entries(ui: &mut egui::Ui, entries: &[&library::LibraryEntry]) {
+/// The scrolling entry list: saved subgraphs grouped by category (name-sorted within each),
+/// then any load errors. Clicking an entry selects it (clicking the selected one again clears
+/// the selection), which reveals its detail section below.
+fn library_list(ui: &mut egui::Ui, state: &mut AppState) {
+    let selection = state.library_selection.clone();
+    // The row a click landed on, applied after the list borrow ends (the closure only reads the
+    // listing, so it cannot also mutate the selection).
+    let mut clicked: Option<std::path::PathBuf> = None;
+    {
+        let listing = &state.library;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                // Group by category, non-empty categories alphabetically first, then a trailing
+                // "Uncategorized" group for the blank ones.
+                let mut by_category: BTreeMap<&str, Vec<&library::LibraryEntry>> = BTreeMap::new();
+                for entry in &listing.entries {
+                    by_category
+                        .entry(entry.file.category.trim())
+                        .or_default()
+                        .push(entry);
+                }
+                for (category, entries) in by_category.iter().filter(|(c, _)| !c.is_empty()) {
+                    egui::CollapsingHeader::new(*category)
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            library_entries(ui, entries, selection.as_deref(), &mut clicked);
+                        });
+                }
+                if let Some(entries) = by_category.get("") {
+                    egui::CollapsingHeader::new("Uncategorized")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            library_entries(ui, entries, selection.as_deref(), &mut clicked);
+                        });
+                }
+
+                if !listing.errors.is_empty() {
+                    ui.add_space(8.0);
+                    ui.separator();
+                    let error = ui.visuals().error_fg_color;
+                    ui.colored_label(error, "Could not load:");
+                    for (path, err) in &listing.errors {
+                        let name = path.file_name().map_or_else(
+                            || path.display().to_string(),
+                            |n| n.to_string_lossy().into_owned(),
+                        );
+                        ui.colored_label(error, format!("• {name}"))
+                            .on_hover_text(err);
+                    }
+                }
+            });
+    }
+    if let Some(path) = clicked {
+        // Toggle: re-clicking the selected entry clears it, so the detail can be dismissed.
+        state.library_selection = (selection.as_deref() != Some(path.as_path())).then_some(path);
+    }
+}
+
+/// Renders one category's library entries as selectable rows, highlighting the selected one and
+/// showing each entry's documentation on hover. A click records the entry's path in `clicked` for
+/// the caller to apply once the listing borrow has ended.
+fn library_entries(
+    ui: &mut egui::Ui,
+    entries: &[&library::LibraryEntry],
+    selection: Option<&std::path::Path>,
+    clicked: &mut Option<std::path::PathBuf>,
+) {
     for entry in entries {
         let file = &entry.file;
-        ui.selectable_label(false, &file.name)
-            .on_hover_ui(|ui| library_entry_tooltip(ui, file));
+        let selected = selection == Some(entry.path.as_path());
+        if ui
+            .selectable_label(selected, &file.name)
+            .on_hover_ui(|ui| library_entry_tooltip(ui, file))
+            .clicked()
+        {
+            *clicked = Some(entry.path.clone());
+        }
+    }
+}
+
+/// The detail section for the selected library entry: its documentation and an Insert action that
+/// instantiates it into the active canvas. A no-op if the selection has gone stale (the entry was
+/// removed by a reload), which also clears the dangling selection.
+fn library_detail(ui: &mut egui::Ui, state: &mut AppState) {
+    let Some(path) = state.library_selection.clone() else {
+        return;
+    };
+    let insert = {
+        let Some(entry) = state.library.entries.iter().find(|e| e.path == path) else {
+            state.library_selection = None;
+            return;
+        };
+        ui.add_space(6.0);
+        library_entry_detail(ui, &entry.file);
+        ui.add_space(6.0);
+        ui.button("Insert").clicked()
+    };
+    if insert
+        && let Some(file) = state
+            .library
+            .entries
+            .iter()
+            .find(|e| e.path == path)
+            .map(|e| e.file.clone())
+    {
+        state.insert_subgraph_from_library(&file);
+    }
+}
+
+/// The pinned detail card for a library entry: its name, category, description, named input and
+/// output ports, and (when present) author and license. Fuller than the hover tooltip, which
+/// shows only port counts.
+fn library_entry_detail(ui: &mut egui::Ui, file: &library::SubgraphFile) {
+    ui.strong(&file.name);
+    if !file.category.trim().is_empty() {
+        ui.weak(&file.category);
+    }
+    if !file.description.trim().is_empty() {
+        ui.add_space(2.0);
+        ui.label(&file.description);
+    }
+    library_port_list(ui, "Inputs", &file.inputs);
+    library_port_list(ui, "Outputs", &file.outputs);
+    if !file.author.is_empty() {
+        let who = if file.author.name.trim().is_empty() {
+            "(unnamed author)".to_string()
+        } else {
+            file.author.name.clone()
+        };
+        ui.weak(format!("by {who}"));
+    }
+    if !file.license.trim().is_empty() {
+        ui.weak(format!("License: {}", file.license));
+    }
+}
+
+/// Lists a subgraph's ports under a heading, by name (falling back to the port index for an
+/// unnamed one). Draws nothing when there are no ports on that side.
+fn library_port_list(ui: &mut egui::Ui, heading: &str, ports: &[library::PortDoc]) {
+    if ports.is_empty() {
+        return;
+    }
+    ui.add_space(2.0);
+    ui.weak(heading);
+    for port in ports {
+        let name = if port.name.trim().is_empty() {
+            format!("#{}", port.index)
+        } else {
+            port.name.clone()
+        };
+        ui.label(format!("• {name}"));
     }
 }
 
@@ -5043,6 +5215,105 @@ mod tests {
         );
         inner.connect(i, 0, o, 0).expect("wire inner");
         inner
+    }
+
+    /// A minimal library file wrapping the identity inner graph, with a chosen seed and a
+    /// one-node interior layout, for the insert tests.
+    #[cfg(test)]
+    fn sample_library_file(seed: i64) -> library::SubgraphFile {
+        let mut view = project_file::ViewState::default();
+        view.nodes.insert(0, [12.0, 34.0]);
+        library::SubgraphFile {
+            format_version: library::SUBGRAPH_FORMAT_VERSION,
+            name: "Passthrough".to_string(),
+            category: "Utility".to_string(),
+            description: "Feeds input to output.".to_string(),
+            inputs: vec![library::PortDoc {
+                index: 0,
+                name: "In".to_string(),
+                description: String::new(),
+            }],
+            outputs: vec![library::PortDoc {
+                index: 0,
+                name: "Out".to_string(),
+                description: String::new(),
+            }],
+            author: preferences::AuthorProfile::default(),
+            license: String::new(),
+            seed,
+            graph: identity_inner().to_document(),
+            view,
+        }
+    }
+
+    #[test]
+    fn inserting_a_library_subgraph_adds_a_named_seeded_container() {
+        let mut state = AppState::new();
+        state.new_project();
+        let before = state.graph.node_count();
+
+        state.insert_subgraph_from_library(&sample_library_file(7));
+
+        assert_eq!(
+            state.graph.node_count(),
+            before + 1,
+            "exactly one container added"
+        );
+        let handle = state.primary.expect("the new container is selected");
+        let id = state.graph.node_id_of(handle).expect("container id");
+
+        // The saved inner graph is nested, and the container's arity reflects its boundary
+        // markers (one Input, one Output).
+        let inner = state.graph.nested(id).expect("inner graph nested");
+        assert_eq!(inner.node_count(), 2, "Input + Output preserved");
+        let spec = state.graph.spec(id).expect("spec");
+        assert_eq!(spec.inputs.len(), 1, "one input port from the Input marker");
+        assert_eq!(
+            spec.outputs.len(),
+            1,
+            "one output port from the Output marker"
+        );
+
+        // The saved seed and the library name are applied.
+        assert_eq!(
+            state.graph.params(id).expect("params").get_i64("seed", -1),
+            7,
+            "the saved seed is applied"
+        );
+        assert_eq!(
+            state.graph.name(id),
+            Some("Passthrough"),
+            "the library name becomes the display name"
+        );
+
+        // The saved interior layout is registered under the new container's path.
+        assert_eq!(
+            state.subgraph_layouts.get(&vec![handle]).map(BTreeMap::len),
+            Some(1),
+            "the saved interior layout is registered"
+        );
+    }
+
+    #[test]
+    fn inserting_a_corrupt_library_subgraph_adds_nothing_and_reports_it() {
+        let mut state = AppState::new();
+        state.new_project();
+        let before = state.graph.node_count();
+
+        // An unloadable document (an unsupported format version) must add nothing.
+        let mut file = sample_library_file(1);
+        file.graph.format_version = file.graph.format_version.wrapping_add(1);
+        state.insert_subgraph_from_library(&file);
+
+        assert_eq!(
+            state.graph.node_count(),
+            before,
+            "a bad document leaves the canvas untouched"
+        );
+        assert!(
+            state.status.is_some(),
+            "the failure is reported to the user"
+        );
     }
 
     #[test]

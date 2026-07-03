@@ -32,8 +32,9 @@ use crate::spec::{NodeSpec, PortSpec};
 pub const INPUT_TYPE_ID: &str = "subgraph.input";
 /// Type id of a subgraph output marker.
 pub const OUTPUT_TYPE_ID: &str = "subgraph.output";
-/// Type id of the subgraph container.
-pub(crate) const SUBGRAPH_TYPE_ID: &str = "subgraph";
+/// Type id of the subgraph container. Exported so a host (the GUI) can instantiate a container
+/// directly, for example when inserting a saved subgraph from the library.
+pub const SUBGRAPH_TYPE_ID: &str = "subgraph";
 
 /// The default display label for a subgraph boundary marker and its derived container port,
 /// 1-based (e.g. `"Input 1"`, `"Output 2"`). Shared by the container's port naming and the

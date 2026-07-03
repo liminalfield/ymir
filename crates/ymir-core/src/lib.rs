@@ -59,4 +59,4 @@ pub use param::{Curve, ParamKind, ParamSpec, ParamValue, Params, Scale, Unit};
 pub use project::{Connection, FORMAT_VERSION, NodeDocument, ProjectDocument};
 pub use region::Region;
 pub use spec::{NodeKind, NodeSpec, PortSpec};
-pub use subgraph::{INPUT_TYPE_ID, OUTPUT_TYPE_ID, marker_port_label};
+pub use subgraph::{INPUT_TYPE_ID, OUTPUT_TYPE_ID, SUBGRAPH_TYPE_ID, marker_port_label};
