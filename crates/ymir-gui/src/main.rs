@@ -147,6 +147,16 @@ const MAX_BUILD_OUTPUTS: usize = 64;
 /// bar or the node tabs.
 const MENU_VPAD: f32 = 4.0;
 
+/// Inner padding for the always-visible search fields (the node palette and the subgraph
+/// library), with more vertical room than egui's default so the text is not cramped against the
+/// box borders.
+const SEARCH_FIELD_MARGIN: egui::Margin = egui::Margin {
+    left: 6,
+    right: 6,
+    top: 5,
+    bottom: 5,
+};
+
 /// Minimum drag (px) before a left-press on empty canvas counts as a marquee rather than
 /// a click; below it, the press is the click that selects/clears (#84).
 const MARQUEE_MIN_DRAG: f32 = 4.0;
@@ -2362,6 +2372,7 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 ui.add(
                     egui::TextEdit::singleline(&mut state.search)
                         .hint_text("search nodes")
+                        .margin(SEARCH_FIELD_MARGIN)
                         .desired_width(160.0),
                 );
                 // Clear button, shown only when there is a query (#56).
@@ -2756,6 +2767,7 @@ fn library_browser(ui: &mut egui::Ui, state: &mut AppState) {
         ui.add(
             egui::TextEdit::singleline(&mut state.library_search)
                 .hint_text("search subgraphs")
+                .margin(SEARCH_FIELD_MARGIN)
                 .desired_width((ui.available_width() - clear_width).max(0.0)),
         );
         if has_query && ui.small_button("×").on_hover_text("Clear search").clicked() {
