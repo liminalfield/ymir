@@ -2688,6 +2688,10 @@ fn library_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // usable third of the dock, floored so a bad first-frame height cannot shrink it to a sliver.
     // The user can still drag the divider to make it larger.
     let third = (ui.available_height() / 3.0).max(180.0);
+    // Each subpane carries its own titled header band (like the preview and node-list panes), so
+    // the browser and the inspector each read as their own thing rather than the dock's switcher
+    // header appearing to title the browser alone. The header spans the full pane width; the
+    // content below it is padded.
     let inspector = egui::Panel::bottom("library-inspector")
         .resizable(true)
         .min_size(third)
@@ -2695,12 +2699,26 @@ fn library_pane(ui: &mut egui::Ui, state: &mut AppState) {
         .frame(
             egui::Frame::side_top_panel(&style)
                 .fill(inspector_fill)
-                .inner_margin(pad),
+                .inner_margin(0),
         )
-        .show_inside(ui, |ui| library_inspector(ui, state));
+        .show_inside(ui, |ui| {
+            header_strip(ui, |ui| {
+                ui.strong("Subgraph Inspector");
+            });
+            egui::Frame::NONE
+                .inner_margin(pad)
+                .show(ui, |ui| library_inspector(ui, state));
+        });
     egui::CentralPanel::default()
-        .frame(egui::Frame::side_top_panel(&style).inner_margin(pad))
-        .show_inside(ui, |ui| library_browser(ui, state));
+        .frame(egui::Frame::side_top_panel(&style).inner_margin(0))
+        .show_inside(ui, |ui| {
+            header_strip(ui, |ui| {
+                ui.strong("Subgraph Library");
+            });
+            egui::Frame::NONE
+                .inner_margin(pad)
+                .show(ui, |ui| library_browser(ui, state));
+        });
 
     // A solid divider spanning the full dock width (the panes now reach both borders), matching the
     // canvas/viewport border rather than egui's faint default separator, so the inspector reads as
