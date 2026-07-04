@@ -5121,6 +5121,10 @@ fn default_layout() -> Layout {
 /// button padding and the rail's own margin.
 const DOCK_RAIL_WIDTH: f32 = 36.0;
 
+/// The width of the flanking side panels (the left dock and the right inspector), kept equal so
+/// the workspace is symmetric. Sized to the right panel's square preview plus a small margin.
+const SIDE_PANEL_WIDTH: f32 = 260.0;
+
 /// Mounts the left dock (#106): archetype 2's project/global column, mirroring the right pane
 /// below the full-width ribbon. Collapsed, it is a narrow icon rail (one button per registered
 /// dock pane); open, it is a full pane with a switcher header (the pane icons plus a collapse
@@ -5138,10 +5142,9 @@ fn mount_dock(ui: &mut egui::Ui, state: &mut AppState) -> egui::InnerResponse<()
 
     if state.dock.open {
         egui::Panel::left("dock-panel")
-            .resizable(true)
-            .default_size(240.0)
-            .min_size(180.0)
-            .max_size(420.0)
+            // Fixed width, matching the right inspector so the two side panels are symmetric.
+            .resizable(false)
+            .exact_size(SIDE_PANEL_WIDTH)
             .show_separator_line(false)
             .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(0))
             .show_inside(ui, |ui| {
@@ -5250,7 +5253,7 @@ fn mount(layout: &Layout, ui: &mut egui::Ui, state: &mut AppState) {
         // Not resizable: exact_size alone leaves the panel resizable, so the edge still shows
         // a resize cursor even though dragging does nothing.
         .resizable(false)
-        .exact_size(260.0)
+        .exact_size(SIDE_PANEL_WIDTH)
         .show_separator_line(false)
         .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::symmetric(4, 2)))
         .show_inside(ui, |ui| draw_pane(layout.right_panel, ui, state));

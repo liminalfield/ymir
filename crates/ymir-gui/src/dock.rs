@@ -44,15 +44,26 @@ pub(crate) fn dock_pane(id: &str) -> Option<&'static DockPane> {
     inventory::iter::<DockPane>().find(|pane| pane.id == id)
 }
 
-/// The dock's open/collapsed state and which pane is active. Defaults to collapsed with no active
-/// pane; the renderer resolves an empty or stale `active` to the first registered pane, so the
-/// dock always has a sensible pane to show once opened. Persisting this across sessions is
-/// deferred (it is window state, and belongs under `$XDG_STATE_HOME` per #127).
-#[derive(Debug, Clone, Default)]
+/// The dock's open/collapsed state and which pane is active. Defaults to open with no active pane;
+/// the renderer resolves an empty or stale `active` to the first registered pane, so the dock
+/// always has a sensible pane to show. Persisting this across sessions is deferred (it is window
+/// state, and belongs under `$XDG_STATE_HOME` per #127).
+#[derive(Debug, Clone)]
 pub(crate) struct DockState {
     /// Whether the dock is expanded (a full pane) or collapsed (a narrow icon rail).
     pub open: bool,
     /// The active pane's id. Empty (or naming a pane that no longer exists) resolves to the
     /// first registered pane at render time.
     pub active: String,
+}
+
+impl Default for DockState {
+    fn default() -> Self {
+        // Open on launch so the library is visible without a click; the switcher's collapse
+        // button hides it to the rail.
+        Self {
+            open: true,
+            active: String::new(),
+        }
+    }
 }
