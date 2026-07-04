@@ -371,6 +371,9 @@ struct AppState {
     /// Cleared when the selection changes or the delete resolves, so it never lingers on another
     /// entry.
     library_pending_delete: Option<std::path::PathBuf>,
+    /// The library browser's search query (#106). Filters the entry list by name, category, and
+    /// description; empty shows the full category-grouped listing. Mirrors the node search.
+    library_search: String,
     /// The user's app-global preferences (the author profile, #106), loaded from config at
     /// startup and edited via the Settings dialog. Persists across projects.
     preferences: preferences::Preferences,
@@ -609,6 +612,7 @@ impl AppState {
             dock: dock::DockState::default(),
             library_selection: None,
             library_pending_delete: None,
+            library_search: String::new(),
             // Env-free default (empty profile); the real file is overlaid in the app shell so
             // the test-constructed state never touches the filesystem, matching apply_default.
             preferences: preferences::Preferences::default(),
@@ -2650,8 +2654,8 @@ fn library_pane(ui: &mut egui::Ui, state: &mut AppState) {
         return;
     }
 
-    // A selection whose file is gone (removed by a reload) resolves to none, so the detail
-    // section never references an entry the list no longer shows.
+    // A selection whose file is gone (removed by a reload) resolves to none, so the inspector
+    // never references an entry the list no longer shows.
     let has_selection = state
         .library_selection
         .as_ref()
@@ -2661,14 +2665,31 @@ fn library_pane(ui: &mut egui::Ui, state: &mut AppState) {
         state.library_pending_delete = None;
     }
 
-    // Detail is a bottom panel so it reserves its own height and the list scrolls above it. Added
-    // before the central list, as egui requires side/edge panels before the central region.
-    if has_selection {
-        egui::Panel::bottom("library-detail")
-            .resizable(false)
-            .show_inside(ui, |ui| library_detail(ui, state));
-    }
-    egui::CentralPanel::default().show_inside(ui, |ui| library_list(ui, state));
+    // The browser (search over the entry list) gets the top two-thirds; the selected entry's
+    // inspector fills the bottom third, resizable. The bottom panel is added before the central
+    // region, as egui requires.
+    //
+    // The inspector body is a filling scroll area, and a resizable panel sized around filling
+    // content collapses to its `min_size` (there is no intrinsic content height to hold a larger
+    // `default_size`). So `min_size` is what actually governs the resting height here: set it to a
+    // usable third of the dock, floored so a bad first-frame height cannot shrink it to a sliver.
+    // The user can still drag the divider to make it larger.
+    let third = (ui.available_height() / 3.0).max(180.0);
+    let inspector = egui::Panel::bottom("library-inspector")
+        .resizable(true)
+        .min_size(third)
+        .show_separator_line(false)
+        .show_inside(ui, |ui| library_inspector(ui, state));
+    egui::CentralPanel::default().show_inside(ui, |ui| library_browser(ui, state));
+
+    // Emphasize the split with a solid full-width divider, matching the canvas/viewport border
+    // rather than egui's faint default resize separator, so the two regions read as distinct panes.
+    let color = ui.visuals().widgets.noninteractive.bg_stroke.color;
+    ui.painter().hline(
+        inspector.response.rect.x_range(),
+        inspector.response.rect.top(),
+        egui::Stroke::new(1.0, color),
+    );
 }
 inventory::submit! {
     dock::DockPane {
@@ -2679,10 +2700,40 @@ inventory::submit! {
     }
 }
 
-/// The scrolling entry list: saved subgraphs grouped by category (name-sorted within each),
-/// then any load errors. Clicking an entry selects it (clicking the selected one again clears
-/// the selection), which reveals its detail section below.
-fn library_list(ui: &mut egui::Ui, state: &mut AppState) {
+/// Whether a subgraph file matches a lowercased search query, across its name, category, and
+/// description. An empty query matches everything. Pure, so the filter is unit-tested apart from
+/// the egui drawing.
+fn library_matches(file: &library::SubgraphFile, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    file.name.to_lowercase().contains(query)
+        || file.category.to_lowercase().contains(query)
+        || file.description.to_lowercase().contains(query)
+}
+
+/// The browser below the inspector: a search field over the entry list. With no query the list is
+/// grouped by category (name-sorted within each) with any load errors beneath; with a query it
+/// flattens to the matching entries, name-sorted, like the node search. Clicking an entry selects
+/// it (clicking the selected one again clears the selection), which fills the inspector above.
+fn library_browser(ui: &mut egui::Ui, state: &mut AppState) {
+    // The search field mirrors the node search: a query box with a clear button that appears only
+    // when there is a query. The box fills the width, leaving room for the button.
+    ui.horizontal(|ui| {
+        let has_query = !state.library_search.is_empty();
+        let clear_width = if has_query { 24.0 } else { 0.0 };
+        ui.add(
+            egui::TextEdit::singleline(&mut state.library_search)
+                .hint_text("search subgraphs")
+                .desired_width((ui.available_width() - clear_width).max(0.0)),
+        );
+        if has_query && ui.small_button("×").on_hover_text("Clear search").clicked() {
+            state.library_search.clear();
+        }
+    });
+    ui.add_space(4.0);
+
+    let query = state.library_search.trim().to_lowercase();
     let selection = state.library_selection.clone();
     // The row a click landed on, applied after the list borrow ends (the closure only reads the
     // listing, so it cannot also mutate the selection).
@@ -2692,48 +2743,64 @@ fn library_list(ui: &mut egui::Ui, state: &mut AppState) {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                // Group by category, non-empty categories alphabetically first, then a trailing
-                // "Uncategorized" group for the blank ones.
-                let mut by_category: BTreeMap<&str, Vec<&library::LibraryEntry>> = BTreeMap::new();
-                for entry in &listing.entries {
-                    by_category
-                        .entry(entry.file.category.trim())
-                        .or_default()
-                        .push(entry);
-                }
-                for (category, entries) in by_category.iter().filter(|(c, _)| !c.is_empty()) {
-                    egui::CollapsingHeader::new(*category)
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            library_entries(ui, entries, selection.as_deref(), &mut clicked);
-                        });
-                }
-                if let Some(entries) = by_category.get("") {
-                    egui::CollapsingHeader::new("Uncategorized")
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            library_entries(ui, entries, selection.as_deref(), &mut clicked);
-                        });
-                }
+                if query.is_empty() {
+                    // Group by category, non-empty categories alphabetically first, then a
+                    // trailing "Uncategorized" group for the blank ones.
+                    let mut by_category: BTreeMap<&str, Vec<&library::LibraryEntry>> =
+                        BTreeMap::new();
+                    for entry in &listing.entries {
+                        by_category
+                            .entry(entry.file.category.trim())
+                            .or_default()
+                            .push(entry);
+                    }
+                    for (category, entries) in by_category.iter().filter(|(c, _)| !c.is_empty()) {
+                        egui::CollapsingHeader::new(*category)
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                library_entries(ui, entries, selection.as_deref(), &mut clicked);
+                            });
+                    }
+                    if let Some(entries) = by_category.get("") {
+                        egui::CollapsingHeader::new("Uncategorized")
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                library_entries(ui, entries, selection.as_deref(), &mut clicked);
+                            });
+                    }
 
-                if !listing.errors.is_empty() {
-                    ui.add_space(8.0);
-                    ui.separator();
-                    let error = ui.visuals().error_fg_color;
-                    ui.colored_label(error, "Could not load:");
-                    for (path, err) in &listing.errors {
-                        let name = path.file_name().map_or_else(
-                            || path.display().to_string(),
-                            |n| n.to_string_lossy().into_owned(),
-                        );
-                        ui.colored_label(error, format!("• {name}"))
-                            .on_hover_text(err);
+                    if !listing.errors.is_empty() {
+                        ui.add_space(8.0);
+                        ui.separator();
+                        let error = ui.visuals().error_fg_color;
+                        ui.colored_label(error, "Could not load:");
+                        for (path, err) in &listing.errors {
+                            let name = path.file_name().map_or_else(
+                                || path.display().to_string(),
+                                |n| n.to_string_lossy().into_owned(),
+                            );
+                            ui.colored_label(error, format!("• {name}"))
+                                .on_hover_text(err);
+                        }
+                    }
+                } else {
+                    // A query flattens the list to its matches, name-sorted (entries already are).
+                    let matches: Vec<&library::LibraryEntry> = listing
+                        .entries
+                        .iter()
+                        .filter(|e| library_matches(&e.file, &query))
+                        .collect();
+                    if matches.is_empty() {
+                        ui.add_space(6.0);
+                        ui.weak("No subgraphs match your search.");
+                    } else {
+                        library_entries(ui, &matches, selection.as_deref(), &mut clicked);
                     }
                 }
             });
     }
     if let Some(path) = clicked {
-        // Toggle: re-clicking the selected entry clears it, so the detail can be dismissed.
+        // Toggle: re-clicking the selected entry clears it, so the inspector can be dismissed.
         state.library_selection = (selection.as_deref() != Some(path.as_path())).then_some(path);
         // Changing the selection disarms any pending delete so a confirm never lands on the
         // wrong entry.
@@ -2779,52 +2846,60 @@ enum DetailAction {
     CancelDelete,
 }
 
-/// The detail section for the selected library entry: its documentation, an Insert action that
-/// instantiates it into the active canvas, and a Delete action guarded by a confirm prompt. A
-/// no-op if the selection has gone stale (the entry was removed by a reload), which also clears
-/// the dangling selection.
-fn library_detail(ui: &mut egui::Ui, state: &mut AppState) {
+/// The inspector pane below the browser: for the selected library entry, its documentation and the
+/// Insert / Edit / Delete actions (Delete guarded by a confirm prompt). Shows a placeholder hint
+/// when nothing is selected, and scrolls when the documentation is long. The thumbnail preview and
+/// a proper layout (it is a plain text blob today) come in following steps.
+fn library_inspector(ui: &mut egui::Ui, state: &mut AppState) {
     let Some(path) = state.library_selection.clone() else {
+        ui.add_space(8.0);
+        ui.weak("Select a subgraph to see its details.");
         return;
     };
     let armed = state.library_pending_delete.as_deref() == Some(path.as_path());
     let mut action = DetailAction::None;
     {
-        let Some(entry) = state.library.entries.iter().find(|e| e.path == path) else {
-            state.library_selection = None;
-            state.library_pending_delete = None;
-            return;
-        };
-        ui.add_space(6.0);
-        library_entry_detail(ui, &entry.file);
-        ui.add_space(6.0);
-        if armed {
-            // Deleting removes the file from disk, so confirm before doing it.
-            ui.colored_label(
-                ui.visuals().warn_fg_color,
-                format!("Delete \"{}\"? This removes its file.", entry.file.name),
-            );
-            ui.horizontal(|ui| {
-                if ui.button("Delete").clicked() {
-                    action = DetailAction::ConfirmDelete;
-                }
-                if ui.button("Cancel").clicked() {
-                    action = DetailAction::CancelDelete;
+        // Borrow only the listing (not all of `state`) so the action can mutate state afterward.
+        let listing = &state.library;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                // The pane clears a stale selection before drawing, so this normally resolves; a
+                // one-frame miss just draws nothing rather than panicking.
+                let Some(entry) = listing.entries.iter().find(|e| e.path == path) else {
+                    return;
+                };
+                ui.add_space(6.0);
+                library_entry_detail(ui, &entry.file);
+                ui.add_space(6.0);
+                if armed {
+                    // Deleting removes the file from disk, so confirm before doing it.
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        format!("Delete \"{}\"? This removes its file.", entry.file.name),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.button("Delete").clicked() {
+                            action = DetailAction::ConfirmDelete;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            action = DetailAction::CancelDelete;
+                        }
+                    });
+                } else {
+                    ui.horizontal(|ui| {
+                        if ui.button("Insert").clicked() {
+                            action = DetailAction::Insert;
+                        }
+                        if ui.button("Edit").clicked() {
+                            action = DetailAction::Edit;
+                        }
+                        if ui.button("Delete").clicked() {
+                            action = DetailAction::ArmDelete;
+                        }
+                    });
                 }
             });
-        } else {
-            ui.horizontal(|ui| {
-                if ui.button("Insert").clicked() {
-                    action = DetailAction::Insert;
-                }
-                if ui.button("Edit").clicked() {
-                    action = DetailAction::Edit;
-                }
-                if ui.button("Delete").clicked() {
-                    action = DetailAction::ArmDelete;
-                }
-            });
-        }
     }
     match action {
         DetailAction::Insert => {
@@ -5606,6 +5681,20 @@ mod tests {
             state.library_pending_delete, None,
             "the armed delete is cleared"
         );
+    }
+
+    #[test]
+    fn library_search_matches_name_category_and_description() {
+        let file = sample_library_file(1); // name "Passthrough", category "Utility", desc "Feeds..."
+        // An empty query matches everything.
+        assert!(library_matches(&file, ""));
+        // Case-insensitive substring on the name.
+        assert!(library_matches(&file, "pass"));
+        // Matches on the category and the description too.
+        assert!(library_matches(&file, "utility"));
+        assert!(library_matches(&file, "feeds"));
+        // A query in none of the three fields does not match.
+        assert!(!library_matches(&file, "erosion"));
     }
 
     #[test]
