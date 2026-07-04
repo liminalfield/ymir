@@ -2645,12 +2645,25 @@ inventory::submit! { PaneKind { id: "right-panel", draw: right_panel_pane } }
 /// selected entry (its documentation and an Insert action); corrupt files are surfaced at the
 /// bottom of the list rather than hidden, so a bad file never silently disappears.
 fn library_pane(ui: &mut egui::Ui, state: &mut AppState) {
+    // The dock body no longer insets its panes (so panels reach both borders), so the pane pads its
+    // own content. Values captured up front as owned copies, to avoid holding a borrow of `ui`
+    // across the panel bodies (which take it mutably).
+    let style = ui.style().clone();
+    let pad = egui::Margin::symmetric(8, 6);
+    // A slightly sunken fill sets the inspector apart from the browser as a distinct pane.
+    let inspector_fill = scale_color(ui.visuals().panel_fill, 0.85);
+    let divider = ui.visuals().widgets.noninteractive.bg_stroke.color;
+
     let listing = &state.library;
     if listing.entries.is_empty() && listing.errors.is_empty() {
-        ui.add_space(8.0);
-        ui.weak("No saved subgraphs yet.");
-        ui.add_space(2.0);
-        ui.weak("Right-click a subgraph container on the canvas and choose \"Save to library\".");
+        egui::Frame::NONE.inner_margin(pad).show(ui, |ui| {
+            ui.add_space(2.0);
+            ui.weak("No saved subgraphs yet.");
+            ui.add_space(2.0);
+            ui.weak(
+                "Right-click a subgraph container on the canvas and choose \"Save to library\".",
+            );
+        });
         return;
     }
 
@@ -2667,7 +2680,7 @@ fn library_pane(ui: &mut egui::Ui, state: &mut AppState) {
 
     // The browser (search over the entry list) gets the top two-thirds; the selected entry's
     // inspector fills the bottom third, resizable. The bottom panel is added before the central
-    // region, as egui requires.
+    // region, as egui requires, and each carries its own content padding.
     //
     // The inspector body is a filling scroll area, and a resizable panel sized around filling
     // content collapses to its `min_size` (there is no intrinsic content height to hold a larger
@@ -2679,16 +2692,23 @@ fn library_pane(ui: &mut egui::Ui, state: &mut AppState) {
         .resizable(true)
         .min_size(third)
         .show_separator_line(false)
+        .frame(
+            egui::Frame::side_top_panel(&style)
+                .fill(inspector_fill)
+                .inner_margin(pad),
+        )
         .show_inside(ui, |ui| library_inspector(ui, state));
-    egui::CentralPanel::default().show_inside(ui, |ui| library_browser(ui, state));
+    egui::CentralPanel::default()
+        .frame(egui::Frame::side_top_panel(&style).inner_margin(pad))
+        .show_inside(ui, |ui| library_browser(ui, state));
 
-    // Emphasize the split with a solid full-width divider, matching the canvas/viewport border
-    // rather than egui's faint default resize separator, so the two regions read as distinct panes.
-    let color = ui.visuals().widgets.noninteractive.bg_stroke.color;
+    // A solid divider spanning the full dock width (the panes now reach both borders), matching the
+    // canvas/viewport border rather than egui's faint default separator, so the inspector reads as
+    // a distinct pane below the browser.
     ui.painter().hline(
         inspector.response.rect.x_range(),
         inspector.response.rect.top(),
-        egui::Stroke::new(1.0, color),
+        egui::Stroke::new(1.0, divider),
     );
 }
 inventory::submit! {
@@ -5170,12 +5190,11 @@ fn mount_dock(ui: &mut egui::Ui, state: &mut AppState) -> egui::InnerResponse<()
                         }
                     });
                 });
-                // The active pane's body.
+                // The active pane's body. No inner margin: the pane spans the dock's full width so
+                // its own panels and dividers can reach both borders. Each pane pads its own
+                // content (see `library_pane`).
                 egui::CentralPanel::default()
-                    .frame(
-                        egui::Frame::side_top_panel(ui.style())
-                            .inner_margin(egui::Margin::symmetric(8, 6)),
-                    )
+                    .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(0))
                     .show_inside(ui, |ui| {
                         if let Some(pane) = dock::dock_pane(&active_id) {
                             (pane.draw)(ui, state);
