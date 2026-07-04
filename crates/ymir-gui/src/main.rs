@@ -492,11 +492,40 @@ struct RenameDialog {
     just_opened: bool,
 }
 
-/// The "Save to library" dialog (#106): a documentation template for a subgraph being saved,
-/// pre-filled from the container and edited by the author. `None` when closed.
+/// Where the subgraph a save dialog will write comes from: a live canvas container, or an
+/// existing library file being edited in place (#106). The documentation is edited either way;
+/// this is what supplies the graph, seed, and interior layout that the documentation wraps.
+enum SubgraphSource {
+    /// Saving a live container node (its `stable_id`): the graph, seed, and interior layout are
+    /// read from the canvas.
+    Container(Handle),
+    /// Editing an existing library file: its graph, seed, and layout are preserved verbatim while
+    /// only the documentation is edited. `original_path` is the file the entry came from, so an
+    /// unchanged name overwrites it directly (no guard) and a renamed one removes it after writing.
+    Existing {
+        original_path: std::path::PathBuf,
+        graph: ymir_core::ProjectDocument,
+        seed: i64,
+        view: project_file::ViewState,
+    },
+}
+
+impl SubgraphSource {
+    /// The file this source was loaded from, if it is an edit of an existing entry. `None` for a
+    /// fresh save of a canvas container.
+    fn original_path(&self) -> Option<&std::path::Path> {
+        match self {
+            SubgraphSource::Container(_) => None,
+            SubgraphSource::Existing { original_path, .. } => Some(original_path),
+        }
+    }
+}
+
+/// The "Save to library" dialog (#106): a documentation template for a subgraph being saved or
+/// edited, pre-filled from its source and edited by the author. `None` when closed.
 struct LibrarySave {
-    /// The container node being saved (its `stable_id`).
-    container: Handle,
+    /// Where the subgraph being documented comes from: a live container, or an existing entry.
+    source: SubgraphSource,
     /// The library display name (defaults to the node's name).
     name: String,
     /// A free-text category for grouping in the browser.
@@ -939,7 +968,7 @@ impl AppState {
                 .collect()
         };
         self.library_save = Some(LibrarySave {
-            container: handle,
+            source: SubgraphSource::Container(handle),
             name: node_display_name(&self.graph, id),
             category: String::new(),
             description: String::new(),
@@ -953,28 +982,66 @@ impl AppState {
         });
     }
 
-    /// Builds a [`library::SubgraphFile`] from a container and the dialog's documentation:
-    /// the inner graph, its captured seed, its interior layout, and the doc block.
+    /// Opens the save dialog to edit an existing library entry in place (#106): pre-filled with its
+    /// current documentation, preserving its graph, seed, and interior layout. Saving under the same
+    /// name overwrites the file; a new name renames it (the old file is removed). A no-op if the
+    /// entry is no longer in the listing.
+    fn open_library_edit(&mut self, path: &std::path::Path) {
+        let Some(entry) = self.library.entries.iter().find(|e| e.path == path) else {
+            return;
+        };
+        let file = &entry.file;
+        self.library_save = Some(LibrarySave {
+            source: SubgraphSource::Existing {
+                original_path: entry.path.clone(),
+                graph: file.graph.clone(),
+                seed: file.seed,
+                view: file.view.clone(),
+            },
+            name: file.name.clone(),
+            category: file.category.clone(),
+            description: file.description.clone(),
+            inputs: file.inputs.clone(),
+            outputs: file.outputs.clone(),
+            author: file.author.clone(),
+            license: file.license.clone(),
+            error: None,
+            confirm_overwrite: false,
+        });
+    }
+
+    /// Builds a [`library::SubgraphFile`] from the dialog's documentation over its source's graph,
+    /// seed, and interior layout. For a container source these come from the live canvas; for an
+    /// existing-entry edit they are preserved verbatim, so editing the documentation never disturbs
+    /// the saved graph.
     fn build_subgraph_file(&self, dialog: &LibrarySave) -> Result<library::SubgraphFile, String> {
-        let id = self
-            .graph
-            .node_id_of(dialog.container)
-            .ok_or_else(|| "the subgraph node is gone".to_string())?;
-        let inner = self
-            .graph
-            .nested(id)
-            .ok_or_else(|| "not a subgraph".to_string())?;
-        let seed = self.graph.params(id).map_or(0, |p| p.get_i64("seed", 0));
-        // The container's interior layout is stored under its path in the active context.
-        let mut path = self.current_path();
-        path.push(dialog.container);
-        let view = project_file::ViewState {
-            nodes: self
-                .subgraph_layouts
-                .get(&path)
-                .cloned()
-                .unwrap_or_default(),
-            ..Default::default()
+        let (graph, seed, view) = match &dialog.source {
+            SubgraphSource::Container(handle) => {
+                let id = self
+                    .graph
+                    .node_id_of(*handle)
+                    .ok_or_else(|| "the subgraph node is gone".to_string())?;
+                let inner = self
+                    .graph
+                    .nested(id)
+                    .ok_or_else(|| "not a subgraph".to_string())?;
+                let seed = self.graph.params(id).map_or(0, |p| p.get_i64("seed", 0));
+                // The container's interior layout is stored under its path in the active context.
+                let mut path = self.current_path();
+                path.push(*handle);
+                let view = project_file::ViewState {
+                    nodes: self
+                        .subgraph_layouts
+                        .get(&path)
+                        .cloned()
+                        .unwrap_or_default(),
+                    ..Default::default()
+                };
+                (inner.to_document(), seed, view)
+            }
+            SubgraphSource::Existing {
+                graph, seed, view, ..
+            } => (graph.clone(), *seed, view.clone()),
         };
         Ok(library::SubgraphFile {
             format_version: library::SUBGRAPH_FORMAT_VERSION,
@@ -986,7 +1053,7 @@ impl AppState {
             author: dialog.author.clone(),
             license: dialog.license.trim().to_string(),
             seed,
-            graph: inner.to_document(),
+            graph,
             view,
         })
     }
@@ -1010,10 +1077,18 @@ impl AppState {
         let Some(dialog) = self.library_save.take() else {
             return;
         };
-        // Whether a file already exists at this name's target, resolved once so the decision is
-        // pure. A missing library directory yields `false`: the write itself then reports it.
-        let target_exists = library_target_path(&dialog.name).is_some_and(|p| p.exists());
-        match save_decision(&dialog.name, target_exists, dialog.confirm_overwrite) {
+        // Whether the write would clobber a *different* existing file than the one being edited.
+        // Resolved once so the decision is pure. A missing library directory yields `false`: the
+        // write itself then reports it. Re-saving an entry in place under its own name is not a
+        // conflict, so an in-place metadata edit never has to confirm.
+        let target = library_target_path(&dialog.name);
+        let target_exists = target.as_ref().is_some_and(|p| p.exists());
+        let conflict = is_foreign_overwrite(
+            target_exists,
+            target.as_deref(),
+            dialog.source.original_path(),
+        );
+        match save_decision(&dialog.name, conflict, dialog.confirm_overwrite) {
             SaveDecision::NameRequired => {
                 self.library_save = Some(LibrarySave {
                     error: Some("A name is required.".to_string()),
@@ -1032,9 +1107,23 @@ impl AppState {
             }
             SaveDecision::Write => match self.write_subgraph_file(&dialog) {
                 Ok(path) => {
-                    self.status = Some(format!("Saved to library: {}", path.display()));
-                    // Refresh the browser so the new entry appears without a restart.
+                    // A rename (editing an existing entry to a new name) leaves the old file behind;
+                    // remove it so the rename does not orphan a duplicate. A failed removal is a
+                    // soft problem: the new file is correct, so report it but still finish the save.
+                    let mut note = format!("Saved to library: {}", path.display());
+                    if let Some(original) = dialog.source.original_path()
+                        && original != path
+                        && let Err(err) = std::fs::remove_file(original)
+                    {
+                        note = format!("Saved, but the old file could not be removed: {err}");
+                    }
+                    self.status = Some(note);
+                    // Refresh the browser so the entry appears (or moves) without a restart, and
+                    // keep an edited entry selected so its detail follows the change.
                     self.reload_library();
+                    if matches!(dialog.source, SubgraphSource::Existing { .. }) {
+                        self.library_selection = Some(path);
+                    }
                 }
                 Err(err) => {
                     self.library_save = Some(LibrarySave {
@@ -2489,6 +2578,18 @@ fn save_decision(name: &str, target_exists: bool, confirmed: bool) -> SaveDecisi
     }
 }
 
+/// Whether writing to `target` would clobber a *different* existing file than the one being edited.
+/// Editing an entry in place (its target equals its `original` path) is never a conflict, so an
+/// in-place metadata edit does not have to confirm; a fresh save has no original and so conflicts
+/// with any existing target.
+fn is_foreign_overwrite(
+    target_exists: bool,
+    target: Option<&std::path::Path>,
+    original: Option<&std::path::Path>,
+) -> bool {
+    target_exists && target != original
+}
+
 /// A node's display name: its per-instance override if set (#59), else its type's
 /// name via `tr`. Mirrors the canvas title for the preview header.
 fn node_display_name(graph: &Graph, id: NodeId) -> String {
@@ -2668,6 +2769,8 @@ enum DetailAction {
     None,
     /// Insert the entry into the active canvas.
     Insert,
+    /// Open the entry for an in-place documentation edit.
+    Edit,
     /// Arm the delete confirmation for the entry.
     ArmDelete,
     /// Confirm and carry out the delete.
@@ -2714,6 +2817,9 @@ fn library_detail(ui: &mut egui::Ui, state: &mut AppState) {
                 if ui.button("Insert").clicked() {
                     action = DetailAction::Insert;
                 }
+                if ui.button("Edit").clicked() {
+                    action = DetailAction::Edit;
+                }
                 if ui.button("Delete").clicked() {
                     action = DetailAction::ArmDelete;
                 }
@@ -2732,6 +2838,7 @@ fn library_detail(ui: &mut egui::Ui, state: &mut AppState) {
                 state.insert_subgraph_from_library(&file);
             }
         }
+        DetailAction::Edit => state.open_library_edit(&path),
         DetailAction::ArmDelete => state.library_pending_delete = Some(path),
         DetailAction::ConfirmDelete => state.delete_library_entry(&path),
         DetailAction::CancelDelete => state.library_pending_delete = None,
@@ -4561,7 +4668,18 @@ fn library_save_dialog(ctx: &egui::Context, state: &mut AppState) {
     let mut open = true;
     let mut save = false;
     let mut cancel = false;
-    egui::Window::new("Save subgraph to library")
+    // Editing an existing entry reuses this dialog; the title says which so the two are not
+    // confused.
+    let editing = matches!(
+        state.library_save.as_ref().map(|d| &d.source),
+        Some(SubgraphSource::Existing { .. })
+    );
+    let title = if editing {
+        "Edit library subgraph"
+    } else {
+        "Save subgraph to library"
+    };
+    egui::Window::new(title)
         .collapsible(false)
         .resizable(true)
         .open(&mut open)
@@ -6294,6 +6412,59 @@ mod tests {
         );
         // Once confirmed, the same existing name writes (overwrites).
         assert_eq!(save_decision("Ridge", true, true), SaveDecision::Write);
+    }
+
+    #[test]
+    fn foreign_overwrite_spares_an_in_place_edit() {
+        let a = std::path::Path::new("/lib/a.ymirsub");
+        let b = std::path::Path::new("/lib/b.ymirsub");
+        // A fresh save (no original) onto an existing name is a foreign overwrite.
+        assert!(is_foreign_overwrite(true, Some(a), None));
+        // Editing an entry in place (target equals its original) is never a conflict.
+        assert!(!is_foreign_overwrite(true, Some(a), Some(a)));
+        // Renaming onto a different existing entry is a conflict.
+        assert!(is_foreign_overwrite(true, Some(b), Some(a)));
+        // No file at the target: never a conflict, whatever the original.
+        assert!(!is_foreign_overwrite(false, Some(a), None));
+    }
+
+    #[test]
+    fn editing_a_library_entry_preserves_the_graph_and_applies_edited_metadata() {
+        // build_subgraph_file for an Existing source uses the stored graph, so no canvas is needed.
+        let state = AppState::new();
+        let original = sample_library_file(9);
+        let dialog = LibrarySave {
+            source: SubgraphSource::Existing {
+                original_path: std::path::PathBuf::from("/lib/passthrough.ymirsub"),
+                graph: original.graph.clone(),
+                seed: original.seed,
+                view: original.view.clone(),
+            },
+            name: "Renamed".to_string(),
+            category: "Terrain".to_string(),
+            description: "Edited description.".to_string(),
+            inputs: original.inputs.clone(),
+            outputs: original.outputs.clone(),
+            author: original.author.clone(),
+            license: original.license.clone(),
+            error: None,
+            confirm_overwrite: false,
+        };
+
+        let built = state
+            .build_subgraph_file(&dialog)
+            .expect("build the edited file");
+
+        // The stored graph and seed pass through a metadata edit untouched.
+        assert_eq!(
+            built.graph, original.graph,
+            "the graph is preserved verbatim"
+        );
+        assert_eq!(built.seed, original.seed, "the seed is preserved");
+        // The edited documentation is applied.
+        assert_eq!(built.name, "Renamed");
+        assert_eq!(built.description, "Edited description.");
+        assert_eq!(built.category, "Terrain");
     }
 
     #[test]
