@@ -508,6 +508,10 @@ struct LibrarySave {
     license: String,
     /// A save error to show in the dialog (e.g. a blank name or a write failure).
     error: Option<String>,
+    /// Set once the user has been warned that this name already has a library file, so the next
+    /// Save overwrites it instead of warning again. Re-armed (cleared) whenever the name is edited,
+    /// so a fresh name is never silently overwritten.
+    confirm_overwrite: bool,
 }
 
 /// Identifies the curve param shown in the popped-out editor window: a specific node
@@ -939,6 +943,7 @@ impl AppState {
             author: self.preferences.author.clone(),
             license: String::new(),
             error: None,
+            confirm_overwrite: false,
         });
     }
 
@@ -983,38 +988,55 @@ impl AppState {
     /// Writes the dialog's subgraph to the user library, returning the file path on success.
     fn write_subgraph_file(&self, dialog: &LibrarySave) -> Result<std::path::PathBuf, String> {
         let file = self.build_subgraph_file(dialog)?;
-        let dir = library::library_dir().ok_or_else(|| "no library directory".to_string())?;
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let path = dir.join(format!("{}.ymirsub", sanitize_filename(&dialog.name)));
+        let path =
+            library_target_path(&dialog.name).ok_or_else(|| "no library directory".to_string())?;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        }
         library::write_subgraph(&path, &file)?;
         Ok(path)
     }
 
-    /// Saves the open dialog's subgraph to the library: validates the name, writes the file,
-    /// and closes on success, or shows the error in the dialog.
+    /// Saves the open dialog's subgraph to the library: validates the name, guards against
+    /// silently overwriting an existing file, writes on confirmation, and closes on success or
+    /// shows the error in the dialog.
     fn save_subgraph_to_library(&mut self) {
         let Some(dialog) = self.library_save.take() else {
             return;
         };
-        if dialog.name.trim().is_empty() {
-            self.library_save = Some(LibrarySave {
-                error: Some("A name is required.".to_string()),
-                ..dialog
-            });
-            return;
-        }
-        match self.write_subgraph_file(&dialog) {
-            Ok(path) => {
-                self.status = Some(format!("Saved to library: {}", path.display()));
-                // Refresh the browser so the new entry appears without a restart.
-                self.reload_library();
-            }
-            Err(err) => {
+        // Whether a file already exists at this name's target, resolved once so the decision is
+        // pure. A missing library directory yields `false`: the write itself then reports it.
+        let target_exists = library_target_path(&dialog.name).is_some_and(|p| p.exists());
+        match save_decision(&dialog.name, target_exists, dialog.confirm_overwrite) {
+            SaveDecision::NameRequired => {
                 self.library_save = Some(LibrarySave {
-                    error: Some(err),
+                    error: Some("A name is required.".to_string()),
                     ..dialog
                 });
             }
+            SaveDecision::ConfirmOverwrite => {
+                let name = dialog.name.trim().to_string();
+                self.library_save = Some(LibrarySave {
+                    confirm_overwrite: true,
+                    error: Some(format!(
+                        "A subgraph named \"{name}\" already exists. Saving again overwrites it."
+                    )),
+                    ..dialog
+                });
+            }
+            SaveDecision::Write => match self.write_subgraph_file(&dialog) {
+                Ok(path) => {
+                    self.status = Some(format!("Saved to library: {}", path.display()));
+                    // Refresh the browser so the new entry appears without a restart.
+                    self.reload_library();
+                }
+                Err(err) => {
+                    self.library_save = Some(LibrarySave {
+                        error: Some(err),
+                        ..dialog
+                    });
+                }
+            },
         }
     }
 
@@ -2386,6 +2408,39 @@ fn sanitize_filename(name: &str) -> String {
         "subgraph".to_string()
     } else {
         stem
+    }
+}
+
+/// The library file path a subgraph named `name` would be written to, or `None` when there is no
+/// library directory. Shared by the save write and the overwrite guard so both resolve the same
+/// file from the same sanitized stem.
+fn library_target_path(name: &str) -> Option<std::path::PathBuf> {
+    library::library_dir().map(|dir| dir.join(format!("{}.ymirsub", sanitize_filename(name))))
+}
+
+/// The outcome of validating a save-to-library request, computed without touching the filesystem
+/// (the existence check is passed in) so the guard is unit-testable.
+#[derive(Debug, PartialEq, Eq)]
+enum SaveDecision {
+    /// The name is blank; report it and do not write.
+    NameRequired,
+    /// A file already exists at this name and the overwrite is not yet confirmed; warn and arm
+    /// the confirmation rather than clobber it.
+    ConfirmOverwrite,
+    /// Nothing blocks the save; write the file.
+    Write,
+}
+
+/// Decides what a save request should do, given the entered name, whether its target file already
+/// exists, and whether the user has confirmed overwriting it. A blank name is rejected before the
+/// overwrite check, so an empty name never arms an overwrite.
+fn save_decision(name: &str, target_exists: bool, confirmed: bool) -> SaveDecision {
+    if name.trim().is_empty() {
+        SaveDecision::NameRequired
+    } else if target_exists && !confirmed {
+        SaveDecision::ConfirmOverwrite
+    } else {
+        SaveDecision::Write
     }
 }
 
@@ -4423,7 +4478,14 @@ fn library_save_dialog(ctx: &egui::Context, state: &mut AppState) {
                 .spacing([8.0, 6.0])
                 .show(ui, |ui| {
                     ui.label("Name");
-                    ui.add(egui::TextEdit::singleline(&mut dialog.name).desired_width(260.0));
+                    let name_resp =
+                        ui.add(egui::TextEdit::singleline(&mut dialog.name).desired_width(260.0));
+                    // Editing the name re-arms the overwrite guard and clears any stale message,
+                    // so switching to a fresh name is never silently overwritten.
+                    if name_resp.changed() {
+                        dialog.confirm_overwrite = false;
+                        dialog.error = None;
+                    }
                     ui.end_row();
                     ui.label("Category");
                     ui.add(
@@ -4462,8 +4524,15 @@ fn library_save_dialog(ctx: &egui::Context, state: &mut AppState) {
                 ui.colored_label(ui.visuals().error_fg_color, err);
             }
             ui.separator();
+            // The button relabels once an overwrite is armed, so the second click reads as the
+            // deliberate action it is rather than a plain re-save.
+            let save_label = if dialog.confirm_overwrite {
+                "Overwrite"
+            } else {
+                "Save"
+            };
             ui.horizontal(|ui| {
-                if ui.button("Save").clicked() {
+                if ui.button(save_label).clicked() {
                     save = true;
                 }
                 if ui.button("Cancel").clicked() {
@@ -6077,6 +6146,27 @@ mod tests {
         // A name of only punctuation would collapse to empty, so it falls back.
         assert_eq!(sanitize_filename("///"), "subgraph");
         assert_eq!(sanitize_filename(""), "subgraph");
+    }
+
+    #[test]
+    fn save_decision_guards_a_blank_name_then_an_overwrite() {
+        // A blank (or whitespace) name is rejected before anything else.
+        assert_eq!(
+            save_decision("   ", false, false),
+            SaveDecision::NameRequired
+        );
+        // A blank name is rejected even when it would otherwise overwrite: an empty name never
+        // arms an overwrite.
+        assert_eq!(save_decision("", true, false), SaveDecision::NameRequired);
+        // A new name (no existing file) writes straight away.
+        assert_eq!(save_decision("Ridge", false, false), SaveDecision::Write);
+        // An existing name warns first, arming the confirmation.
+        assert_eq!(
+            save_decision("Ridge", true, false),
+            SaveDecision::ConfirmOverwrite
+        );
+        // Once confirmed, the same existing name writes (overwrites).
+        assert_eq!(save_decision("Ridge", true, true), SaveDecision::Write);
     }
 
     #[test]
