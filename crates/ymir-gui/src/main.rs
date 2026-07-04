@@ -2688,10 +2688,11 @@ fn library_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // usable third of the dock, floored so a bad first-frame height cannot shrink it to a sliver.
     // The user can still drag the divider to make it larger.
     let third = (ui.available_height() / 3.0).max(180.0);
-    // Each subpane carries its own titled header band (like the preview and node-list panes), so
-    // the browser and the inspector each read as their own thing rather than the dock's switcher
-    // header appearing to title the browser alone. The header spans the full pane width; the
-    // content below it is padded.
+    // Each subpane carries a subtle all-caps heading on its own background (like a sidebar's
+    // WORKSPACE/OUTLINER label), so the browser and the inspector each read as their own thing
+    // rather than the dock's switcher header appearing to title the browser alone. The full-width
+    // divider (below) marks the split; the panel rects stay full width, so it reaches both borders
+    // even though the content is padded.
     let inspector = egui::Panel::bottom("library-inspector")
         .resizable(true)
         .min_size(third)
@@ -2699,25 +2700,17 @@ fn library_pane(ui: &mut egui::Ui, state: &mut AppState) {
         .frame(
             egui::Frame::side_top_panel(&style)
                 .fill(inspector_fill)
-                .inner_margin(0),
+                .inner_margin(pad),
         )
         .show_inside(ui, |ui| {
-            header_strip(ui, |ui| {
-                ui.strong("Subgraph Inspector");
-            });
-            egui::Frame::NONE
-                .inner_margin(pad)
-                .show(ui, |ui| library_inspector(ui, state));
+            section_heading(ui, "Subgraph Inspector");
+            library_inspector(ui, state);
         });
     egui::CentralPanel::default()
-        .frame(egui::Frame::side_top_panel(&style).inner_margin(0))
+        .frame(egui::Frame::side_top_panel(&style).inner_margin(pad))
         .show_inside(ui, |ui| {
-            header_strip(ui, |ui| {
-                ui.strong("Subgraph Library");
-            });
-            egui::Frame::NONE
-                .inner_margin(pad)
-                .show(ui, |ui| library_browser(ui, state));
+            section_heading(ui, "Subgraph Library");
+            library_browser(ui, state);
         });
 
     // A solid divider spanning the full dock width (the panes now reach both borders), matching the
@@ -3459,6 +3452,15 @@ fn preview_black_image(ui: &mut egui::Ui) {
 fn scale_color(c: egui::Color32, factor: f32) -> egui::Color32 {
     let s = |v: u8| (f32::from(v) * factor).clamp(0.0, 255.0) as u8;
     egui::Color32::from_rgb(s(c.r()), s(c.g()), s(c.b()))
+}
+
+/// A subtle all-caps section heading for a subpane, in the muted style of a sidebar's
+/// "WORKSPACE"/"OUTLINER" label: uppercased and dimmed, set on the pane background rather than a
+/// heavy header band. Shared so subpane titles stay consistent.
+fn section_heading(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(2.0);
+    ui.label(egui::RichText::new(text.to_uppercase()).weak());
+    ui.add_space(4.0);
 }
 
 /// Draws a pane header strip: a full-width band a touch darker than the pane body, with
