@@ -366,6 +366,11 @@ struct AppState {
     /// nothing is selected; a stale path (the file was removed by a reload) resolves to `None`
     /// at render time. Selecting an entry reveals its documentation and an Insert action.
     library_selection: Option<std::path::PathBuf>,
+    /// The library entry whose Delete has been armed, by its file path (#106). The detail section
+    /// shows a confirm prompt while this matches the selection; the second click removes the file.
+    /// Cleared when the selection changes or the delete resolves, so it never lingers on another
+    /// entry.
+    library_pending_delete: Option<std::path::PathBuf>,
     /// The user's app-global preferences (the author profile, #106), loaded from config at
     /// startup and edited via the Settings dialog. Persists across projects.
     preferences: preferences::Preferences,
@@ -574,6 +579,7 @@ impl AppState {
             library: library::LibraryListing::default(),
             dock: dock::DockState::default(),
             library_selection: None,
+            library_pending_delete: None,
             // Env-free default (empty profile); the real file is overlaid in the app shell so
             // the test-constructed state never touches the filesystem, matching apply_default.
             preferences: preferences::Preferences::default(),
@@ -1086,6 +1092,45 @@ impl AppState {
             self.select_only(handle);
         }
         self.status = Some(format!("Inserted \"{}\".", file.name));
+    }
+
+    /// Deletes a library entry's file from disk (#106), then clears the selection and refreshes the
+    /// listing. The display name for the status line is read from the current listing, falling back
+    /// to the file stem. A file already gone (removed outside the app) is treated as done rather
+    /// than an error; a real removal failure is reported and the selection kept so the user can
+    /// retry. Never panics.
+    fn delete_library_entry(&mut self, path: &std::path::Path) {
+        let name = self
+            .library
+            .entries
+            .iter()
+            .find(|e| e.path == path)
+            .map(|e| e.file.name.clone())
+            .unwrap_or_else(|| {
+                path.file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            });
+        let result = std::fs::remove_file(path);
+        // The armed confirmation is consumed whatever the outcome, so a failed delete does not
+        // leave the prompt stuck open.
+        self.library_pending_delete = None;
+        match result {
+            Ok(()) => {
+                self.status = Some(format!("Deleted \"{name}\" from the library."));
+                self.library_selection = None;
+                self.reload_library();
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                // Already removed elsewhere; drop it from the view rather than report a failure.
+                self.status = Some(format!("\"{name}\" was already removed."));
+                self.library_selection = None;
+                self.reload_library();
+            }
+            Err(err) => {
+                self.status = Some(format!("Could not delete \"{name}\": {err}"));
+            }
+        }
     }
 
     /// Commits the open Settings dialog: installs its draft as the live preferences and writes
@@ -2512,6 +2557,7 @@ fn library_pane(ui: &mut egui::Ui, state: &mut AppState) {
         .is_some_and(|path| state.library.entries.iter().any(|e| &e.path == path));
     if !has_selection {
         state.library_selection = None;
+        state.library_pending_delete = None;
     }
 
     // Detail is a bottom panel so it reserves its own height and the list scrolls above it. Added
@@ -2588,6 +2634,9 @@ fn library_list(ui: &mut egui::Ui, state: &mut AppState) {
     if let Some(path) = clicked {
         // Toggle: re-clicking the selected entry clears it, so the detail can be dismissed.
         state.library_selection = (selection.as_deref() != Some(path.as_path())).then_some(path);
+        // Changing the selection disarms any pending delete so a confirm never lands on the
+        // wrong entry.
+        state.library_pending_delete = None;
     }
 }
 
@@ -2613,32 +2662,80 @@ fn library_entries(
     }
 }
 
-/// The detail section for the selected library entry: its documentation and an Insert action that
-/// instantiates it into the active canvas. A no-op if the selection has gone stale (the entry was
-/// removed by a reload), which also clears the dangling selection.
+/// A button pressed in the library detail section, applied after the listing borrow ends.
+enum DetailAction {
+    /// No button was pressed this frame.
+    None,
+    /// Insert the entry into the active canvas.
+    Insert,
+    /// Arm the delete confirmation for the entry.
+    ArmDelete,
+    /// Confirm and carry out the delete.
+    ConfirmDelete,
+    /// Dismiss the delete confirmation.
+    CancelDelete,
+}
+
+/// The detail section for the selected library entry: its documentation, an Insert action that
+/// instantiates it into the active canvas, and a Delete action guarded by a confirm prompt. A
+/// no-op if the selection has gone stale (the entry was removed by a reload), which also clears
+/// the dangling selection.
 fn library_detail(ui: &mut egui::Ui, state: &mut AppState) {
     let Some(path) = state.library_selection.clone() else {
         return;
     };
-    let insert = {
+    let armed = state.library_pending_delete.as_deref() == Some(path.as_path());
+    let mut action = DetailAction::None;
+    {
         let Some(entry) = state.library.entries.iter().find(|e| e.path == path) else {
             state.library_selection = None;
+            state.library_pending_delete = None;
             return;
         };
         ui.add_space(6.0);
         library_entry_detail(ui, &entry.file);
         ui.add_space(6.0);
-        ui.button("Insert").clicked()
-    };
-    if insert
-        && let Some(file) = state
-            .library
-            .entries
-            .iter()
-            .find(|e| e.path == path)
-            .map(|e| e.file.clone())
-    {
-        state.insert_subgraph_from_library(&file);
+        if armed {
+            // Deleting removes the file from disk, so confirm before doing it.
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                format!("Delete \"{}\"? This removes its file.", entry.file.name),
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Delete").clicked() {
+                    action = DetailAction::ConfirmDelete;
+                }
+                if ui.button("Cancel").clicked() {
+                    action = DetailAction::CancelDelete;
+                }
+            });
+        } else {
+            ui.horizontal(|ui| {
+                if ui.button("Insert").clicked() {
+                    action = DetailAction::Insert;
+                }
+                if ui.button("Delete").clicked() {
+                    action = DetailAction::ArmDelete;
+                }
+            });
+        }
+    }
+    match action {
+        DetailAction::Insert => {
+            if let Some(file) = state
+                .library
+                .entries
+                .iter()
+                .find(|e| e.path == path)
+                .map(|e| e.file.clone())
+            {
+                state.insert_subgraph_from_library(&file);
+            }
+        }
+        DetailAction::ArmDelete => state.library_pending_delete = Some(path),
+        DetailAction::ConfirmDelete => state.delete_library_entry(&path),
+        DetailAction::CancelDelete => state.library_pending_delete = None,
+        DetailAction::None => {}
     }
 }
 
@@ -5360,6 +5457,36 @@ mod tests {
             state.subgraph_layouts.get(&vec![handle]).map(BTreeMap::len),
             Some(1),
             "the saved interior layout is registered"
+        );
+    }
+
+    #[test]
+    fn deleting_a_library_entry_removes_its_file_and_clears_the_selection() {
+        // A real temp file so the delete has something to remove.
+        let path =
+            std::env::temp_dir().join(format!("ymir-del-test-{}.ymirsub", std::process::id()));
+        let file = sample_library_file(1);
+        library::write_subgraph(&path, &file).expect("write temp file");
+        assert!(path.exists(), "the temp entry exists before delete");
+
+        let mut state = AppState::new();
+        state.library = library::LibraryListing {
+            entries: vec![library::LibraryEntry {
+                path: path.clone(),
+                file,
+            }],
+            errors: Vec::new(),
+        };
+        state.library_selection = Some(path.clone());
+        state.library_pending_delete = Some(path.clone());
+
+        state.delete_library_entry(&path);
+
+        assert!(!path.exists(), "the file is removed from disk");
+        assert_eq!(state.library_selection, None, "the selection is cleared");
+        assert_eq!(
+            state.library_pending_delete, None,
+            "the armed delete is cleared"
         );
     }
 
