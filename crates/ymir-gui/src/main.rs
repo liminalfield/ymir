@@ -157,6 +157,11 @@ const SEARCH_FIELD_MARGIN: egui::Margin = egui::Margin {
     bottom: 5,
 };
 
+/// How much to lighten the search fields' background above the theme's deepest input colour, so
+/// the boxes settle back and do not compete with the panel headings. A channel multiplier for
+/// [`scale_color`].
+const SEARCH_FIELD_LIGHTEN: f32 = 1.7;
+
 /// Minimum drag (px) before a left-press on empty canvas counts as a marquee rather than
 /// a click; below it, the press is the click that selects/clears (#84).
 const MARQUEE_MIN_DRAG: f32 = 4.0;
@@ -2369,10 +2374,12 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
                     );
                 }
                 ui.separator();
+                let search_bg = scale_color(ui.visuals().extreme_bg_color, SEARCH_FIELD_LIGHTEN);
                 ui.add(
                     egui::TextEdit::singleline(&mut state.search)
                         .hint_text("search nodes")
                         .margin(SEARCH_FIELD_MARGIN)
+                        .background_color(search_bg)
                         .desired_width(160.0),
                 );
                 // Clear button, shown only when there is a query (#56).
@@ -2764,10 +2771,12 @@ fn library_browser(ui: &mut egui::Ui, state: &mut AppState) {
     ui.horizontal(|ui| {
         let has_query = !state.library_search.is_empty();
         let clear_width = if has_query { 24.0 } else { 0.0 };
+        let search_bg = scale_color(ui.visuals().extreme_bg_color, SEARCH_FIELD_LIGHTEN);
         ui.add(
             egui::TextEdit::singleline(&mut state.library_search)
                 .hint_text("search subgraphs")
                 .margin(SEARCH_FIELD_MARGIN)
+                .background_color(search_bg)
                 .desired_width((ui.available_width() - clear_width).max(0.0)),
         );
         if has_query && ui.small_button("×").on_hover_text("Clear search").clicked() {
