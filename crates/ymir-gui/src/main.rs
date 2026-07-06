@@ -162,6 +162,13 @@ const SEARCH_FIELD_MARGIN: egui::Margin = egui::Margin {
 /// [`scale_color`].
 const SEARCH_FIELD_LIGHTEN: f32 = 1.7;
 
+/// The largest the library inspector's thumbnail slot grows. The slot is square, because the
+/// terrain render is square (the grid is square) — a landscape crop would letterbox, clip, or
+/// distort it. Capped so a full-width square does not dominate the short inspector: when the dock
+/// is wider than this the square stays this size and centers. The offline subgraph render (a later
+/// step) fills the same box, so reserving it now keeps the inspector from reflowing when it lands.
+const LIBRARY_THUMB_MAX_SIZE: f32 = 150.0;
+
 /// Minimum drag (px) before a left-press on empty canvas counts as a marquee rather than
 /// a click; below it, the press is the click that selects/clears (#84).
 const MARQUEE_MIN_DRAG: f32 = 4.0;
@@ -2706,6 +2713,13 @@ fn library_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // usable third of the dock, floored so a bad first-frame height cannot shrink it to a sliver.
     // The user can still drag the divider to make it larger.
     let third = (ui.available_height() / 3.0).max(180.0);
+    // The selected entry's name, folded into the inspector heading ("INSPECTOR: <name>") so the
+    // card need not repeat it on its own line below.
+    let selected_name = state
+        .library_selection
+        .as_ref()
+        .and_then(|path| state.library.entries.iter().find(|e| &e.path == path))
+        .map(|e| e.file.name.clone());
     // Each subpane carries a subtle all-caps heading on its own background (like a sidebar's
     // WORKSPACE/OUTLINER label), so the browser and the inspector each read as their own thing
     // rather than the dock's switcher header appearing to title the browser alone. The full-width
@@ -2721,7 +2735,7 @@ fn library_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 .inner_margin(pad),
         )
         .show_inside(ui, |ui| {
-            section_heading(ui, "Subgraph Inspector");
+            inspector_heading(ui, selected_name.as_deref());
             library_inspector(ui, state);
         });
     egui::CentralPanel::default()
@@ -2787,9 +2801,10 @@ fn library_browser(ui: &mut egui::Ui, state: &mut AppState) {
 
     let query = state.library_search.trim().to_lowercase();
     let selection = state.library_selection.clone();
-    // The row a click landed on, applied after the list borrow ends (the closure only reads the
-    // listing, so it cannot also mutate the selection).
-    let mut clicked: Option<std::path::PathBuf> = None;
+    // The command a row produced this frame (a click selecting it, a double-click inserting it, or
+    // a context-menu action), applied after the list borrow ends (the closure only reads the
+    // listing, so it cannot also mutate `state`).
+    let mut command: Option<LibraryCommand> = None;
     {
         let listing = &state.library;
         egui::ScrollArea::vertical()
@@ -2810,14 +2825,14 @@ fn library_browser(ui: &mut egui::Ui, state: &mut AppState) {
                         egui::CollapsingHeader::new(*category)
                             .default_open(true)
                             .show(ui, |ui| {
-                                library_entries(ui, entries, selection.as_deref(), &mut clicked);
+                                library_entries(ui, entries, selection.as_deref(), &mut command);
                             });
                     }
                     if let Some(entries) = by_category.get("") {
                         egui::CollapsingHeader::new("Uncategorized")
                             .default_open(true)
                             .show(ui, |ui| {
-                                library_entries(ui, entries, selection.as_deref(), &mut clicked);
+                                library_entries(ui, entries, selection.as_deref(), &mut command);
                             });
                     }
 
@@ -2846,115 +2861,99 @@ fn library_browser(ui: &mut egui::Ui, state: &mut AppState) {
                         ui.add_space(6.0);
                         ui.weak("No subgraphs match your search.");
                     } else {
-                        library_entries(ui, &matches, selection.as_deref(), &mut clicked);
+                        library_entries(ui, &matches, selection.as_deref(), &mut command);
                     }
                 }
             });
     }
-    if let Some(path) = clicked {
-        // Toggle: re-clicking the selected entry clears it, so the inspector can be dismissed.
-        state.library_selection = (selection.as_deref() != Some(path.as_path())).then_some(path);
-        // Changing the selection disarms any pending delete so a confirm never lands on the
-        // wrong entry.
-        state.library_pending_delete = None;
+    if let Some(command) = command {
+        apply_library_command(state, command);
     }
 }
 
 /// Renders one category's library entries as selectable rows, highlighting the selected one and
-/// showing each entry's documentation on hover. A click records the entry's path in `clicked` for
-/// the caller to apply once the listing borrow has ended.
+/// showing each entry's documentation on hover. A left-click selects the row, a double-click
+/// inserts it (the common action), and a right-click opens its context menu; each records a
+/// [`LibraryCommand`] for the caller to apply once the listing borrow has ended.
 fn library_entries(
     ui: &mut egui::Ui,
     entries: &[&library::LibraryEntry],
     selection: Option<&std::path::Path>,
-    clicked: &mut Option<std::path::PathBuf>,
+    command: &mut Option<LibraryCommand>,
 ) {
     for entry in entries {
         let file = &entry.file;
         let selected = selection == Some(entry.path.as_path());
-        if ui
+        let response = ui
             .selectable_label(selected, &file.name)
-            .on_hover_ui(|ui| library_entry_tooltip(ui, file))
-            .clicked()
-        {
-            *clicked = Some(entry.path.clone());
+            .on_hover_ui(|ui| library_entry_tooltip(ui, file));
+        // Double-click is the shortcut for the common case; a single click selects (so the
+        // inspector shows the entry) and cannot also fire on the same interaction.
+        if response.double_clicked() {
+            *command = Some(LibraryCommand::Insert(entry.path.clone()));
+        } else if response.clicked() {
+            *command = Some(LibraryCommand::Select(entry.path.clone()));
         }
+        response.context_menu(|ui| library_row_menu(ui, &entry.path, command));
     }
 }
 
-/// A button pressed in the library detail section, applied after the listing borrow ends.
-enum DetailAction {
-    /// No button was pressed this frame.
-    None,
-    /// Insert the entry into the active canvas.
-    Insert,
-    /// Open the entry for an in-place documentation edit.
-    Edit,
-    /// Arm the delete confirmation for the entry.
-    ArmDelete,
+/// The right-click menu for a library browser row: the full action set, since a row has no
+/// visible buttons of its own. "Edit Graph…" is intentionally absent until it is implemented (a
+/// menu item that did nothing would be a dead stub); it joins here with its own step.
+fn library_row_menu(
+    ui: &mut egui::Ui,
+    path: &std::path::Path,
+    command: &mut Option<LibraryCommand>,
+) {
+    canvas::style_context_menu(ui);
+    if ui.button("Insert").clicked() {
+        *command = Some(LibraryCommand::Insert(path.to_path_buf()));
+        ui.close();
+    }
+    if ui.button("Edit Details…").clicked() {
+        *command = Some(LibraryCommand::EditDetails(path.to_path_buf()));
+        ui.close();
+    }
+    ui.separator();
+    if ui.button("Delete").clicked() {
+        // Route through the inspector's armed confirm rather than deleting from the menu, so a
+        // destructive action always gets a second look.
+        *command = Some(LibraryCommand::ArmDelete(path.to_path_buf()));
+        ui.close();
+    }
+}
+
+/// A command produced by the library UI (a browser row's click or context menu, or the
+/// inspector's buttons and kebab menu), applied by [`apply_library_command`] after the read-only
+/// listing borrow ends so it can mutate [`AppState`].
+enum LibraryCommand {
+    /// Select this entry (or clear it if it is already selected), showing it in the inspector.
+    Select(std::path::PathBuf),
+    /// Drop a copy of the entry into the active canvas.
+    Insert(std::path::PathBuf),
+    /// Open the entry's documentation card for an in-place edit.
+    EditDetails(std::path::PathBuf),
+    /// Select the entry and arm its delete confirmation (surfaced in the inspector).
+    ArmDelete(std::path::PathBuf),
     /// Confirm and carry out the delete.
-    ConfirmDelete,
-    /// Dismiss the delete confirmation.
+    ConfirmDelete(std::path::PathBuf),
+    /// Dismiss a pending delete confirmation.
     CancelDelete,
 }
 
-/// The inspector pane below the browser: for the selected library entry, its documentation and the
-/// Insert / Edit / Delete actions (Delete guarded by a confirm prompt). Shows a placeholder hint
-/// when nothing is selected, and scrolls when the documentation is long. The thumbnail preview and
-/// a proper layout (it is a plain text blob today) come in following steps.
-fn library_inspector(ui: &mut egui::Ui, state: &mut AppState) {
-    let Some(path) = state.library_selection.clone() else {
-        ui.add_space(8.0);
-        ui.weak("Select a subgraph to see its details.");
-        return;
-    };
-    let armed = state.library_pending_delete.as_deref() == Some(path.as_path());
-    let mut action = DetailAction::None;
-    {
-        // Borrow only the listing (not all of `state`) so the action can mutate state afterward.
-        let listing = &state.library;
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                // The pane clears a stale selection before drawing, so this normally resolves; a
-                // one-frame miss just draws nothing rather than panicking.
-                let Some(entry) = listing.entries.iter().find(|e| e.path == path) else {
-                    return;
-                };
-                ui.add_space(6.0);
-                library_entry_detail(ui, &entry.file);
-                ui.add_space(6.0);
-                if armed {
-                    // Deleting removes the file from disk, so confirm before doing it.
-                    ui.colored_label(
-                        ui.visuals().warn_fg_color,
-                        format!("Delete \"{}\"? This removes its file.", entry.file.name),
-                    );
-                    ui.horizontal(|ui| {
-                        if ui.button("Delete").clicked() {
-                            action = DetailAction::ConfirmDelete;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            action = DetailAction::CancelDelete;
-                        }
-                    });
-                } else {
-                    ui.horizontal(|ui| {
-                        if ui.button("Insert").clicked() {
-                            action = DetailAction::Insert;
-                        }
-                        if ui.button("Edit").clicked() {
-                            action = DetailAction::Edit;
-                        }
-                        if ui.button("Delete").clicked() {
-                            action = DetailAction::ArmDelete;
-                        }
-                    });
-                }
-            });
-    }
-    match action {
-        DetailAction::Insert => {
+/// Applies a [`LibraryCommand`] to the app state once the read-only listing borrow has ended.
+fn apply_library_command(state: &mut AppState, command: LibraryCommand) {
+    match command {
+        LibraryCommand::Select(path) => {
+            // Toggle: re-selecting the current entry clears it, so the inspector can be dismissed.
+            let same = state.library_selection.as_deref() == Some(path.as_path());
+            state.library_selection = (!same).then_some(path);
+            // Changing the selection disarms any pending delete so a confirm never lands on the
+            // wrong entry.
+            state.library_pending_delete = None;
+        }
+        LibraryCommand::Insert(path) => {
             if let Some(file) = state
                 .library
                 .entries
@@ -2965,56 +2964,178 @@ fn library_inspector(ui: &mut egui::Ui, state: &mut AppState) {
                 state.insert_subgraph_from_library(&file);
             }
         }
-        DetailAction::Edit => state.open_library_edit(&path),
-        DetailAction::ArmDelete => state.library_pending_delete = Some(path),
-        DetailAction::ConfirmDelete => state.delete_library_entry(&path),
-        DetailAction::CancelDelete => state.library_pending_delete = None,
-        DetailAction::None => {}
+        LibraryCommand::EditDetails(path) => state.open_library_edit(&path),
+        LibraryCommand::ArmDelete(path) => {
+            state.library_selection = Some(path.clone());
+            state.library_pending_delete = Some(path);
+        }
+        LibraryCommand::ConfirmDelete(path) => state.delete_library_entry(&path),
+        LibraryCommand::CancelDelete => state.library_pending_delete = None,
     }
 }
 
-/// The pinned detail card for a library entry: its name, category, description, named input and
-/// output ports, and (when present) author and license. Fuller than the hover tooltip, which
-/// shows only port counts.
-fn library_entry_detail(ui: &mut egui::Ui, file: &library::SubgraphFile) {
-    ui.strong(&file.name);
-    if !file.category.trim().is_empty() {
-        ui.weak(&file.category);
+/// The inspector pane below the browser: for the selected library entry, a reserved thumbnail
+/// slot, its formatted documentation card, and its actions. The primary action is a prominent
+/// Insert button; the rest (Edit Details…, Delete) live in a kebab menu beside it, mirroring the
+/// browser row's right-click menu. Delete is guarded by an armed confirm. Shows a placeholder hint
+/// when nothing is selected, and scrolls when the documentation is long.
+fn library_inspector(ui: &mut egui::Ui, state: &mut AppState) {
+    let Some(path) = state.library_selection.clone() else {
+        ui.add_space(8.0);
+        ui.weak("Select a subgraph to see its details.");
+        return;
+    };
+    let armed = state.library_pending_delete.as_deref() == Some(path.as_path());
+    let mut command: Option<LibraryCommand> = None;
+    {
+        // Borrow only the listing (not all of `state`) so the command can mutate state afterward.
+        let listing = &state.library;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                // The pane clears a stale selection before drawing, so this normally resolves; a
+                // one-frame miss just draws nothing rather than panicking.
+                let Some(entry) = listing.entries.iter().find(|e| e.path == path) else {
+                    return;
+                };
+                // The name titles the card via the pane heading ("INSPECTOR: <name>"), so the card
+                // opens straight with the preview. The actions sit directly under the image: seeing
+                // the thumbnail is what tells the user this is the subgraph they want to act on, so
+                // the buttons must be in view without scrolling. The descriptive detail
+                // (description, ports, footer) follows below the actions.
+                library_thumbnail_slot(ui);
+                ui.add_space(8.0);
+                if armed {
+                    // Deleting removes the file from disk, so confirm before doing it.
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        format!("Delete \"{}\"? This removes its file.", entry.file.name),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.button("Delete").clicked() {
+                            command = Some(LibraryCommand::ConfirmDelete(path.clone()));
+                        }
+                        if ui.button("Cancel").clicked() {
+                            command = Some(LibraryCommand::CancelDelete);
+                        }
+                    });
+                } else {
+                    ui.horizontal(|ui| {
+                        if ui.button("Insert").clicked() {
+                            command = Some(LibraryCommand::Insert(path.clone()));
+                        }
+                        // The kebab carries the secondary actions, so the row stays uncluttered
+                        // behind its one primary button.
+                        ui.menu_button(egui_phosphor::regular::DOTS_THREE_VERTICAL, |ui| {
+                            canvas::style_context_menu(ui);
+                            if ui.button("Edit Details…").clicked() {
+                                command = Some(LibraryCommand::EditDetails(path.clone()));
+                                ui.close();
+                            }
+                            ui.separator();
+                            if ui.button("Delete").clicked() {
+                                command = Some(LibraryCommand::ArmDelete(path.clone()));
+                                ui.close();
+                            }
+                        });
+                    });
+                }
+                ui.add_space(8.0);
+                library_entry_detail(ui, &entry.file);
+            });
     }
+    if let Some(command) = command {
+        apply_library_command(state, command);
+    }
+}
+
+/// Draws the inspector's reserved thumbnail slot: a framed, centered square (matching the square
+/// terrain render), sized to the pane but capped by [`LIBRARY_THUMB_MAX_SIZE`]. The offline
+/// subgraph render is a later step, so today the box holds a muted image glyph as a placeholder;
+/// reserving it now keeps the inspector from reflowing when the render lands.
+fn library_thumbnail_slot(ui: &mut egui::Ui) {
+    let size = ui.available_width().min(LIBRARY_THUMB_MAX_SIZE);
+    ui.vertical_centered(|ui| {
+        let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(size), egui::Sense::hover());
+        let visuals = ui.visuals();
+        let painter = ui.painter();
+        painter.rect_filled(rect, 4.0, visuals.extreme_bg_color);
+        painter.rect_stroke(
+            rect,
+            4.0,
+            visuals.widgets.noninteractive.bg_stroke,
+            egui::StrokeKind::Inside,
+        );
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            egui_phosphor::regular::IMAGE,
+            egui::FontId::proportional(28.0),
+            visuals.weak_text_color(),
+        );
+    });
+}
+
+/// The detail card below the thumbnail and actions: the description, the named input and output
+/// ports under all-caps headings, and a footer of muted metadata (category, author, license). Thin
+/// separators divide the blocks. The name titles the card via the pane heading. Fuller than the
+/// hover tooltip, which shows only port counts.
+fn library_entry_detail(ui: &mut egui::Ui, file: &library::SubgraphFile) {
     if !file.description.trim().is_empty() {
         ui.add_space(2.0);
         ui.label(&file.description);
     }
-    library_port_list(ui, "Inputs", &file.inputs);
-    library_port_list(ui, "Outputs", &file.outputs);
+    if !file.inputs.is_empty() || !file.outputs.is_empty() {
+        ui.add_space(6.0);
+        ui.separator();
+        library_port_list(ui, "Inputs", &file.inputs);
+        library_port_list(ui, "Outputs", &file.outputs);
+    }
+    // Footer: category, author, and license as one muted line, so the grouping and provenance sit
+    // quietly under the card. Category moved here off the title line (the name now lives in the
+    // pane heading).
+    let mut footer = Vec::new();
+    if !file.category.trim().is_empty() {
+        footer.push(file.category.clone());
+    }
     if !file.author.is_empty() {
         let who = if file.author.name.trim().is_empty() {
             "(unnamed author)".to_string()
         } else {
             file.author.name.clone()
         };
-        ui.weak(format!("by {who}"));
+        footer.push(format!("by {who}"));
     }
     if !file.license.trim().is_empty() {
-        ui.weak(format!("License: {}", file.license));
+        footer.push(file.license.clone());
+    }
+    if !footer.is_empty() {
+        ui.add_space(6.0);
+        ui.separator();
+        ui.weak(footer.join(" · "));
     }
 }
 
-/// Lists a subgraph's ports under a heading, by name (falling back to the port index for an
-/// unnamed one). Draws nothing when there are no ports on that side.
+/// Lists a subgraph's ports under an all-caps heading (matching the pane section headings): each
+/// port's name (falling back to the port index for an unnamed one), with its description indented
+/// beneath in muted text. Draws nothing when there are no ports on that side.
 fn library_port_list(ui: &mut egui::Ui, heading: &str, ports: &[library::PortDoc]) {
     if ports.is_empty() {
         return;
     }
-    ui.add_space(2.0);
-    ui.weak(heading);
+    section_heading(ui, heading);
     for port in ports {
         let name = if port.name.trim().is_empty() {
             format!("#{}", port.index)
         } else {
             port.name.clone()
         };
-        ui.label(format!("• {name}"));
+        ui.label(name);
+        if !port.description.trim().is_empty() {
+            ui.indent((heading, port.index), |ui| {
+                ui.weak(&port.description);
+            });
+        }
     }
 }
 
@@ -3481,6 +3602,27 @@ fn scale_color(c: egui::Color32, factor: f32) -> egui::Color32 {
 fn section_heading(ui: &mut egui::Ui, text: &str) {
     ui.add_space(2.0);
     ui.label(egui::RichText::new(text.to_uppercase()).weak());
+    ui.add_space(4.0);
+}
+
+/// The inspector subpane's heading. Like [`section_heading`] it is the muted all-caps subpane
+/// label, but it folds the selected entry's name into the line ("INSPECTOR: <name>") so the card
+/// need not repeat it below. The name keeps its own case and strong weight, so it reads as the
+/// item's name rather than being shouted in all-caps. Falls back to the plain label when nothing
+/// is selected.
+fn inspector_heading(ui: &mut egui::Ui, name: Option<&str>) {
+    ui.add_space(2.0);
+    match name {
+        Some(name) => {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("INSPECTOR:").weak());
+                ui.strong(name);
+            });
+        }
+        None => {
+            ui.label(egui::RichText::new("SUBGRAPH INSPECTOR").weak());
+        }
+    }
     ui.add_space(4.0);
 }
 

@@ -111,8 +111,9 @@ pub(crate) fn cull_to_viewport(
 /// Styles a right-click context-menu ui to match the node-creation menu: taller
 /// rows, a constant width, and the blue selection highlight on hover (egui's default
 /// is a muted grey). Pointing the hovered/active widget fills at `selection.bg_fill`
-/// gives the same blue a `Button::selectable` shows when selected.
-fn style_context_menu(ui: &mut egui::Ui) {
+/// gives the same blue a `Button::selectable` shows when selected. Shared with the
+/// library browser's row and inspector menus so every context menu reads the same.
+pub(crate) fn style_context_menu(ui: &mut egui::Ui) {
     ui.spacing_mut().button_padding = egui::vec2(8.0, 6.0);
     ui.set_min_width(CONTEXT_MENU_WIDTH);
     let selection = ui.visuals().selection;
