@@ -1,0 +1,931 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Ymir — a node-based procedural terrain generator in Rust, built with Claude Code. Field briefing for Agile Thailand.">
+<title>Ymir — A Field Briefing</title>
+<style>html,body{margin:0;padding:0}img{max-width:100%}</style>
+</head>
+<body>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+
+  :root {
+    /* Light "glacial paper" (base). Dark overrides below. */
+    --ground: #e9eef1;
+    --surface: #f7fafb;
+    --surface-2: #eef3f6;
+    --rail: #e4ecef;
+    --line: #cfdbe1;
+    --line-strong: #aebfc9;
+    --ink: #14212a;
+    --ink-2: #3c5460;
+    --ink-dim: #647b88;
+    --frost: #12798f;
+    --frost-deep: #0c586b;
+    --ember: #bd6425;
+    --ember-deep: #954c19;
+    --good: #2f8a5b;
+    --warn: #9a7412;
+    --crit: #b64237;
+    --scrim: rgba(233,238,241,0.72);
+    --card-shadow: 0 1px 0 rgba(20,33,42,0.04), 0 12px 30px -18px rgba(20,33,42,0.28);
+    color-scheme: light;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #0b1014;
+      --surface: #11191f;
+      --surface-2: #16222b;
+      --rail: #0d141a;
+      --line: #223441;
+      --line-strong: #33495a;
+      --ink: #e3ebf0;
+      --ink-2: #aebdc8;
+      --ink-dim: #7b8e9c;
+      --frost: #63c6db;
+      --frost-deep: #2f8397;
+      --ember: #e08a4a;
+      --ember-deep: #b96329;
+      --good: #6fc191;
+      --warn: #e0b24a;
+      --crit: #e26a5f;
+      --scrim: rgba(11,16,20,0.62);
+      --card-shadow: 0 1px 0 rgba(0,0,0,0.4), 0 20px 44px -24px rgba(0,0,0,0.7);
+      color-scheme: dark;
+    }
+  }
+
+  /* Explicit toggle wins over the media query, in both directions. */
+  :root[data-theme="light"] {
+    --ground: #e9eef1; --surface: #f7fafb; --surface-2: #eef3f6; --rail: #e4ecef;
+    --line: #cfdbe1; --line-strong: #aebfc9; --ink: #14212a; --ink-2: #3c5460;
+    --ink-dim: #647b88; --frost: #12798f; --frost-deep: #0c586b; --ember: #bd6425;
+    --ember-deep: #954c19; --good: #2f8a5b; --warn: #9a7412; --crit: #b64237;
+    --scrim: rgba(233,238,241,0.72);
+    --card-shadow: 0 1px 0 rgba(20,33,42,0.04), 0 12px 30px -18px rgba(20,33,42,0.28);
+    color-scheme: light;
+  }
+  :root[data-theme="dark"] {
+    --ground: #0b1014; --surface: #11191f; --surface-2: #16222b; --rail: #0d141a;
+    --line: #223441; --line-strong: #33495a; --ink: #e3ebf0; --ink-2: #aebdc8;
+    --ink-dim: #7b8e9c; --frost: #63c6db; --frost-deep: #2f8397; --ember: #e08a4a;
+    --ember-deep: #b96329; --good: #6fc191; --warn: #e0b24a; --crit: #e26a5f;
+    --scrim: rgba(11,16,20,0.62);
+    --card-shadow: 0 1px 0 rgba(0,0,0,0.4), 0 20px 44px -24px rgba(0,0,0,0.7);
+    color-scheme: dark;
+  }
+
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: clamp(16px, 1rem + 0.12vw, 17.5px);
+    line-height: 1.66;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  a { color: var(--frost); text-decoration: none; }
+  a:hover { color: color-mix(in srgb, var(--frost), var(--ink) 32%); }
+
+  code, .mono {
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
+  }
+
+  ::selection { background: var(--frost); color: var(--ground); }
+
+  :focus-visible {
+    outline: 2px solid var(--frost);
+    outline-offset: 3px;
+    border-radius: 2px;
+  }
+
+  /* ---------- Top bar ---------- */
+  .topbar {
+    position: sticky; top: 0; z-index: 40;
+    display: flex; align-items: center; gap: 1rem;
+    padding: 0.7rem clamp(1rem, 4vw, 2.5rem);
+    background: color-mix(in srgb, var(--ground) 86%, transparent);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--line);
+  }
+  .wordmark {
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", monospace;
+    font-weight: 700; letter-spacing: 0.34em; font-size: 0.9rem;
+    padding-left: 0.06em;
+  }
+  .wordmark b { color: var(--frost); font-weight: 700; }
+  .topbar .spacer { flex: 1; }
+  .topbar .doc-tag {
+    font-family: ui-monospace, monospace; font-size: 0.68rem;
+    letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink-dim);
+  }
+  .ramp {
+    height: 8px; width: 74px; border-radius: 2px;
+    background: linear-gradient(90deg, var(--frost-deep), var(--frost) 42%, var(--ember) 78%, var(--ember-deep));
+    border: 1px solid var(--line-strong);
+  }
+  .theme-btn {
+    font-family: ui-monospace, monospace; font-size: 0.68rem; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--ink-2);
+    background: var(--surface); border: 1px solid var(--line);
+    padding: 0.4rem 0.7rem; border-radius: 6px; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 0.45rem;
+  }
+  .theme-btn:hover { border-color: var(--line-strong); color: var(--ink); }
+
+  /* ---------- Hero ---------- */
+  .hero { position: relative; overflow: hidden; border-bottom: 1px solid var(--line); }
+  .hero canvas { display: block; width: 100%; height: clamp(360px, 58vh, 560px); }
+  .hero .scrim {
+    position: absolute; inset: 0;
+    background:
+      radial-gradient(120% 90% at 20% 30%, transparent 30%, var(--scrim) 100%),
+      linear-gradient(180deg, transparent 40%, var(--ground) 99%);
+    pointer-events: none;
+  }
+  .hero .overlay {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    padding: clamp(1.5rem, 5vw, 3.5rem) clamp(1rem, 4vw, 2.5rem) clamp(1.4rem, 3vw, 2.2rem);
+    max-width: 1120px; margin: 0 auto;
+  }
+  .eyebrow {
+    font-family: ui-monospace, monospace; font-size: 0.72rem; letter-spacing: 0.22em;
+    text-transform: uppercase; color: var(--frost);
+    display: inline-flex; align-items: center; gap: 0.6rem; margin-bottom: 0.9rem;
+  }
+  .eyebrow::before {
+    content: ""; width: 26px; height: 1px; background: var(--frost); display: inline-block;
+  }
+  .hero h1 {
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", monospace;
+    font-weight: 700; margin: 0;
+    font-size: clamp(3.4rem, 12vw, 8rem); line-height: 0.92; letter-spacing: -0.02em;
+    text-wrap: balance;
+  }
+  .hero .lede {
+    margin: 0.9rem 0 0; max-width: 40ch;
+    font-size: clamp(1.05rem, 1rem + 0.7vw, 1.5rem); line-height: 1.4; color: var(--ink);
+    font-weight: 450;
+  }
+  .hero .myth {
+    margin: 0.85rem 0 0; max-width: 46ch; color: var(--ink-2); font-size: 0.98rem;
+  }
+
+  /* ---------- Stat strip ---------- */
+  .strip {
+    display: grid; grid-template-columns: repeat(5, 1fr);
+    border-bottom: 1px solid var(--line);
+    background: var(--surface);
+  }
+  .strip .cell {
+    padding: 1.15rem clamp(0.8rem, 2vw, 1.4rem);
+    border-left: 1px solid var(--line);
+  }
+  .strip .cell:first-child { border-left: 0; }
+  .strip .fig {
+    font-family: ui-monospace, monospace; font-weight: 700;
+    font-size: clamp(1.5rem, 1rem + 1.6vw, 2.15rem); letter-spacing: -0.01em;
+    font-variant-numeric: tabular-nums; line-height: 1;
+  }
+  .strip .fig .u { color: var(--frost); }
+  .strip .lab {
+    margin-top: 0.5rem; font-family: ui-monospace, monospace;
+    font-size: 0.66rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-dim);
+  }
+
+  /* ---------- Layout shell ---------- */
+  main { max-width: 1120px; margin: 0 auto; padding: 0 clamp(1rem, 4vw, 2.5rem); }
+
+  section { padding: clamp(3rem, 7vw, 5.5rem) 0; border-bottom: 1px solid var(--line); }
+  section:last-of-type { border-bottom: 0; }
+
+  .sec-grid { display: grid; grid-template-columns: 132px minmax(0, 1fr); gap: clamp(1.2rem, 4vw, 3rem); }
+  .rail { position: relative; }
+  .rail .num {
+    font-family: ui-monospace, monospace; font-weight: 700; font-size: 0.82rem;
+    color: var(--frost); letter-spacing: 0.08em;
+  }
+  .rail .tag {
+    margin-top: 0.45rem; font-family: ui-monospace, monospace; font-size: 0.66rem;
+    letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-dim); line-height: 1.5;
+  }
+  .rail.ember .num { color: var(--ember); }
+  .rail::before {
+    content: ""; position: absolute; left: 0; top: 0.35rem; width: 8px; height: 8px;
+    transform: translateX(-1.6rem) rotate(45deg);
+    border: 1px solid var(--frost); background: var(--ground);
+  }
+  .rail.ember::before { border-color: var(--ember); }
+  @media (max-width: 760px) { .rail::before { display: none; } }
+
+  .body h2 {
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", monospace;
+    font-weight: 700; margin: 0 0 0.4rem; letter-spacing: -0.01em;
+    font-size: clamp(1.55rem, 1rem + 2vw, 2.35rem); line-height: 1.08; text-wrap: balance;
+  }
+  .body .stand {
+    margin: 0 0 1.6rem; color: var(--ink-2); font-size: 1.06rem; max-width: 62ch;
+  }
+  .body p { max-width: 68ch; margin: 0 0 1.05rem; }
+  .body p:last-child { margin-bottom: 0; }
+  .body h3 {
+    font-size: 1.02rem; margin: 1.9rem 0 0.5rem; color: var(--ink);
+    font-family: ui-monospace, monospace; letter-spacing: 0.01em;
+  }
+  .body strong { color: var(--ink); font-weight: 650; }
+  .body em { color: var(--frost); font-style: normal; font-weight: 600; }
+  p code, li code {
+    background: var(--surface-2); border: 1px solid var(--line);
+    padding: 0.06em 0.38em; border-radius: 4px; font-size: 0.86em; color: var(--ink);
+  }
+
+  /* ---------- Reusable pieces ---------- */
+  .lead-in {
+    display: inline-block; font-family: ui-monospace, monospace;
+    font-size: 0.7rem; letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--frost); margin-bottom: 1rem;
+  }
+  .ember .lead-in { color: var(--ember); }
+
+  .cards { display: grid; gap: 1px; background: var(--line); border: 1px solid var(--line);
+    border-radius: 10px; overflow: hidden; margin: 1.4rem 0; }
+  .grid-2 { grid-template-columns: repeat(2, 1fr); }
+  .grid-3 { grid-template-columns: repeat(3, 1fr); }
+  .grid-4 { grid-template-columns: repeat(4, 1fr); }
+  .card { background: var(--surface); padding: 1.15rem 1.2rem; }
+  .card .k {
+    font-family: ui-monospace, monospace; font-size: 0.68rem; letter-spacing: 0.1em;
+    text-transform: uppercase; color: var(--frost); margin-bottom: 0.5rem;
+    display: flex; align-items: center; gap: 0.5rem;
+  }
+  .card.ember .k { color: var(--ember); }
+  .card .v { font-size: 0.95rem; color: var(--ink-2); }
+  .card p { margin: 0; max-width: none; }
+
+  /* numbers instrument grid */
+  .readout { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px;
+    background: var(--line); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .readout .r { background: var(--surface); padding: 1.2rem; position: relative; }
+  .readout .r::after {
+    content: ""; position: absolute; top: 10px; right: 10px; width: 5px; height: 5px;
+    border-radius: 50%; background: var(--frost); opacity: 0.5;
+  }
+  .readout .r.warm::after { background: var(--ember); }
+  .readout .big {
+    font-family: ui-monospace, monospace; font-weight: 700; font-variant-numeric: tabular-nums;
+    font-size: clamp(1.6rem, 1rem + 1.8vw, 2.3rem); line-height: 1; letter-spacing: -0.01em;
+  }
+  .readout .cap { margin-top: 0.55rem; font-size: 0.72rem; letter-spacing: 0.1em;
+    text-transform: uppercase; font-family: ui-monospace, monospace; color: var(--ink-dim); }
+
+  /* node taxonomy */
+  .taxo { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.75rem; margin: 1.4rem 0; }
+  .cat { background: var(--surface); border: 1px solid var(--line); border-radius: 9px;
+    padding: 0.95rem 1rem; border-left: 3px solid var(--frost); box-shadow: var(--card-shadow); }
+  .cat.geo { border-left-color: var(--ember); }
+  .cat.out { border-left-color: var(--line-strong); }
+  .cat .hd { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.6rem; }
+  .cat .nm { font-family: ui-monospace, monospace; font-size: 0.8rem; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--ink); font-weight: 650; }
+  .cat.geo .nm { color: var(--ember); }
+  .cat:not(.geo):not(.out) .nm { color: var(--frost); }
+  .cat .ct { font-family: ui-monospace, monospace; font-size: 0.72rem; color: var(--ink-dim);
+    font-variant-numeric: tabular-nums; }
+  .chips { display: flex; flex-wrap: wrap; gap: 0.34rem; }
+  .chip { font-family: ui-monospace, monospace; font-size: 0.72rem; color: var(--ink-2);
+    background: var(--surface-2); border: 1px solid var(--line); border-radius: 5px; padding: 0.16rem 0.44rem; }
+  .cat .role { font-size: 0.82rem; color: var(--ink-dim); margin: 0 0 0.6rem; }
+
+  /* callout */
+  .callout { border: 1px solid var(--line); border-radius: 12px; overflow: hidden;
+    margin: 1.6rem 0; background: var(--surface); box-shadow: var(--card-shadow); }
+  .callout .bar { padding: 0.6rem 1rem; border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 0.6rem; background: var(--surface-2); }
+  .callout .bar .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ember); }
+  .callout .bar .t { font-family: ui-monospace, monospace; font-size: 0.72rem;
+    letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-2); }
+  .callout .body-in { padding: 1.15rem 1.25rem; }
+  .callout .body-in p { margin: 0 0 0.7rem; }
+  .callout .body-in p:last-child { margin: 0; }
+  pre { margin: 0.8rem 0 0; background: var(--ground); border: 1px solid var(--line);
+    border-radius: 8px; padding: 0.85rem 1rem; overflow-x: auto; }
+  pre code { font-size: 0.82rem; line-height: 1.6; color: var(--ink-2); }
+  pre .cm { color: var(--ink-dim); }
+  pre .fn { color: var(--frost); }
+  pre .kw { color: var(--ember); }
+
+  /* pipeline diagram */
+  .pipe { display: flex; align-items: stretch; gap: 0; flex-wrap: wrap; margin: 1.5rem 0;
+    border: 1px solid var(--line); border-radius: 12px; overflow: hidden; box-shadow: var(--card-shadow); }
+  .pipe .stage { flex: 1 1 150px; min-width: 150px; padding: 1rem 1.05rem; background: var(--surface);
+    border-right: 1px solid var(--line); position: relative; }
+  .pipe .stage:last-child { border-right: 0; }
+  .pipe .stage .s-k { font-family: ui-monospace, monospace; font-size: 0.66rem; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--ember); margin-bottom: 0.4rem; }
+  .pipe .stage .s-v { font-size: 0.9rem; color: var(--ink-2); }
+  .pipe .stage .s-v b { color: var(--ink); }
+
+  .forbid { columns: 2; column-gap: 1.5rem; margin: 1.1rem 0; padding: 0; list-style: none; }
+  .forbid li { break-inside: avoid; padding: 0.28rem 0 0.28rem 1.3rem; position: relative;
+    font-size: 0.92rem; color: var(--ink-2); }
+  .forbid li::before { content: "✕"; position: absolute; left: 0; color: var(--crit);
+    font-family: ui-monospace, monospace; font-size: 0.8rem; top: 0.35rem; }
+  .forbid li code { background: var(--surface-2); border: 1px solid var(--line);
+    padding: 0.02em 0.3em; border-radius: 3px; font-size: 0.84em; }
+
+  ul.clean { list-style: none; padding: 0; margin: 1rem 0; }
+  ul.clean li { padding: 0.4rem 0 0.4rem 1.5rem; position: relative; border-bottom: 1px solid var(--line);
+    max-width: 68ch; }
+  ul.clean li:last-child { border-bottom: 0; }
+  ul.clean li::before { content: ""; position: absolute; left: 0; top: 0.95rem; width: 7px; height: 7px;
+    transform: rotate(45deg); border: 1px solid var(--frost); }
+  .ember ul.clean li::before { border-color: var(--ember); }
+
+  .pull { border-left: 3px solid var(--frost); padding: 0.3rem 0 0.3rem 1.2rem; margin: 1.5rem 0;
+    font-size: 1.12rem; line-height: 1.5; color: var(--ink); max-width: 60ch; }
+  .ember .pull { border-left-color: var(--ember); }
+
+  /* ---------- Footer ---------- */
+  footer { padding: clamp(2.5rem, 6vw, 4rem) clamp(1rem, 4vw, 2.5rem);
+    background: var(--surface); border-top: 1px solid var(--line); }
+  footer .fw { max-width: 1120px; margin: 0 auto;
+    display: flex; flex-wrap: wrap; gap: 1.4rem; justify-content: space-between; align-items: flex-end; }
+  footer .fw .l { font-family: ui-monospace, monospace; font-weight: 700; letter-spacing: 0.3em; }
+  footer .fw .l b { color: var(--frost); }
+  footer .meta { font-size: 0.82rem; color: var(--ink-dim); max-width: 46ch; line-height: 1.6; }
+  footer .meta a { color: var(--ink-2); border-bottom: 1px solid var(--line-strong); }
+
+  /* ---------- Responsive ---------- */
+  @media (max-width: 900px) {
+    .strip { grid-template-columns: repeat(3, 1fr); }
+    .strip .cell:nth-child(4) { border-left: 0; }
+    .readout { grid-template-columns: repeat(2, 1fr); }
+  }
+  @media (max-width: 760px) {
+    .sec-grid { grid-template-columns: 1fr; gap: 0.9rem; }
+    .rail { display: flex; align-items: baseline; gap: 0.8rem; }
+    .rail .tag { margin-top: 0; }
+    .taxo, .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
+    .forbid { columns: 1; }
+    .topbar .doc-tag { display: none; }
+  }
+  @media (max-width: 480px) {
+    .strip { grid-template-columns: repeat(2, 1fr); }
+    .strip .cell:nth-child(3) { border-left: 0; }
+    .readout { grid-template-columns: 1fr; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { scroll-behavior: auto; }
+  }
+</style>
+
+<header class="topbar">
+  <span class="wordmark">Y<b>M</b>IR</span>
+  <span class="ramp" title="elevation ramp — low to high"></span>
+  <span class="spacer"></span>
+  <span class="doc-tag">Field Briefing · Agile Thailand</span>
+  <button class="theme-btn" id="themeBtn" type="button" aria-label="Toggle colour theme">
+    <span id="themeIcon">◐</span><span id="themeLabel">Theme</span>
+  </button>
+</header>
+
+<div class="hero">
+  <canvas id="topo" aria-hidden="true"></canvas>
+  <div class="scrim"></div>
+  <div class="overlay">
+    <span class="eyebrow">Procedural terrain engine · Rust · Linux</span>
+    <h1>YMIR</h1>
+    <p class="lede">A node-based procedural terrain generator where everything is a layered field, and nodes just transform it.</p>
+    <p class="myth">Named for the primordial giant of Norse myth, whose body the world is shaped from. Built in three weeks, hand-in-hand with an AI agent held to a strict engineering contract.</p>
+  </div>
+</div>
+
+<div class="strip" role="list">
+  <div class="cell" role="listitem"><div class="fig">32.6<span class="u">K</span></div><div class="lab">Lines of Rust</div></div>
+  <div class="cell" role="listitem"><div class="fig">252</div><div class="lab">Commits · 1 per step</div></div>
+  <div class="cell" role="listitem"><div class="fig">571</div><div class="lab">Tests</div></div>
+  <div class="cell" role="listitem"><div class="fig">33</div><div class="lab">Nodes · 8 categories</div></div>
+  <div class="cell" role="listitem"><div class="fig">~3<span class="u">wk</span></div><div class="lab">Elapsed</div></div>
+</div>
+
+<main>
+
+  <!-- 01 -->
+  <section>
+    <div class="sec-grid">
+      <div class="rail"><div class="num">§01</div><div class="tag">The bet</div></div>
+      <div class="body">
+        <span class="lead-in">Everything is data</span>
+        <h2>One type flows on every edge</h2>
+        <p class="stand">The whole architecture rests on a single wager: if every wire carries the same universal type, the engine never needs to know what any node does, and the user is never forced into a fixed build order.</p>
+        <p>That type is a <em>Field</em>: a grid resolution, normalized world-space <code>region</code> bounds, a map of named scalar <code>layers</code> (<code>height</code>, <code>mask</code>, <code>flow</code>, <code>water</code>, <code>sediment</code>…), and a small bag of scalar globals (<code>seed</code>, world bounds, vertical scale). Layers are <code>Arc</code>-shared, so passing a field through untouched is nearly free.</p>
+        <p>The discipline that keeps it a terrain tool rather than a general dataflow engine: Ymir adopts Houdini's <strong>attribute</strong> philosophy but not its element model. There is exactly <strong>one element</strong> — the 2D grid — plus globals. No points, no vertices, no primitives. Holding that line against scope creep is an explicit, recurring instruction.</p>
+        <div class="pull">Nodes declare the layers they want, degrade gracefully when one is absent, and never gate a connection. That is why any node is insertable anywhere.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 02 -->
+  <section>
+    <div class="sec-grid">
+      <div class="rail"><div class="num">§02</div><div class="tag">Readout</div></div>
+      <div class="body">
+        <span class="lead-in">By the numbers</span>
+        <h2>A survey of the codebase</h2>
+        <p class="stand">Accurate as of the current commit. The point of the small numbers is that they are small on purpose — a green build was never the goal; a build an experienced Rust reviewer would sign off on was.</p>
+        <div class="readout">
+          <div class="r"><div class="big">4</div><div class="cap">Crates</div></div>
+          <div class="r"><div class="big">13.4K</div><div class="cap">GUI lines</div></div>
+          <div class="r"><div class="big">11.3K</div><div class="cap">Node lines</div></div>
+          <div class="r"><div class="big">7.8K</div><div class="cap">Core lines</div></div>
+          <div class="r warm"><div class="big">571</div><div class="cap">Test fns</div></div>
+          <div class="r warm"><div class="big">252</div><div class="cap">Commits</div></div>
+          <div class="r"><div class="big">13</div><div class="cap">Design docs</div></div>
+          <div class="r"><div class="big">0</div><div class="cap">unsafe · async</div></div>
+        </div>
+        <p>Rust 1.95, edition 2024, GPL-3.0. Toolchain pinned in-repo — not hygiene theatre, but load-bearing for the byte-identical-output promise. <code>rayon</code> for per-cell parallelism; no <code>unsafe</code>, no <code>async</code> (this is compute-bound, not I/O-bound).</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 03 -->
+  <section>
+    <div class="sec-grid">
+      <div class="rail"><div class="num">§03</div><div class="tag">Structure</div></div>
+      <div class="body">
+        <span class="lead-in">Architecture</span>
+        <h2>The compiler enforces the invariant</h2>
+        <p class="stand">The central rule: <em>nothing may ask "which node is this?"</em> Everything either dispatches polymorphically or reads the node's own schema. Adding a node touches only its own new file.</p>
+
+        <h3>The dependency arrow does the work</h3>
+        <p>Concrete nodes live in <code>ymir-nodes</code>; the engine lives in <code>ymir-core</code>, and the arrow points <em>nodes → core</em>. So the engine <strong>literally cannot name a concrete node</strong> — the invariant is enforced by the borrow checker, not by discipline. Good architecture is guardrails the builder can't step over.</p>
+
+        <h3>The Operator trait</h3>
+        <pre><code><span class="kw">trait</span> <span class="fn">Operator</span> {
+  <span class="kw">fn</span> spec(&self) -> NodeSpec;                <span class="cm">// identity, ports, params</span>
+  <span class="kw">fn</span> eval(&self, inputs, params, ctx)
+        -> Result&lt;Vec&lt;Field&gt;&gt;;             <span class="cm">// one field per output</span>
+  <span class="kw">fn</span> content_hash(&self) -> Option&lt;u64&gt;;    <span class="cm">// for containers</span>
+  <span class="kw">fn</span> nested(&self) -> Option&lt;&Graph&gt;;       <span class="cm">// subgraph nesting</span>
+}</code></pre>
+        <p>Inputs are an ordered, named list from day one — required by index, optional via <code>inputs.optional(i)</code> — so multi-input blends and optional masks are first-class, never retrofitted. Failures are <strong>values, not panics</strong>: a red node is reported while the rest of the graph still evaluates.</p>
+
+        <h3>Enforced in four independent places</h3>
+        <div class="cards grid-2">
+          <div class="card"><div class="k">Evaluate</div><p class="v">Dispatch through <code>dyn Operator::eval</code> — core has no concrete type to match on.</p></div>
+          <div class="card"><div class="k">Palette</div><p class="v">Generated by iterating the <code>inventory</code> registry — no hand-kept list.</p></div>
+          <div class="card"><div class="k">Params UI</div><p class="v">Built by introspecting <code>ParamSpec</code> — zero per-node widget code.</p></div>
+          <div class="card"><div class="k">Save / load</div><p class="v">Stores <code>type_id</code> + params, rebuilds via the registry — no central enum.</p></div>
+        </div>
+        <p>A node's <em>kind</em> (generator / modifier / endpoint) is derived from arity, not stored: no inputs ⇒ generator, no outputs ⇒ endpoint. "Generators only at the head" enforces itself, because a generator has no input socket to wire.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 04 -->
+  <section>
+    <div class="sec-grid">
+      <div class="rail"><div class="num">§04</div><div class="tag">Evaluation</div></div>
+      <div class="body">
+        <span class="lead-in">The evaluator &amp; cache</span>
+        <h2>Pull-based, memoized, three tiers deep</h2>
+        <p class="stand">Validate the graph is a DAG, evaluate from the requested endpoint, recompute only downstream of a change. A full-resolution field per node would exhaust memory, so the cache is bounded by policy, not naïve.</p>
+        <div class="cards grid-3">
+          <div class="card"><div class="k">Hot</div><p class="v">The active evaluation path, in memory.</p></div>
+          <div class="card"><div class="k">Warm · RAM</div><p class="v">A small LRU for reuse across edits.</p></div>
+          <div class="card"><div class="k">Warm · disk</div><p class="v">Content-addressed blobs, keyed by computation — survive restarts, shared across projects.</p></div>
+        </div>
+        <p>Every cache operation is best-effort: a corrupt file or a full disk degrades to a miss, never a panic. A node's key is its <code>type_id</code>, a canonical param hash, its upstream input hashes, and the context fields it depends on — content-hashing everything is what makes the cache correct rather than merely fast.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 05 -->
+  <section>
+    <div class="sec-grid">
+      <div class="rail"><div class="num">§05</div><div class="tag">Contract</div></div>
+      <div class="body">
+        <span class="lead-in">Determinism</span>
+        <h2>A means to repeatability, not an end</h2>
+        <p class="stand">The contract is stated in rungs — and refusing to over-engineer the top rung is itself the design decision.</p>
+        <ul class="clean">
+          <li><strong>Same machine — required, byte-identical.</strong> Same seed, graph, and machine yields the same output every time. The memo cache depends on it: keys are content hashes, so any run-to-run drift would make every downstream node miss constantly. No output may depend on hash-map order, the clock, a thread id, or address layout.</li>
+          <li><strong>Across machines — visual equivalence.</strong> A shared project regenerates terrain that <em>looks</em> the same; a few last-bit differences in an order-sensitive parallel reduction are accepted rather than contorting the algorithm to force bit-identity nobody asked for.</li>
+        </ul>
+        <div class="pull">Nobody chooses the tool because it is bit-exact across machines. They choose it because it reliably regenerates great terrain. Determinism serves that; it is not the trophy.</div>
+        <p>Per-cell pure functions (noise, shapes) write each cell independently, so they stay byte-identical regardless of thread count for free. Only order-sensitive scatter — thermal erosion adding into shared neighbours — relaxes.</p>
+
+        <h3>Erosion is physics, not a sampled function</h3>
+        <p>One more axis, and it is deliberate: iterative erosion is <em>resolution-dependent</em>. Run it at preview resolution and at build resolution and you get genuinely different terrain, not a rescaled copy — so the fast preview is a faithful <strong>approximation</strong> of the build, never a promise of pixel-identity to it. Its strength and scale are expressed in world units and its pass counts scale with cell size, so the preview stays representative rather than misleading. The target-resolution build is the source of truth.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 06 -->
+  <section>
+    <div class="sec-grid">
+      <div class="rail"><div class="num">§06</div><div class="tag">Library</div></div>
+      <div class="body">
+        <span class="lead-in">The node library · 33 nodes</span>
+        <h2>Many small nodes, not a few big ones</h2>
+        <p class="stand">A graph should read from its wiring, not from parameters buried inside nodes — an <em>Invert</em> node, not a remap with its range secretly swapped. Landforms like craters and calderas are <strong>composed from primitives</strong> and shipped as example subgraphs, never baked in as bespoke nodes.</p>
+        <div class="taxo">
+          <div class="cat">
+            <div class="hd"><span class="nm">Generator</span><span class="ct">15 · heads</span></div>
+            <p class="role">No inputs — the sources every graph starts from.</p>
+            <div class="chips"><span class="chip">fbm</span><span class="chip">billow</span><span class="chip">ridged</span><span class="chip">hybrid</span><span class="chip">cellular·bumps</span><span class="chip">cellular·cracks</span><span class="chip">cellular·regions</span><span class="chip">radial</span><span class="chip">ring</span><span class="chip">rect</span><span class="chip">polygon</span><span class="chip">falloff</span><span class="chip">gradient</span><span class="chip">flow</span><span class="chip">import</span></div>
+          </div>
+          <div class="cat">
+            <div class="hd"><span class="nm">Selector</span><span class="ct">4 · masks</span></div>
+            <p class="role">Turn terrain into masks — the "where" that steers everything else.</p>
+            <div class="chips"><span class="chip">slope</span><span class="chip">height</span><span class="chip">curvature</span><span class="chip">flow</span></div>
+          </div>
+          <div class="cat">
+            <div class="hd"><span class="nm">Adjust</span><span class="ct">4 · pointwise</span></div>
+            <p class="role">Per-cell shaping on a single input.</p>
+            <div class="chips"><span class="chip">curve</span><span class="chip">levels</span><span class="chip">invert</span><span class="chip">expression</span></div>
+          </div>
+          <div class="cat">
+            <div class="hd"><span class="nm">Filter</span><span class="ct">2 · spatial</span></div>
+            <p class="role">Neighborhood operations.</p>
+            <div class="chips"><span class="chip">blur</span><span class="chip">warp</span></div>
+          </div>
+          <div class="cat">
+            <div class="hd"><span class="nm">Combine</span><span class="ct">1 · multi-in</span></div>
+            <p class="role">Pointwise, two inputs.</p>
+            <div class="chips"><span class="chip">blend</span></div>
+          </div>
+          <div class="cat geo">
+            <div class="hd"><span class="nm">Geology</span><span class="ct">3 · processes</span></div>
+            <p class="role">Complete, self-contained erosion models. Stream carving is the intended differentiator.</p>
+            <div class="chips"><span class="chip">thermal</span><span class="chip">hydraulic</span><span class="chip">stream</span></div>
+          </div>
+          <div class="cat out">
+            <div class="hd"><span class="nm">Output</span><span class="ct">3 · endpoints</span></div>
+            <p class="role">No outputs — where terrain leaves the graph.</p>
+            <div class="chips"><span class="chip">PNG&nbsp;16-bit</span><span class="chip">OpenEXR</span><span class="chip">R16 · Unreal</span></div>
+          </div>
+          <div class="cat out">
+            <div class="hd"><span class="nm">Utility</span><span class="ct">1 · plumbing</span></div>
+            <p class="role">Reroute / pass-through anchors.</p>
+            <div class="chips"><span class="chip">null</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 07 -->
+  <section>
+    <div class="sec-grid">
+      <div class="rail"><div class="num">§07</div><div class="tag">Expression</div></div>
+      <div class="body">
+        <span class="lead-in">A tiny bytecode VM</span>
+        <h2>The Expression node runs its own language</h2>
+        <p class="stand">An expression is parsed once into flat bytecode, then a stack machine evaluates it per cell — no AST pointer-chasing, no per-cell allocation — so it stays fast over millions of cells and parallelizes trivially.</p>
+        <div class="callout">
+          <div class="bar"><span class="dot"></span><span class="t">expr · per-cell stack machine</span></div>
+          <div class="body-in">
+            <pre><code><span class="cm">// height ramped by a warped radial falloff</span>
+lerp(h, <span class="fn">smoothstep</span>(0.2, 0.8, 1.0 - sqrt(x*x + y*y)),
+     <span class="fn">clamp</span>(slope, 0.0, 1.0))</code></pre>
+            <p style="margin-top:0.9rem">Built-ins: <code>abs ceil floor sign sqrt exp ln pow min max clamp lerp sin cos tan step smoothstep select</code>, constants <code>pi e tau</code>, and variables for cell coordinates and input layers. It is an <em>expression</em> language, not a script — branching is <code>select(cond, a, b)</code>. An unknown identifier is a <strong>compile error</strong>, so a typo is reported, never silently zero.</p>
+            <p>Hand-rolled on purpose: the function set and numeric behaviour stay fully under control and byte-stable, with no dependency liability. Off-the-shelf evaluators are tree-walkers — the slow per-cell path.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 08 -->
+  <section>
+    <div class="sec-grid">
+      <div class="rail"><div class="num">§08</div><div class="tag">Interface</div></div>
+      <div class="body">
+        <span class="lead-in">The desktop application</span>
+        <h2>egui + wgpu, and a self-referential preview</h2>
+        <p class="stand">The GUI is the largest crate for a reason: a terrain tool lives or dies on how it feels to compose with. The node canvas is rendered as a <em>pure view</em> over the core graph — presentation and truth kept cleanly apart.</p>
+        <div class="cards grid-2">
+          <div class="card"><div class="k">Node canvas</div><p class="v"><code>egui-snarl</code> as a view over the authoritative core graph. The wiring is presentation; the graph is truth.</p></div>
+          <div class="card"><div class="k">3D viewport</div><p class="v">Real <code>wgpu</code> rendering inside an egui pane — terrain mesh, lighting, vertical-exaggeration slider.</p></div>
+          <div class="card"><div class="k">Live thumbnails</div><p class="v">Every node shows its own heightmap preview — cached, debounced, GPU-upload budgeted so it never hitches.</p></div>
+          <div class="card"><div class="k">Curve editor</div><p class="v">A visual transfer-curve widget, because shaping needs a widget, not bare sliders.</p></div>
+          <div class="card"><div class="k">Subgraph library</div><p class="v">Saved subgraphs as git-friendly, version-stamped JSON files — browse, insert, document.</p></div>
+          <div class="card"><div class="k">2D preview</div><p class="v">Off-thread evaluation with an output picker — inspect any tapped output of any node.</p></div>
+          <div class="card"><div class="k">Full-res Build</div><p class="v">Evaluates selected endpoints at target resolution — the source of truth behind the live preview.</p></div>
+          <div class="card"><div class="k">Project format</div><p class="v">One versioned, git-diffable JSON document. Undo/redo as whole-session snapshots.</p></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 09 -->
+  <section>
+    <div class="sec-grid">
+      <div class="rail ember"><div class="num">§09</div><div class="tag">The method</div></div>
+      <div class="body ember">
+        <span class="lead-in">Built with Claude Code</span>
+        <h2>An agent under an enforced contract</h2>
+        <p class="stand">Ymir was not just built with an AI assistant — it was built under an explicit, mechanically enforced methodology a human team could adopt wholesale. The claim to test on stage: with the right guardrails, the output holds up to a demanding reviewer, and the git history reads as a deliberate build narrative.</p>
+
+        <h3>CLAUDE.md as a constitution</h3>
+        <p>A ~250-line project brief the agent reads before every change: the vision, the data model, the invariants, the determinism contract, the quality bar, and the working style. Not documentation written after — the operating contract, written first.</p>
+
+        <h3>Incremental, checkpoint-gated, one commit per step</h3>
+        <p>Small single-purpose steps. Every step ends compiling, tested, clippy-clean, and runnable — the tree is never broken between steps. State the plan before, the change after, then stop for review before the next. The result is <strong>252 commits you can scroll as a story</strong>, the opposite of a five-thousand-line dump.</p>
+
+        <h3>No shortcuts — fix causes, not symptoms</h3>
+        <p>The strongest rule, and enforced by machine, not vibes. A scanner recognizes symptom-hiding shapes and runs at two gates — a git pre-commit hook <em>and</em> an agent Stop hook, so the assistant cannot even end its turn having introduced one:</p>
+        <ul class="forbid">
+          <li>timers / sleeps to dodge a race</li>
+          <li><code>unwrap</code> · <code>expect</code> · panic on expected conditions</li>
+          <li><code>#[allow]</code> to mute a lint</li>
+          <li><code>todo!</code> · <code>unimplemented!</code> · stubs</li>
+          <li>tests that assert nothing or are ignored</li>
+          <li>hardcoding a value to go green</li>
+          <li>swallowed errors (<code>let _ =</code>, <code>.ok()</code>)</li>
+          <li>weakening a test to pass</li>
+        </ul>
+        <div class="pipe">
+          <div class="stage"><div class="s-k">Rule</div><div class="s-v"><b>CLAUDE.md</b> defines forbidden shapes + an inline <code>// shortcut-ok</code> escape hatch, rare and visible.</div></div>
+          <div class="stage"><div class="s-k">Scan</div><div class="s-v"><b>check-shortcuts.sh</b> greps the diff for those shapes.</div></div>
+          <div class="stage"><div class="s-k">Gate A</div><div class="s-v"><b>Pre-commit hook</b> blocks the commit.</div></div>
+          <div class="stage"><div class="s-k">Gate B</div><div class="s-v"><b>Stop hook</b> blocks the agent from ending its turn.</div></div>
+        </div>
+
+        <h3>Tests, design docs, and a memory that compounds</h3>
+        <ul class="clean">
+          <li><strong>571 tests written with each step</strong> — unit per operator, property tests for invariants, golden snapshots that fail on any silent output change.</li>
+          <li><strong>13 design documents</strong> — anything non-trivial gets a written design and a checkpoint before code. Extension from clean seams, never speculative abstraction.</li>
+          <li><strong>Persistent file-based memory</strong> — decisions and preferences carried across sessions, so the working relationship compounds instead of resetting each morning.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- 10 -->
+  <section>
+    <div class="sec-grid">
+      <div class="rail"><div class="num">§10</div><div class="tag">Takeaways</div></div>
+      <div class="body">
+        <span class="lead-in">Narrative hooks</span>
+        <h2>Where the two threads meet</h2>
+        <p class="stand">The through-line for the talk: the properties that make Ymir extensible for its <em>users</em> are the same ones that make it buildable by an <em>agent</em>.</p>
+        <div class="cards grid-2">
+          <div class="card"><div class="k">Extensibility, twice</div><p class="v">"Everything is data" means a new feature is one new file against a stable contract — extensibility for the user and for the builder are the same property.</p></div>
+          <div class="card"><div class="k">Make the wrong thing not compile</div><p class="v">The engine can't name a node, so it can't violate the additive invariant. Design so the mistake fails to build.</p></div>
+          <div class="card"><div class="k">Guardrails &gt; vibes</div><p class="v">A Stop hook that refuses to end a turn on an <code>unwrap</code> is a memorable demo — and a transferable practice.</p></div>
+          <div class="card"><div class="k">The human curates</div><p class="v">An eager generator over-generalizes; the maintainer's job became saying no — encoded, so it holds.</p></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="fw">
+    <div>
+      <div class="l">Y<b>M</b>IR</div>
+      <div class="meta" style="margin-top:0.6rem">An open-source procedural terrain generator. GPL-3.0. A personal, non-commercial project built to hold up to serious scrutiny.</div>
+    </div>
+    <div class="meta">
+      Briefing prepared for <b style="color:var(--ink-2)">Building Creative Desktop Applications with Claude Code</b>, Agile Thailand.<br>
+      Figures are a snapshot of the repository at the time of writing and will drift as the project grows.
+    </div>
+  </div>
+</footer>
+
+<script>
+(function () {
+  "use strict";
+
+  /* ---------- Theme toggle (works standalone and under a host that stamps data-theme) ---------- */
+  var root = document.documentElement;
+  var btn = document.getElementById("themeBtn");
+  var icon = document.getElementById("themeIcon");
+  var label = document.getElementById("themeLabel");
+
+  function stored() { try { return localStorage.getItem("ymir-theme"); } catch (e) { return null; } }
+  function save(v) { try { localStorage.setItem("ymir-theme", v); } catch (e) {} }
+
+  function currentDark() {
+    var t = root.getAttribute("data-theme");
+    if (t === "dark") return true;
+    if (t === "light") return false;
+    return window.matchMedia("(prefers-color-scheme: dark)").matches;
+  }
+  function reflect() {
+    var dark = currentDark();
+    icon.textContent = dark ? "☾" : "☀";
+    label.textContent = dark ? "Dark" : "Light";
+  }
+  var pref = stored();
+  if (pref === "dark" || pref === "light") root.setAttribute("data-theme", pref);
+  reflect();
+
+  btn.addEventListener("click", function () {
+    var dark = currentDark();
+    var next = dark ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+    save(next);
+    reflect();
+    refreshPalette();
+  });
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", function () {
+    reflect(); refreshPalette();
+  });
+
+  /* ---------- Topographic contour hero (marching squares over fBm value noise) ---------- */
+  var canvas = document.getElementById("topo");
+  var ctx = canvas.getContext("2d");
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  var pal = { frost: "#63c6db", frostDeep: "#2f8397", ember: "#e08a4a", dim: "#7b8e9c", line: "#223441" };
+  function readVar(name, fb) {
+    var v = getComputedStyle(root).getPropertyValue(name).trim();
+    return v || fb;
+  }
+  function refreshPalette() {
+    pal.frost = readVar("--frost", pal.frost);
+    pal.frostDeep = readVar("--frost-deep", pal.frostDeep);
+    pal.ember = readVar("--ember", pal.ember);
+    pal.dim = readVar("--ink-dim", pal.dim);
+    pal.line = readVar("--line", pal.line);
+  }
+  refreshPalette();
+
+  function toRGB(c) {
+    c = c.trim();
+    if (c[0] === "#") {
+      var h = c.slice(1);
+      if (h.length === 3) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
+      return [parseInt(h.slice(0,2),16), parseInt(h.slice(2,4),16), parseInt(h.slice(4,6),16)];
+    }
+    var m = c.match(/(\d+(\.\d+)?)/g);
+    if (m) return [+m[0], +m[1], +m[2]];
+    return [120,120,120];
+  }
+  function mix(a, b, t) {
+    var A = toRGB(a), B = toRGB(b);
+    return "rgb(" + Math.round(A[0]+(B[0]-A[0])*t) + "," +
+                    Math.round(A[1]+(B[1]-A[1])*t) + "," +
+                    Math.round(A[2]+(B[2]-A[2])*t) + ")";
+  }
+
+  /* deterministic value noise */
+  function hash(x, y) {
+    var h = (x * 374761393 + y * 668265263) | 0;
+    h = (h ^ (h >> 13)) * 1274126177;
+    h = (h ^ (h >> 16)) >>> 0;
+    return h / 4294967295;
+  }
+  function smooth(t) { return t * t * (3 - 2 * t); }
+  function vnoise(x, y) {
+    var xi = Math.floor(x), yi = Math.floor(y);
+    var xf = x - xi, yf = y - yi;
+    var u = smooth(xf), v = smooth(yf);
+    var a = hash(xi, yi), b = hash(xi + 1, yi);
+    var c = hash(xi, yi + 1), d = hash(xi + 1, yi + 1);
+    return (a + (b - a) * u) * (1 - v) + (c + (d - c) * u) * v;
+  }
+  function fbm(x, y) {
+    var sum = 0, amp = 0.5, freq = 1, norm = 0;
+    for (var o = 0; o < 5; o++) {
+      sum += amp * vnoise(x * freq, y * freq);
+      norm += amp; amp *= 0.5; freq *= 2.0;
+    }
+    return sum / norm;
+  }
+
+  var W = 0, H = 0, dpr = 1, step = 22, cols = 0, rows = 0, grid = null;
+  var LEVELS = 11;
+
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = canvas.clientWidth; H = canvas.clientHeight;
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    step = W < 620 ? 18 : 24;
+    cols = Math.ceil(W / step) + 1;
+    rows = Math.ceil(H / step) + 1;
+    grid = new Float32Array(cols * rows);
+  }
+
+  // edge interpolation helpers for a cell
+  function lerp(a, b, t) { return a + (b - a) * t; }
+
+  function compute(t) {
+    var scale = 0.055 * (step / 24);
+    var warp = 0.6;
+    var dx = t * 0.06, dy = t * 0.028;
+    for (var j = 0; j < rows; j++) {
+      for (var i = 0; i < cols; i++) {
+        var x = i * step * scale + dx;
+        var y = j * step * scale + dy;
+        // gentle domain warp for organic ridgelines
+        var wx = fbm(x + 5.2, y + 1.3) - 0.5;
+        var wy = fbm(x - 3.7, y + 9.1) - 0.5;
+        grid[j * cols + i] = fbm(x + warp * wx, y + warp * wy);
+      }
+    }
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    function seg(a, b) { ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); }
+
+    for (var l = 1; l < LEVELS; l++) {
+      var frac = l / LEVELS;
+      var level = frac;
+      var isIndex = (l % 4 === 0); // emphasized "index contours"
+      // elevation ramp: low = frost-deep -> frost -> ember (peaks)
+      var col;
+      if (frac < 0.55) col = mix(pal.frostDeep, pal.frost, frac / 0.55);
+      else col = mix(pal.frost, pal.ember, (frac - 0.55) / 0.45);
+
+      ctx.beginPath();
+      for (var j = 0; j < rows - 1; j++) {
+        for (var i = 0; i < cols - 1; i++) {
+          var x0 = i * step, x1 = (i + 1) * step;
+          var y0 = j * step, y1 = (j + 1) * step;
+          var tl = grid[j * cols + i], tr = grid[j * cols + i + 1];
+          var br = grid[(j + 1) * cols + i + 1], bl = grid[(j + 1) * cols + i];
+          var idx = (tl > level ? 8 : 0) | (tr > level ? 4 : 0) | (br > level ? 2 : 0) | (bl > level ? 1 : 0);
+          if (idx === 0 || idx === 15) continue;
+
+          // crossing points on each edge
+          var top = [lerp(x0, x1, (level - tl) / (tr - tl)), y0];
+          var right = [x1, lerp(y0, y1, (level - tr) / (br - tr))];
+          var bottom = [lerp(x0, x1, (level - bl) / (br - bl)), y1];
+          var left = [x0, lerp(y0, y1, (level - tl) / (bl - tl))];
+
+          switch (idx) {
+            case 1: seg(left, bottom); break;
+            case 2: seg(bottom, right); break;
+            case 3: seg(left, right); break;
+            case 4: seg(top, right); break;
+            case 5: seg(left, top); seg(bottom, right); break;
+            case 6: seg(top, bottom); break;
+            case 7: seg(left, top); break;
+            case 8: seg(left, top); break;
+            case 9: seg(top, bottom); break;
+            case 10: seg(top, right); seg(left, bottom); break;
+            case 11: seg(top, right); break;
+            case 12: seg(left, right); break;
+            case 13: seg(bottom, right); break;
+            case 14: seg(left, bottom); break;
+          }
+        }
+      }
+      ctx.strokeStyle = col;
+      ctx.globalAlpha = isIndex ? 0.85 : 0.42;
+      ctx.lineWidth = isIndex ? 1.6 : 0.9;
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  var start = 0;
+  function frame(ts) {
+    if (!start) start = ts;
+    var t = (ts - start) / 1000;
+    compute(t);
+    draw();
+    raf = requestAnimationFrame(frame);
+  }
+
+  var raf = null;
+  function boot() {
+    resize();
+    if (reduce) { compute(12.0); draw(); return; }
+    if (raf) cancelAnimationFrame(raf);
+    start = 0;
+    raf = requestAnimationFrame(frame);
+  }
+
+  var rt;
+  window.addEventListener("resize", function () {
+    clearTimeout(rt);
+    rt = setTimeout(function () {
+      var wasReduced = reduce;
+      resize();
+      if (wasReduced) { compute(12.0); draw(); }
+    }, 150);
+  });
+
+  boot();
+})();
+</script>
+</body>
+</html>
