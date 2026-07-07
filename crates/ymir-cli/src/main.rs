@@ -64,64 +64,27 @@ fn main() -> Result<(), Box<dyn Error>> {
 mod tests {
     use ymir_core::registry;
 
-    // Smoke test for the inventory link-time gotcha: if ymir-nodes were not
-    // linked, the registry would be empty and this fails fast.
+    // Link-anchor smoke test: proves the `use ymir_nodes as _` above actually pulls
+    // ymir-nodes' operator registrations into *this binary*. Without the anchor the
+    // linker can drop them (the inventory gotcha) and the registry comes up empty, so
+    // asserting a couple of sentinel operators construct fails fast here. The full
+    // registered set is pinned once in crates/ymir-nodes/tests/registry_smoke.rs; this
+    // stays a per-binary link check and deliberately does not re-list every node.
     #[test]
-    fn registry_has_the_expected_operators() {
-        let mut type_ids: Vec<&str> = registry::entries().map(|e| e.type_id).collect();
-        type_ids.sort_unstable();
-
-        let mut unique = type_ids.clone();
-        unique.dedup();
-        assert_eq!(
-            unique.len(),
-            type_ids.len(),
-            "duplicate type_id in registry"
+    fn ymir_nodes_is_linked_into_this_binary() {
+        assert!(
+            registry::count() > 0,
+            "operator registry is empty; ymir-nodes was not linked",
         );
-
-        assert_eq!(
-            type_ids,
-            [
-                "endpoint.export",
-                "endpoint.export_exr",
-                "endpoint.export_r16",
-                "generator.billow",
-                "generator.cellular_bumps",
-                "generator.cellular_cracks",
-                "generator.cellular_regions",
-                "generator.falloff",
-                "generator.fbm",
-                "generator.flow",
-                "generator.gradient",
-                "generator.hybrid",
-                "generator.import",
-                "generator.polygon",
-                "generator.radial",
-                "generator.rect",
-                "generator.ridged",
-                "generator.ring",
-                "modifier.blend",
-                "modifier.blur",
-                "modifier.curvature",
-                "modifier.curve",
-                "modifier.expression",
-                "modifier.flow",
-                "modifier.height",
-                "modifier.hydraulic_erosion",
-                "modifier.invert",
-                "modifier.levels",
-                "modifier.null",
-                "modifier.slope",
-                "modifier.stream_erosion",
-                "modifier.thermal_erosion",
-                "modifier.warp",
-                // The subgraph container and its boundary markers live in ymir-core (the
-                // named exception to "no concrete nodes in core"); see
-                // crates/ymir-core/src/subgraph.rs.
-                "subgraph",
-                "subgraph.input",
-                "subgraph.output"
-            ],
-        );
+        for type_id in [
+            "generator.fbm",
+            "modifier.thermal_erosion",
+            "endpoint.export",
+        ] {
+            assert!(
+                registry::make(type_id).is_some(),
+                "operator {type_id:?} is not registered; the ymir-nodes anchor was dropped",
+            );
+        }
     }
 }
