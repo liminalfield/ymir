@@ -9,7 +9,28 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 gives the full history the shortcut scan needs to diff the
+      # push/PR against its base; the default shallow clone has no base commit.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # The no-shortcuts scanner, the same one the pre-commit and Stop hooks run, but
+      # over exactly the range this push or PR introduces. It is the only check that is
+      # otherwise local-only (a --no-verify commit or a clone that never set
+      # core.hooksPath would slip past the hook), so CI is what makes it unskippable.
+      - name: Shortcut scan
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          # A new branch or an unavailable base has no usable "before"; fall back to
+          # the previous commit so the scan still covers the latest change.
+          if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            base="$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)"
+          fi
+          sh scripts/check-shortcuts.sh --range "$base...HEAD"
       # rustup on the runner honors rust-toolchain.toml and fetches the pinned version.
       - run: rustup component add rustfmt clippy
       # --workspace on every step so CI always covers all crates, regardless of

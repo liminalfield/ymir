@@ -8,8 +8,14 @@
 # conceptual shortcuts; those are the job of per-step review and the tests.
 #
 # Usage:
-#   check-shortcuts.sh --staged     scan the staged diff (git pre-commit hook)
-#   check-shortcuts.sh --worktree   scan working tree vs HEAD + untracked .rs
+#   check-shortcuts.sh --staged         scan the staged diff (git pre-commit hook)
+#   check-shortcuts.sh --worktree       scan working tree vs HEAD + untracked .rs
+#   check-shortcuts.sh --range <range>  scan a git diff range (CI on a push/PR)
+#
+# The --range mode takes any expression `git diff` accepts, e.g. `BASE...HEAD`, so
+# CI can scan exactly the lines a push or pull request introduces. A clean CI
+# checkout has nothing staged or in the worktree, so --staged/--worktree would scan
+# nothing there; --range is the CI entry point.
 #
 # Escape hatch: a deliberate, justified use is allowed by appending
 #   // shortcut-ok: <reason>
@@ -21,10 +27,18 @@
 set -eu
 
 mode="${1:---staged}"
+range=""
 case "$mode" in
   --staged | --worktree) ;;
+  --range)
+    range="${2:-}"
+    if [ -z "$range" ]; then
+      echo "usage: $0 --range <git-range>" >&2
+      exit 2
+    fi
+    ;;
   *)
-    echo "usage: $0 --staged|--worktree" >&2
+    echo "usage: $0 --staged|--worktree|--range <git-range>" >&2
     exit 2
     ;;
 esac
@@ -34,6 +48,8 @@ esac
 changed_files() {
   if [ "$mode" = "--staged" ]; then
     git diff --cached --name-only --diff-filter=ACM -z -- '*.rs' ':!vendor/'
+  elif [ "$mode" = "--range" ]; then
+    git diff "$range" --name-only --diff-filter=ACM -z -- '*.rs' ':!vendor/'
   else
     git diff HEAD --name-only --diff-filter=ACM -z -- '*.rs' ':!vendor/'
     git ls-files --others --exclude-standard -z -- '*.rs' ':!vendor/'
@@ -45,6 +61,8 @@ file_diff() {
   f="$1"
   if [ "$mode" = "--staged" ]; then
     git diff --cached --unified=0 --no-color -- "$f"
+  elif [ "$mode" = "--range" ]; then
+    git diff "$range" --unified=0 --no-color -- "$f"
   elif git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then
     git diff HEAD --unified=0 --no-color -- "$f"
   else
