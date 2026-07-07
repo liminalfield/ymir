@@ -43,3 +43,7 @@ serde_json = "1"
 # byte-identical to the sequential one regardless of thread count, preserving the
 # determinism promise. The de-facto standard for CPU data parallelism in Rust.
 rayon = "1"
+
+[dev-dependencies]
+# Property-based tests for the Field invariants (see tests/field_properties.rs).
+proptest = { workspace = true }

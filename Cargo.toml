@@ -21,6 +21,12 @@ eframe = { version = "0.34", default-features = false, features = [
     "wayland",
     "x11",
 ] }
+# Property-based testing (dev-only). The testing strategy calls for proptest over
+# the core invariants (pass-through leaves untouched layers identical, layer_or
+# defaults for a missing layer, canonical hashing is deterministic), which random
+# fields exercise far better than fixed examples. Pinned centrally so ymir-core and
+# the later ymir-nodes determinism sweep share one version. Never a runtime dep.
+proptest = "1"
 
 # Lint policy lives here so every crate inherits it with `[lints] workspace = true`.
 # The `cargo clippy --all-targets -- -D warnings` gate then turns these into hard
