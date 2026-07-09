@@ -1486,14 +1486,31 @@ impl AppState {
         self.clear_selection();
     }
 
-    /// The node whose output the 2D preview shows: the pinned node when one is set
-    /// and still previewable, otherwise the primary selected node. Decouples the preview
-    /// target from selection (#39).
+    /// The node whose output the 2D preview shows: the pinned node when one is set and still
+    /// previewable, else the primary selected node, else — when the selection is an output-less
+    /// endpoint — the node feeding that endpoint (what it exports), else the graph's result sink.
+    /// Decouples the preview target from selection (#39).
     fn preview_target(&self) -> Option<Handle> {
         self.preview_pin
             .filter(|&h| self.is_previewable(h))
             .or_else(|| self.primary.filter(|&h| self.is_previewable(h)))
+            .or_else(|| self.primary.and_then(|h| self.endpoint_input_source(h)))
             .or_else(|| self.preview_sink())
+    }
+
+    /// The previewable node feeding a selected endpoint's input, if any. An output-less endpoint
+    /// (an export) is not itself previewable, so selecting it should show *what it exports* — the
+    /// node wired into its first input — rather than falling through to an unrelated graph sink
+    /// (#133). Returns `None` for a node that has outputs (it previews its own output), for an
+    /// endpoint with nothing wired, or when the source is itself not previewable.
+    fn endpoint_input_source(&self, handle: Handle) -> Option<Handle> {
+        let id = self.graph.node_id_of(handle)?;
+        if !self.graph.spec(id)?.outputs.is_empty() {
+            return None;
+        }
+        let (source, _) = self.graph.input_source(id, 0)?;
+        let source = self.graph.stable_id(source)?;
+        self.is_previewable(source).then_some(source)
     }
 
     /// The graph's natural "result" node: a previewable node whose output feeds nothing else
@@ -6494,11 +6511,12 @@ mod tests {
         // Nothing selected or pinned, and no previewable sink: no target.
         assert_eq!(state.preview_target(), None);
 
-        // A previewable selection is the target; an endpoint (no output) is not.
+        // A previewable selection is the target. Selecting the endpoint (no output of its own)
+        // instead previews what it exports: the generator wired into its input (#133).
         state.select_only(generator);
         assert_eq!(state.preview_target(), Some(generator));
         state.select_only(endpoint);
-        assert_eq!(state.preview_target(), None);
+        assert_eq!(state.preview_target(), Some(generator));
 
         // A valid pin wins over the selection.
         state.preview_pin = Some(generator);
@@ -6561,6 +6579,42 @@ mod tests {
         state.preview_pin = Some(generator);
         state.clear_selection();
         assert_eq!(state.preview_target(), Some(generator));
+    }
+
+    #[test]
+    fn selecting_an_export_endpoint_previews_its_input_not_an_unrelated_sink() {
+        let mut state = AppState::new();
+        state.graph = Graph::new();
+        state.snarl = Snarl::new();
+        let pos = egui::Pos2::ZERO;
+        // A source feeding an export endpoint, plus a separate dangling generator added last (so
+        // it has the highest stable id) that the sink fallback would otherwise pick.
+        let src_id =
+            canvas::add_node(&mut state.graph, &mut state.snarl, "generator.fbm", pos).unwrap();
+        let export_id =
+            canvas::add_node(&mut state.graph, &mut state.snarl, "endpoint.export", pos).unwrap();
+        let dangling_id =
+            canvas::add_node(&mut state.graph, &mut state.snarl, "generator.fbm", pos).unwrap();
+        state.graph.connect(src_id, 0, export_id, 0).unwrap();
+        let src = state.graph.stable_id(src_id).unwrap();
+        let export = state.graph.stable_id(export_id).unwrap();
+        let dangling = state.graph.stable_id(dangling_id).unwrap();
+
+        // The dangling generator is the highest-id previewable sink, so the sink fallback alone
+        // would pick it.
+        assert_eq!(state.preview_sink(), Some(dangling));
+
+        // But selecting the export previews what it exports: the node wired into its input, not
+        // the unrelated dangling branch.
+        state.select_only(export);
+        assert_eq!(state.preview_target(), Some(src));
+
+        // An export with nothing wired has no input to show, so it still falls back to the sink.
+        let empty_id =
+            canvas::add_node(&mut state.graph, &mut state.snarl, "endpoint.export", pos).unwrap();
+        let empty = state.graph.stable_id(empty_id).unwrap();
+        state.select_only(empty);
+        assert_eq!(state.preview_target(), Some(dangling));
     }
 
     #[test]
