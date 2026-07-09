@@ -39,6 +39,7 @@ use ymir_core::{
 
 use crate::hydrology::{
     Grid, Receivers, build_stack, drainage_area_mfd, fill_depressions, log_normalize, receivers,
+    resolve_flats,
 };
 
 /// Stable type identifier and registry key.
@@ -142,7 +143,9 @@ impl Operator for StreamErosion {
             if ctx.is_cancelled() {
                 return Err(Error::Cancelled);
             }
-            let filled = fill_depressions(&z, &grid, max_fill);
+            // Fill pits, then resolve the resulting flats so filled basins drain across their
+            // real geometry rather than along grid-aligned spokes.
+            let filled = resolve_flats(&fill_depressions(&z, &grid, max_fill), &grid);
             let receivers = receivers(&filled, &grid);
             let stack = build_stack(&receivers.to);
             // Drainage magnitude is multi-flow (spread across downhill neighbours) so it carries

@@ -1,4 +1,5 @@
-//! Shared drainage primitives: depression filling, flow routing, and accumulation.
+//! Shared drainage primitives: depression filling, flat resolution, flow routing, and
+//! accumulation.
 //!
 //! The reusable substrate beneath any drainage-based node, stream-power erosion today and a
 //! Rivers node, hydrology conditioning, or further erosion models later. It lives here, beside
@@ -21,10 +22,6 @@ pub(crate) const NEIGHBORS: [(i32, i32, f32); 8] = [
     (-1, 1, core::f32::consts::SQRT_2),
     (1, 1, core::f32::consts::SQRT_2),
 ];
-
-/// Epsilon tilt applied during depression filling, so flow routes across filled flats instead
-/// of stalling. Tiny relative to the working height range, so it never visibly raises terrain.
-const FILL_EPSILON: f32 = 1e-5;
 
 /// The grid dimensions, bundled so the primitives share one source of truth.
 #[derive(Clone, Copy)]
@@ -68,11 +65,15 @@ impl PartialEq for FloodNode {
 }
 impl Eq for FloodNode {}
 
-/// Priority-flood depression filling (Barnes-Lehman-Soille) with an epsilon tilt, then a depth
-/// cap: shallow pits fill completely so flow routes through them, but a pit that would need more
-/// than `max_fill` to fill keeps its floor below the spill, so it stays a depression — a lake,
-/// a local base level — instead of being filled flat and fanned across. Deterministic: cells
-/// are processed in (elevation, insertion-order) priority. The filled terrain only routes flow.
+/// Priority-flood depression filling (Barnes-Lehman-Soille) with a depth cap: shallow pits fill
+/// completely so flow routes through them, but a pit that would need more than `max_fill` to fill
+/// keeps its floor below the spill, so it stays a depression — a lake, a local base level —
+/// instead of being filled flat and fanned across. Deterministic: cells are processed in
+/// (elevation, insertion-order) priority. The filled terrain only routes flow.
+///
+/// Filled basins come out exactly flat, with no downhill direction of their own; run the result
+/// through [`resolve_flats`] before routing so those flats drain across their true geometry
+/// instead of stalling.
 pub(crate) fn fill_depressions(bed: &[f32], grid: &Grid, max_fill: f32) -> Vec<f32> {
     let (w, h) = (grid.width, grid.height);
     let mut filled = bed.to_vec();
@@ -108,7 +109,7 @@ pub(crate) fn fill_depressions(bed: &[f32], grid: &Grid, max_fill: f32) -> Vec<f
             }
             visited[nc] = true;
             // The spill level reaching this cell; cap the fill so deep basins stay depressions.
-            let spill = (node.elev + FILL_EPSILON).min(bed[nc] + max_fill);
+            let spill = node.elev.min(bed[nc] + max_fill);
             filled[nc] = bed[nc].max(spill);
             heap.push(FloodNode {
                 elev: filled[nc],
@@ -119,6 +120,251 @@ pub(crate) fn fill_depressions(bed: &[f32], grid: &Grid, max_fill: f32) -> Vec<f
         }
     }
     filled
+}
+
+/// "Not yet part of any labelled flat" marker for [`resolve_flats`].
+const NO_LABEL: u32 = u32::MAX;
+
+/// A cell waiting in a flat-resolution Dijkstra, ordered so the *smallest* accumulated distance
+/// pops first, with ties broken by insertion order so the traversal is fully deterministic.
+struct DistNode {
+    dist: f32,
+    seq: u64,
+    idx: usize,
+}
+
+impl Ord for DistNode {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other
+            .dist
+            .total_cmp(&self.dist)
+            .then_with(|| other.seq.cmp(&self.seq))
+    }
+}
+impl PartialOrd for DistNode {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl PartialEq for DistNode {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+impl Eq for DistNode {}
+
+/// Resolve drainage directions across the flats left by [`fill_depressions`], so filled basins
+/// drain across their real geometry instead of along grid-aligned spokes.
+///
+/// A filled basin comes out perfectly flat, which leaves its cells with no downhill direction.
+/// Simply tilting the fill in flood order (the naive fix) biases every flat toward the eight grid
+/// directions, so drainage collapses into straight axis and diagonal lines. Instead this
+/// superimposes two gradients over each flat — one growing away from the surrounding higher
+/// terrain, and one, weighted twice as strongly, growing toward the flat's lower outlets —
+/// following Barnes, Lehman & Soille (2014). The result is a convergent micro-relief that
+/// steepest-descent and multiple-flow routing follow into natural dendritic drainage.
+///
+/// The distances are geodesic within each flat and use true diagonal weights (1 and `sqrt(2)`)
+/// so their contours are near-circular. A unit-step breadth-first distance would instead measure
+/// Chebyshev distance, whose diamond contours give the gradient eight preferred directions that
+/// multiple-flow routing re-collapses onto as grid-aligned scars; the weighted distance carries
+/// no such direction.
+///
+/// The added relief is a few ULPs per cell, scaled to the local magnitude and far below the
+/// working height range, so it steers routing without visibly altering terrain. Genuine sinks — a
+/// capped lake floor with no outlet — carry no outlet edge, receive no gradient, and stay base
+/// levels. Deterministic: Dijkstra with a `(distance, insertion-order)` priority over a fixed
+/// neighbour order, with no dependence on hash or float iteration order.
+pub(crate) fn resolve_flats(filled: &[f32], grid: &Grid) -> Vec<f32> {
+    let (w, h) = (grid.width, grid.height);
+    let n = w * h;
+    let mut resolved = filled.to_vec();
+
+    // Per-cell classification against the eight neighbours:
+    //   flat    - shares its elevation with a neighbour (part of an equal-elevation region);
+    //   defined - already drains (a strictly lower neighbour, or the domain edge, which drains
+    //             off-grid); the flat cells that are *not* defined are the interior to resolve;
+    //   higher  - borders strictly higher terrain.
+    let mut flat = vec![false; n];
+    let mut defined = vec![false; n];
+    let mut higher = vec![false; n];
+    for y in 0..h {
+        for x in 0..w {
+            let c = y * w + x;
+            let e = filled[c];
+            let mut eq = false;
+            let mut low = x == 0 || y == 0 || x == w - 1 || y == h - 1;
+            let mut hi = false;
+            for &(dx, dy, _) in &NEIGHBORS {
+                let (nx, ny) = (x as i32 + dx, y as i32 + dy);
+                if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
+                    continue;
+                }
+                let ne = filled[ny as usize * w + nx as usize];
+                if ne == e {
+                    eq = true;
+                } else if ne < e {
+                    low = true;
+                } else {
+                    hi = true;
+                }
+            }
+            flat[c] = eq;
+            defined[c] = low;
+            higher[c] = hi;
+        }
+    }
+
+    // Label each flat (a connected equal-elevation region) with a deterministic row-major flood
+    // fill, so the two gradients can be inverted per flat by its own maximum distance.
+    let mut label = vec![NO_LABEL; n];
+    let mut num_labels: u32 = 0;
+    let mut work: Vec<usize> = Vec::new();
+    for start in 0..n {
+        if !flat[start] || label[start] != NO_LABEL {
+            continue;
+        }
+        let e = filled[start];
+        let lab = num_labels;
+        num_labels += 1;
+        label[start] = lab;
+        work.push(start);
+        while let Some(c) = work.pop() {
+            let (cx, cy) = (c % w, c / w);
+            for &(dx, dy, _) in &NEIGHBORS {
+                let (nx, ny) = (cx as i32 + dx, cy as i32 + dy);
+                if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
+                    continue;
+                }
+                let nc = ny as usize * w + nx as usize;
+                if flat[nc] && label[nc] == NO_LABEL && filled[nc] == e {
+                    label[nc] = lab;
+                    work.push(nc);
+                }
+            }
+        }
+    }
+    if num_labels == 0 {
+        return resolved; // no flats to resolve
+    }
+
+    // Step 1: distance away from higher terrain, grown by Dijkstra from the undefined flat cells
+    // that border higher ground. The true diagonal weights keep the contours near-circular.
+    let mut away = vec![f32::INFINITY; n];
+    let mut heap: BinaryHeap<DistNode> = BinaryHeap::new();
+    let mut seq = 0_u64;
+    for c in 0..n {
+        if flat[c] && !defined[c] && higher[c] {
+            away[c] = 0.0;
+            heap.push(DistNode {
+                dist: 0.0,
+                seq,
+                idx: c,
+            });
+            seq += 1;
+        }
+    }
+    while let Some(node) = heap.pop() {
+        let c = node.idx;
+        if node.dist > away[c] {
+            continue; // a shorter path already settled this cell
+        }
+        let (cx, cy) = (c % w, c / w);
+        for &(dx, dy, wgt) in &NEIGHBORS {
+            let (nx, ny) = (cx as i32 + dx, cy as i32 + dy);
+            if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
+                continue;
+            }
+            let nc = ny as usize * w + nx as usize;
+            // The away gradient only grows through the undefined interior of the same flat.
+            if label[nc] == label[c] && !defined[nc] {
+                let nd = away[c] + wgt;
+                if nd < away[nc] {
+                    away[nc] = nd;
+                    heap.push(DistNode {
+                        dist: nd,
+                        seq,
+                        idx: nc,
+                    });
+                    seq += 1;
+                }
+            }
+        }
+    }
+    // Each flat's greatest away distance, used to invert that gradient (high near the walls).
+    let mut flat_heights = vec![0.0_f32; num_labels as usize];
+    for c in 0..n {
+        if away[c].is_finite() {
+            let peak = &mut flat_heights[label[c] as usize];
+            *peak = peak.max(away[c]);
+        }
+    }
+
+    // Step 2: distance toward lower terrain, grown by Dijkstra from the flat cells that border
+    // lower ground (the outlets). This spreads through the whole flat, defining its drainage.
+    let mut toward = vec![f32::INFINITY; n];
+    heap.clear();
+    seq = 0;
+    for c in 0..n {
+        if flat[c] && defined[c] {
+            toward[c] = 0.0;
+            heap.push(DistNode {
+                dist: 0.0,
+                seq,
+                idx: c,
+            });
+            seq += 1;
+        }
+    }
+    while let Some(node) = heap.pop() {
+        let c = node.idx;
+        if node.dist > toward[c] {
+            continue;
+        }
+        let (cx, cy) = (c % w, c / w);
+        for &(dx, dy, wgt) in &NEIGHBORS {
+            let (nx, ny) = (cx as i32 + dx, cy as i32 + dy);
+            if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
+                continue;
+            }
+            let nc = ny as usize * w + nx as usize;
+            if label[nc] == label[c] {
+                let nd = toward[c] + wgt;
+                if nd < toward[nc] {
+                    toward[nc] = nd;
+                    heap.push(DistNode {
+                        dist: nd,
+                        seq,
+                        idx: nc,
+                    });
+                    seq += 1;
+                }
+            }
+        }
+    }
+
+    // Superimpose the two gradients — away from the walls (inverted), plus twice the distance
+    // toward the outlets — so drainage descends toward an outlet from every cell. Apply as a few
+    // ULPs of relief, scaled to each cell's magnitude, well below the working height range so it
+    // steers routing without visibly altering terrain. A flat with no outlet (its toward distance
+    // stays infinite) is a genuine sink and is left untouched.
+    for c in 0..n {
+        if label[c] == NO_LABEL || !toward[c].is_finite() {
+            continue;
+        }
+        let walls = if away[c].is_finite() {
+            flat_heights[label[c] as usize] - away[c]
+        } else {
+            0.0
+        };
+        let relief = walls + 2.0 * toward[c];
+        if relief != 0.0 {
+            let e = resolved[c];
+            let step = f32::EPSILON * e.abs().max(1.0);
+            resolved[c] = e + relief * step;
+        }
+    }
+    resolved
 }
 
 /// Each cell's steepest-descent receiver on the (filled) terrain, with the distance to it.
@@ -344,6 +590,117 @@ mod tests {
             seen.len(),
             grid.width * grid.height,
             "the stack is a permutation of every cell"
+        );
+    }
+
+    /// A square flat basin: 1.0 walls around a 0.5 interior, with a single lower outlet at the
+    /// bottom-centre, on the `x = 3` axis. The archetypal case the flood-order tilt used to
+    /// streak into grid-aligned lines.
+    fn flat_basin() -> (Vec<f32>, Grid) {
+        let (w, h) = (7, 7);
+        let mut z = vec![0.5_f32; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                if x == 0 || y == 0 || x == w - 1 || y == h - 1 {
+                    z[y * w + x] = 1.0;
+                }
+            }
+        }
+        z[6 * w + 3] = 0.0; // outlet in the bottom border, on the x = 3 axis
+        (
+            z,
+            Grid {
+                width: w,
+                height: h,
+            },
+        )
+    }
+
+    #[test]
+    fn resolve_flats_is_deterministic() {
+        let (z, grid) = flat_basin();
+        assert_eq!(resolve_flats(&z, &grid), resolve_flats(&z, &grid));
+    }
+
+    #[test]
+    fn resolve_flats_drains_every_flat_cell_toward_the_outlet() {
+        let (z, grid) = flat_basin();
+        let (w, h) = (grid.width, grid.height);
+        let r = resolve_flats(&z, &grid);
+        // Every interior flat cell gains a strictly lower resolved neighbour, so steepest descent
+        // never stalls on the flat.
+        for y in 1..h - 1 {
+            for x in 1..w - 1 {
+                let here = r[y * w + x];
+                let mut drains = false;
+                for &(dx, dy, _) in &NEIGHBORS {
+                    let (nx, ny) = (x as i32 + dx, y as i32 + dy);
+                    if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
+                        continue;
+                    }
+                    if r[ny as usize * w + nx as usize] < here {
+                        drains = true;
+                        break;
+                    }
+                }
+                assert!(drains, "flat cell ({x},{y}) has no downhill neighbour");
+            }
+        }
+        // The micro-relief descends toward the outlet: the far side of the flat sits above the
+        // cell next to the outlet.
+        let top = r[w + 3]; // (3, 1)
+        let near_outlet = r[5 * w + 3]; // (3, 5)
+        assert!(
+            top > near_outlet,
+            "flat should descend toward the outlet: top {top}, near-outlet {near_outlet}"
+        );
+    }
+
+    #[test]
+    fn resolve_flats_is_symmetric_about_the_outlet_axis() {
+        let (z, grid) = flat_basin();
+        let (w, h) = (grid.width, grid.height);
+        let r = resolve_flats(&z, &grid);
+        // Mirror pairs across x = 3 are bit-identical: the resolution follows the flat's geometry,
+        // not a grid direction or the flood traversal order (which the old tilt leaked).
+        for y in 1..h - 1 {
+            for x in 1..3 {
+                let left = r[y * w + x];
+                let right = r[y * w + (6 - x)];
+                assert_eq!(
+                    left,
+                    right,
+                    "asymmetry at row {y}, columns {x} and {}",
+                    6 - x
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_flats_measures_euclidean_not_chebyshev_distance() {
+        // One large flat at 0.5 with a single lower outlet at the centre and no higher terrain, so
+        // the resolved relief is purely the distance toward that outlet. Pick two cells the same
+        // number of grid steps from the outlet: one straight out, one on the diagonal. Under the
+        // old unit-step (Chebyshev) distance they were the same ring and got identical relief,
+        // which is exactly the eight-direction bias that streaked drainage into diagonal scars.
+        // With true diagonal weights the diagonal cell is genuinely farther, so it sits higher.
+        let (w, h) = (31, 31);
+        let (cx, cy) = (15, 15);
+        let mut z = vec![0.5_f32; w * h];
+        z[cy * w + cx] = 0.0; // the single outlet
+        let grid = Grid {
+            width: w,
+            height: h,
+        };
+        let r = resolve_flats(&z, &grid);
+
+        let orthogonal = r[(cy + 6) * w + cx]; // offset (0, 6)
+        let diagonal = r[(cy + 6) * w + (cx + 6)]; // offset (6, 6): same Chebyshev ring, farther
+        assert!(
+            diagonal > orthogonal,
+            "diagonal cell should be farther from the outlet than the orthogonal one: \
+             diagonal {diagonal}, orthogonal {orthogonal}"
         );
     }
 }

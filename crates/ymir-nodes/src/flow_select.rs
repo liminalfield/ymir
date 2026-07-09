@@ -22,7 +22,9 @@ use ymir_core::{
     Params, PortSpec, Result, layers,
 };
 
-use crate::hydrology::{Grid, drainage_area_mfd, fill_depressions, log_normalize_span};
+use crate::hydrology::{
+    Grid, drainage_area_mfd, fill_depressions, log_normalize_span, resolve_flats,
+};
 
 /// Stable type identifier and registry key.
 const TYPE_ID: &str = "modifier.flow";
@@ -84,15 +86,16 @@ impl Operator for FlowSelect {
         let concentration = params.get_f64("concentration", DEFAULT_CONCENTRATION) as f32;
 
         // Compute the drainage map: fill pits fully so flow routes everywhere (a selector wants
-        // the whole connected network, not lakes), accumulate by physical cell area so the
-        // pattern is resolution-honest, then log-map to keep tributaries visible.
+        // the whole connected network, not lakes), resolve the resulting flats so basins drain
+        // across their real geometry instead of along grid-aligned spokes, accumulate by physical
+        // cell area so the pattern is resolution-honest, then log-map to keep tributaries visible.
         let grid = Grid { width, height };
         let bed = h.as_slice().to_vec();
         let cell_area = {
             let m = ctx.meters_per_cell() as f32;
             (m * m).max(1e-12)
         };
-        let filled = fill_depressions(&bed, &grid, f32::INFINITY);
+        let filled = resolve_flats(&fill_depressions(&bed, &grid, f32::INFINITY), &grid);
         let area = drainage_area_mfd(&filled, &grid, concentration, cell_area);
         // Stretch across the actual range so ridges read 0 and the largest channels read 1,
         // making the band meaningful (the cell-area seed cancels in the stretch).
