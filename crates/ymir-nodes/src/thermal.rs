@@ -22,6 +22,8 @@ use ymir_core::{
     Params, PortSpec, Result, Unit, layers,
 };
 
+use crate::erosion;
+
 /// Stable type identifier and registry key.
 const TYPE_ID: &str = "modifier.thermal_erosion";
 
@@ -62,7 +64,11 @@ impl Operator for ThermalErosion {
                 // input's own mask layer is used by convention, else erode everywhere.
                 PortSpec::optional("mask"),
             ],
-            outputs: vec![PortSpec::new("heightfield"), PortSpec::new("debris")],
+            outputs: vec![
+                PortSpec::new("heightfield"),
+                PortSpec::new("wear"),
+                PortSpec::new("debris"),
+            ],
             params: vec![
                 ParamSpec::new(
                     "talus",
@@ -171,16 +177,16 @@ impl Operator for ThermalErosion {
         let mut heightfield = input.clone();
         heightfield.set_layer(layers::HEIGHT, Arc::new(blended));
 
-        // Tapped `debris` output: the scree/talus that accumulated, i.e. where the unmasked
-        // relaxation left the surface higher than it started; the bare faces it slid off read
-        // zero. Reports the full simulation (not the masked composite), like Stream's flow tap.
-        let debris = Layer::from_fn(width, height, |x, y| {
-            let idx = y * width + x;
-            (heights[idx] - source.get(x, y).unwrap_or(0.0)).max(0.0)
-        });
-        let debris_field =
-            Field::new(width, height, input.region()).with_layer(layers::HEIGHT, Arc::new(debris));
-        Ok(vec![heightfield, debris_field])
+        // Byproduct taps from the unmasked simulation (before the mask composite, like Stream's
+        // flow tap): `wear` where the relaxation stripped a face, and the settled talus where the
+        // surface ended up higher than it started. Thermal is dry mass-wasting, so its settled
+        // material is scree — emitted on the `debris` port, kept distinct from the fluvial
+        // `deposition` the water models produce (though it is computed the same way).
+        let (wear, debris) = erosion::wear_and_deposition(source.as_slice(), &heights);
+        let region = input.region();
+        let wear_field = erosion::byproduct_field(wear, width, height, region);
+        let debris_field = erosion::byproduct_field(debris, width, height, region);
+        Ok(vec![heightfield, wear_field, debris_field])
     }
 }
 
@@ -349,21 +355,21 @@ mod tests {
     }
 
     #[test]
-    fn spec_has_heightfield_and_debris_outputs() {
+    fn spec_has_heightfield_wear_and_debris_outputs() {
         let spec = ThermalErosion.spec();
         let names: Vec<&str> = spec.outputs.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, ["heightfield", "debris"]);
+        assert_eq!(names, ["heightfield", "wear", "debris"]);
     }
 
     #[test]
     fn debris_output_records_accumulated_talus() {
-        // A spike sheds material to its neighbours; the debris tap is high where talus piled up
-        // and zero at the peak, which only lost material.
+        // A spike sheds material to its neighbours; the debris tap (output 2) is high where talus
+        // piled up and zero at the peak, which only lost material.
         let input = spike_field(false);
         let out = ThermalErosion
             .eval(Inputs::required_only(&[&input]), &Params::default(), &ctx())
             .unwrap();
-        let debris = out[1].layer(layers::HEIGHT).unwrap();
+        let debris = out[2].layer(layers::HEIGHT).unwrap();
         assert!(
             debris.get(17, 16).unwrap() > 0.0,
             "talus should accumulate beside the spike"
@@ -372,6 +378,57 @@ mod tests {
             debris.get(16, 16).unwrap(),
             0.0,
             "the shedding peak holds no debris"
+        );
+    }
+
+    #[test]
+    fn wear_output_records_stripped_material() {
+        // The mirror of debris: the wear tap (output 1) is high at the shedding peak and zero on
+        // the cells where talus piled up.
+        let input = spike_field(false);
+        let out = ThermalErosion
+            .eval(Inputs::required_only(&[&input]), &Params::default(), &ctx())
+            .unwrap();
+        let wear = out[1].layer(layers::HEIGHT).unwrap();
+        assert!(
+            wear.get(16, 16).unwrap() > 0.0,
+            "the shedding peak should record wear"
+        );
+        assert_eq!(
+            wear.get(17, 16).unwrap(),
+            0.0,
+            "a cell that only gained talus records no wear"
+        );
+    }
+
+    #[test]
+    fn wear_and_debris_conserve_mass() {
+        // The relaxation is mass-conserving (what a cell sheds its lower neighbours receive), so
+        // over the whole field the material worn away equals the material deposited. This is the
+        // check that the byproduct pair is real, not a broken tap.
+        use crate::noise::{FbmParams, fbm_field};
+        let input = fbm_field(64, 64, Region::UNIT, FbmParams::default(), 7);
+        let out = ThermalErosion
+            .eval(
+                Inputs::required_only(&[&input]),
+                &Params::default(),
+                &EvalContext::new(64, 64, Region::UNIT, 7),
+            )
+            .unwrap();
+        let sum = |i: usize| -> f64 {
+            out[i]
+                .layer(layers::HEIGHT)
+                .unwrap()
+                .as_slice()
+                .iter()
+                .map(|&v| f64::from(v))
+                .sum()
+        };
+        let (total_wear, total_debris) = (sum(1), sum(2));
+        assert!(total_debris > 0.0, "erosion should deposit some talus");
+        assert!(
+            (total_wear - total_debris).abs() / total_debris < 1e-3,
+            "wear ({total_wear}) and debris ({total_debris}) should balance",
         );
     }
 

@@ -19,6 +19,7 @@ mod cellular_cracks;
 mod cellular_regions;
 mod curvature;
 mod curve;
+mod erosion;
 mod export;
 mod export_exr;
 mod export_r16;
