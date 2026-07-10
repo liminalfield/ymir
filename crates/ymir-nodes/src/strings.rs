@@ -168,6 +168,15 @@ pub fn tr(key: &str) -> &str {
              droplet density."
         }
 
+        // Flow selector (shallow-water simulation).
+        "node-modifier.flow_water" => "Flow (Water Sim)",
+        "node-modifier.flow_water-desc" => {
+            "Selects drainage channels by running a shallow-water simulation: rain floods the \
+             terrain and water flows through virtual pipes, pooling in pits and spilling on its \
+             own. The flux field is continuous, so no fans, scars, or aliasing. `rain` and \
+             `evaporation` set the water balance, `iterations` how long it runs."
+        }
+
         // Invert.
         "node-modifier.invert" => "Invert",
         "node-modifier.invert-desc" => "Flips the height layer (1 - height).",
