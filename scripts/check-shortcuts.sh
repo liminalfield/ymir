@@ -43,16 +43,18 @@ case "$mode" in
     ;;
 esac
 
-# List the Rust files to scan, NUL-safe, depending on mode. Vendored third-party crates
-# under vendor/ are excluded: they are not ours to hold to the no-shortcuts rule.
+# List the Rust files to scan, one per line, depending on mode. Vendored third-party crates
+# under vendor/ are excluded: they are not ours to hold to the no-shortcuts rule. Newline-
+# separated (not -z) so the reader below stays POSIX: the CI runner's /bin/sh is dash, whose
+# `read` has no `-d`. Rust source paths never contain a newline, so this is safe.
 changed_files() {
   if [ "$mode" = "--staged" ]; then
-    git diff --cached --name-only --diff-filter=ACM -z -- '*.rs' ':!vendor/'
+    git diff --cached --name-only --diff-filter=ACM -- '*.rs' ':!vendor/'
   elif [ "$mode" = "--range" ]; then
-    git diff "$range" --name-only --diff-filter=ACM -z -- '*.rs' ':!vendor/'
+    git diff "$range" --name-only --diff-filter=ACM -- '*.rs' ':!vendor/'
   else
-    git diff HEAD --name-only --diff-filter=ACM -z -- '*.rs' ':!vendor/'
-    git ls-files --others --exclude-standard -z -- '*.rs' ':!vendor/'
+    git diff HEAD --name-only --diff-filter=ACM -- '*.rs' ':!vendor/'
+    git ls-files --others --exclude-standard -- '*.rs' ':!vendor/'
   fi
 }
 
@@ -87,8 +89,10 @@ status=0
 tmp_files=$(mktemp)
 changed_files >"$tmp_files"
 
-# Iterate NUL-separated paths without a subshell, so $status survives.
-while IFS= read -r -d '' f || [ -n "$f" ]; do
+# Iterate the paths without a subshell, so $status survives. Redirecting the temp file into the
+# loop (rather than a pipe) is what keeps the loop in the current shell. The `|| [ -n "$f" ]`
+# handles a final line with no trailing newline.
+while IFS= read -r f || [ -n "$f" ]; do
   [ -n "$f" ] || continue
 
   # Whole-file test code (integration tests, benches) is exempt from the
