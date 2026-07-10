@@ -159,6 +159,14 @@ pub fn tr(key: &str) -> &str {
              drainage counterpart to Slope and Curvature."
         }
 
+        // Flow selector (harmonic flat resolution).
+        "node-modifier.flow_harmonic" => "Flow (Harmonic)",
+        "node-modifier.flow_harmonic-desc" => {
+            "The Flow selector with isotropic flat resolution: filled basins drain along a smooth \
+             harmonic flow potential instead of a distance transform, removing the faint diagonal \
+             creases at the cost of an iterative solve. Same controls as Flow."
+        }
+
         // Invert.
         "node-modifier.invert" => "Invert",
         "node-modifier.invert-desc" => "Flips the height layer (1 - height).",

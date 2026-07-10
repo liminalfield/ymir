@@ -153,38 +153,27 @@ impl PartialEq for DistNode {
 }
 impl Eq for DistNode {}
 
-/// Resolve drainage directions across the flats left by [`fill_depressions`], so filled basins
-/// drain across their real geometry instead of along grid-aligned spokes.
-///
-/// A filled basin comes out perfectly flat, which leaves its cells with no downhill direction.
-/// Simply tilting the fill in flood order (the naive fix) biases every flat toward the eight grid
-/// directions, so drainage collapses into straight axis and diagonal lines. Instead this
-/// superimposes two gradients over each flat — one growing away from the surrounding higher
-/// terrain, and one, weighted twice as strongly, growing toward the flat's lower outlets —
-/// following Barnes, Lehman & Soille (2014). The result is a convergent micro-relief that
-/// steepest-descent and multiple-flow routing follow into natural dendritic drainage.
-///
-/// The distances are geodesic within each flat and use true diagonal weights (1 and `sqrt(2)`)
-/// so their contours are near-circular. A unit-step breadth-first distance would instead measure
-/// Chebyshev distance, whose diamond contours give the gradient eight preferred directions that
-/// multiple-flow routing re-collapses onto as grid-aligned scars; the weighted distance carries
-/// no such direction.
-///
-/// The added relief is a few ULPs per cell, scaled to the local magnitude and far below the
-/// working height range, so it steers routing without visibly altering terrain. Genuine sinks — a
-/// capped lake floor with no outlet — carry no outlet edge, receive no gradient, and stay base
-/// levels. Deterministic: Dijkstra with a `(distance, insertion-order)` priority over a fixed
-/// neighbour order, with no dependence on hash or float iteration order.
-pub(crate) fn resolve_flats(filled: &[f32], grid: &Grid) -> Vec<f32> {
+/// The per-flat classification the flat resolvers share.
+struct FlatClassification {
+    /// Cell shares its elevation with a neighbour (part of an equal-elevation region).
+    flat: Vec<bool>,
+    /// Cell already drains: a strictly lower neighbour, or the domain edge (drains off-grid). The
+    /// flat cells that are *not* defined are the interior a resolver must give a gradient.
+    defined: Vec<bool>,
+    /// Cell borders strictly higher terrain.
+    higher: Vec<bool>,
+    /// Connected-flat label per cell, or [`NO_LABEL`] for a non-flat cell.
+    label: Vec<u32>,
+    /// Number of distinct flats labelled.
+    num_labels: u32,
+}
+
+/// Classify every cell for flat resolution: `flat` / `defined` / `higher` against the eight
+/// neighbours, plus a connected-component `label` per flat (a deterministic row-major flood fill).
+/// Shared by [`resolve_flats`] and [`resolve_flats_harmonic`] so they agree on what a flat is.
+fn classify_flats(filled: &[f32], grid: &Grid) -> FlatClassification {
     let (w, h) = (grid.width, grid.height);
     let n = w * h;
-    let mut resolved = filled.to_vec();
-
-    // Per-cell classification against the eight neighbours:
-    //   flat    - shares its elevation with a neighbour (part of an equal-elevation region);
-    //   defined - already drains (a strictly lower neighbour, or the domain edge, which drains
-    //             off-grid); the flat cells that are *not* defined are the interior to resolve;
-    //   higher  - borders strictly higher terrain.
     let mut flat = vec![false; n];
     let mut defined = vec![false; n];
     let mut higher = vec![false; n];
@@ -215,8 +204,6 @@ pub(crate) fn resolve_flats(filled: &[f32], grid: &Grid) -> Vec<f32> {
         }
     }
 
-    // Label each flat (a connected equal-elevation region) with a deterministic row-major flood
-    // fill, so the two gradients can be inverted per flat by its own maximum distance.
     let mut label = vec![NO_LABEL; n];
     let mut num_labels: u32 = 0;
     let mut work: Vec<usize> = Vec::new();
@@ -244,6 +231,50 @@ pub(crate) fn resolve_flats(filled: &[f32], grid: &Grid) -> Vec<f32> {
             }
         }
     }
+
+    FlatClassification {
+        flat,
+        defined,
+        higher,
+        label,
+        num_labels,
+    }
+}
+
+/// Resolve drainage directions across the flats left by [`fill_depressions`], so filled basins
+/// drain across their real geometry instead of along grid-aligned spokes.
+///
+/// A filled basin comes out perfectly flat, which leaves its cells with no downhill direction.
+/// Simply tilting the fill in flood order (the naive fix) biases every flat toward the eight grid
+/// directions, so drainage collapses into straight axis and diagonal lines. Instead this
+/// superimposes two gradients over each flat — one growing away from the surrounding higher
+/// terrain, and one, weighted twice as strongly, growing toward the flat's lower outlets —
+/// following Barnes, Lehman & Soille (2014). The result is a convergent micro-relief that
+/// steepest-descent and multiple-flow routing follow into natural dendritic drainage.
+///
+/// The distances are geodesic within each flat and use true diagonal weights (1 and `sqrt(2)`)
+/// so their contours are near-circular. A unit-step breadth-first distance would instead measure
+/// Chebyshev distance, whose diamond contours give the gradient eight preferred directions that
+/// multiple-flow routing re-collapses onto as grid-aligned scars; the weighted distance carries
+/// no such direction.
+///
+/// The added relief is a few ULPs per cell, scaled to the local magnitude and far below the
+/// working height range, so it steers routing without visibly altering terrain. Genuine sinks — a
+/// capped lake floor with no outlet — carry no outlet edge, receive no gradient, and stay base
+/// levels. Deterministic: Dijkstra with a `(distance, insertion-order)` priority over a fixed
+/// neighbour order, with no dependence on hash or float iteration order.
+pub(crate) fn resolve_flats(filled: &[f32], grid: &Grid) -> Vec<f32> {
+    let (w, h) = (grid.width, grid.height);
+    let n = w * h;
+    let mut resolved = filled.to_vec();
+
+    let FlatClassification {
+        flat,
+        defined,
+        higher,
+        label,
+        num_labels,
+    } = classify_flats(filled, grid);
     if num_labels == 0 {
         return resolved; // no flats to resolve
     }
@@ -363,6 +394,99 @@ pub(crate) fn resolve_flats(filled: &[f32], grid: &Grid) -> Vec<f32> {
             let step = f32::EPSILON * e.abs().max(1.0);
             resolved[c] = e + relief * step;
         }
+    }
+    resolved
+}
+
+/// Relaxation sweeps for the harmonic flat resolver. A cap, not a target: small flats settle in
+/// far fewer, large flats stop here (approximate but still smooth). The iterative solve is the
+/// cost of a fully isotropic gradient, heavier than [`resolve_flats`].
+const HARMONIC_SWEEPS: u32 = 800;
+/// Over-relaxation factor for the SOR sweep (1 = plain Gauss-Seidel, up to 2). ~1.8 propagates the
+/// potential across a flat in far fewer sweeps without overshooting on these grids.
+const HARMONIC_OMEGA: f32 = 1.8;
+
+/// Resolve flats with an isotropic "flow potential" instead of a distance transform: over each
+/// flat, solve the Poisson problem `laplacian(phi) = -1` with `phi = 0` at its outlets and no flux
+/// through its walls, then let drainage follow the descent of `phi`. Uniform forcing is uniform
+/// rain draining to the outlets; the potential is smooth, with no metric contours, so
+/// multiple-flow routing carries no grid- or diagonal-direction bias whatsoever. This is the fully
+/// isotropic counterpart to [`resolve_flats`] (which uses a geodesic-Euclidean distance and leaves
+/// faint octagonal creases), at the cost of an iterative solve.
+///
+/// The potential is relaxed by weighted Successive Over-Relaxation over the eight neighbours
+/// (orthogonal weight 1, diagonal `1/sqrt(2)`), a `+1` source per cell driving the hill up from the
+/// outlets. It is applied as the same ULP-scale relief as [`resolve_flats`], and a flat with no
+/// outlet is left untouched as a genuine sink. Deterministic: a fixed-order row-major sweep with a
+/// capped iteration count, no hash or float-order dependence.
+pub(crate) fn resolve_flats_harmonic(filled: &[f32], grid: &Grid) -> Vec<f32> {
+    let (w, h) = (grid.width, grid.height);
+    let n = w * h;
+    let mut resolved = filled.to_vec();
+
+    let FlatClassification {
+        flat,
+        defined,
+        label,
+        num_labels,
+        ..
+    } = classify_flats(filled, grid);
+    if num_labels == 0 {
+        return resolved;
+    }
+
+    // Outlet cells (defined flat cells) are held at phi = 0; the undefined flat interior is free
+    // and relaxed. Only flats that actually have an outlet get a gradient; the rest stay sinks.
+    let mut phi = vec![0.0_f32; n];
+    let mut free = vec![false; n];
+    let mut has_outlet = vec![false; num_labels as usize];
+    for c in 0..n {
+        if flat[c] && defined[c] {
+            has_outlet[label[c] as usize] = true;
+        } else if flat[c] {
+            free[c] = true;
+        }
+    }
+
+    // SOR relaxation of laplacian(phi) = -1. A neighbour outside the same flat is a no-flux wall,
+    // dropped from the weighted sum and the divisor (the discrete Neumann condition); an outlet
+    // neighbour contributes phi = 0, anchoring the potential. The `+1` per cell is the source.
+    for _ in 0..HARMONIC_SWEEPS {
+        for c in 0..n {
+            if !free[c] || !has_outlet[label[c] as usize] {
+                continue;
+            }
+            let (cx, cy) = ((c % w) as i32, (c / w) as i32);
+            let lab = label[c];
+            let mut sum = 0.0_f32;
+            let mut weight = 0.0_f32;
+            for &(dx, dy, dist) in &NEIGHBORS {
+                let (nx, ny) = (cx + dx, cy + dy);
+                if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
+                    continue;
+                }
+                let nc = ny as usize * w + nx as usize;
+                if label[nc] == lab {
+                    let wgt = 1.0 / dist;
+                    sum += wgt * phi[nc];
+                    weight += wgt;
+                }
+            }
+            if weight == 0.0 {
+                continue;
+            }
+            let target = sum / weight + 1.0;
+            phi[c] += HARMONIC_OMEGA * (target - phi[c]);
+        }
+    }
+
+    for c in 0..n {
+        if !free[c] || !has_outlet[label[c] as usize] {
+            continue;
+        }
+        let e = resolved[c];
+        let step = f32::EPSILON * e.abs().max(1.0);
+        resolved[c] = e + phi[c] * step;
     }
     resolved
 }
@@ -702,5 +826,43 @@ mod tests {
             "diagonal cell should be farther from the outlet than the orthogonal one: \
              diagonal {diagonal}, orthogonal {orthogonal}"
         );
+    }
+
+    #[test]
+    fn resolve_flats_harmonic_is_deterministic() {
+        let (z, grid) = flat_basin();
+        assert_eq!(
+            resolve_flats_harmonic(&z, &grid),
+            resolve_flats_harmonic(&z, &grid)
+        );
+    }
+
+    #[test]
+    fn resolve_flats_harmonic_drains_every_flat_cell() {
+        let (z, grid) = flat_basin();
+        let (w, h) = (grid.width, grid.height);
+        let r = resolve_flats_harmonic(&z, &grid);
+        // The flow potential gives every interior flat cell a strictly lower resolved neighbour, so
+        // steepest descent never stalls on the flat.
+        for y in 1..h - 1 {
+            for x in 1..w - 1 {
+                let here = r[y * w + x];
+                let mut drains = false;
+                for &(dx, dy, _) in &NEIGHBORS {
+                    let (nx, ny) = (x as i32 + dx, y as i32 + dy);
+                    if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
+                        continue;
+                    }
+                    if r[ny as usize * w + nx as usize] < here {
+                        drains = true;
+                        break;
+                    }
+                }
+                assert!(
+                    drains,
+                    "harmonic flat cell ({x},{y}) has no downhill neighbour"
+                );
+            }
+        }
     }
 }
