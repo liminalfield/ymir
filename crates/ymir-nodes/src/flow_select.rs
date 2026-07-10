@@ -6,12 +6,13 @@
 //! Curvature selectors: where Slope reads the gradient and Curvature the second derivative, this
 //! reads how much water collects.
 //!
-//! The flow is computed on demand from the input height (depression-fill, then
-//! multiple-flow-direction accumulation, then a log map that keeps tributaries visible), reusing
-//! the shared [`crate::hydrology`] primitives. So it selects "where water would run" on any
-//! terrain, not only on the output of an erosion node. `concentration` controls how tightly flow
-//! stays in the steepest path (low spreads it widely, high keeps it channelised), matching the
-//! Stream node. Like the other selectors it is not mask-aware: it derives a selection from
+//! The flow is computed on demand from the input height (depression-fill up to `fill`, flat
+//! resolution, multiple-flow-direction accumulation, then a log map that keeps tributaries
+//! visible), reusing the shared [`crate::hydrology`] primitives. So it selects "where water would
+//! run" on any terrain, not only on the output of an erosion node. `concentration` controls how
+//! tightly flow stays in the steepest path (low spreads it widely, high keeps it channelised) and
+//! `fill` how deep a basin still routes through rather than terminating as a lake, both matching
+//! the Stream node. Like the other selectors it is not mask-aware: it derives a selection from
 //! scratch.
 
 use std::sync::Arc;
@@ -37,6 +38,12 @@ const DEFAULT_FALLOFF: f64 = 0.15;
 /// Default flow concentration (the MFD slope exponent), matching the Stream node: low spreads
 /// flow widely (smooth, dendritic), high keeps it tightly channelised.
 const DEFAULT_CONCENTRATION: f64 = 1.5;
+/// Default maximum depression fill, in working height units, matching the Stream node. Shallow
+/// pits fill so flow routes through them (connecting the network across noise speckle); a basin
+/// deeper than this stays a depression where flow terminates, rather than filling flat and
+/// funnelling its whole catchment through one outlet as a bright fan. Raise it to route across
+/// larger basins, lower it to keep only the incised network.
+const DEFAULT_FILL: f64 = 0.05;
 
 /// Flow selector: one input, one output. Writes the selection to [`layers::HEIGHT`].
 #[derive(Clone)]
@@ -70,6 +77,11 @@ impl Operator for FlowSelect {
                     ParamKind::Float { min: 1.0, max: 6.0 },
                     ParamValue::Float(DEFAULT_CONCENTRATION),
                 ),
+                ParamSpec::new(
+                    "fill",
+                    ParamKind::Float { min: 0.0, max: 1.0 },
+                    ParamValue::Float(DEFAULT_FILL),
+                ),
             ],
         }
     }
@@ -84,9 +96,11 @@ impl Operator for FlowSelect {
         let max = params.get_f64("max", DEFAULT_MAX) as f32;
         let falloff = params.get_f64("falloff", DEFAULT_FALLOFF).max(0.0) as f32;
         let concentration = params.get_f64("concentration", DEFAULT_CONCENTRATION) as f32;
+        let max_fill = params.get_f64("fill", DEFAULT_FILL) as f32;
 
-        // Compute the drainage map: fill pits fully so flow routes everywhere (a selector wants
-        // the whole connected network, not lakes), resolve the resulting flats so basins drain
+        // Compute the drainage map: fill pits up to `fill` so flow routes through shallow
+        // depressions (deeper basins stay lakes where flow terminates, rather than funnelling
+        // their whole catchment through one outlet), resolve the resulting flats so basins drain
         // across their real geometry instead of along grid-aligned spokes, accumulate by physical
         // cell area so the pattern is resolution-honest, then log-map to keep tributaries visible.
         let grid = Grid { width, height };
@@ -95,7 +109,7 @@ impl Operator for FlowSelect {
             let m = ctx.meters_per_cell() as f32;
             (m * m).max(1e-12)
         };
-        let filled = resolve_flats(&fill_depressions(&bed, &grid, f32::INFINITY), &grid);
+        let filled = resolve_flats(&fill_depressions(&bed, &grid, max_fill), &grid);
         let area = drainage_area_mfd(&filled, &grid, concentration, cell_area);
         // Stretch across the actual range so ridges read 0 and the largest channels read 1,
         // making the band meaningful (the cell-area seed cancels in the stretch).
@@ -216,6 +230,40 @@ mod tests {
     fn spec_is_a_selector_modifier() {
         assert_eq!(FlowSelect.spec().kind(), ymir_core::NodeKind::Modifier);
         assert_eq!(FlowSelect.spec().type_id, TYPE_ID);
+    }
+
+    #[test]
+    fn the_fill_cap_changes_the_drainage() {
+        // A plateau with a deep central pit and one lower outlet on the bottom border. With a
+        // small fill cap the pit stays a lake that captures the flow above it; with a large cap
+        // the pit fills and that catchment drains on to the outlet. The selection must differ,
+        // proving `fill` is honoured rather than always fully filling.
+        let size = 24;
+        let mut z = vec![0.6_f32; size * size];
+        for y in 8..16 {
+            for x in 8..16 {
+                z[y * size + x] = 0.0; // the deep pit
+            }
+        }
+        z[(size - 1) * size + size / 2] = 0.0; // a low outlet notch on the bottom border
+        let field = Field::new(size, size, Region::UNIT)
+            .with_layer(layers::HEIGHT, Arc::new(Layer::from_vec(size, size, z)));
+
+        let run = |fill: f64| {
+            let params = Params::new().with("fill", ParamValue::Float(fill));
+            let ctx = EvalContext::new(size, size, Region::UNIT, 0).with_world_extent(256.0);
+            FlowSelect
+                .eval(Inputs::required_only(&[&field]), &params, &ctx)
+                .unwrap()
+                .remove(0)
+        };
+        let shallow = run(0.0);
+        let deep = run(1.0);
+        assert_ne!(
+            shallow.layer(layers::HEIGHT).unwrap().content_hash(),
+            deep.layer(layers::HEIGHT).unwrap().content_hash(),
+            "the fill cap must change the drainage selection"
+        );
     }
 
     #[test]
