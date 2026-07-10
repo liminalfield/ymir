@@ -1,6 +1,11 @@
 # Design note: the erosion roadmap
 
-Status: **direction, being worked through.** Synthesised from a competitive and technical
+Status: **superseded** by [the erosion strategy and design brief](../ymir-erosion-DESIGN.md)
+(the three-transport-drivers framing, the GPU grid-hydraulic flagship, the revised determinism
+stance, and the build plan). Kept for the competitive/technical survey synthesis it records;
+the live plan is the brief.
+
+Original status: **direction, being worked through.** Synthesised from a competitive and technical
 survey of erosion in other tools (Gaea, World Machine, Houdini, World Creator, Hesiod/HighMap,
 Instant Terra), plus what Ymir already learned building Thermal, Stream, and Hydraulic. This is
 the map we prioritise against; individual items still get their own design note and review
