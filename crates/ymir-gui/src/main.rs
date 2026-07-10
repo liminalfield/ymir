@@ -52,6 +52,7 @@ mod starter;
 mod theme;
 // The 3D viewport: custom wgpu rendering inside an egui pane (#7).
 mod viewport;
+mod viewport2d;
 // Snapshot-based undo/redo over the session (#82).
 mod history;
 use build::BuildRunner;
@@ -439,6 +440,12 @@ struct AppState {
     /// settings that shape it), so it re-meshes only when one of those changes. `None` until
     /// the first mesh.
     viewport_mesh: Option<viewport::MeshKey>,
+    /// Which projection the main viewport draws: the 3D relief or the flat 2D map (#134).
+    /// A view aid, not persisted; 3D by default.
+    viewport_mode: viewport2d::Mode,
+    /// The 2D map view's state (texture, pan, zoom, shading), used when `viewport_mode` is
+    /// `TwoD`. Draws the same field the 3D view meshes, flat and pannable.
+    viewport_2d: viewport2d::View2d,
     /// The 3D viewport's orbit camera, persisted across frames so the view holds as the
     /// previewed node changes.
     viewport_camera: viewport::OrbitCamera,
@@ -650,6 +657,8 @@ impl AppState {
             recent: Vec::new(),
             frame_to_graph_request: false,
             viewport_mesh: None,
+            viewport_mode: viewport2d::Mode::default(),
+            viewport_2d: viewport2d::View2d::default(),
             viewport_camera: viewport::OrbitCamera::default(),
             viewport_scale: shade::HeightScale::Fixed,
             viewport_exaggeration: 1.0,
@@ -5188,19 +5197,13 @@ fn refresh_viewport_build(state: &mut AppState) {
         .map(|fields| (key, fields));
 }
 
-fn viewport_3d_pane(ui: &mut egui::Ui, state: &mut AppState) {
+fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // The pane rect, captured before `show` consumes it, anchors the floating control HUD.
     let rect = ui.available_rect_before_wrap();
 
-    // True world proportion: a height of 1.0 rises to (world_height / world_extent) over the
-    // unit footprint. The exaggeration multiplies it, so 1x is real-world proportion.
-    let true_proportion = (state.world_height / state.world_extent.max(f64::EPSILON)) as f32;
-    let settings = viewport::ViewSettings {
-        fixed_range: state.viewport_scale == shade::HeightScale::Fixed,
-        vertical_scale: true_proportion * state.viewport_exaggeration,
-    };
     // Prefer build-quality fields for the shown node when the disk cache has them (after a
-    // Build of the unchanged graph), else the live preview field.
+    // Build of the unchanged graph), else the live preview field. The same field feeds both
+    // the 3D mesh and the 2D map, so the two projections show identical data.
     refresh_viewport_build(state);
     let display = state.preview.display_output();
     let build_field = state
@@ -5209,26 +5212,55 @@ fn viewport_3d_pane(ui: &mut egui::Ui, state: &mut AppState) {
         .and_then(|(_, fields)| fields.get(display.min(fields.len().saturating_sub(1))));
     let showing_build = build_field.is_some();
     let field = build_field.or_else(|| state.preview.field());
-    viewport::show(
-        ui,
-        &mut state.viewport_camera,
-        field,
-        settings,
-        state.viewport_lighting,
-        &mut state.viewport_mesh,
-    );
+
+    match state.viewport_mode {
+        viewport2d::Mode::ThreeD => {
+            // True world proportion: a height of 1.0 rises to (world_height / world_extent)
+            // over the unit footprint. The exaggeration multiplies it, so 1x is real-world
+            // proportion.
+            let true_proportion =
+                (state.world_height / state.world_extent.max(f64::EPSILON)) as f32;
+            let settings = viewport::ViewSettings {
+                fixed_range: state.viewport_scale == shade::HeightScale::Fixed,
+                vertical_scale: true_proportion * state.viewport_exaggeration,
+            };
+            viewport::show(
+                ui,
+                &mut state.viewport_camera,
+                field,
+                settings,
+                state.viewport_lighting,
+                &mut state.viewport_mesh,
+            );
+        }
+        viewport2d::Mode::TwoD => {
+            state
+                .viewport_2d
+                .show(ui, field, display, state.viewport_scale);
+        }
+    }
 
     // A small control HUD overlaid at the top-left of the viewport. A temporary home: the
     // design calls for a vertical toolbar down the left edge, not yet built.
+    let mut mode = state.viewport_mode;
     let mut scale = state.viewport_scale;
     let mut exaggeration = state.viewport_exaggeration;
     let mut light = state.viewport_lighting;
+    let mut shade_mode = state.viewport_2d.shade_mode();
     egui::Area::new(ui.id().with("viewport-hud"))
         .order(egui::Order::Foreground)
         .fixed_pos(rect.left_top() + egui::vec2(8.0, 8.0))
         .show(ui.ctx(), |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
-                // Whether the viewport is meshing the full build result or the coarse preview,
+                // The projection: the 3D relief or the flat 2D map (#134). The 2D view gives
+                // data maps (flow, masks) the room the small preview pane can't.
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut mode, viewport2d::Mode::ThreeD, "3D")
+                        .on_hover_text("Meshed relief, orbit camera");
+                    ui.selectable_value(&mut mode, viewport2d::Mode::TwoD, "2D")
+                        .on_hover_text("Flat map; drag to pan, scroll to zoom, double-click to fit");
+                });
+                // Whether the viewport shows the full build result or the coarse preview,
                 // so it is clear which fidelity is on screen while tuning.
                 ui.weak(if showing_build {
                     "Showing: build"
@@ -5238,66 +5270,105 @@ fn viewport_3d_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 .on_hover_text(
                     "Build quality appears after a Build, until the graph changes; otherwise the live preview",
                 );
-                ui.horizontal(|ui| {
-                    // Fixed shows true amplitude; Auto normalizes to fill the relief (and so
-                    // hides amplitude). Mirrors the 2D preview's Auto/Fixed toggle.
-                    ui.selectable_value(&mut scale, shade::HeightScale::Fixed, "Fixed")
-                        .on_hover_text("Show true height (clips out of range)");
-                    ui.selectable_value(&mut scale, shade::HeightScale::Auto, "Auto")
-                        .on_hover_text("Stretch the field's actual range to fill the relief");
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Exaggeration").on_hover_text(
-                        "Vertical exaggeration; 1x is real-world proportion (set by World height)",
-                    );
-                    ui.add(
-                        egui::Slider::new(&mut exaggeration, 0.25..=8.0)
-                            .logarithmic(true)
-                            .fixed_decimals(2)
-                            .custom_formatter(|v, _| format!("{v:.2}x")),
-                    );
-                });
-                // Lighting tucks under a collapsing header so the HUD stays compact.
-                ui.collapsing("Light", |ui| {
-                    egui::Grid::new("viewport-light")
-                        .num_columns(2)
-                        .show(ui, |ui| {
-                            ui.label("Azimuth")
-                                .on_hover_text("Compass direction the sun comes from");
-                            ui.add(
-                                egui::Slider::new(&mut light.azimuth_deg, 0.0..=360.0)
-                                    .fixed_decimals(0)
-                                    .suffix("°"),
-                            );
-                            ui.end_row();
-                            ui.label("Elevation")
-                                .on_hover_text("Sun height above the horizon; low rakes the form");
-                            ui.add(
-                                egui::Slider::new(&mut light.elevation_deg, 0.0..=90.0)
-                                    .fixed_decimals(0)
-                                    .suffix("°"),
-                            );
-                            ui.end_row();
-                            ui.label("Intensity");
-                            ui.add(
-                                egui::Slider::new(&mut light.intensity, 0.0..=2.0)
-                                    .fixed_decimals(2),
-                            );
-                            ui.end_row();
-                            ui.label("Ambient");
-                            ui.add(
-                                egui::Slider::new(&mut light.ambient, 0.0..=1.0).fixed_decimals(2),
-                            );
-                            ui.end_row();
-                        });
-                });
+                match mode {
+                    viewport2d::Mode::ThreeD => {
+                        viewport_3d_controls(ui, &mut scale, &mut exaggeration, &mut light);
+                    }
+                    viewport2d::Mode::TwoD => {
+                        viewport_2d_controls(ui, &mut shade_mode, &mut scale);
+                    }
+                }
             });
         });
+    state.viewport_mode = mode;
     state.viewport_scale = scale;
     state.viewport_exaggeration = exaggeration;
     state.viewport_lighting = light;
+    state.viewport_2d.set_shade_mode(shade_mode);
 }
-inventory::submit! { PaneKind { id: "viewport-3d", draw: viewport_3d_pane } }
+
+/// The 3D viewport HUD controls: the Auto/Fixed height scale, the vertical exaggeration,
+/// and the sun under a collapsing header.
+fn viewport_3d_controls(
+    ui: &mut egui::Ui,
+    scale: &mut shade::HeightScale,
+    exaggeration: &mut f32,
+    light: &mut viewport::Lighting,
+) {
+    ui.horizontal(|ui| {
+        // Fixed shows true amplitude; Auto normalizes to fill the relief (and so hides
+        // amplitude). Mirrors the 2D preview's Auto/Fixed toggle.
+        ui.selectable_value(scale, shade::HeightScale::Fixed, "Fixed")
+            .on_hover_text("Show true height (clips out of range)");
+        ui.selectable_value(scale, shade::HeightScale::Auto, "Auto")
+            .on_hover_text("Stretch the field's actual range to fill the relief");
+    });
+    ui.horizontal(|ui| {
+        ui.label("Exaggeration").on_hover_text(
+            "Vertical exaggeration; 1x is real-world proportion (set by World height)",
+        );
+        ui.add(
+            egui::Slider::new(exaggeration, 0.25..=8.0)
+                .logarithmic(true)
+                .fixed_decimals(2)
+                .custom_formatter(|v, _| format!("{v:.2}x")),
+        );
+    });
+    // Lighting tucks under a collapsing header so the HUD stays compact.
+    ui.collapsing("Light", |ui| {
+        egui::Grid::new("viewport-light")
+            .num_columns(2)
+            .show(ui, |ui| {
+                ui.label("Azimuth")
+                    .on_hover_text("Compass direction the sun comes from");
+                ui.add(
+                    egui::Slider::new(&mut light.azimuth_deg, 0.0..=360.0)
+                        .fixed_decimals(0)
+                        .suffix("°"),
+                );
+                ui.end_row();
+                ui.label("Elevation")
+                    .on_hover_text("Sun height above the horizon; low rakes the form");
+                ui.add(
+                    egui::Slider::new(&mut light.elevation_deg, 0.0..=90.0)
+                        .fixed_decimals(0)
+                        .suffix("°"),
+                );
+                ui.end_row();
+                ui.label("Intensity");
+                ui.add(egui::Slider::new(&mut light.intensity, 0.0..=2.0).fixed_decimals(2));
+                ui.end_row();
+                ui.label("Ambient");
+                ui.add(egui::Slider::new(&mut light.ambient, 0.0..=1.0).fixed_decimals(2));
+                ui.end_row();
+            });
+    });
+}
+
+/// The 2D map HUD controls: the Height/Relief shading toggle, and (in Height) the shared
+/// Auto/Fixed scale. Relief uses a fixed light here; the small preview pane is where the
+/// light is steered.
+fn viewport_2d_controls(
+    ui: &mut egui::Ui,
+    shade_mode: &mut shade::ShadeMode,
+    scale: &mut shade::HeightScale,
+) {
+    ui.horizontal(|ui| {
+        ui.selectable_value(shade_mode, shade::ShadeMode::Height, "Height")
+            .on_hover_text("Grayscale value, best for data maps (flow, masks)");
+        ui.selectable_value(shade_mode, shade::ShadeMode::Relief, "Relief")
+            .on_hover_text("Hillshade, best for terrain shape");
+    });
+    if *shade_mode == shade::ShadeMode::Height {
+        ui.horizontal(|ui| {
+            ui.selectable_value(scale, shade::HeightScale::Fixed, "Fixed")
+                .on_hover_text("Map a fixed [0, 1]: true amplitude, clips out of range");
+            ui.selectable_value(scale, shade::HeightScale::Auto, "Auto")
+                .on_hover_text("Stretch the field's actual range to black/white");
+        });
+    }
+}
+inventory::submit! { PaneKind { id: "viewport-3d", draw: viewport_pane } }
 
 // ---- layout description + fixed-panel backend -------------------------------
 
