@@ -125,33 +125,170 @@ pub(crate) fn fill_depressions(bed: &[f32], grid: &Grid, max_fill: f32) -> Vec<f
 /// "Not yet part of any labelled flat" marker for [`resolve_flats`].
 const NO_LABEL: u32 = u32::MAX;
 
-/// A cell waiting in a flat-resolution Dijkstra, ordered so the *smallest* accumulated distance
-/// pops first, with ties broken by insertion order so the traversal is fully deterministic.
-struct DistNode {
-    dist: f32,
-    seq: u64,
-    idx: usize,
+/// Fast-sweeping passes for the eikonal flat solver (each pass runs the four alternating sweep
+/// directions). A cap, not a target: one pass is exact on a convex flat, while non-convex flats
+/// whose geodesics bend around walls need a few. Small and fixed, so the solve stays O(n) per
+/// flat and deterministic.
+const EIKONAL_PASSES: u32 = 4;
+
+/// The Godunov upwind eikonal update from the two axis minima at unit spacing, or infinity when
+/// neither axis has a settled neighbour. Solves `(T-m1)^2 + (T-m2)^2 = 1`, falling back to the
+/// one-sided `m1 + 1` when the second axis cannot contribute.
+fn eikonal_godunov(umin: f32, vmin: f32) -> f32 {
+    let (m1, m2) = (umin.min(vmin), umin.max(vmin));
+    if m1.is_infinite() {
+        f32::INFINITY
+    } else if m2.is_infinite() || m2 - m1 >= 1.0 {
+        m1 + 1.0
+    } else {
+        let d = m2 - m1;
+        (m1 + m2 + (2.0 - d * d).sqrt()) / 2.0
+    }
 }
 
-impl Ord for DistNode {
-    fn cmp(&self, other: &Self) -> Ordering {
-        other
-            .dist
-            .total_cmp(&self.dist)
-            .then_with(|| other.seq.cmp(&self.seq))
+/// The smallest settled distance among a cell's same-flat, in-domain neighbours, returned as
+/// `(horizontal, vertical, diagonal)` minima.
+fn eikonal_neighbour_mins(
+    t: &[f32],
+    domain: &[bool],
+    label: &[u32],
+    grid: &Grid,
+    x: usize,
+    y: usize,
+    lab: u32,
+) -> (f32, f32, f32) {
+    let (w, h) = (grid.width, grid.height);
+    let c = y * w + x;
+    let sample = |nc: usize, acc: &mut f32| {
+        if domain[nc] && label[nc] == lab {
+            *acc = acc.min(t[nc]);
+        }
+    };
+    let mut umin = f32::INFINITY;
+    if x > 0 {
+        sample(c - 1, &mut umin);
     }
-}
-impl PartialOrd for DistNode {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
+    if x + 1 < w {
+        sample(c + 1, &mut umin);
     }
-}
-impl PartialEq for DistNode {
-    fn eq(&self, other: &Self) -> bool {
-        self.cmp(other) == Ordering::Equal
+    let mut vmin = f32::INFINITY;
+    if y > 0 {
+        sample(c - w, &mut vmin);
     }
+    if y + 1 < h {
+        sample(c + w, &mut vmin);
+    }
+    let mut dmin = f32::INFINITY;
+    if x > 0 && y > 0 {
+        sample(c - w - 1, &mut dmin);
+    }
+    if x + 1 < w && y > 0 {
+        sample(c - w + 1, &mut dmin);
+    }
+    if x > 0 && y + 1 < h {
+        sample(c + w - 1, &mut dmin);
+    }
+    if x + 1 < w && y + 1 < h {
+        sample(c + w + 1, &mut dmin);
+    }
+    (umin, vmin, dmin)
 }
-impl Eq for DistNode {}
+
+/// Geodesic distance from the `source` cells, restricted to `domain` cells of the same flat, by
+/// solving the eikonal equation `|grad T| = 1` with a Godunov upwind update and Zhao fast
+/// sweeping. Unlike a chamfer or breadth-first distance (whose lattice metric leaves creases at
+/// the half-diagonals), this approximates the continuous distance, so its gradient is isotropic.
+/// `label` isolates flats and walls: propagation never crosses into another label or out of the
+/// domain, giving a wall-respecting distance. Cells outside the domain, and flats no source
+/// reaches, stay infinite. Deterministic: a fixed sweep order, with no ties or priority queue.
+fn eikonal_flats(source: &[bool], domain: &[bool], label: &[u32], grid: &Grid) -> Vec<f32> {
+    let (w, h) = (grid.width, grid.height);
+    let n = w * h;
+    let mut t = vec![f32::INFINITY; n];
+    for c in 0..n {
+        if domain[c] && source[c] {
+            t[c] = 0.0;
+        }
+    }
+
+    // The four alternating sweep orderings (x forward/back crossed with y forward/back).
+    let xs_fwd: Vec<usize> = (0..w).collect();
+    let xs_rev: Vec<usize> = (0..w).rev().collect();
+    let ys_fwd: Vec<usize> = (0..h).collect();
+    let ys_rev: Vec<usize> = (0..h).rev().collect();
+    let orders = [
+        (&xs_fwd, &ys_fwd),
+        (&xs_fwd, &ys_rev),
+        (&xs_rev, &ys_fwd),
+        (&xs_rev, &ys_rev),
+    ];
+
+    // Phase 1: isotropic Godunov fast sweeping over the 4-connected stencil. Bit-exact, so a
+    // symmetric flat resolves symmetrically.
+    for _ in 0..EIKONAL_PASSES {
+        let mut changed = false;
+        for (xs, ys) in orders {
+            for &y in ys.iter() {
+                for &x in xs.iter() {
+                    let c = y * w + x;
+                    if !domain[c] || source[c] {
+                        continue;
+                    }
+                    let (umin, vmin, _) =
+                        eikonal_neighbour_mins(&t, domain, label, grid, x, y, label[c]);
+                    let cand = eikonal_godunov(umin, vmin);
+                    if cand < t[c] {
+                        t[c] = cand;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    // Phase 2: bridge diagonal-only pinches. A flat is labelled with 8-connectivity, but the
+    // Godunov stencil is 4-connected, so a region joined to its outlet only through a diagonal
+    // pinch stays infinite after Phase 1 and would stall as a false sink. Resolve only the cells
+    // still infinite, adding a diagonal step where no orthogonal neighbour exists — so the
+    // isotropic Phase-1 values are never touched, and this whole phase is skipped when the flats
+    // have no pinches.
+    let mut pinch: Vec<bool> = t.iter().map(|v| v.is_infinite()).collect();
+    for c in 0..n {
+        pinch[c] = pinch[c] && domain[c] && !source[c];
+    }
+    if pinch.iter().any(|&p| p) {
+        for _ in 0..EIKONAL_PASSES {
+            let mut changed = false;
+            for (xs, ys) in orders {
+                for &y in ys.iter() {
+                    for &x in xs.iter() {
+                        let c = y * w + x;
+                        if !pinch[c] {
+                            continue;
+                        }
+                        let (umin, vmin, dmin) =
+                            eikonal_neighbour_mins(&t, domain, label, grid, x, y, label[c]);
+                        let mut cand = eikonal_godunov(umin, vmin);
+                        if dmin.is_finite() {
+                            cand = cand.min(dmin + core::f32::consts::SQRT_2);
+                        }
+                        if cand < t[c] {
+                            t[c] = cand;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+    t
+}
 
 /// Resolve drainage directions across the flats left by [`fill_depressions`], so filled basins
 /// drain across their real geometry instead of along grid-aligned spokes.
@@ -164,17 +301,18 @@ impl Eq for DistNode {}
 /// following Barnes, Lehman & Soille (2014). The result is a convergent micro-relief that
 /// steepest-descent and multiple-flow routing follow into natural dendritic drainage.
 ///
-/// The distances are geodesic within each flat and use true diagonal weights (1 and `sqrt(2)`)
-/// so their contours are near-circular. A unit-step breadth-first distance would instead measure
-/// Chebyshev distance, whose diamond contours give the gradient eight preferred directions that
-/// multiple-flow routing re-collapses onto as grid-aligned scars; the weighted distance carries
-/// no such direction.
+/// The distances are continuous geodesic distances, obtained by solving the eikonal equation
+/// `|grad T| = 1` with fast sweeping, not a lattice metric. A chamfer or breadth-first distance
+/// has its worst error at the half-diagonals (about 22.5 degrees), so its gradient kinks there and
+/// multiple-flow routing re-collapses onto grid-aligned creases; the eikonal gradient has unit
+/// magnitude in every direction, so it channelises toward the nearest outlet with no preferred
+/// direction.
 ///
 /// The added relief is a few ULPs per cell, scaled to the local magnitude and far below the
 /// working height range, so it steers routing without visibly altering terrain. Genuine sinks — a
 /// capped lake floor with no outlet — carry no outlet edge, receive no gradient, and stay base
-/// levels. Deterministic: Dijkstra with a `(distance, insertion-order)` priority over a fixed
-/// neighbour order, with no dependence on hash or float iteration order.
+/// levels. Deterministic: a fixed-order sweep, with no priority queue, tie-break, or hash
+/// iteration.
 pub(crate) fn resolve_flats(filled: &[f32], grid: &Grid) -> Vec<f32> {
     let (w, h) = (grid.width, grid.height);
     let n = w * h;
@@ -248,98 +386,36 @@ pub(crate) fn resolve_flats(filled: &[f32], grid: &Grid) -> Vec<f32> {
         return resolved; // no flats to resolve
     }
 
-    // Step 1: distance away from higher terrain, grown by Dijkstra from the undefined flat cells
-    // that border higher ground. The true diagonal weights keep the contours near-circular.
-    let mut away = vec![f32::INFINITY; n];
-    let mut heap: BinaryHeap<DistNode> = BinaryHeap::new();
-    let mut seq = 0_u64;
+    // Two isotropic geodesic distances over the flats, by eikonal fast sweeping:
+    //   away   - from the higher-terrain boundary, over the undefined flat interior;
+    //   toward - from the outlets, over the whole flat.
+    // Same composition as Barnes-Lehman-Soille, but the distances are continuous (isotropic)
+    // rather than a lattice metric, so no grid- or diagonal-direction creases survive.
+    let mut away_source = vec![false; n];
+    let mut away_domain = vec![false; n];
+    let mut toward_source = vec![false; n];
+    let mut toward_domain = vec![false; n];
     for c in 0..n {
-        if flat[c] && !defined[c] && higher[c] {
-            away[c] = 0.0;
-            heap.push(DistNode {
-                dist: 0.0,
-                seq,
-                idx: c,
-            });
-            seq += 1;
+        if !flat[c] {
+            continue;
+        }
+        toward_domain[c] = true;
+        if defined[c] {
+            toward_source[c] = true;
+        } else {
+            away_domain[c] = true;
+            away_source[c] = higher[c];
         }
     }
-    while let Some(node) = heap.pop() {
-        let c = node.idx;
-        if node.dist > away[c] {
-            continue; // a shorter path already settled this cell
-        }
-        let (cx, cy) = (c % w, c / w);
-        for &(dx, dy, wgt) in &NEIGHBORS {
-            let (nx, ny) = (cx as i32 + dx, cy as i32 + dy);
-            if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
-                continue;
-            }
-            let nc = ny as usize * w + nx as usize;
-            // The away gradient only grows through the undefined interior of the same flat.
-            if label[nc] == label[c] && !defined[nc] {
-                let nd = away[c] + wgt;
-                if nd < away[nc] {
-                    away[nc] = nd;
-                    heap.push(DistNode {
-                        dist: nd,
-                        seq,
-                        idx: nc,
-                    });
-                    seq += 1;
-                }
-            }
-        }
-    }
+    let away = eikonal_flats(&away_source, &away_domain, &label, grid);
+    let toward = eikonal_flats(&toward_source, &toward_domain, &label, grid);
+
     // Each flat's greatest away distance, used to invert that gradient (high near the walls).
     let mut flat_heights = vec![0.0_f32; num_labels as usize];
     for c in 0..n {
         if away[c].is_finite() {
             let peak = &mut flat_heights[label[c] as usize];
             *peak = peak.max(away[c]);
-        }
-    }
-
-    // Step 2: distance toward lower terrain, grown by Dijkstra from the flat cells that border
-    // lower ground (the outlets). This spreads through the whole flat, defining its drainage.
-    let mut toward = vec![f32::INFINITY; n];
-    heap.clear();
-    seq = 0;
-    for c in 0..n {
-        if flat[c] && defined[c] {
-            toward[c] = 0.0;
-            heap.push(DistNode {
-                dist: 0.0,
-                seq,
-                idx: c,
-            });
-            seq += 1;
-        }
-    }
-    while let Some(node) = heap.pop() {
-        let c = node.idx;
-        if node.dist > toward[c] {
-            continue;
-        }
-        let (cx, cy) = (c % w, c / w);
-        for &(dx, dy, wgt) in &NEIGHBORS {
-            let (nx, ny) = (cx as i32 + dx, cy as i32 + dy);
-            if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
-                continue;
-            }
-            let nc = ny as usize * w + nx as usize;
-            if label[nc] == label[c] {
-                let nd = toward[c] + wgt;
-                if nd < toward[nc] {
-                    toward[nc] = nd;
-                    heap.push(DistNode {
-                        dist: nd,
-                        seq,
-                        idx: nc,
-                    });
-                    seq += 1;
-                }
-            }
         }
     }
 
@@ -678,29 +754,102 @@ mod tests {
     }
 
     #[test]
-    fn resolve_flats_measures_euclidean_not_chebyshev_distance() {
-        // One large flat at 0.5 with a single lower outlet at the centre and no higher terrain, so
-        // the resolved relief is purely the distance toward that outlet. Pick two cells the same
-        // number of grid steps from the outlet: one straight out, one on the diagonal. Under the
-        // old unit-step (Chebyshev) distance they were the same ring and got identical relief,
-        // which is exactly the eight-direction bias that streaked drainage into diagonal scars.
-        // With true diagonal weights the diagonal cell is genuinely farther, so it sits higher.
-        let (w, h) = (31, 31);
-        let (cx, cy) = (15, 15);
-        let mut z = vec![0.5_f32; w * h];
-        z[cy * w + cx] = 0.0; // the single outlet
+    fn eikonal_distance_is_isotropic() {
+        // A disk-shaped flat with a single centre source. The eikonal distance should track the
+        // true Euclidean radius within a few percent at every angle. A chamfer distance is exact
+        // on the axes and diagonals but over-estimates by ~8% at the half-diagonal (~22.5 deg),
+        // a sharp crease; the eikonal error is small there and never a peak above the diagonal,
+        // which is what stops multiple-flow routing from re-collapsing onto grid-aligned streaks.
+        let (w, h) = (81usize, 81usize);
+        let (cx, cy) = (40i32, 40i32);
+        let radius = 36.0f32;
+        let grid = Grid {
+            width: w,
+            height: h,
+        };
+        let n = w * h;
+        let mut domain = vec![false; n];
+        let mut label = vec![NO_LABEL; n];
+        for y in 0..h {
+            for x in 0..w {
+                let r = (((x as i32 - cx).pow(2) + (y as i32 - cy).pow(2)) as f32).sqrt();
+                if r <= radius {
+                    domain[y * w + x] = true;
+                    label[y * w + x] = 0;
+                }
+            }
+        }
+        let mut source = vec![false; n];
+        source[cy as usize * w + cx as usize] = true;
+        let t = eikonal_flats(&source, &domain, &label, &grid);
+        let rel_err = |dx: i32, dy: i32| {
+            let c = (cy + dy) as usize * w + (cx + dx) as usize;
+            let euclid = (((dx * dx + dy * dy) as f32).sqrt()).max(1e-6);
+            (t[c] - euclid).abs() / euclid
+        };
+        let axis = rel_err(30, 0);
+        let diag = rel_err(21, 21);
+        let half = rel_err(28, 12); // ~23 deg, the chamfer error maximum
+
+        assert!(axis < 0.02, "axis error {axis}");
+        assert!(diag < 0.05, "diagonal error {diag}");
+        // The half-diagonal error is small (a chamfer would be ~0.08 here) and, unlike a chamfer
+        // crease, is not a sharp peak above the diagonal.
+        assert!(half < 0.04, "half-diagonal error {half}");
+        assert!(
+            half <= diag + 0.01,
+            "half-diagonal should not spike above the diagonal (crease): half {half}, diag {diag}"
+        );
+    }
+
+    #[test]
+    fn resolve_flats_bridges_diagonal_pinches() {
+        // Two flat blocks joined only through a single diagonal-pinch cell, with the outlet in the
+        // first block. The Godunov stencil is 4-connected, so without the pinch-bridging pass the
+        // second block (reachable only across the diagonal) would stay infinite and stall as false
+        // sinks. Every flat cell must drain.
+        let (w, h) = (9usize, 9usize);
+        let idx = |x: usize, y: usize| y * w + x;
+        let mut z = vec![1.0_f32; w * h]; // walls everywhere
+        for y in 1..=3 {
+            for x in 1..=3 {
+                z[idx(x, y)] = 0.5; // block A
+            }
+        }
+        z[idx(4, 4)] = 0.5; // the diagonal bridge; its orthogonal neighbours are all walls
+        for y in 5..=7 {
+            for x in 5..=7 {
+                z[idx(x, y)] = 0.5; // block B, reachable from A only across the pinch
+            }
+        }
+        z[idx(2, 4)] = 0.0; // an outlet just below block A
         let grid = Grid {
             width: w,
             height: h,
         };
         let r = resolve_flats(&z, &grid);
-
-        let orthogonal = r[(cy + 6) * w + cx]; // offset (0, 6)
-        let diagonal = r[(cy + 6) * w + (cx + 6)]; // offset (6, 6): same Chebyshev ring, farther
-        assert!(
-            diagonal > orthogonal,
-            "diagonal cell should be farther from the outlet than the orthogonal one: \
-             diagonal {diagonal}, orthogonal {orthogonal}"
-        );
+        for y in 0..h {
+            for x in 0..w {
+                if (z[idx(x, y)] - 0.5).abs() > 1e-6 {
+                    continue; // only the flat cells
+                }
+                let here = r[idx(x, y)];
+                let mut drains = false;
+                for &(dx, dy, _) in &NEIGHBORS {
+                    let (nx, ny) = (x as i32 + dx, y as i32 + dy);
+                    if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
+                        continue;
+                    }
+                    if r[ny as usize * w + nx as usize] < here {
+                        drains = true;
+                        break;
+                    }
+                }
+                assert!(
+                    drains,
+                    "flat cell ({x},{y}) beyond a diagonal pinch does not drain"
+                );
+            }
+        }
     }
 }
