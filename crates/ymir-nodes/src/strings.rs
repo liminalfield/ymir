@@ -159,6 +159,15 @@ pub fn tr(key: &str) -> &str {
              drainage counterpart to Slope and Curvature."
         }
 
+        // Flow selector (droplet / rainfall simulation).
+        "node-modifier.flow_droplet" => "Flow (Droplet)",
+        "node-modifier.flow_droplet-desc" => {
+            "Selects drainage channels by simulating rainfall as droplets that trace continuous \
+             sub-cell paths downhill and pool in pits. No depression filling, so no fans, scars, \
+             or aliasing, unlike the grid Flow node. `inertia` smooths the paths, `rain` sets \
+             droplet density."
+        }
+
         // Invert.
         "node-modifier.invert" => "Invert",
         "node-modifier.invert-desc" => "Flips the height layer (1 - height).",
