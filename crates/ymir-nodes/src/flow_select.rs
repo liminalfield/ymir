@@ -24,7 +24,8 @@ use ymir_core::{
 };
 
 use crate::hydrology::{
-    Grid, drainage_area_mfd, fill_depressions, log_normalize_span, resolve_flats,
+    Grid, breach_depressions, drainage_area_mfd, fill_depressions, log_normalize_span,
+    resolve_flats,
 };
 
 /// Stable type identifier and registry key.
@@ -44,6 +45,18 @@ const DEFAULT_CONCENTRATION: f64 = 1.5;
 /// funnelling its whole catchment through one outlet as a bright fan. Raise it to route across
 /// larger basins, lower it to keep only the incised network.
 const DEFAULT_FILL: f64 = 0.05;
+/// Default maximum breach length, in world units. Before filling, each depression is drained by
+/// carving a descending channel to a lower outlet within this distance (Lindsay 2016 least-cost
+/// breaching), so a basin drains along a channel rather than filling to a flat and fanning at a
+/// single outlet. A pit with no outlet in range falls back to the `fill` pass; 0 disables
+/// breaching (fill only). It is a world distance, converted to a cell count at the build
+/// resolution, so its reach stays the same on the ground whatever the resolution.
+///
+/// Drainage is resolution-dependent physics (like erosion): a finer build resolves more fine pits
+/// and channels, so the network genuinely changes with resolution. The controls are
+/// resolution-aware (world units), so a low-resolution preview approximates the full build rather
+/// than drifting from it, but it is an approximation, not an identical result.
+const DEFAULT_BREACH: f64 = 256.0;
 
 /// Flow selector: one input, one output. Writes the selection to [`layers::HEIGHT`].
 #[derive(Clone)]
@@ -82,6 +95,14 @@ impl Operator for FlowSelect {
                     ParamKind::Float { min: 0.0, max: 1.0 },
                     ParamValue::Float(DEFAULT_FILL),
                 ),
+                ParamSpec::new(
+                    "breach",
+                    ParamKind::Float {
+                        min: 0.0,
+                        max: 4096.0,
+                    },
+                    ParamValue::Float(DEFAULT_BREACH),
+                ),
             ],
         }
     }
@@ -97,19 +118,25 @@ impl Operator for FlowSelect {
         let falloff = params.get_f64("falloff", DEFAULT_FALLOFF).max(0.0) as f32;
         let concentration = params.get_f64("concentration", DEFAULT_CONCENTRATION) as f32;
         let max_fill = params.get_f64("fill", DEFAULT_FILL) as f32;
+        // World-unit breach reach, converted to a cell count at this resolution so the same graph
+        // breaches the same distance on the ground whatever the resolution.
+        let breach_len = (params.get_f64("breach", DEFAULT_BREACH) / ctx.meters_per_cell())
+            .clamp(0.0, 1024.0) as usize;
 
-        // Compute the drainage map: fill pits up to `fill` so flow routes through shallow
-        // depressions (deeper basins stay lakes where flow terminates, rather than funnelling
-        // their whole catchment through one outlet), resolve the resulting flats so basins drain
-        // across their real geometry instead of along grid-aligned spokes, accumulate by physical
-        // cell area so the pattern is resolution-honest, then log-map to keep tributaries visible.
+        // Compute the drainage map: breach pits (carve a channel to a lower outlet within
+        // `breach` cells) so basins drain along a channel instead of fanning at a single spill,
+        // fill whatever pits are still deeper than `fill` and too far to breach, resolve any flats
+        // the fill leaves so they drain across their real geometry rather than grid-aligned spokes,
+        // accumulate by physical cell area so the pattern is resolution-honest, then log-map to
+        // keep tributaries visible.
         let grid = Grid { width, height };
         let bed = h.as_slice().to_vec();
         let cell_area = {
             let m = ctx.meters_per_cell() as f32;
             (m * m).max(1e-12)
         };
-        let filled = resolve_flats(&fill_depressions(&bed, &grid, max_fill), &grid);
+        let breached = breach_depressions(&bed, &grid, breach_len);
+        let filled = resolve_flats(&fill_depressions(&breached, &grid, max_fill), &grid);
         let area = drainage_area_mfd(&filled, &grid, concentration, cell_area);
         // Stretch across the actual range so ridges read 0 and the largest channels read 1,
         // making the band meaningful (the cell-area seed cancels in the stretch).
@@ -250,7 +277,11 @@ mod tests {
             .with_layer(layers::HEIGHT, Arc::new(Layer::from_vec(size, size, z)));
 
         let run = |fill: f64| {
-            let params = Params::new().with("fill", ParamValue::Float(fill));
+            // Disable breaching so this isolates the fill cap (breaching would otherwise drain the
+            // basin first, making `fill` irrelevant for it).
+            let params = Params::new()
+                .with("breach", ParamValue::Float(0.0))
+                .with("fill", ParamValue::Float(fill));
             let ctx = EvalContext::new(size, size, Region::UNIT, 0).with_world_extent(256.0);
             FlowSelect
                 .eval(Inputs::required_only(&[&field]), &params, &ctx)
@@ -263,6 +294,35 @@ mod tests {
             shallow.layer(layers::HEIGHT).unwrap().content_hash(),
             deep.layer(layers::HEIGHT).unwrap().content_hash(),
             "the fill cap must change the drainage selection"
+        );
+    }
+
+    #[test]
+    fn breaching_changes_the_drainage() {
+        // On a basin, breaching (carve a channel to the outlet) yields a different selection than
+        // filling alone, proving the `breach` step is wired in.
+        let size = 24;
+        let mut z = vec![0.6_f32; size * size];
+        for y in 8..16 {
+            for x in 8..16 {
+                z[y * size + x] = 0.0;
+            }
+        }
+        z[(size - 1) * size + size / 2] = 0.0;
+        let field = Field::new(size, size, Region::UNIT)
+            .with_layer(layers::HEIGHT, Arc::new(Layer::from_vec(size, size, z)));
+        let run = |breach: f64| {
+            let params = Params::new().with("breach", ParamValue::Float(breach));
+            let ctx = EvalContext::new(size, size, Region::UNIT, 0).with_world_extent(256.0);
+            FlowSelect
+                .eval(Inputs::required_only(&[&field]), &params, &ctx)
+                .unwrap()
+                .remove(0)
+        };
+        assert_ne!(
+            run(0.0).layer(layers::HEIGHT).unwrap().content_hash(),
+            run(2000.0).layer(layers::HEIGHT).unwrap().content_hash(),
+            "breaching should change the drainage versus fill-only"
         );
     }
 
