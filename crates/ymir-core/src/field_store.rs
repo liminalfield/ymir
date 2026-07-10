@@ -11,7 +11,7 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::field::Field;
@@ -19,6 +19,9 @@ use crate::field_cache::{read_fields, write_fields};
 
 /// Extension for cache blobs, so eviction only ever considers our own files.
 const EXTENSION: &str = "ymfc";
+
+/// Prefix marking a build-tagged cache subdirectory (see [`build_tag`]).
+const BUILD_PREFIX: &str = "build-";
 
 /// A content-addressed, byte-bounded disk cache of node outputs.
 pub struct FieldStore {
@@ -33,14 +36,18 @@ impl FieldStore {
     #[must_use]
     pub fn open(dir: PathBuf, budget_bytes: u64) -> Option<Self> {
         fs::create_dir_all(&dir).ok()?;
+        prune_sibling_builds(&dir);
         Some(Self { dir, budget_bytes })
     }
 
-    /// The default cache directory, `<cache>/ymir/fields`, reading the real environment.
-    /// `None` if neither `XDG_CACHE_HOME` nor `HOME` is set.
+    /// The default cache directory, `<cache>/ymir/fields/build-<tag>`, reading the real
+    /// environment. `None` if neither `XDG_CACHE_HOME` nor `HOME` is set. The `build-<tag>`
+    /// segment (see [`build_tag`]) isolates the cache per executable, so fields computed by an
+    /// older build of the operators are never served to a newer one that reuses their keys.
     #[must_use]
     pub fn default_dir() -> Option<PathBuf> {
         cache_dir_from(std::env::var_os("XDG_CACHE_HOME"), std::env::var_os("HOME"))
+            .map(|d| d.join(build_tag()))
     }
 
     fn path(&self, key: u64) -> PathBuf {
@@ -128,6 +135,71 @@ fn cache_dir_from(xdg: Option<OsString>, home: Option<OsString>) -> Option<PathB
             .join("ymir")
             .join("fields"),
     )
+}
+
+/// A cache tag that changes whenever the executable changes, derived from its length and
+/// modification time. The warm-cache key is a node's content hash (`type_id`, params, input
+/// hashes, context) and carries no notion of the operator *algorithm*, so a rebuilt operator
+/// produces different output under the same key. Isolating the cache per executable means an old
+/// build's fields are never served to a new one. A released binary has a stable tag, so its cache
+/// persists across restarts; a recompile changes the tag, so development always recomputes. A
+/// fixed fallback is used when the executable cannot be inspected.
+fn build_tag() -> String {
+    let stamp = std::env::current_exe()
+        .ok()
+        .and_then(|path| fs::metadata(path).ok())
+        .map(|meta| {
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_nanos() as u64);
+            // FNV-1a over (length, mtime).
+            let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+            for byte in meta
+                .len()
+                .to_le_bytes()
+                .iter()
+                .chain(mtime.to_le_bytes().iter())
+            {
+                h ^= u64::from(*byte);
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            h
+        })
+        .unwrap_or(0);
+    format!("{BUILD_PREFIX}{stamp:016x}")
+}
+
+/// If `dir` is a build-tagged cache directory, remove its sibling build-tagged directories, so the
+/// fresh cache a recompile creates does not leave the previous build's cache behind. Best-effort,
+/// and by construction only ever removes directories whose name carries the [`BUILD_PREFIX`], so
+/// it can never touch anything but our own stale build caches.
+fn prune_sibling_builds(dir: &Path) {
+    let is_build_name = |name: &str| name.starts_with(BUILD_PREFIX);
+    let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    if !is_build_name(name) {
+        return; // not a build-tagged dir (e.g. a test's temp dir): leave siblings alone
+    }
+    let Some(parent) = dir.parent() else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Some(entry_name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if entry_name == name || !is_build_name(&entry_name) {
+            continue;
+        }
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            let _ = fs::remove_dir_all(entry.path()); // shortcut-ok: pruning a stale build's cache
+        }
+    }
 }
 
 #[cfg(test)]
@@ -227,5 +299,60 @@ mod tests {
         assert_eq!(home, Some(PathBuf::from("/home/u/.cache/ymir/fields")));
         // Neither set: no directory.
         assert_eq!(cache_dir_from(None, None), None);
+    }
+
+    #[test]
+    fn default_dir_is_build_tagged() {
+        // Under the real environment (HOME is set in CI), the default dir gains a build-<tag>
+        // segment under `fields`, isolating the cache per executable.
+        if let Some(dir) = FieldStore::default_dir() {
+            let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            assert!(
+                name.starts_with(BUILD_PREFIX),
+                "expected a build tag, got {name}"
+            );
+            let parent = dir
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str());
+            assert_eq!(parent, Some("fields"));
+        }
+    }
+
+    #[test]
+    fn open_prunes_stale_build_dirs_only() {
+        let scratch = Scratch::new("prune");
+        let fields = scratch.0.join("fields");
+        fs::create_dir_all(fields.join("build-old")).expect("mk old");
+        fs::write(fields.join("build-old").join("x.ymfc"), b"stale").expect("write stale");
+        fs::create_dir_all(fields.join("keepme")).expect("mk non-build sibling");
+
+        let current = fields.join("build-new");
+        let _store = FieldStore::open(current.clone(), 1 << 20).expect("store opens");
+
+        assert!(current.is_dir(), "current build dir exists");
+        assert!(
+            !fields.join("build-old").exists(),
+            "the previous build's cache is pruned"
+        );
+        assert!(
+            fields.join("keepme").is_dir(),
+            "a non-build sibling is never touched"
+        );
+    }
+
+    #[test]
+    fn open_on_a_plain_dir_prunes_nothing() {
+        // A non-build-tagged directory (as tests and callers passing an explicit dir use) must not
+        // trigger any sibling pruning.
+        let scratch = Scratch::new("noprune");
+        let sib = scratch.0.join("build-sibling");
+        fs::create_dir_all(&sib).expect("mk sibling");
+        let plain = scratch.0.join("plain");
+        let _store = FieldStore::open(plain, 1 << 20).expect("store opens");
+        assert!(
+            sib.is_dir(),
+            "a plain dir does not prune build-tagged siblings"
+        );
     }
 }
