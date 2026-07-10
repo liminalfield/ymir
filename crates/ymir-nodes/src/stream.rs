@@ -1,7 +1,7 @@
 //! Stream erosion: iterative stream-power fluvial erosion (FastScape / Braun-Willett).
 //!
-//! A complete, self-contained erosion model, distinct from the pipe simulation in
-//! [`crate::hydraulic`]. It evolves the terrain toward a fluvial landscape: each iteration
+//! A complete, self-contained erosion model driven by drainage area rather than a local
+//! flow simulation. It evolves the terrain toward a fluvial landscape: each iteration
 //! routes flow to drainage, then *incises the bed toward the cell it drains into* by the
 //! stream-power law, and repeats. Two properties of that loop are what make it read as real,
 //! and neither comes from a single carve:

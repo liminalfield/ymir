@@ -151,23 +151,6 @@ pub fn tr(key: &str) -> &str {
              min..max degrees, softening over the falloff. Scale it with an upstream Blur."
         }
 
-        // Flow selector.
-        "node-modifier.flow" => "Flow",
-        "node-modifier.flow-desc" => {
-            "Selects drainage channels by flow accumulation, computed on demand from the \
-             terrain: high where upstream water collects, within a normalized band. The \
-             drainage counterpart to Slope and Curvature."
-        }
-
-        // Flow selector (droplet / rainfall simulation).
-        "node-modifier.flow_droplet" => "Flow (Droplet)",
-        "node-modifier.flow_droplet-desc" => {
-            "Selects drainage channels by simulating rainfall as droplets that trace continuous \
-             sub-cell paths downhill and pool in pits. No depression filling, so no fans, scars, \
-             or aliasing, unlike the grid Flow node. `inertia` smooths the paths, `rain` sets \
-             droplet density."
-        }
-
         // Invert.
         "node-modifier.invert" => "Invert",
         "node-modifier.invert-desc" => "Flips the height layer (1 - height).",
@@ -208,12 +191,6 @@ pub fn tr(key: &str) -> &str {
         "node-modifier.thermal_erosion" => "Thermal Erosion",
         "node-modifier.thermal_erosion-desc" => {
             "Relaxes slopes steeper than the talus angle toward repose."
-        }
-
-        // Hydraulic erosion.
-        "node-modifier.hydraulic_erosion" => "Hydraulic Erosion",
-        "node-modifier.hydraulic_erosion-desc" => {
-            "Simulates rain, water flow, and sediment transport, carving the terrain."
         }
 
         // Stream erosion.
