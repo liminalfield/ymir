@@ -12,6 +12,9 @@ workspace = true
 
 [dependencies]
 ymir-core = { path = "../ymir-core" }
+# The logging facade, for diagnostics (project-load degradations) that also go to the
+# logfile. The backend is installed in `main` via `ymir_core::logging`.
+log = "0.4"
 # Depended on so its operator and category registrations populate the palette,
 # and for the tr(key) resolver and CategoryDef. Using its items directly links
 # the crate (and its inventory registrations), so no separate anchor is needed.

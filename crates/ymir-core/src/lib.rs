@@ -25,6 +25,7 @@
 pub mod export;
 pub mod import;
 pub mod layers;
+pub mod logging;
 pub mod project;
 pub mod registry;
 

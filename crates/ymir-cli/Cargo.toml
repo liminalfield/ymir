@@ -12,6 +12,9 @@ workspace = true
 
 [dependencies]
 ymir-core = { path = "../ymir-core" }
+# The logging facade, so a headless run records load degradations to stderr. The backend
+# is installed in `main` via `ymir_core::logging`.
+log = "0.4"
 # Depended on for its operator registrations. The binary must also anchor it in
 # code (`use ymir_nodes as _;`), or the linker can drop the registrations.
 ymir-nodes = { path = "../ymir-nodes" }

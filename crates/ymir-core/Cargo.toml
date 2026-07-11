@@ -43,6 +43,14 @@ serde_json = "1"
 # byte-identical to the sequential one regardless of thread count, preserving the
 # determinism promise. The de-facto standard for CPU data parallelism in Rust.
 rayon = "1"
+# The standard logging facade, so any crate can emit diagnostics (project-load
+# degradations, evaluation issues) that a headless/CLI run records to stderr or a
+# logfile without a GUI to show them. The backend is a tiny in-tree tee logger; only
+# the facade is a dependency, keeping call sites decoupled from where logs go.
+log = { version = "0.4", features = ["std"] }
+# RFC3339 timestamp formatting for the logfile, so a toolchain run can order events.
+# Tiny and dependency-free; the std library has no date formatting.
+humantime = "2"
 
 [dev-dependencies]
 # Property-based tests for the Field invariants (see tests/field_properties.rs).

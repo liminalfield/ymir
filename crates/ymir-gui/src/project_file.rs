@@ -148,6 +148,10 @@ pub(crate) struct RestoredProject {
     /// The restored interior layouts of subgraph containers, flattened to a path-keyed map
     /// (the container `stable_id`s from the top) for the editor's in-session layout cache.
     pub subgraph_layouts: HashMap<Vec<u64>, BTreeMap<u64, [f32; 2]>>,
+    /// Human-readable notes for anything that had to degrade on load (an unavailable node kept as
+    /// a placeholder, a dropped connection). Empty on a clean load. The caller surfaces and logs
+    /// these so a lossy open is never silent.
+    pub warnings: Vec<String>,
 }
 
 impl ProjectFile {
@@ -256,7 +260,7 @@ impl ProjectFile {
             });
         }
 
-        let graph = Graph::from_document(&self.graph)?;
+        let (graph, warnings) = Graph::from_document_reporting(&self.graph)?;
         let snarl = build_snarl(&graph, &self.view.nodes);
 
         let mut subgraph_layouts = HashMap::new();
@@ -270,6 +274,7 @@ impl ProjectFile {
             world_height: self.world.world_height,
             frames: self.view.frames.clone(),
             subgraph_layouts,
+            warnings,
         })
     }
 }

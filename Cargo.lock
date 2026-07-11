@@ -1372,6 +1372,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df"
 
 [[package]]
+name = "humantime"
+version = "2.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15cdd26707701c53297e2fa6afb323d55fbc1d0810c3aec078ae3ef0424c3c15"
+
+[[package]]
 name = "icu_collections"
 version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4077,6 +4083,7 @@ checksum = "3ae8337f8a065cfc972643663ea4279e04e7256de865aa66fe25cec5fb912d3f"
 name = "ymir-cli"
 version = "0.1.0"
 dependencies = [
+ "log",
  "ymir-core",
  "ymir-nodes",
 ]
@@ -4086,7 +4093,9 @@ name = "ymir-core"
 version = "0.1.0"
 dependencies = [
  "exr",
+ "humantime",
  "inventory",
+ "log",
  "png 0.17.16",
  "proptest",
  "rayon",
@@ -4106,6 +4115,7 @@ dependencies = [
  "egui-snarl",
  "glam",
  "inventory",
+ "log",
  "png 0.17.16",
  "rfd",
  "serde",

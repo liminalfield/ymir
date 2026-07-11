@@ -1015,6 +1015,20 @@ impl Graph {
         let file = File::open(path)?;
         Self::load_from_reader(BufReader::new(file))
     }
+
+    /// Loads a graph from a project file at `path`, returning the graph together with any load
+    /// warnings (see [`from_document_reporting`](Self::from_document_reporting)). The variant a
+    /// headless caller uses so degradations can be logged rather than silently discarded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if the file cannot be opened, [`Error::Json`] if the bytes are not a
+    /// valid document, or [`Error::UnsupportedFormatVersion`].
+    pub fn load_reporting(path: impl AsRef<Path>) -> Result<(Self, Vec<String>)> {
+        let file = File::open(path)?;
+        let doc: ProjectDocument = serde_json::from_reader(BufReader::new(file))?;
+        Self::from_document_reporting(&doc)
+    }
 }
 
 impl Default for Graph {

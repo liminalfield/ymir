@@ -19,6 +19,10 @@ fn make_op(type_id: &str) -> Result<Box<dyn ymir_core::Operator>, Box<dyn Error>
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    // Headless diagnostics go to stderr (a toolchain captures it); load degradations are logged
+    // rather than swallowed.
+    ymir_core::logging::init(None, log::LevelFilter::Info);
+
     let size: usize = 512;
     let seed: u64 = 42;
     let path = "out/heightmap.png";
@@ -42,7 +46,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let export_id = graph
         .stable_id(export)
         .ok_or("export node has no stable id")?;
-    let graph = Graph::load(project_path)?;
+    let (graph, warnings) = Graph::load_reporting(project_path)?;
+    for warning in &warnings {
+        log::warn!("loading {project_path}: {warning}");
+    }
     let export = graph
         .node_id_of(export_id)
         .ok_or("export node missing after reload")?;

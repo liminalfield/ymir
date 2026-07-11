@@ -64,6 +64,11 @@ use history::EditHistory;
 const PREVIEW_RES: usize = 256;
 
 fn main() -> eframe::Result {
+    // Diagnostics (a project loaded with degradations, an evaluation problem) log to stderr and to
+    // a logfile beside the other config, so an issue is recorded even when the status line is
+    // missed. Stderr-only if the logfile path is unavailable.
+    ymir_core::logging::init(log_path().as_deref(), log::LevelFilter::Info);
+
     // The window icon: `with_icon` is honoured on X11/Windows/macOS. On Wayland it is
     // ignored (no runtime icon protocol); there the icon comes from a `.desktop` entry
     // matched by `app_id`, so set a stable one. Falls back to eframe's default if the
@@ -2053,13 +2058,31 @@ fn open_project(state: &mut AppState) {
 fn open_project_path(state: &mut AppState, path: std::path::PathBuf) {
     match read_project(&path) {
         Ok(restored) => {
+            let warnings = restored.warnings.clone();
             state.install_project(restored, path.clone());
-            record_recent(state, path);
+            record_recent(state, path.clone());
+            // A lossy open (a node kept as a placeholder, a dropped connection) is never silent:
+            // each note goes to the log for a headless record, and the count is shown in the UI.
+            if !warnings.is_empty() {
+                for warning in &warnings {
+                    log::warn!("opening {}: {warning}", path.display());
+                }
+                let n = warnings.len();
+                state.status = Some(format!(
+                    "Opened with {n} issue{}; see the log for details",
+                    if n == 1 { "" } else { "s" },
+                ));
+            }
         }
         Err(err) => {
+            log::warn!("could not open {}: {err}", path.display());
             state.status = Some(format!("Could not open {}: {err}", path.display()));
-            state.recent.retain(|p| p != &path);
-            save_recent(state);
+            // Only forget the project when the file itself is gone; a real file that failed to
+            // parse (a corrupt or future-version project) stays in recent so the entry is not lost.
+            if !path.exists() {
+                state.recent.retain(|p| p != &path);
+                save_recent(state);
+            }
         }
     }
 }
@@ -2133,6 +2156,16 @@ fn recent_projects_path() -> Option<std::path::PathBuf> {
         std::env::var_os("XDG_CONFIG_HOME"),
         std::env::var_os("HOME"),
         "recent.json",
+    )
+}
+
+/// The path to the session logfile: `…/ymir/ymir.log` under the XDG config base. `None` if no
+/// config base is available (then logging is stderr-only).
+fn log_path() -> Option<std::path::PathBuf> {
+    config_path(
+        std::env::var_os("XDG_CONFIG_HOME"),
+        std::env::var_os("HOME"),
+        "ymir.log",
     )
 }
 
