@@ -193,6 +193,14 @@ pub fn tr(key: &str) -> &str {
             "Relaxes slopes steeper than the talus angle toward repose."
         }
 
+        // Hydraulic erosion.
+        "node-modifier.hydraulic_erosion" => "Hydraulic Erosion",
+        "node-modifier.hydraulic_erosion-desc" => {
+            "Water carving the terrain, simulated as rain droplets that run downhill, pick up and \
+             drop sediment, and cut rills while depositing fans and filling hollows. The \
+             deposition is what reads as weathered. Taps wear, deposition, and flow."
+        }
+
         // Stream erosion.
         "node-modifier.stream_erosion" => "Stream Erosion",
         "node-modifier.stream_erosion-desc" => {
