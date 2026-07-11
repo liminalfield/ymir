@@ -821,17 +821,32 @@ impl Graph {
     /// `stable_id`. A reloaded graph evaluates identically to the saved one, since
     /// seeding derives from `stable_id`, which is preserved.
     ///
+    /// Recoverable problems do not fail the load; they degrade so the project always opens (a
+    /// node change must never orphan a saved project). See
+    /// [`from_document_reporting`](Self::from_document_reporting) for the list, and use that
+    /// variant when the warnings should be surfaced to the user.
+    ///
     /// # Errors
     ///
-    /// - [`Error::UnsupportedFormatVersion`] if the document's version is not the one
-    ///   this build understands.
-    /// - [`Error::UnknownNodeType`] if a node's `type_id` is not in the registry.
-    /// - [`Error::DuplicateStableId`] if two nodes share a `stable_id`.
-    /// - [`Error::DanglingConnection`] if a connection names a source `stable_id` no
-    ///   node has.
-    /// - [`Error::InvalidPort`] if a connection references a port the rebuilt operator
-    ///   does not have (e.g. its arity changed since the file was written).
+    /// - [`Error::UnsupportedFormatVersion`] if the document's version is not the one this build
+    ///   understands (a genuine incompatibility that needs a migration).
     pub fn from_document(doc: &ProjectDocument) -> Result<Self> {
+        Self::from_document_reporting(doc).map(|(graph, _warnings)| graph)
+    }
+
+    /// Rebuilds a graph from a document, returning the graph together with a list of human-
+    /// readable warnings for anything that had to degrade. Nothing recoverable aborts the load:
+    ///
+    /// - An unknown `type_id` (a node removed or renamed since the save) becomes a placeholder
+    ///   that preserves the type id, params, and enough ports for its connections to reattach;
+    ///   it re-saves faithfully and evaluates to an error rather than producing output.
+    /// - A connection to a missing source, or to a port the rebuilt operator no longer has (an
+    ///   arity change), is dropped.
+    /// - A duplicate `stable_id` keeps the first node; the collision is reported.
+    /// - A subgraph that cannot be rebuilt is left empty and reported, its own warnings folded in.
+    ///
+    /// Only an [`Error::UnsupportedFormatVersion`] is fatal.
+    pub fn from_document_reporting(doc: &ProjectDocument) -> Result<(Self, Vec<String>)> {
         if doc.format_version != FORMAT_VERSION {
             return Err(Error::UnsupportedFormatVersion {
                 version: doc.format_version,
@@ -839,6 +854,7 @@ impl Graph {
             });
         }
 
+        let mut warnings: Vec<String> = Vec::new();
         let mut graph = Graph::new();
         // stable_id -> runtime NodeId, for resolving connection sources in pass two.
         let mut by_stable: HashMap<u64, NodeId> = HashMap::with_capacity(doc.nodes.len());
@@ -846,13 +862,43 @@ impl Graph {
         // look the destination up.
         let mut node_ids: Vec<NodeId> = Vec::with_capacity(doc.nodes.len());
 
+        // The highest output index any connection reads from each source, so a placeholder for a
+        // missing node gets enough output ports for its downstream wiring to reattach.
+        let mut max_output: HashMap<u64, usize> = HashMap::new();
+        for nd in &doc.nodes {
+            for conn in &nd.connections {
+                let slot = max_output.entry(conn.source).or_insert(0);
+                *slot = (*slot).max(conn.output);
+            }
+        }
+
         // Pass one: create every node, so a connection can resolve its source
         // regardless of node order in the file.
         for nd in &doc.nodes {
-            let operator =
-                crate::registry::make(&nd.type_id).ok_or_else(|| Error::UnknownNodeType {
-                    type_id: nd.type_id.clone(),
-                })?;
+            // Rebuild the operator, or substitute a placeholder when its type is unavailable so
+            // the project still opens. A placeholder's ports are inferred from the wiring in the
+            // file (max input used, max output read downstream) so pass-two connections land.
+            let operator: Box<dyn Operator> = match crate::registry::make(&nd.type_id) {
+                Some(op) => op,
+                None => {
+                    let inputs = nd
+                        .connections
+                        .iter()
+                        .map(|c| c.input + 1)
+                        .max()
+                        .unwrap_or(0);
+                    let outputs = max_output.get(&nd.stable_id).map_or(0, |m| m + 1).max(1);
+                    warnings.push(format!(
+                        "node {} has unavailable type \"{}\"; kept as a placeholder (it will not evaluate)",
+                        nd.stable_id, nd.type_id,
+                    ));
+                    Box::new(crate::missing::MissingOperator::new(
+                        crate::missing::intern_type_id(&nd.type_id),
+                        inputs,
+                        outputs,
+                    ))
+                }
+            };
             let id = graph.add_op(operator, nd.params.clone());
             // `add_op` assigned a fresh stable_id; overwrite it with the persisted one
             // so identity (and the seed derived from it) matches the saved project.
@@ -861,23 +907,36 @@ impl Graph {
                 node.name = nd.name.clone();
                 node.bypassed = nd.bypassed;
             }
-            // Restore a container's inner graph (recursively), then refresh this node's
-            // arity from it so pass-two connections land on the right ports. Structural:
-            // we act on the presence of nested data and the operator's rebuild hook, never
-            // on the node's concrete type.
+            // Restore a container's inner graph (recursively), then refresh this node's arity from
+            // it so pass-two connections land on the right ports. A subgraph that cannot be
+            // rebuilt is left as the container's default inner rather than aborting the load.
             if let Some(inner_doc) = &nd.subgraph {
-                let inner = Graph::from_document(inner_doc)?;
-                let rebuilt = graph
-                    .node(id)
-                    .ok_or(Error::NodeNotFound)?
-                    .operator
-                    .rebuild_nested(inner);
-                graph.set_operator(id, rebuilt)?;
+                match Self::from_document_reporting(inner_doc) {
+                    Ok((inner, inner_warnings)) => {
+                        for w in inner_warnings {
+                            warnings.push(format!("in subgraph {}: {w}", nd.stable_id));
+                        }
+                        let rebuilt = graph
+                            .node(id)
+                            .ok_or(Error::NodeNotFound)?
+                            .operator
+                            .rebuild_nested(inner);
+                        graph.set_operator(id, rebuilt)?;
+                    }
+                    Err(e) => warnings.push(format!(
+                        "subgraph {} could not be rebuilt ({e}); left empty",
+                        nd.stable_id,
+                    )),
+                }
             }
-            if by_stable.insert(nd.stable_id, id).is_some() {
-                return Err(Error::DuplicateStableId {
-                    stable_id: nd.stable_id,
-                });
+            // A duplicate id is corruption; keep the first node and report it rather than abort.
+            if let std::collections::hash_map::Entry::Vacant(slot) = by_stable.entry(nd.stable_id) {
+                slot.insert(id);
+            } else {
+                warnings.push(format!(
+                    "duplicate node id {}; keeping the first",
+                    nd.stable_id,
+                ));
             }
             node_ids.push(id);
         }
@@ -886,20 +945,27 @@ impl Graph {
         // next id assigned matches the saved project.
         graph.next_stable_id = doc.next_stable_id;
 
-        // Pass two: reapply connections by stable_id.
+        // Pass two: reapply connections by stable_id, dropping any that cannot be applied (a
+        // missing source, or a port an arity change removed) rather than aborting.
         for (nd, &dest) in doc.nodes.iter().zip(&node_ids) {
             for conn in &nd.connections {
-                let source = *by_stable
-                    .get(&conn.source)
-                    .ok_or(Error::DanglingConnection {
-                        source_id: conn.source,
-                        dest: nd.stable_id,
-                    })?;
-                graph.connect(source, conn.output, dest, conn.input)?;
+                let Some(&source) = by_stable.get(&conn.source) else {
+                    warnings.push(format!(
+                        "dropped a connection into node {}: its source node {} is missing",
+                        nd.stable_id, conn.source,
+                    ));
+                    continue;
+                };
+                if let Err(e) = graph.connect(source, conn.output, dest, conn.input) {
+                    warnings.push(format!(
+                        "dropped a connection into node {} ({e})",
+                        nd.stable_id,
+                    ));
+                }
             }
         }
 
-        Ok(graph)
+        Ok((graph, warnings))
     }
 
     /// Writes the graph to `writer` as a pretty-printed JSON project document. Pretty
@@ -1240,7 +1306,9 @@ mod tests {
     }
 
     #[test]
-    fn from_document_rejects_an_unknown_node_type() {
+    fn from_document_keeps_an_unknown_node_type_as_a_placeholder() {
+        // A project referencing a node type this build lacks must still open: the node becomes a
+        // placeholder that preserves its type id and params, and the loss is reported.
         let doc = ProjectDocument {
             format_version: FORMAT_VERSION,
             next_stable_id: 1,
@@ -1254,14 +1322,22 @@ mod tests {
                 subgraph: None,
             }],
         };
-        assert!(matches!(
-            Graph::from_document(&doc),
-            Err(Error::UnknownNodeType { .. })
-        ));
+        let (graph, warnings) =
+            Graph::from_document_reporting(&doc).expect("loads despite the unknown type");
+        assert!(
+            warnings.iter().any(|w| w.contains("test.nonesuch")),
+            "the unavailable type is reported: {warnings:?}"
+        );
+        // The placeholder round-trips faithfully, so re-saving does not lose the node.
+        assert_eq!(graph.to_document().nodes[0].type_id, "test.nonesuch");
+        assert!(
+            Graph::from_document(&doc).is_ok(),
+            "never orphans a project"
+        );
     }
 
     #[test]
-    fn from_document_rejects_duplicate_stable_ids() {
+    fn from_document_keeps_the_first_of_duplicate_ids() {
         let node = |stable_id| NodeDocument {
             stable_id,
             type_id: "test.gen".to_string(),
@@ -1276,10 +1352,12 @@ mod tests {
             next_stable_id: 2,
             nodes: vec![node(0), node(0)],
         };
-        assert!(matches!(
-            Graph::from_document(&doc),
-            Err(Error::DuplicateStableId { stable_id: 0 })
-        ));
+        let (_graph, warnings) =
+            Graph::from_document_reporting(&doc).expect("loads despite the duplicate id");
+        assert!(
+            warnings.iter().any(|w| w.contains("duplicate")),
+            "the duplicate id is reported: {warnings:?}"
+        );
     }
 
     #[test]
@@ -1309,7 +1387,7 @@ mod tests {
     }
 
     #[test]
-    fn from_document_rejects_a_dangling_connection() {
+    fn from_document_drops_a_dangling_connection() {
         let doc = ProjectDocument {
             format_version: FORMAT_VERSION,
             next_stable_id: 1,
@@ -1327,13 +1405,102 @@ mod tests {
                 subgraph: None,
             }],
         };
-        assert!(matches!(
-            Graph::from_document(&doc),
-            Err(Error::DanglingConnection {
-                source_id: 99,
-                dest: 0
-            })
-        ));
+        let (graph, warnings) =
+            Graph::from_document_reporting(&doc).expect("loads despite the dangling connection");
+        assert!(
+            warnings.iter().any(|w| w.contains("dropped")),
+            "the dropped connection is reported: {warnings:?}"
+        );
+        // The node is kept, with its now-unwired input left empty.
+        let saved = graph.to_document();
+        assert_eq!(saved.nodes.len(), 1);
+        assert!(saved.nodes[0].connections.is_empty());
+    }
+
+    #[test]
+    fn from_document_drops_a_connection_to_a_port_that_no_longer_exists() {
+        // A saved connection reads an output the operator no longer has (its arity changed since
+        // the file was written). The connection is dropped rather than aborting the load.
+        let entry = |stable_id, type_id: &str, connections| NodeDocument {
+            stable_id,
+            type_id: type_id.to_string(),
+            name: None,
+            params: Params::new(),
+            connections,
+            bypassed: false,
+            subgraph: None,
+        };
+        let doc = ProjectDocument {
+            format_version: FORMAT_VERSION,
+            next_stable_id: 2,
+            nodes: vec![
+                entry(0, "test.gen", Vec::new()),
+                entry(
+                    1,
+                    "test.mod",
+                    vec![Connection {
+                        input: 0,
+                        source: 0,
+                        output: 5, // test.gen has one output; 5 is out of range
+                    }],
+                ),
+            ],
+        };
+        let (graph, warnings) =
+            Graph::from_document_reporting(&doc).expect("loads despite the invalid port");
+        assert!(
+            warnings.iter().any(|w| w.contains("dropped")),
+            "the dropped connection is reported: {warnings:?}"
+        );
+        let saved = graph.to_document();
+        assert_eq!(saved.nodes.len(), 2);
+        assert!(saved.nodes.iter().all(|n| n.connections.is_empty()));
+    }
+
+    #[test]
+    fn a_placeholder_preserves_params_and_wiring_on_re_save() {
+        use crate::param::ParamValue;
+        // An unknown node carrying params and an input wired from a real upstream node re-saves
+        // with its type, params, and connection intact: opening a project with a missing node
+        // loses none of that node's data.
+        let doc = ProjectDocument {
+            format_version: FORMAT_VERSION,
+            next_stable_id: 2,
+            nodes: vec![
+                NodeDocument {
+                    stable_id: 0,
+                    type_id: "test.gen".to_string(),
+                    name: None,
+                    params: Params::new(),
+                    connections: Vec::new(),
+                    bypassed: false,
+                    subgraph: None,
+                },
+                NodeDocument {
+                    stable_id: 1,
+                    type_id: "test.gone".to_string(),
+                    name: None,
+                    params: Params::new().with("k", ParamValue::Int(7)),
+                    connections: vec![Connection {
+                        input: 0,
+                        source: 0,
+                        output: 0,
+                    }],
+                    bypassed: false,
+                    subgraph: None,
+                },
+            ],
+        };
+        let (graph, _warnings) = Graph::from_document_reporting(&doc).expect("loads");
+        let saved = graph.to_document();
+        let placeholder = saved
+            .nodes
+            .iter()
+            .find(|n| n.stable_id == 1)
+            .expect("placeholder present");
+        assert_eq!(placeholder.type_id, "test.gone");
+        assert_eq!(placeholder.params.get("k"), Some(&ParamValue::Int(7)));
+        assert_eq!(placeholder.connections.len(), 1, "wiring preserved");
     }
 
     #[test]
