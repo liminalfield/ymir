@@ -12,7 +12,11 @@
 //! - **Base level.** Incision is *toward the receiver* (the downstream cell), solved with the
 //!   implicit, unconditionally-stable update of Braun & Willett (2013). Erosion propagates up
 //!   from the fixed domain boundary, so a channel cuts down to the level it drains to and no
-//!   further — no runaway, and basins/lakes are just local base levels, handled for free.
+//!   further — no runaway. Only the network that actually reaches the boundary incises: a closed
+//!   basin (a lake, deeper than the fill cap) is a depositional environment, not a place the
+//!   river cuts, so incision is skipped there. Cutting into a basin instead fans D8 receiver
+//!   chains into radial grooves — the star-burst artefact — for a landform that should collect
+//!   sediment, not shed it.
 //!
 //! Each iteration: depression-fill for routing (shallow noise pits fill so flow connects;
 //! genuine basins stay as lakes — local base levels), pick each cell's steepest-descent
@@ -26,8 +30,15 @@
 //! resolution. The whole pass is a serial, deterministic sweep (sorted/stack ordering, never a
 //! parallel reduction), which is what keeps it reproducible.
 //!
-//! Outputs: `heightfield` (the eroded terrain) and `flow` (the final drainage accumulation —
-//! the river map). Mask-aware: the result is composited over the original through the mask.
+//! Each iteration also interleaves a hillslope-diffusion pass: after the channels incise, their
+//! walls and the interfluves between them relax and creep, so the drainage reads as valleys with
+//! cross-sectional form rather than one-cell slots gouged into raw noise. Incision alone looks
+//! chopped; the coupling is what makes it terrain (`diffusion` sets how strongly, `0` restores
+//! pure incision).
+//!
+//! Outputs: `heightfield` (the eroded terrain), `flow` (the drainage accumulation — the river
+//! map), and `wear`/`deposition` (where the bed was cut and where it was filled). Mask-aware: the
+//! result is composited over the original through the mask.
 
 use std::sync::Arc;
 
@@ -37,10 +48,12 @@ use ymir_core::{
     Params, PortSpec, Result, layers,
 };
 
+use crate::erosion;
 use crate::hydrology::{
     Grid, Receivers, build_stack, drainage_area_mfd, fill_depressions, log_normalize, receivers,
     resolve_flats,
 };
+use crate::talus;
 
 /// Stable type identifier and registry key.
 const TYPE_ID: &str = "modifier.stream_erosion";
@@ -63,6 +76,17 @@ const DEFAULT_CONCENTRATION: f64 = 1.5;
 /// flow routes through them (removing the noise speckle); deeper basins stay as depressions and
 /// become lakes (local base levels) where flow terminates.
 const DEFAULT_FILL: f64 = 0.05;
+/// Default hillslope relaxation, interleaved with the incision: how strongly the over-steep
+/// channel walls the incision leaves are relaxed (as talus) toward the angle of repose each pass,
+/// so one-cell slots round into valleys with a cross-section. Only slopes steeper than repose
+/// move, so — unlike a plain diffusion (a lowpass over everything) — it does not wash out the
+/// terrain's finer detail. `0` is pure incision (the old behaviour).
+const DEFAULT_DIFFUSION: f64 = 0.5;
+/// The per-cell normalized-height drop above which the interleaved relaxation treats a wall as
+/// over-steep and sheds it. A normalized threshold (not a real-world repose angle) so the coupling
+/// bites on the freshly incised slots regardless of the world's vertical scale — the node works in
+/// normalized height, and a slot cut into it is steep in those terms.
+const RELAX_THRESHOLD: f32 = 0.02;
 
 /// Stream erosion modifier: one input (plus an optional mask), two outputs.
 #[derive(Clone)]
@@ -79,12 +103,22 @@ impl Operator for StreamErosion {
                 // own mask layer is used by convention, else erode everywhere.
                 PortSpec::optional("mask"),
             ],
-            outputs: vec![PortSpec::new("heightfield"), PortSpec::new("flow")],
+            outputs: vec![
+                PortSpec::new("heightfield"),
+                PortSpec::new("flow"),
+                PortSpec::new("wear"),
+                PortSpec::new("deposition"),
+            ],
             params: vec![
                 ParamSpec::new(
                     "strength",
                     ParamKind::Float { min: 0.0, max: 1.0 },
                     ParamValue::Float(DEFAULT_STRENGTH),
+                ),
+                ParamSpec::new(
+                    "diffusion",
+                    ParamKind::Float { min: 0.0, max: 1.0 },
+                    ParamValue::Float(DEFAULT_DIFFUSION),
                 ),
                 ParamSpec::new(
                     "iterations",
@@ -117,6 +151,11 @@ impl Operator for StreamErosion {
         let grid = Grid { width, height };
 
         let strength = params.get_f64("strength", DEFAULT_STRENGTH) as f32;
+        // The interleaved talus relaxation strength (how much of the over-steep excess sheds per
+        // pass), and its repose threshold in per-cell normalized-height terms (resolution-aware,
+        // as in Thermal).
+        let relaxation = (params.get_f64("diffusion", DEFAULT_DIFFUSION) as f32).clamp(0.0, 1.0);
+        let talus_per_cell = RELAX_THRESHOLD;
         let concavity = params.get_f64("concavity", DEFAULT_CONCAVITY) as f32;
         let concentration = params.get_f64("concentration", DEFAULT_CONCENTRATION) as f32;
         let max_fill = params.get_f64("fill", DEFAULT_FILL) as f32;
@@ -137,6 +176,18 @@ impl Operator for StreamErosion {
         // becomes the flow output.
         let mut z = bed.clone();
         let mut area = vec![cell_area; bed.len()];
+        // Talus-relaxation state, reused across iterations: the pass parameters and its scratch.
+        let relax = talus::Pass {
+            width,
+            height,
+            talus_per_cell,
+            strength: relaxation,
+        };
+        let (mut moved, mut excess, mut delta) = (
+            vec![0.0_f32; bed.len()],
+            vec![0.0_f32; bed.len()],
+            vec![0.0_f32; bed.len()],
+        );
         for _ in 0..iterations {
             // Erosion is the slow node; poll cancellation each pass so a superseded preview
             // aborts instead of running to completion.
@@ -152,7 +203,14 @@ impl Operator for StreamErosion {
             // no grid bias; the incision *direction/order* stays single-flow (the stack) so the
             // implicit step is exact.
             area = drainage_area_mfd(&filled, &grid, concentration, cell_area);
-            incise(&mut z, &stack, &receivers, &area, strength, concavity);
+            incise(&mut z, &stack, &receivers, &area, grid, strength, concavity);
+            // Interleave a talus-relaxation pass so the over-steep walls the incision just cut
+            // shed toward the angle of repose: the coupling that gives channels a cross-section
+            // (valleys) instead of leaving one-cell slots, while gentler ground keeps its detail.
+            if relaxation > 0.0 {
+                talus::relax_pass(&z, &mut moved, &mut excess, &mut delta, &relax);
+                z.iter_mut().zip(&delta).for_each(|(zc, d)| *zc += *d);
+            }
         }
 
         // Flow output: the final drainage accumulation, log-normalized (it spans orders of
@@ -173,12 +231,22 @@ impl Operator for StreamErosion {
         });
         let flow_layer = Layer::from_fn(width, height, |x, y| flow[y * width + x]);
 
+        let region = input.region();
         let mut heightfield = input.clone();
         heightfield.set_layer(layers::HEIGHT, Arc::new(result));
-        let flow_field = Field::new(width, height, input.region())
-            .with_layer(layers::HEIGHT, Arc::new(flow_layer));
+        let flow_field =
+            Field::new(width, height, region).with_layer(layers::HEIGHT, Arc::new(flow_layer));
+        // Wear where the channels cut, deposition where the diffusion (and, later, sediment
+        // transport) built the surface up — from the unmasked simulation, like the other erosion
+        // nodes.
+        let (wear, deposition) = erosion::wear_and_deposition(&bed, &z);
 
-        Ok(vec![heightfield, flow_field])
+        Ok(vec![
+            heightfield,
+            flow_field,
+            erosion::byproduct_field(wear, width, height, region),
+            erosion::byproduct_field(deposition, width, height, region),
+        ])
     }
 }
 
@@ -187,19 +255,40 @@ impl Operator for StreamErosion {
 /// `E = strength * A^concavity * S` with the unconditionally-stable implicit solution for
 /// `n = 1`, clamped so the bed only ever lowers. Channels (high drainage) cut hard toward base
 /// level; hillslopes (low drainage) barely move, which is what preserves their fine detail.
+///
+/// Only cells whose drainage reaches the domain boundary incise. A cell whose chain terminates at
+/// an interior local minimum sits inside a closed basin (a lake): fluvial incision does not act
+/// there — it would fan the D8 receiver chains into radial grooves — so it is left for the
+/// hillslope pass and, later, sediment deposition. The reach-the-boundary flag is propagated down
+/// the stack in the same sweep, which lists every receiver before its donors.
 fn incise(
     z: &mut [f32],
     stack: &[usize],
     receivers: &Receivers,
     area: &[f32],
+    grid: Grid,
     strength: f32,
     concavity: f32,
 ) {
     let max_area = area.iter().copied().fold(1e-12_f32, f32::max);
+    let (w, h) = (grid.width, grid.height);
+    // Whether each cell's drainage reaches the domain boundary (the true outlet) rather than a
+    // closed interior sink. Set at the roots and inherited downstream-first.
+    let mut drains_out = vec![false; z.len()];
     for &c in stack {
         let r = receivers.to[c];
         if r == c {
-            continue; // base level
+            // A root: the boundary drains off-grid (a real outlet); an interior minimum is a
+            // closed basin, which does not.
+            let (x, y) = (c % w, c / w);
+            drains_out[c] = x == 0 || y == 0 || x == w - 1 || y == h - 1;
+            continue;
+        }
+        // The receiver is already visited (receivers precede donors in the stack), so its flag is
+        // final: this cell reaches the boundary exactly when its receiver does.
+        drains_out[c] = drains_out[r];
+        if !drains_out[c] {
+            continue; // inside a closed basin: depositional, not incised
         }
         // Normalized catchment (resolution-stable), sharpened by concavity, over the descent
         // distance: the implicit weight pulling this cell toward its receiver.
@@ -264,15 +353,60 @@ mod tests {
     }
 
     #[test]
-    fn erosion_only_lowers_the_bed() {
-        // The implicit incision is clamped to erosion only; it never raises ground.
-        let input = ramp_field();
-        let out = run(&input, &Params::default()).remove(0);
-        let before = input.layer(layers::HEIGHT).unwrap();
-        let after = out.layer(layers::HEIGHT).unwrap();
-        for (a, b) in before.as_slice().iter().zip(after.as_slice()) {
-            assert!(*b <= *a + 1e-6, "erosion raised the bed: {a} -> {b}");
-        }
+    fn it_erodes_and_deposits() {
+        // With hillslope diffusion coupled in, the model both cuts channels (wear) and fills
+        // (deposition): it is no longer incision-only, which is the whole point of the rebuild.
+        use crate::noise::{FbmParams, fbm_field};
+        let input = fbm_field(64, 64, Region::UNIT, FbmParams::default(), 7);
+        let c = EvalContext::new(64, 64, Region::UNIT, 7).with_world_extent(512.0);
+        let out = StreamErosion
+            .eval(Inputs::required_only(&[&input]), &Params::default(), &c)
+            .unwrap();
+        let sum = |i: usize| -> f64 {
+            out[i]
+                .layer(layers::HEIGHT)
+                .unwrap()
+                .as_slice()
+                .iter()
+                .map(|&v| f64::from(v))
+                .sum()
+        };
+        assert!(sum(2) > 0.0, "wear (output 2) should be non-zero");
+        assert!(
+            sum(3) > 0.0,
+            "deposition (output 3) should be non-zero: the diffusion fills"
+        );
+    }
+
+    #[test]
+    fn a_closed_basin_is_not_incised() {
+        // A ramp draining to the bottom boundary, with a deep single-cell pit gouged into the
+        // middle. The pit is a closed interior sink (deeper than the fill cap), so no drainage
+        // path from it reaches the boundary: fluvial incision must skip it (otherwise the D8
+        // receiver chains fan into the radial-groove artefact). With diffusion off, only incision
+        // moves the bed, so the pit's height must come through untouched while the ramp still
+        // erodes.
+        let mut heights: Vec<f32> = (0..32 * 32).map(|i| 1.0 - (i / 32) as f32 / 31.0).collect();
+        let pit = 16 * 32 + 16;
+        heights[pit] = -0.5;
+        let layer = Layer::from_fn(32, 32, |x, y| heights[y * 32 + x]);
+        let input = Field::new(32, 32, Region::UNIT).with_layer(layers::HEIGHT, Arc::new(layer));
+
+        let mut p = Params::default();
+        p.insert("diffusion", ParamValue::Float(0.0)); // isolate incision from the talus pass
+        let out = run(&input, &p);
+        let result = out[0].layer(layers::HEIGHT).unwrap();
+
+        assert_eq!(
+            result.get(16, 16).unwrap(),
+            -0.5,
+            "the closed-basin floor must not be incised"
+        );
+        assert_ne!(
+            input.layer(layers::HEIGHT).unwrap().content_hash(),
+            result.content_hash(),
+            "the boundary-draining ramp must still erode"
+        );
     }
 
     #[test]
@@ -313,10 +447,10 @@ mod tests {
     }
 
     #[test]
-    fn spec_has_heightfield_and_flow_outputs() {
+    fn spec_outputs_are_heightfield_flow_wear_deposition() {
         let spec = StreamErosion.spec();
         let names: Vec<&str> = spec.outputs.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, ["heightfield", "flow"]);
+        assert_eq!(names, ["heightfield", "flow", "wear", "deposition"]);
         assert_eq!(spec.kind(), ymir_core::NodeKind::Modifier);
     }
 

@@ -47,6 +47,7 @@ mod shape;
 mod slope;
 mod stream;
 mod strings;
+mod talus;
 mod thermal;
 mod warp;
 
