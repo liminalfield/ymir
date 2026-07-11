@@ -2481,7 +2481,7 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
                             let request = EvalRequest::new(res, res, Region::UNIT, state.seed)
                                 .with_world_extent(state.world_extent)
                                 .with_world_height(state.world_height);
-                            state.build.start(top, targets, request);
+                            state.build.start(top, targets, request, ui.ctx().clone());
                         }
                     }
                     state.build.show(ui);
@@ -5212,7 +5212,18 @@ fn refresh_viewport_build(state: &mut AppState) {
             .with_world_height(state.world_height);
         state.graph.output_key(id, &request).ok()
     })();
+    // Diagnostic (logged, so it shows headless too): report the lookup once per distinct
+    // (key, hit) transition, so a single Build reveals whether the viewport actually finds the
+    // build-quality fields in the cache or falls back to the preview, and why.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST_PROBE: AtomicU64 = AtomicU64::new(u64::MAX);
     let Some(key) = key else {
+        if LAST_PROBE.swap(1, Ordering::Relaxed) != 1 {
+            log::debug!(
+                "viewport build lookup: no previewed node to show (store_open={})",
+                state.field_store.is_some(),
+            );
+        }
         state.viewport_build = None;
         return;
     };
@@ -5223,11 +5234,20 @@ fn refresh_viewport_build(state: &mut AppState) {
     {
         return; // already loaded for this key
     }
-    state.viewport_build = state
-        .field_store
-        .as_ref()
-        .and_then(|store| store.load(key))
-        .map(|fields| (key, fields));
+    let loaded = state.field_store.as_ref().and_then(|store| store.load(key));
+    let probe = (key << 1) | u64::from(loaded.is_some());
+    if LAST_PROBE.swap(probe, Ordering::Relaxed) != probe {
+        log::debug!(
+            "viewport build lookup: key={key:016x} store_open={} -> {}",
+            state.field_store.is_some(),
+            if loaded.is_some() {
+                "HIT (showing build)"
+            } else {
+                "miss (showing preview)"
+            },
+        );
+    }
+    state.viewport_build = loaded.map(|fields| (key, fields));
 }
 
 fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {

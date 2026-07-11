@@ -61,7 +61,13 @@ impl BuildRunner {
     /// Starts a build: evaluates each `target` (a node `stable_id`) at `request` on a
     /// worker thread against a snapshot `graph`. Each export endpoint writes its file
     /// as the side effect of being evaluated.
-    pub(crate) fn start(&mut self, graph: Graph, targets: Vec<u64>, request: EvalRequest) {
+    pub(crate) fn start(
+        &mut self,
+        graph: Graph,
+        targets: Vec<u64>,
+        request: EvalRequest,
+        ctx: egui::Context,
+    ) {
         // A fresh token per build; the worker's request carries a clone so the erosion's
         // per-pass polling can abort it.
         let cancel = CancelToken::new();
@@ -75,6 +81,10 @@ impl BuildRunner {
             let outcome = run(&graph, &targets, &request, &mut cache);
             // shortcut-ok: the receiver only drops if the app has exited; nothing to recover.
             let _ = tx.send(outcome);
+            // Wake the UI the instant the build finishes, so `poll` settles the status and the
+            // viewport re-checks the build cache promptly instead of waiting for the next user
+            // interaction (otherwise a build done while idle shows only after an unrelated click).
+            ctx.request_repaint();
         });
     }
 
