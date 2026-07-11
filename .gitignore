@@ -29,3 +29,7 @@ target
 # OS cruft
 .DS_Store
 Thumbs.db
+
+# Claude Code: transient agent worktrees and local settings (settings.json is shared)
+.claude/worktrees/
+.claude/settings.local.json
