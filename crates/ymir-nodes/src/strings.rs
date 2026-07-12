@@ -207,6 +207,13 @@ pub fn tr(key: &str) -> &str {
             "Carves drainage networks from flow accumulation; outputs the river/flow map."
         }
 
+        // Rivers (accumulation-carve drainage network).
+        "node-modifier.rivers" => "Rivers",
+        "node-modifier.rivers-desc" => {
+            "Incises a connected river network by carving flow accumulation, so channels appear \
+             across the whole drainage, not just at the outlets. Outputs the flow map and wear."
+        }
+
         // Null (pass-through utility).
         "node-modifier.null" => "Null",
         "node-modifier.null-desc" => {
