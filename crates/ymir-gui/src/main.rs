@@ -367,8 +367,11 @@ struct AppState {
     preview: PreviewEngine,
     /// Background per-node thumbnail evaluation, drawn in node bodies (#42).
     thumbnails: ThumbnailEngine,
-    /// Whether node thumbnails are shown, toggled from the View menu (#74). When off,
-    /// no thumbnails are evaluated, uploaded, or drawn.
+    /// Whether node thumbnails are shown. When off, no thumbnails are evaluated, uploaded, or
+    /// drawn. The View-menu toggle that flipped this is temporarily hidden (it caused a flashing
+    /// build-status frame on every node when switched; see the tracking issue), so this stays at
+    /// its `true` default. The capability is kept so the toggle can be restored once that is fixed
+    /// (#135).
     thumbnails_enabled: bool,
     /// The off-thread full-resolution Build (#7).
     build: BuildRunner,
@@ -1896,7 +1899,10 @@ fn menu_bar_pane(ui: &mut egui::Ui, state: &mut AppState) {
             }
         });
         ui.menu_button("View", |ui| {
-            ui.checkbox(&mut state.thumbnails_enabled, "Node thumbnails");
+            // The "Node thumbnails" toggle is temporarily hidden: flipping it flashed a
+            // build-status frame on every node (#135). The capability is kept (`thumbnails_enabled`
+            // stays true by default); the menu returns once that is fixed.
+            ui.weak("(empty)");
         });
         ui.menu_button("Graph", |ui| {
             ui.weak("(empty)");
