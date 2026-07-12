@@ -132,14 +132,6 @@ enum ActiveTab {
     Uncategorized,
 }
 
-/// Which tab of the Parameters pane is showing: the selected node's inspector, or the
-/// global world/build settings.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ParamTab {
-    Node,
-    World,
-}
-
 /// Build-resolution presets offered in the world settings: UE5 landscape sizes
 /// (component-based, `N·63 + 1`) and plain powers of two (for texture maps). The
 /// field itself accepts any custom value; these are just shortcuts.
@@ -428,8 +420,6 @@ struct AppState {
     /// fit is computed from this frame's node rects (collected during rendering) and
     /// applied via the canvas's `current_transform` override next frame.
     pending_view: Option<egui::emath::TSTransform>,
-    /// Which Parameters-pane tab is showing (the node inspector or world settings).
-    param_tab: ParamTab,
     /// The resolution a full Build evaluates at (square). Custom, since UE5 landscapes
     /// need specific sizes.
     build_res: usize,
@@ -666,7 +656,6 @@ impl AppState {
             settings_edit: None,
             curve_popout: None,
             pending_view: None,
-            param_tab: ParamTab::Node,
             build_res: 1024,
             preview_res: PREVIEW_RES,
             world_extent: DEFAULT_WORLD_EXTENT,
@@ -1571,11 +1560,10 @@ impl AppState {
             .max()
     }
 
-    /// Evaluates the current preview target once per frame, regardless of which pane or tab is
-    /// visible. The 3D viewport meshes the preview's output, so without this the viewport froze
-    /// whenever the 2D preview pane was hidden, most visibly when switching to the World tab to
-    /// change world settings: evaluation used to run only inside that pane. A no-op when no
-    /// node is previewable.
+    /// Evaluates the current preview target once per frame, regardless of which pane is visible.
+    /// The 3D viewport meshes the preview's output, so without this the viewport froze whenever
+    /// the 2D preview pane was hidden: evaluation used to run only inside that pane. A no-op when
+    /// no node is previewable.
     fn drive_preview(&mut self, ctx: &egui::Context) {
         let Some(id) = self.preview_target().and_then(|h| self.graph.node_id_of(h)) else {
             return;
@@ -2773,37 +2761,26 @@ fn node_display_name(graph: &Graph, id: NodeId) -> String {
     )
 }
 
-/// The right column: a tab header (Node / World) over the selected tab's content. The Node
-/// tab shows the preview over the node inspector; the World tab shows the world settings. A
-/// collapse control will live at the far right of the header later.
+/// The right column: the 2D preview over the node inspector. Dedicated to the selected node;
+/// world settings moved to the left dock (#128). The header keeps a label (and will host a
+/// collapse control at its far right later).
 fn right_panel_pane(ui: &mut egui::Ui, state: &mut AppState) {
     header_strip(ui, |ui| {
-        ui.selectable_value(&mut state.param_tab, ParamTab::Node, "Node");
-        ui.selectable_value(&mut state.param_tab, ParamTab::World, "World");
+        ui.label("Node");
     });
-    match state.param_tab {
-        ParamTab::Node => {
-            egui::Panel::top("preview-panel")
-                // Fixed height so the preview does not change size between having a node
-                // selected (a tall image) and not (a placeholder).
-                .exact_size(346.0)
-                .show_separator_line(false)
-                .frame(
-                    egui::Frame::side_top_panel(ui.style())
-                        .inner_margin(egui::Margin::symmetric(4, 2)),
-                )
-                .show_inside(ui, |ui| preview_2d_pane(ui, state));
-            // A selected frame shows the frame inspector here instead of the node inspector
-            // (selection is mutually exclusive, #94).
-            egui::CentralPanel::default().show_inside(ui, |ui| match state.selected_frame {
-                Some(index) => frame_inspector(ui, state, index),
-                None => node_inspector(ui, state),
-            });
-        }
-        ParamTab::World => {
-            egui::CentralPanel::default().show_inside(ui, |ui| world_settings(ui, state));
-        }
-    }
+    egui::Panel::top("preview-panel")
+        // Fixed height so the preview does not change size between having a node selected (a tall
+        // image) and not (a placeholder).
+        .exact_size(346.0)
+        .show_separator_line(false)
+        .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::symmetric(4, 2)))
+        .show_inside(ui, |ui| preview_2d_pane(ui, state));
+    // A selected frame shows the frame inspector here instead of the node inspector (selection is
+    // mutually exclusive, #94).
+    egui::CentralPanel::default().show_inside(ui, |ui| match state.selected_frame {
+        Some(index) => frame_inspector(ui, state, index),
+        None => node_inspector(ui, state),
+    });
 }
 inventory::submit! { PaneKind { id: "right-panel", draw: right_panel_pane } }
 
@@ -2902,6 +2879,27 @@ inventory::submit! {
         icon: egui_phosphor::regular::BOOKS,
         title: "Library",
         draw: library_pane,
+    }
+}
+
+/// The World settings dock pane (#128): the project-global seed, world extent and height, and
+/// build resolution. Moved out of the right column so that panel stays dedicated to the selected
+/// node. The dock draws the pane's "World" title header; this pads and renders the settings body
+/// (which is [`world_settings`], unchanged from when it lived in the right column).
+fn world_dock_pane(ui: &mut egui::Ui, state: &mut AppState) {
+    egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(8, 6))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            world_settings(ui, state);
+        });
+}
+inventory::submit! {
+    dock::DockPane {
+        id: "world",
+        icon: egui_phosphor::regular::GLOBE_HEMISPHERE_WEST,
+        title: "World",
+        draw: world_dock_pane,
     }
 }
 
