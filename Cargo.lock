@@ -4121,6 +4121,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ymir-gpu"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "pollster",
+ "thiserror 2.0.18",
+ "wgpu",
+ "ymir-core",
+]
+
+[[package]]
 name = "ymir-gui"
 version = "0.2.0"
 dependencies = [
