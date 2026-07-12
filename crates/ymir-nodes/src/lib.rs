@@ -54,7 +54,7 @@ mod warp;
 pub use billow::Billow;
 pub use blend::Blend;
 pub use blur::Blur;
-pub use category::{CategoryDef, categories, find_category};
+pub use category::{CategoryDef, NodeGroup, categories, find_category, node_group};
 pub use cellular_bumps::CellularBumps;
 pub use cellular_cracks::CellularCracks;
 pub use cellular_regions::CellularRegions;

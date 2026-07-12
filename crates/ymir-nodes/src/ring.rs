@@ -106,6 +106,10 @@ inventory::submit! {
     OperatorEntry { type_id: TYPE_ID, make: || Box::new(Ring) }
 }
 
+inventory::submit! {
+    crate::category::NodeGroup { type_id: TYPE_ID, group: "shape", sort: 31 }
+}
+
 /// Builds a field whose `height` layer is a ring: 1 on the circle of `radius_cells`
 /// around `center` (in cells), easing to 0 over `flank_cells` on each side. A
 /// non-positive `flank_cells` yields a flat-zero field (an infinitely thin circle has no

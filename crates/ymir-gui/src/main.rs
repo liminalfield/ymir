@@ -18,7 +18,7 @@ use ymir_core::{
     EvalCache, EvalRequest, Extraction, Field, FieldStore, Graph, INPUT_TYPE_ID, NodeId,
     OUTPUT_TYPE_ID, ParamValue, Params, Region, SUBGRAPH_TYPE_ID,
 };
-use ymir_nodes::{CategoryDef, categories, find_category, tr};
+use ymir_nodes::{CategoryDef, categories, find_category, node_group, tr};
 
 // The node-editor canvas (GUI step 5, issue #6): egui-snarl as a pure view over the
 // core graph, per the policy confirmed by the spike (issue #5).
@@ -167,6 +167,16 @@ const SEARCH_FIELD_MARGIN: egui::Margin = egui::Margin {
 /// the boxes settle back and do not compete with the panel headings. A channel multiplier for
 /// [`scale_color`].
 const SEARCH_FIELD_LIGHTEN: f32 = 1.7;
+
+/// Inner padding for the ribbon's buttons (category tabs and node buttons), well above egui's
+/// cramped default so each has whitespace on every side in both its resting and hovered state,
+/// and the two ribbon bands stand a little taller. Padding is a minimum, so a tab grows past
+/// `interact_size` to fit it too.
+const RIBBON_BUTTON_PADDING: egui::Vec2 = egui::vec2(8.0, 5.0);
+
+/// Top/bottom (and left/right) inner margin of each ribbon band, between its content and its
+/// edges. A touch tighter vertically than the button padding above, so the bands are snug.
+const RIBBON_BAND_MARGIN: egui::Margin = egui::Margin::symmetric(8, 4);
 
 /// The largest the library inspector's thumbnail slot grows. The slot is square, because the
 /// terrain render is square (the grid is square) — a landscape crop would letterbox, clip, or
@@ -1683,14 +1693,20 @@ fn visible_nodes<'a>(
 ) -> Vec<&'a NodeEntry> {
     let query = search.trim().to_lowercase();
     if query.is_empty() {
-        entries
+        let mut shown: Vec<&NodeEntry> = entries
             .iter()
             .filter(|e| match tab {
                 Some(ActiveTab::Category(id)) => e.category == id,
                 Some(ActiveTab::Uncategorized) => find_category(e.category).is_none(),
                 None => false,
             })
-            .collect()
+            .collect();
+        // Order within a category by each node's registered palette-group sort, so like
+        // nodes sit together; a stable sort keeps ungrouped nodes (sort MAX) in registry
+        // order. Groups end up contiguous, so the ribbon and menu draw a separator wherever
+        // the group id changes.
+        shown.sort_by_key(|e| node_group(e.type_id).map_or(i32::MAX, |g| g.sort));
+        shown
     } else {
         // Rank every match, then sort best-first, breaking ties by display name so the
         // order is stable rather than registry-dependent (#91).
@@ -1718,6 +1734,9 @@ enum MenuRow {
     Category(&'static str),
     /// A node to create, by `type_id`.
     Node(&'static str),
+    /// A non-selectable divider between palette groups within a drilled-in category.
+    /// Keyboard navigation and activation skip it; it renders as a plain separator line.
+    Separator,
 }
 
 /// The rows the node menu shows, in display order. A non-empty search wins (flat
@@ -1731,19 +1750,49 @@ fn menu_rows(entries: &[NodeEntry], search: &str, drilled: Option<&'static str>)
             .map(|e| MenuRow::Node(e.type_id))
             .collect()
     } else if let Some(cat) = drilled {
-        std::iter::once(MenuRow::Back)
-            .chain(
-                visible_nodes(entries, Some(ActiveTab::Category(cat)), "")
-                    .iter()
-                    .map(|e| MenuRow::Node(e.type_id)),
-            )
-            .collect()
+        // Back, then the category's nodes in palette-group order, with a separator row
+        // wherever the group changes (matching the ribbon's group dividers).
+        let mut rows = vec![MenuRow::Back];
+        let mut prev_group: Option<&str> = None;
+        for e in visible_nodes(entries, Some(ActiveTab::Category(cat)), "") {
+            let group = node_group(e.type_id).map(|g| g.group);
+            if let (Some(p), Some(c)) = (prev_group, group)
+                && p != c
+            {
+                rows.push(MenuRow::Separator);
+            }
+            prev_group = group;
+            rows.push(MenuRow::Node(e.type_id));
+        }
+        rows
     } else {
         categories_sorted()
             .iter()
             .map(|c| MenuRow::Category(c.id))
             .collect()
     }
+}
+
+/// The next selectable row index from `from` in the given direction, skipping the
+/// non-selectable [`MenuRow::Separator`] dividers so keyboard navigation never lands on
+/// one. Returns `from` if there is no other selectable row.
+fn step_highlight(rows: &[MenuRow], from: usize, forward: bool) -> usize {
+    let n = rows.len();
+    if n == 0 {
+        return 0;
+    }
+    let mut i = from;
+    for _ in 0..n {
+        i = if forward {
+            (i + 1) % n
+        } else {
+            (i + n - 1) % n
+        };
+        if !matches!(rows[i], MenuRow::Separator) {
+            return i;
+        }
+    }
+    from
 }
 
 /// The top-level row index of the category `id`, used to land the highlight on the
@@ -1766,6 +1815,8 @@ fn menu_row_text(row: MenuRow) -> String {
         MenuRow::Back => format!("{}  Back", egui_phosphor::regular::CARET_LEFT),
         MenuRow::Category(id) => tr(&format!("category-{id}")).to_string(),
         MenuRow::Node(type_id) => tr(&format!("node-{type_id}")).to_string(),
+        // A divider carries no text; it is drawn as a separator line, never as a labelled row.
+        MenuRow::Separator => String::new(),
     }
 }
 
@@ -2395,6 +2446,16 @@ fn category_tab(
     }
 }
 
+/// A vertical divider between palette groups in the ribbon, drawn with a stronger line than
+/// egui's default separator, which is near-invisible against the ribbon fill.
+fn ribbon_group_separator(ui: &mut egui::Ui) {
+    ui.scope(|ui| {
+        ui.visuals_mut().widgets.noninteractive.bg_stroke =
+            egui::Stroke::new(1.0, theme::LINE_STRONG);
+        ui.add(egui::Separator::default().vertical());
+    });
+}
+
 /// A new default canvas frame with its top-left at `pos` (graph space): a subtle
 /// translucent tint with a matching border and a placeholder label, ready to recolour and
 /// relabel in the inspector (#94).
@@ -2420,11 +2481,15 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
         state.active_tab = cats.first().map(|c| ActiveTab::Category(c.id));
     }
 
+    // Roomier tabs and node buttons than egui's default (#—): both bands inherit this, so the
+    // buttons carry whitespace on every side in both states and the ribbon stands a touch taller.
+    ui.spacing_mut().button_padding = RIBBON_BUTTON_PADDING;
+
     // Two full-width bands with equal padding, so they are equal height with their content
     // vertically centred: the categories/search/Build bar, then the node list below.
     egui::Frame::new()
         .fill(scale_color(ui.visuals().panel_fill, 1.5))
-        .inner_margin(egui::Margin::symmetric(8, 6))
+        .inner_margin(RIBBON_BAND_MARGIN)
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.horizontal(|ui| {
@@ -2500,13 +2565,25 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
     let shown = visible_nodes(&entries, state.active_tab, &state.search);
     egui::Frame::new()
         .fill(scale_color(ui.visuals().panel_fill, 1.8))
-        .inner_margin(egui::Margin::symmetric(8, 6))
+        .inner_margin(RIBBON_BAND_MARGIN)
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             // Subgraph boundary markers are disabled (shown greyed) outside a subgraph (#106).
             let inside_subgraph = !state.nav.is_empty();
             ui.horizontal_wrapped(|ui| {
+                // A touch tighter between nodes within a group than egui's default.
+                ui.spacing_mut().item_spacing.x = (ui.spacing().item_spacing.x - 1.0).max(0.0);
+                // A vertical separator wherever the palette group changes, so like generators
+                // read as a cluster. Ungrouped nodes (no registered group) get none.
+                let mut prev_group: Option<&str> = None;
                 for entry in shown {
+                    let group = node_group(entry.type_id).map(|g| g.group);
+                    if let (Some(p), Some(c)) = (prev_group, group)
+                        && p != c
+                    {
+                        ribbon_group_separator(ui);
+                    }
+                    prev_group = group;
                     let key = format!("node-{}", entry.type_id);
                     let enabled = node_addable(entry.type_id, inside_subgraph);
                     let clicked = ui
@@ -3754,12 +3831,17 @@ fn node_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
     } else {
         let n = rows.len();
         if down {
-            menu.highlight = (menu.highlight + 1) % n;
+            menu.highlight = step_highlight(&rows, menu.highlight, true);
         }
         if up {
-            menu.highlight = (menu.highlight + n - 1) % n;
+            menu.highlight = step_highlight(&rows, menu.highlight, false);
         }
         menu.highlight = menu.highlight.min(n - 1);
+        // A query change or drill-in can leave the highlight on a divider; nudge off it so
+        // Enter always has a real row.
+        if matches!(rows.get(menu.highlight), Some(MenuRow::Separator)) {
+            menu.highlight = step_highlight(&rows, menu.highlight, true);
+        }
     }
     // The activated row: Enter takes the highlight; a click overrides with its row.
     let mut activated = (enter && !rows.is_empty()).then_some(menu.highlight);
@@ -3828,6 +3910,12 @@ fn node_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
                 let pointer_moved = ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO);
                 let mut hovered = None;
                 for (i, &row) in rows.iter().enumerate() {
+                    // A divider is drawn as a plain separator line and takes no interaction,
+                    // so it never becomes the hovered/highlighted or clicked row.
+                    if matches!(row, MenuRow::Separator) {
+                        ui.separator();
+                        continue;
+                    }
                     let enabled = match row {
                         MenuRow::Node(type_id) => node_addable(type_id, inside_subgraph),
                         _ => true,
@@ -3939,6 +4027,8 @@ fn node_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
                 }
                 state.node_menu = None;
             }
+            // A divider is never activated (navigation and clicks skip it).
+            MenuRow::Separator => {}
         }
     }
 }
@@ -6570,6 +6660,66 @@ mod tests {
         assert!(drilled.contains(&MenuRow::Node("modifier.invert")));
         // No node row outside the drilled category.
         assert!(!drilled.contains(&MenuRow::Node("generator.fbm")));
+    }
+
+    #[test]
+    fn generators_are_grouped_in_order_with_separators() {
+        let entries = node_entries();
+        let rows = menu_rows(&entries, "", Some("generator"));
+        assert_eq!(rows.first(), Some(&MenuRow::Back));
+        // Nodes appear in palette-group order: noise (Flow included), then cellular, then
+        // shapes, then gradient/falloff.
+        let node_seq: Vec<&str> = rows
+            .iter()
+            .filter_map(|r| match r {
+                MenuRow::Node(t) => Some(*t),
+                _ => None,
+            })
+            .collect();
+        let pos = |t: &str| node_seq.iter().position(|&x| x == t).expect("node present");
+        assert!(
+            pos("generator.fbm") < pos("generator.flow"),
+            "fbm before flow"
+        );
+        assert!(
+            pos("generator.flow") < pos("generator.cellular_bumps"),
+            "flow (noise) before cellular"
+        );
+        assert!(
+            pos("generator.cellular_bumps") < pos("generator.radial"),
+            "cellular before shapes"
+        );
+        assert!(
+            pos("generator.radial") < pos("generator.gradient"),
+            "shapes before gradient/falloff"
+        );
+        // Separators sit between groups: at least one, never at an end, never adjacent
+        // (which would mean an empty group).
+        assert!(rows.iter().any(|r| matches!(r, MenuRow::Separator)));
+        assert_ne!(rows.first(), Some(&MenuRow::Separator));
+        assert_ne!(rows.last(), Some(&MenuRow::Separator));
+        assert!(
+            !rows
+                .windows(2)
+                .any(|w| w[0] == MenuRow::Separator && w[1] == MenuRow::Separator),
+            "no two separators are adjacent"
+        );
+    }
+
+    #[test]
+    fn menu_navigation_skips_separators() {
+        let rows = vec![
+            MenuRow::Back,
+            MenuRow::Node("a"),
+            MenuRow::Separator,
+            MenuRow::Node("b"),
+        ];
+        // Down from the node before the divider lands on the node after it, not the divider.
+        assert_eq!(step_highlight(&rows, 1, true), 3);
+        // Up from that node steps back over the divider.
+        assert_eq!(step_highlight(&rows, 3, false), 1);
+        // Wrapping from the last selectable row reaches Back, skipping nothing spurious.
+        assert_eq!(step_highlight(&rows, 3, true), 0);
     }
 
     #[test]

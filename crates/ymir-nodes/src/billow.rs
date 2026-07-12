@@ -105,6 +105,10 @@ inventory::submit! {
     OperatorEntry { type_id: TYPE_ID, make: || Box::new(Billow) }
 }
 
+inventory::submit! {
+    crate::category::NodeGroup { type_id: TYPE_ID, group: "noise", sort: 11 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

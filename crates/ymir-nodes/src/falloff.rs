@@ -98,6 +98,10 @@ inventory::submit! {
     OperatorEntry { type_id: TYPE_ID, make: || Box::new(Falloff) }
 }
 
+inventory::submit! {
+    crate::category::NodeGroup { type_id: TYPE_ID, group: "gradient", sort: 41 }
+}
+
 /// Builds a field whose `height` layer is the normalized radial distance from `center`
 /// (in cells): 0 at the center, rising linearly to 1 at `radius_cells`, clamped to 1
 /// beyond. A non-positive `radius_cells` yields a flat field of 1 (the edge has collapsed

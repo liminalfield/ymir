@@ -139,6 +139,10 @@ inventory::submit! {
     OperatorEntry { type_id: TYPE_ID, make: || Box::new(Rect) }
 }
 
+inventory::submit! {
+    crate::category::NodeGroup { type_id: TYPE_ID, group: "shape", sort: 32 }
+}
+
 /// Builds a field whose `height` layer is a rectangle: 1 across the flat core of
 /// half-extents `half` (in cells) around `center`, rotated by `neg_angle` (the negated
 /// orientation, applied to each cell offset to reach the box's local frame), easing to 0

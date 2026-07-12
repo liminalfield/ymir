@@ -109,6 +109,10 @@ inventory::submit! {
     OperatorEntry { type_id: TYPE_ID, make: || Box::new(CellularRegions) }
 }
 
+inventory::submit! {
+    crate::category::NodeGroup { type_id: TYPE_ID, group: "cellular", sort: 22 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

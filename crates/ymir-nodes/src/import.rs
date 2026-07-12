@@ -267,6 +267,10 @@ inventory::submit! {
     OperatorEntry { type_id: TYPE_ID, make: || Box::new(Import) }
 }
 
+inventory::submit! {
+    crate::category::NodeGroup { type_id: TYPE_ID, group: "source", sort: 50 }
+}
+
 /// Resamples `image` into a field at the context's resolution and region, bilinearly,
 /// placing the image by `placement`. The image spans the `UNIT` square by default; the
 /// placement offsets, rotates, and scales it about its centre. Each output cell inverts the

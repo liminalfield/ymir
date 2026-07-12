@@ -97,6 +97,10 @@ inventory::submit! {
     OperatorEntry { type_id: TYPE_ID, make: || Box::new(Radial) }
 }
 
+inventory::submit! {
+    crate::category::NodeGroup { type_id: TYPE_ID, group: "shape", sort: 30 }
+}
+
 /// Builds a field whose `height` layer is a radial dome: 1 at `center` (in cells),
 /// easing to 0 at `radius_cells` through a smoothstep, and 0 beyond. A non-positive
 /// `radius_cells` yields a flat-zero field (the dome has collapsed) rather than a

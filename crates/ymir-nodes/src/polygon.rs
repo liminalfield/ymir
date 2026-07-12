@@ -140,6 +140,10 @@ inventory::submit! {
     OperatorEntry { type_id: TYPE_ID, make: || Box::new(Polygon) }
 }
 
+inventory::submit! {
+    crate::category::NodeGroup { type_id: TYPE_ID, group: "shape", sort: 33 }
+}
+
 /// Builds a field whose `height` layer is a regular polygon: 1 across the flat core (out
 /// to the apothem of `radius_cells` circumradius), easing to 0 over `falloff_cells`
 /// outside it. `neg_angle` is the negated orientation applied to each cell offset to

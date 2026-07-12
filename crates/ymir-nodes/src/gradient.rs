@@ -110,6 +110,10 @@ inventory::submit! {
     OperatorEntry { type_id: TYPE_ID, make: || Box::new(Gradient) }
 }
 
+inventory::submit! {
+    crate::category::NodeGroup { type_id: TYPE_ID, group: "gradient", sort: 40 }
+}
+
 /// Builds a field whose `height` layer ramps from 0 to 1 across a smoothstep band of
 /// `band_cells` centered at `center` (in cells), in the `dir` direction. A non-positive
 /// `band_cells` degrades to a hard half-plane step at the center line rather than a
