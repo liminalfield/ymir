@@ -139,9 +139,12 @@ mod tests {
         ProjectFile::capture(
             &Graph::new(),
             &Snarl::<Handle>::new(),
-            seed,
-            1024.0,
-            256.0,
+            crate::project_file::WorldSettings {
+                seed,
+                world_extent: 1024.0,
+                world_height: 256.0,
+                build_res: crate::project_file::DEFAULT_BUILD_RES,
+            },
             &[],
         )
     }

@@ -53,6 +53,15 @@ fn default_world_height() -> f64 {
     DEFAULT_WORLD_HEIGHT
 }
 
+/// The default full-Build resolution (square), and the value assumed for a project saved before
+/// the field was persisted.
+pub(crate) const DEFAULT_BUILD_RES: usize = 1024;
+
+/// The build resolution for a project file that predates the field.
+fn default_build_res() -> usize {
+    DEFAULT_BUILD_RES
+}
+
 /// World settings restored with the project.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub(crate) struct WorldSettings {
@@ -66,6 +75,10 @@ pub(crate) struct WorldSettings {
     /// projects saved before it existed still open.
     #[serde(default = "default_world_height")]
     pub world_height: f64,
+    /// The resolution a full Build evaluates at (square). Project intent (a UE5 export wants a
+    /// specific size), so it travels with the project. Defaulted on load for older files.
+    #[serde(default = "default_build_res")]
+    pub build_res: usize,
 }
 
 /// The default frame label colour: the brand's light text, readable on the dark default
@@ -143,6 +156,8 @@ pub(crate) struct RestoredProject {
     pub world_extent: f64,
     /// The restored world height (meters).
     pub world_height: f64,
+    /// The restored full-Build resolution (square).
+    pub build_res: usize,
     /// The restored canvas frames (#94).
     pub frames: Vec<Frame>,
     /// The restored interior layouts of subgraph containers, flattened to a path-keyed map
@@ -160,17 +175,13 @@ impl ProjectFile {
     pub(crate) fn capture(
         graph: &Graph,
         snarl: &Snarl<Handle>,
-        seed: u64,
-        world_extent: f64,
-        world_height: f64,
+        world: WorldSettings,
         frames: &[Frame],
     ) -> Self {
         Self::capture_with(
             graph,
             snarl_positions(snarl),
-            seed,
-            world_extent,
-            world_height,
+            world,
             frames,
             &HashMap::new(),
         )
@@ -185,19 +196,13 @@ impl ProjectFile {
     pub(crate) fn capture_with(
         graph: &Graph,
         nodes: BTreeMap<u64, [f32; 2]>,
-        seed: u64,
-        world_extent: f64,
-        world_height: f64,
+        world: WorldSettings,
         frames: &[Frame],
         layouts: &HashMap<Vec<u64>, BTreeMap<u64, [f32; 2]>>,
     ) -> Self {
         Self {
             format_version: PROJECT_FORMAT_VERSION,
-            world: WorldSettings {
-                seed,
-                world_extent,
-                world_height,
-            },
+            world,
             graph: graph.to_document(),
             view: ViewState {
                 nodes,
@@ -272,6 +277,7 @@ impl ProjectFile {
             seed: self.world.seed,
             world_extent: self.world.world_extent,
             world_height: self.world.world_height,
+            build_res: self.world.build_res,
             frames: self.view.frames.clone(),
             subgraph_layouts,
             warnings,
@@ -441,7 +447,17 @@ mod tests {
         .expect("thermal");
         graph.connect(generator, 0, erosion, 0).expect("connect");
 
-        let file = ProjectFile::capture(&graph, &snarl, 99, 4096.0, 800.0, &[]);
+        let file = ProjectFile::capture(
+            &graph,
+            &snarl,
+            WorldSettings {
+                seed: 99,
+                world_extent: 4096.0,
+                world_height: 800.0,
+                build_res: 2048,
+            },
+            &[],
+        );
 
         // Through JSON, to exercise the real serialization path.
         let json = serde_json::to_string(&file).expect("serialize");
@@ -456,6 +472,7 @@ mod tests {
         assert_eq!(restored.seed, 99);
         assert_eq!(restored.world_extent, 4096.0);
         assert_eq!(restored.world_height, 800.0);
+        assert_eq!(restored.build_res, 2048);
 
         // Positions restored by stable_id.
         let gen_sid = graph.stable_id(generator).expect("gen sid");
@@ -483,7 +500,17 @@ mod tests {
         add_node(&mut graph, &mut snarl, "generator.fbm", Pos2::ZERO).expect("fbm");
 
         // Drop the view section entirely, as a headless or fragment file would have.
-        let mut file = ProjectFile::capture(&graph, &snarl, 0, 1024.0, 256.0, &[]);
+        let mut file = ProjectFile::capture(
+            &graph,
+            &snarl,
+            WorldSettings {
+                seed: 0,
+                world_extent: 1024.0,
+                world_height: 256.0,
+                build_res: DEFAULT_BUILD_RES,
+            },
+            &[],
+        );
         file.view.nodes.clear();
 
         let restored = file.restore().expect("restore");
@@ -502,7 +529,17 @@ mod tests {
     fn restore_rejects_an_unknown_envelope_version() {
         let graph = Graph::new();
         let snarl = Snarl::<Handle>::new();
-        let mut file = ProjectFile::capture(&graph, &snarl, 0, 1024.0, 256.0, &[]);
+        let mut file = ProjectFile::capture(
+            &graph,
+            &snarl,
+            WorldSettings {
+                seed: 0,
+                world_extent: 1024.0,
+                world_height: 256.0,
+                build_res: DEFAULT_BUILD_RES,
+            },
+            &[],
+        );
         file.format_version = PROJECT_FORMAT_VERSION + 1;
         assert!(matches!(
             file.restore(),
@@ -541,7 +578,17 @@ mod tests {
             label: "Generators".to_string(),
             label_placement: LabelPlacement::TopCenter,
         }];
-        let file = ProjectFile::capture(&graph, &snarl, 1, 1024.0, 256.0, &frames);
+        let file = ProjectFile::capture(
+            &graph,
+            &snarl,
+            WorldSettings {
+                seed: 1,
+                world_extent: 1024.0,
+                world_height: 256.0,
+                build_res: DEFAULT_BUILD_RES,
+            },
+            &frames,
+        );
 
         let json = serde_json::to_string(&file).expect("serialize");
         let parsed: ProjectFile = serde_json::from_str(&json).expect("deserialize");

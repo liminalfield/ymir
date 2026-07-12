@@ -611,9 +611,12 @@ impl AppState {
         let initial = project_file::ProjectFile::capture(
             &graph,
             &snarl,
-            0,
-            DEFAULT_WORLD_EXTENT,
-            project_file::DEFAULT_WORLD_HEIGHT,
+            project_file::WorldSettings {
+                seed: 0,
+                world_extent: DEFAULT_WORLD_EXTENT,
+                world_height: project_file::DEFAULT_WORLD_HEIGHT,
+                build_res: project_file::DEFAULT_BUILD_RES,
+            },
             &[],
         );
         let history = EditHistory::new(initial.clone());
@@ -656,7 +659,7 @@ impl AppState {
             settings_edit: None,
             curve_popout: None,
             pending_view: None,
-            build_res: 1024,
+            build_res: project_file::DEFAULT_BUILD_RES,
             preview_res: PREVIEW_RES,
             world_extent: DEFAULT_WORLD_EXTENT,
             world_height: project_file::DEFAULT_WORLD_HEIGHT,
@@ -710,6 +713,7 @@ impl AppState {
         self.seed = restored.seed;
         self.world_extent = restored.world_extent;
         self.world_height = restored.world_height;
+        self.build_res = restored.build_res;
         self.clear_selection();
         self.preview_pin = None;
         self.node_menu = None;
@@ -803,6 +807,17 @@ impl AppState {
         }
     }
 
+    /// The current world settings (seed, extent, height, build resolution), bundled for a
+    /// [`project_file`] capture.
+    fn world_settings(&self) -> project_file::WorldSettings {
+        project_file::WorldSettings {
+            seed: self.seed,
+            world_extent: self.world_extent,
+            world_height: self.world_height,
+            build_res: self.build_res,
+        }
+    }
+
     /// A snapshot of the current session (graph, canvas positions, world settings),
     /// the unit the undo history and the project file both work in.
     ///
@@ -816,9 +831,7 @@ impl AppState {
             project_file::ProjectFile::capture_with(
                 &self.graph,
                 project_file::snarl_positions(&self.snarl),
-                self.seed,
-                self.world_extent,
-                self.world_height,
+                self.world_settings(),
                 &self.frames,
                 &layouts,
             )
@@ -826,9 +839,7 @@ impl AppState {
             project_file::ProjectFile::capture_with(
                 &self.top_graph(),
                 self.nav[0].positions.clone(),
-                self.seed,
-                self.world_extent,
-                self.world_height,
+                self.world_settings(),
                 &self.nav[0].frames,
                 &layouts,
             )
@@ -2364,6 +2375,7 @@ fn apply_default(state: &mut AppState) {
             state.seed = restored.seed;
             state.world_extent = restored.world_extent;
             state.world_height = restored.world_height;
+            state.build_res = restored.build_res;
             state.frame_to_graph_request = true;
             // Anchor undo and the clean point at the default, not the starter it replaced.
             state.reset_history();
@@ -7098,7 +7110,17 @@ mod tests {
         // Exercises the real file I/O wrappers (the in-memory serde path is covered in
         // project_file): write a session to disk, read it back, confirm it matches.
         let (graph, snarl) = starter::starter_graph();
-        let file = project_file::ProjectFile::capture(&graph, &snarl, 7, 2048.0, 640.0, &[]);
+        let file = project_file::ProjectFile::capture(
+            &graph,
+            &snarl,
+            project_file::WorldSettings {
+                seed: 7,
+                world_extent: 2048.0,
+                world_height: 640.0,
+                build_res: 4096,
+            },
+            &[],
+        );
         let path =
             std::env::temp_dir().join(format!("ymir-default-test-{}.ymir", std::process::id()));
 
@@ -7110,6 +7132,7 @@ mod tests {
         assert_eq!(restored.seed, 7);
         assert_eq!(restored.world_extent, 2048.0);
         assert_eq!(restored.world_height, 640.0);
+        assert_eq!(restored.build_res, 4096);
     }
 
     #[test]
