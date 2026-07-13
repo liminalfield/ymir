@@ -4424,6 +4424,9 @@ enum ClickHit {
 }
 
 fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
+    // No vertical item spacing in the pane: the breadcrumb bar (when shown) then butts directly
+    // against the snarl canvas below it, with no strip of dark pane background showing between them.
+    ui.spacing_mut().item_spacing.y = 0.0;
     // Breadcrumb while inside a subgraph (#106): "Project › Mountain › …", each earlier
     // segment a link that pops back out to that level. Shown only when dived in, so the
     // top-level canvas is unchanged. Runs first so a click swaps the active context before
@@ -4431,20 +4434,43 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     if !state.nav.is_empty() {
         let depth = state.nav.len();
         let mut exit_target: Option<usize> = None;
-        ui.horizontal(|ui| {
-            if ui.link("Project").clicked() {
-                exit_target = Some(0);
-            }
-            for (i, frame) in state.nav.iter().enumerate() {
-                ui.weak("›");
-                if i + 1 == depth {
-                    ui.strong(&frame.label); // the current context: not a link
-                } else if ui.link(&frame.label).clicked() {
-                    exit_target = Some(i + 1);
-                }
-            }
-        });
-        ui.separator();
+        // A chrome address bar spanning the canvas width: deepest chrome fill with a bottom hairline
+        // to the light canvas, padded on the left and vertically centred. "Project" and each earlier
+        // container are accent links back to that level; the current context is inert ink-hi; the
+        // separators are muted.
+        let bar = egui::Frame::new()
+            .fill(theme::BG_ABYSS)
+            .inner_margin(egui::Margin {
+                left: 12,
+                right: 10,
+                top: 6,
+                bottom: 6,
+            })
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    if ui.link("Project").clicked() {
+                        exit_target = Some(0);
+                    }
+                    for (i, frame) in state.nav.iter().enumerate() {
+                        ui.label(egui::RichText::new("›").color(theme::TEXT_TERTIARY));
+                        if i + 1 == depth {
+                            // The current context: same font and size as the links, distinguished by
+                            // colour only (bright ink-hi vs the accent links), so nothing reads as a
+                            // different size.
+                            ui.label(egui::RichText::new(&frame.label).color(theme::TEXT_PRIMARY));
+                        } else if ui.link(&frame.label).clicked() {
+                            exit_target = Some(i + 1);
+                        }
+                    }
+                });
+            });
+        ui.painter().hline(
+            bar.response.rect.x_range(),
+            bar.response.rect.bottom(),
+            egui::Stroke::new(1.0, theme::LINE),
+        );
         if let Some(target) = exit_target {
             state.exit_to(target);
         }
