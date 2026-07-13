@@ -3635,6 +3635,10 @@ fn library_entry_tooltip(ui: &mut egui::Ui, file: &library::SubgraphFile) {
 
 /// The selected node's inspector: its display-name override and parameter widgets.
 fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
+    // The SETTINGS half edits the selected node (distinct from the PREVIEW half above, which
+    // follows the pinned node). The eyebrow labels the split.
+    section_heading(ui, "Settings");
+
     // The inspector edits the primary (last-clicked) selected node; nothing selected (or
     // it was deleted) shows a hint, not an error.
     let Some(handle) = state.primary else {
@@ -3929,6 +3933,11 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
     {
         state.preview_pin = None;
     }
+
+    // The PREVIEW half shows the pinned node's output; the SETTINGS half below edits the selected
+    // node. The eyebrow makes that pinned-vs-selected split explicit (the two are usually different
+    // nodes).
+    section_heading(ui, "Preview");
 
     // The preview shows the pinned node if one is set, else the selection. Only nodes with
     // an output qualify; evaluating an endpoint would run its side effect. When nothing is
