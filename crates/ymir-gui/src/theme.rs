@@ -38,8 +38,10 @@ pub const LINE_STRONG: Color32 = Color32::from_rgb(0x5a, 0x61, 0x6b);
 pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(0xe9, 0xed, 0xf2);
 /// Secondary text, menu items, palette-chip labels. Frost `ink-mid`.
 pub const TEXT_SECONDARY: Color32 = Color32::from_rgb(0xb2, 0xb9, 0xc2);
-// `ink-lo` (tertiary text) and the aurora accents (green/violet/amber) exist in the handoff but are
-// added when a later theming step first uses one, keeping this file to the colours in play.
+/// Tertiary text: section labels, counts, stat lines, placeholders. Frost `ink-lo`.
+pub const TEXT_TERTIARY: Color32 = Color32::from_rgb(0x87, 0x8f, 0x99);
+// The aurora accents (green/violet/amber) exist in the handoff but are added when a later theming
+// step first uses one, keeping this file to the colours in play.
 
 // --- canvas: the frosted icy node-graph surface (LIGHT; the one light region in the dark chrome) ---
 /// The frosted canvas fill. A solid stand-in for the handoff's `canvas-a -> canvas-b` gradient (the

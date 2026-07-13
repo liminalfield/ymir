@@ -3027,18 +3027,16 @@ fn library_browser(ui: &mut egui::Ui, state: &mut AppState) {
                             .push(entry);
                     }
                     for (category, entries) in by_category.iter().filter(|(c, _)| !c.is_empty()) {
-                        egui::CollapsingHeader::new(*category)
-                            .default_open(true)
-                            .show(ui, |ui| {
-                                library_entries(ui, entries, selection.as_deref(), &mut command);
-                            });
+                        library_category(ui, category, entries, selection.as_deref(), &mut command);
                     }
                     if let Some(entries) = by_category.get("") {
-                        egui::CollapsingHeader::new("Uncategorized")
-                            .default_open(true)
-                            .show(ui, |ui| {
-                                library_entries(ui, entries, selection.as_deref(), &mut command);
-                            });
+                        library_category(
+                            ui,
+                            "Uncategorized",
+                            entries,
+                            selection.as_deref(),
+                            &mut command,
+                        );
                     }
 
                     if !listing.errors.is_empty() {
@@ -3066,7 +3064,9 @@ fn library_browser(ui: &mut egui::Ui, state: &mut AppState) {
                         ui.add_space(6.0);
                         ui.weak("No subgraphs match your search.");
                     } else {
-                        library_entries(ui, &matches, selection.as_deref(), &mut command);
+                        for entry in &matches {
+                            library_item(ui, entry, selection.as_deref(), &mut command);
+                        }
                     }
                 }
             });
@@ -3076,31 +3076,147 @@ fn library_browser(ui: &mut egui::Ui, state: &mut AppState) {
     }
 }
 
-/// Renders one category's library entries as selectable rows, highlighting the selected one and
-/// showing each entry's documentation on hover. A left-click selects the row, a double-click
-/// inserts it (the common action), and a right-click opens its context menu; each records a
-/// [`LibraryCommand`] for the caller to apply once the listing borrow has ended.
-fn library_entries(
+/// A collapsible category group in the browser: a header row (caret + name + count) that toggles a
+/// persisted open state, with its entries listed indented beneath when open. Only drawn in the
+/// unsearched, grouped view.
+fn library_category(
     ui: &mut egui::Ui,
+    category: &str,
     entries: &[&library::LibraryEntry],
     selection: Option<&std::path::Path>,
     command: &mut Option<LibraryCommand>,
 ) {
-    for entry in entries {
-        let file = &entry.file;
-        let selected = selection == Some(entry.path.as_path());
-        let response = ui
-            .selectable_label(selected, &file.name)
-            .on_hover_ui(|ui| library_entry_tooltip(ui, file));
-        // Double-click is the shortcut for the common case; a single click selects (so the
-        // inspector shows the entry) and cannot also fire on the same interaction.
-        if response.double_clicked() {
-            *command = Some(LibraryCommand::Insert(entry.path.clone()));
-        } else if response.clicked() {
-            *command = Some(LibraryCommand::Select(entry.path.clone()));
-        }
-        response.context_menu(|ui| library_row_menu(ui, &entry.path, command));
+    let id = ui.make_persistent_id(("library-category", category));
+    let mut open = ui.data_mut(|d| *d.get_temp_mut_or(id, true));
+    if library_category_header(ui, category, entries.len(), open).clicked() {
+        open = !open;
+        ui.data_mut(|d| d.insert_temp(id, open));
     }
+    if open {
+        // A small left inset sets the items under their category header, matching the mock.
+        ui.indent(id, |ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            for entry in entries {
+                library_item(ui, entry, selection, command);
+            }
+        });
+        ui.add_space(2.0);
+    }
+}
+
+/// A category header row: a disclosure caret, the category name, and its entry count in muted ink.
+/// The whole row is one click target that toggles the group; returns its response.
+fn library_category_header(
+    ui: &mut egui::Ui,
+    name: &str,
+    count: usize,
+    open: bool,
+) -> egui::Response {
+    let height = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), height),
+        egui::Sense::click(),
+    );
+    let caret = if open {
+        egui_phosphor::regular::CARET_DOWN
+    } else {
+        egui_phosphor::regular::CARET_RIGHT
+    };
+    let painter = ui.painter();
+    let mut x = rect.left() + 2.0;
+    let mid = rect.center().y;
+    painter.text(
+        egui::pos2(x, mid),
+        egui::Align2::LEFT_CENTER,
+        caret,
+        egui::FontId::proportional(11.0),
+        theme::TEXT_TERTIARY,
+    );
+    x += 16.0;
+    let name_rect = painter.text(
+        egui::pos2(x, mid),
+        egui::Align2::LEFT_CENTER,
+        name,
+        egui::FontId::proportional(13.0),
+        theme::TEXT_SECONDARY,
+    );
+    painter.text(
+        egui::pos2(name_rect.right() + 8.0, mid),
+        egui::Align2::LEFT_CENTER,
+        count.to_string(),
+        egui::FontId::proportional(12.0),
+        theme::TEXT_TERTIARY,
+    );
+    response
+}
+
+/// One library entry as a selectable browser row (the styled treatment shared by the grouped and
+/// searched views). A left-click selects it (filling the inspector), a double-click inserts it (the
+/// common action), and a right-click opens its context menu; each records a [`LibraryCommand`] for
+/// the caller to apply once the listing borrow has ended.
+fn library_item(
+    ui: &mut egui::Ui,
+    entry: &library::LibraryEntry,
+    selection: Option<&std::path::Path>,
+    command: &mut Option<LibraryCommand>,
+) {
+    let selected = selection == Some(entry.path.as_path());
+    let response = library_item_row(ui, &entry.file.name, selected)
+        .on_hover_ui(|ui| library_entry_tooltip(ui, &entry.file));
+    if response.double_clicked() {
+        *command = Some(LibraryCommand::Insert(entry.path.clone()));
+    } else if response.clicked() {
+        *command = Some(LibraryCommand::Select(entry.path.clone()));
+    }
+    response.context_menu(|ui| library_row_menu(ui, &entry.path, command));
+}
+
+/// Draws one browser row and returns its response. Three states, per the Frost handoff: the selected
+/// row gets an accent wash with a 2px accent left border and near-white text; a hovered unselected
+/// row gets a raised fill and near-white text; a resting row is bare with muted text.
+fn library_item_row(ui: &mut egui::Ui, name: &str, selected: bool) -> egui::Response {
+    let height = ui.text_style_height(&egui::TextStyle::Body) + 8.0;
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), height),
+        egui::Sense::click(),
+    );
+    let painter = ui.painter();
+    let text_color = if selected {
+        // The accent wash with a square-left, round-right radius, then a 2px accent bar hugging the
+        // left edge, so the selected row reads as a tab pulled from the panel edge.
+        painter.rect_filled(
+            rect,
+            egui::CornerRadius {
+                nw: 0,
+                ne: 3,
+                sw: 0,
+                se: 3,
+            },
+            theme::ACCENT_PRIMARY.gamma_multiply(0.16),
+        );
+        painter.rect_filled(
+            egui::Rect::from_min_max(
+                rect.left_top(),
+                egui::pos2(rect.left() + 2.0, rect.bottom()),
+            ),
+            0.0,
+            theme::ACCENT_PRIMARY,
+        );
+        theme::TEXT_PRIMARY
+    } else if response.hovered() {
+        painter.rect_filled(rect, 3.0, theme::BG_RAISED);
+        theme::TEXT_PRIMARY
+    } else {
+        theme::TEXT_SECONDARY
+    };
+    ui.painter().text(
+        egui::pos2(rect.left() + 12.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        name,
+        egui::FontId::proportional(13.0),
+        text_color,
+    );
+    response
 }
 
 /// The right-click menu for a library browser row: the full action set, since a row has no
