@@ -3636,34 +3636,91 @@ fn library_entry_tooltip(ui: &mut egui::Ui, file: &library::SubgraphFile) {
 /// The selected node's inspector: its display-name override and parameter widgets.
 fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
     // The SETTINGS half edits the selected node (distinct from the PREVIEW half above, which
-    // follows the pinned node). The eyebrow labels the split.
-    section_heading(ui, "Settings");
-
-    // The inspector edits the primary (last-clicked) selected node; nothing selected (or
-    // it was deleted) shows a hint, not an error.
+    // follows the pinned node). Nothing selected shows the eyebrow and a hint.
     let Some(handle) = state.primary else {
+        section_heading(ui, "Settings");
         ui.weak("Select a node to edit its parameters.");
         return;
     };
     let Some(id) = state.graph.node_id_of(handle) else {
+        section_heading(ui, "Settings");
         ui.weak("Select a node to edit its parameters.");
         return;
     };
     let Some(spec) = state.graph.spec(id) else {
+        section_heading(ui, "Settings");
         ui.weak("Select a node to edit its parameters.");
         return;
     };
 
-    // Display-name override (#59): edit at the top. The type name is the hint, so an
-    // empty field shows what the node falls back to, and a weak line below always
-    // shows the underlying type even when renamed.
+    // SETTINGS eyebrow with a Reset-all action at the right (reverts every parameter to its
+    // default).
+    let mut reset = false;
+    ui.add_space(2.0);
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new("SETTINGS")
+                .size(10.5)
+                .color(theme::TEXT_TERTIARY),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            reset = ui
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new(format!(
+                            "{}  Reset",
+                            egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE
+                        ))
+                        .size(11.0)
+                        .color(theme::TEXT_SECONDARY),
+                    )
+                    .frame(false),
+                )
+                .on_hover_text("Reset all parameters to their defaults")
+                .clicked();
+        });
+    });
+    ui.add_space(4.0);
+
+    // Name heading: the display name as a semibold heading.
+    ui.label(
+        egui::RichText::new(node_display_name(&state.graph, id))
+            .family(egui::FontFamily::Name("plex-semibold".into()))
+            .size(16.0)
+            .color(theme::TEXT_PRIMARY),
+    );
+
+    // Decoupling cue: shown only when the pinned preview is a different node, so it is clear that
+    // editing this node updates that downstream preview.
+    if let Some(pinned) = state.preview_pin
+        && pinned != handle
+        && let Some(pinned_id) = state.graph.node_id_of(pinned)
+    {
+        ui.label(
+            egui::RichText::new(format!(
+                "↑ changes update the pinned {} preview",
+                node_display_name(&state.graph, pinned_id)
+            ))
+            .size(11.0)
+            .color(mix(theme::ACCENT_PRIMARY, theme::TEXT_SECONDARY, 0.78)),
+        );
+    }
+
+    // Name field: a dense row — a fixed-width label and a deep mono input. The type name is the
+    // hint, so an empty field shows the fallback.
     let type_name = tr(&format!("node-{}", spec.type_id)).to_string();
     let mut name = state.graph.name(id).unwrap_or("").to_string();
     ui.horizontal(|ui| {
-        ui.label("Name");
+        ui.add_sized(
+            [34.0, ui.spacing().interact_size.y],
+            egui::Label::new(egui::RichText::new("Name").color(theme::TEXT_TERTIARY)),
+        );
         let resp = ui.add(
             egui::TextEdit::singleline(&mut name)
                 .hint_text(type_name.as_str())
+                .font(egui::FontSelection::Style(egui::TextStyle::Monospace))
+                .text_color(theme::TEXT_PRIMARY)
+                .background_color(theme::BG_ABYSS)
                 .desired_width(f32::INFINITY),
         );
         if resp.changed()
@@ -3672,7 +3729,6 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
             ui.colored_label(ui.visuals().error_fg_color, err.to_string());
         }
     });
-    ui.weak(type_name.as_str());
     ui.separator();
 
     if spec.params.is_empty() {
@@ -3691,6 +3747,14 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
     // changed. The graph stays the single source of truth.
     let mut params = state.graph.params(id).cloned().unwrap_or_default();
     let mut changed = false;
+    // Reset all: overwrite every parameter with its spec default before the rows read them, so the
+    // controls show the defaults and the single write-back below persists them.
+    if reset {
+        for pspec in &spec.params {
+            params.insert(pspec.name.clone(), pspec.default.clone());
+        }
+        changed = true;
+    }
     for (index, pspec) in spec.params.iter().enumerate() {
         // A little vertical breathing room between parameters, so the panel does not read as a
         // dense stack (#90). Between rows only: none before the first or after the last.
