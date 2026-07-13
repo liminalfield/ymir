@@ -4346,7 +4346,11 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         // out in a dense graph. No selection fill over the body: snarl's default grey fill dimmed the
         // card and read like a bypassed node, and even a faint cyan wash muddied the preview thumbnail
         // and text, so the body stays fully legible and the header carries the signal.
-        select_stoke: Some(egui::Stroke::new(2.5, theme::ACCENT_PRIMARY)),
+        // Selection is drawn as an accent header plus an accent card border (the `node_frame` viewer
+        // override), which sits tight on the card edge and covers snarl's sub-pixel rounding seam.
+        // Snarl's own selection rect is disabled (no fill, no stroke) so it does not add a second,
+        // looser border outside the card.
+        select_stoke: Some(egui::Stroke::NONE),
         select_fill: Some(egui::Color32::TRANSPARENT),
         // The Frost canvas is a frosted icy-light surface (the one light region in the dark chrome),
         // with no grid for now (the grid draw is suppressed in `draw_background`).

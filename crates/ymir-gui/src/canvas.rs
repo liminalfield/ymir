@@ -504,6 +504,41 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
         }
     }
 
+    fn node_frame(
+        &mut self,
+        default: egui::Frame,
+        node: SnarlNodeId,
+        _inputs: &[InPin],
+        _outputs: &[OutPin],
+        snarl: &Snarl<Handle>,
+    ) -> egui::Frame {
+        // A selected node gets a 2px accent border on the card edge. This is the selection frame, and
+        // it covers the strip of light card body between the accent header and the card edge. Snarl's
+        // own outer select stroke is disabled (see the SnarlStyle) in favour of this tighter one.
+        //
+        // egui grows a frame's outer rect by its stroke width (the stroke is drawn Inside), so a
+        // thicker border would push the card edge out past the header and reopen the strip at the
+        // rounded corners, where the diagonal gap is widest. Shrink the inner margin by the 1px of
+        // extra stroke (default border is 1px) on every side, so the card's outer geometry is
+        // unchanged and the header-to-edge gap stays within the 2px the border covers, corners
+        // included. The default header/body margins are 4 top, 6 elsewhere.
+        let is_selected = snarl
+            .get_node(node)
+            .is_some_and(|h| self.selection.contains(h));
+        if is_selected {
+            default
+                .stroke(egui::Stroke::new(2.0, crate::theme::ACCENT_PRIMARY))
+                .inner_margin(egui::Margin {
+                    left: 5,
+                    right: 5,
+                    top: 3,
+                    bottom: 5,
+                })
+        } else {
+            default
+        }
+    }
+
     fn has_node_style(
         &mut self,
         node: SnarlNodeId,
