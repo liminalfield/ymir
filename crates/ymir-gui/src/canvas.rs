@@ -670,8 +670,18 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
                     }
                 });
                 if let Some(color) = dot {
-                    ui.painter()
-                        .circle_filled(rect.center(), diameter * 0.5, color);
+                    let r = diameter * 0.5;
+                    let painter = ui.painter();
+                    painter.circle_filled(rect.center(), r, color);
+                    // A darker rim of the same hue: it makes the neon pip legible on both the light
+                    // header and the accent header of a selected node, and adds a value edge so a
+                    // red/green colour-blind reader separates the green and red pips by more than hue.
+                    let rim = egui::Color32::from_rgb(
+                        (f32::from(color.r()) * 0.5) as u8,
+                        (f32::from(color.g()) * 0.5) as u8,
+                        (f32::from(color.b()) * 0.5) as u8,
+                    );
+                    painter.circle_stroke(rect.center(), r, egui::Stroke::new(1.5, rim));
                 }
                 // A ring around the dot marks the pinned node, so it reads as the locked
                 // preview target even as selection moves elsewhere. Painted (not

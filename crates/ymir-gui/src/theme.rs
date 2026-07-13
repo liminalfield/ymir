@@ -67,11 +67,12 @@ pub const ACCENT_FROST: Color32 = Color32::from_rgb(0x1f, 0xa0, 0xc4);
 
 // --- semantic (used sparingly) ---
 // Bright, saturated, and separated in lightness so a red/green colour-blind reader can still tell
-// them apart: success is a light spring green, error a bright rose-red (a hint of magenta, which
+// them apart: success is an electric neon green, error a bright rose-red (a hint of magenta, which
 // carries blue and reads apart from green), warning a bright amber. Never rely on red-vs-green
-// alone; these back up a shape/label cue.
+// alone; these back up a shape/label cue (for the status pips, a darker rim of the same hue adds a
+// value edge on top of the colour).
 /// Solved / valid state.
-pub const SUCCESS: Color32 = Color32::from_rgb(0x24, 0xe0, 0xa0);
+pub const SUCCESS: Color32 = Color32::from_rgb(0x2b, 0xff, 0x5c);
 /// Warnings.
 pub const WARNING: Color32 = Color32::from_rgb(0xff, 0xbf, 0x47);
 /// Errors.
