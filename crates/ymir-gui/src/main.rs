@@ -161,11 +161,6 @@ const SEARCH_FIELD_MARGIN: egui::Margin = egui::Margin {
     bottom: 5,
 };
 
-/// How much to lighten the search fields' background above the theme's deepest input colour, so
-/// the boxes settle back and do not compete with the panel headings. A channel multiplier for
-/// [`scale_color`].
-const SEARCH_FIELD_LIGHTEN: f32 = 1.7;
-
 /// Inner padding for the ribbon's buttons (category tabs and node buttons), well above egui's
 /// cramped default so each has whitespace on every side in both its resting and hovered state,
 /// and the two ribbon bands stand a little taller. Padding is a minimum, so a tab grows past
@@ -2452,30 +2447,35 @@ fn apply_preferences(state: &mut AppState) {
     }
 }
 
-/// A category tab whose width is reserved at its full text width, so the per-state
-/// difference in egui's button frame margin (it subtracts the state's border width from
-/// the padding) cannot change a tab's footprint and reflow the row on hover or selection.
-/// Sets the button's `min_size` to `text + 2·button_padding`, which no state's natural
-/// width exceeds, pinning every state to that one width.
+/// A category tab in the Frost style: frameless text with a 2px accent underline when active (no
+/// fill highlight). The active tab reads in primary ink, inactive in secondary; the weight stays
+/// the same across states so a tab never changes width and reflows the row.
 fn category_tab(
     ui: &mut egui::Ui,
     active: &mut Option<ActiveTab>,
     value: Option<ActiveTab>,
     label: &str,
 ) {
-    let font = egui::TextStyle::Body.resolve(ui.style());
-    let text_w = ui
-        .painter()
-        .layout_no_wrap(label.to_string(), font, egui::Color32::WHITE)
-        .rect
-        .width();
-    let width = text_w + 2.0 * ui.spacing().button_padding.x;
-    let height = ui.spacing().interact_size.y;
     let selected = *active == value;
-    if ui
-        .add(egui::Button::selectable(selected, label).min_size(egui::vec2(width, height)))
-        .clicked()
-    {
+    let color = if selected {
+        theme::TEXT_PRIMARY
+    } else {
+        theme::TEXT_SECONDARY
+    };
+    let resp = ui.add(
+        egui::Button::new(egui::RichText::new(label).color(color))
+            .frame(false)
+            .min_size(egui::vec2(0.0, ui.spacing().interact_size.y)),
+    );
+    if selected {
+        let r = resp.rect;
+        ui.painter().hline(
+            r.left()..=r.right(),
+            r.bottom(),
+            egui::Stroke::new(2.0, theme::ACCENT_PRIMARY),
+        );
+    }
+    if resp.clicked() {
         *active = value;
     }
 }
@@ -2522,7 +2522,7 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // Two full-width bands with equal padding, so they are equal height with their content
     // vertically centred: the categories/search/Build bar, then the node list below.
     egui::Frame::new()
-        .fill(scale_color(ui.visuals().panel_fill, 1.5))
+        .fill(theme::BG_SURFACE)
         .inner_margin(RIBBON_BAND_MARGIN)
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
@@ -2545,7 +2545,7 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
                     );
                 }
                 ui.separator();
-                let search_bg = scale_color(ui.visuals().extreme_bg_color, SEARCH_FIELD_LIGHTEN);
+                let search_bg = theme::BG_ABYSS;
                 ui.add(
                     egui::TextEdit::singleline(&mut state.search)
                         .hint_text("search nodes")
@@ -2564,10 +2564,13 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
                     // Build the selected outputs at the world-tab resolution, off-thread.
                     state.build.poll(ui.ctx());
                     let building = state.build.is_building();
-                    if ui
-                        .add_enabled(!building, egui::Button::new("Build"))
-                        .clicked()
-                    {
+                    // The one prominent element: an accent-filled button with dark text (per the
+                    // Frost spec), so Build reads as the primary action against the dark chrome.
+                    let build_btn = egui::Button::new(
+                        egui::RichText::new("Build").color(theme::BG_ABYSS).strong(),
+                    )
+                    .fill(theme::ACCENT_PRIMARY);
+                    if ui.add_enabled(!building, build_btn).clicked() {
                         // Build the whole project: the effective top-level graph, even if a
                         // subgraph is currently open on the canvas.
                         let top = state.top_graph();
@@ -2598,7 +2601,7 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
     let entries = node_entries();
     let shown = visible_nodes(&entries, state.active_tab, &state.search);
     egui::Frame::new()
-        .fill(scale_color(ui.visuals().panel_fill, 1.8))
+        .fill(theme::BG_SURFACE)
         .inner_margin(RIBBON_BAND_MARGIN)
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
@@ -2841,7 +2844,7 @@ fn library_pane(ui: &mut egui::Ui, state: &mut AppState) {
     let style = ui.style().clone();
     let pad = egui::Margin::symmetric(8, 6);
     // A slightly sunken fill sets the inspector apart from the browser as a distinct pane.
-    let inspector_fill = scale_color(ui.visuals().panel_fill, 0.85);
+    let inspector_fill = theme::BG_SURFACE;
     let divider = ui.visuals().widgets.noninteractive.bg_stroke.color;
 
     let listing = &state.library;
@@ -2971,7 +2974,7 @@ fn library_browser(ui: &mut egui::Ui, state: &mut AppState) {
     ui.horizontal(|ui| {
         let has_query = !state.library_search.is_empty();
         let clear_width = if has_query { 24.0 } else { 0.0 };
-        let search_bg = scale_color(ui.visuals().extreme_bg_color, SEARCH_FIELD_LIGHTEN);
+        let search_bg = theme::BG_ABYSS;
         ui.add(
             egui::TextEdit::singleline(&mut state.library_search)
                 .hint_text("search subgraphs")
@@ -3774,14 +3777,6 @@ fn preview_black_image(ui: &mut egui::Ui) {
     ui.painter().rect_filled(rect, 0.0, egui::Color32::BLACK);
 }
 
-/// Multiplies an opaque colour's channels by `factor` (clamped), keeping it opaque. Unlike
-/// [`egui::Color32::gamma_multiply`], which changes opacity, this darkens (`factor < 1`) or
-/// lightens (`factor > 1`) the colour itself.
-fn scale_color(c: egui::Color32, factor: f32) -> egui::Color32 {
-    let s = |v: u8| (f32::from(v) * factor).clamp(0.0, 255.0) as u8;
-    egui::Color32::from_rgb(s(c.r()), s(c.g()), s(c.b()))
-}
-
 /// A subtle all-caps section heading for a subpane, in the muted style of a sidebar's
 /// "WORKSPACE"/"OUTLINER" label: uppercased and dimmed, set on the pane background rather than a
 /// heavy header band. Shared so subpane titles stay consistent.
@@ -3817,7 +3812,7 @@ fn inspector_heading(ui: &mut egui::Ui, name: Option<&str>) {
 /// their headers match.
 fn header_strip(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::new()
-        .fill(scale_color(ui.visuals().panel_fill, 0.5))
+        .fill(theme::BG_ABYSS)
         .inner_margin(egui::Margin::symmetric(8, 6))
         .show(ui, |ui| {
             // Fill the width so the strip spans the pane even when its content is short.
@@ -4328,10 +4323,36 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     let style = egui_snarl::ui::SnarlStyle {
         wire_width: Some(2.5),
         pin_fill: Some(theme::ACCENT_FROST),
-        // The canvas backdrop reads as the base layer, a step darker than the surface
-        // panels, with a subtle line grid, so the graph sits below the panels (#104).
-        bg_frame: Some(egui::Frame::new().fill(theme::BG_BASE)),
-        bg_pattern_stroke: Some(egui::Stroke::new(1.0, theme::LINE)),
+        // The Frost canvas is a frosted icy-light surface (the one light region in the dark chrome),
+        // with no grid for now (the grid draw is suppressed in `draw_background`).
+        bg_frame: Some(egui::Frame::new().fill(theme::CANVAS_BASE)),
+        // Node cards: a light frosted body with a 1px hairline border, 5px corners, and a soft drop
+        // shadow, and a slightly darker header strip. Node text is dark on light via the scoped
+        // `canvas_visuals` applied to the widget below.
+        node_frame: Some(
+            egui::Frame::new()
+                .fill(theme::NODE_BG)
+                .stroke(egui::Stroke::new(1.0, theme::NODE_LINE))
+                .corner_radius(5)
+                .shadow(egui::epaint::Shadow {
+                    offset: [0, 3],
+                    blur: 9,
+                    spread: 0,
+                    color: egui::Color32::from_rgba_unmultiplied(15, 30, 50, 115),
+                })
+                .inner_margin(egui::Margin::same(6)),
+        ),
+        header_frame: Some(
+            egui::Frame::new()
+                .fill(theme::NODE_HEAD)
+                .corner_radius(egui::CornerRadius {
+                    nw: 5,
+                    ne: 5,
+                    sw: 0,
+                    se: 0,
+                })
+                .inner_margin(egui::Margin::symmetric(6, 4)),
+        ),
         // Clamp zoom so the graph can't shrink to an unfindable speck (snarl's
         // default min is 0.2 = 5x out); "zoom to graph" handles seeing a big graph
         // whole (#65).
@@ -4370,6 +4391,10 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
             })
         });
 
+    // The node graph is the one LIGHT region in the dark chrome. Node text is coloured dark
+    // explicitly (in the viewer's header/pin hooks), rather than via a light visuals override:
+    // egui-snarl renders through egui's Scene, which leaks a ui-scoped visuals change to the whole
+    // context, so overriding visuals here would flip the dark chrome light.
     SnarlWidget::new()
         .style(style)
         .id_salt("ymir-canvas")
@@ -5600,7 +5625,18 @@ inventory::submit! { PaneKind { id: "viewport-3d", draw: viewport_pane } }
 fn footer_pane(ui: &mut egui::Ui, _state: &mut AppState) {
     ui.horizontal(|ui| {
         ui.add_space(MENU_VPAD);
-        ui.weak("Ready");
+        // A status dot then a mono label, per the Frost status bar. "Ready" is an ok state (the
+        // green here is a status indicator, not a red-vs-green discrimination).
+        let d = 7.0;
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(d, d), egui::Sense::hover());
+        ui.painter()
+            .circle_filled(rect.center(), d * 0.5, theme::SUCCESS);
+        ui.add_space(2.0);
+        ui.label(
+            egui::RichText::new("Ready")
+                .monospace()
+                .color(theme::TEXT_SECONDARY),
+        );
     });
 }
 
@@ -5745,7 +5781,7 @@ fn mount(layout: &Layout, ui: &mut egui::Ui, state: &mut AppState) {
         // fill through the gap.
         .frame(
             egui::Frame::side_top_panel(ui.style())
-                .fill(scale_color(ui.visuals().panel_fill, 1.5))
+                .fill(theme::BG_SURFACE)
                 .inner_margin(0),
         )
         .show_inside(ui, |ui| draw_pane(layout.palette, ui, state));
@@ -5753,9 +5789,7 @@ fn mount(layout: &Layout, ui: &mut egui::Ui, state: &mut AppState) {
     // Section 5: the footer (its top border is drawn below), a bit darker than the body.
     let footer = egui::Panel::bottom("footer-panel")
         .show_separator_line(false)
-        .frame(
-            egui::Frame::side_top_panel(ui.style()).fill(scale_color(ui.visuals().panel_fill, 0.7)),
-        )
+        .frame(egui::Frame::side_top_panel(ui.style()).fill(theme::BG_SURFACE))
         .show_inside(ui, |ui| draw_pane(layout.footer, ui, state));
 
     // Section 4: the right column — the node inspector and preview. It sits BELOW the ribbon

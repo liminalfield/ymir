@@ -41,6 +41,24 @@ pub const TEXT_SECONDARY: Color32 = Color32::from_rgb(0xb2, 0xb9, 0xc2);
 // `ink-lo` (tertiary text) and the aurora accents (green/violet/amber) exist in the handoff but are
 // added when a later theming step first uses one, keeping this file to the colours in play.
 
+// --- canvas: the frosted icy node-graph surface (LIGHT; the one light region in the dark chrome) ---
+/// The frosted canvas fill. A solid stand-in for the handoff's `canvas-a -> canvas-b` gradient (the
+/// gradient is a later polish); the midpoint of those two tokens.
+pub const CANVAS_BASE: Color32 = Color32::from_rgb(0xb2, 0xbe, 0xc8);
+
+// --- node cards (light, floating on the frosted canvas) ---
+/// Node card body. The handoff frosts it with a backdrop blur, which egui cannot do, so this is a
+/// near-solid light fill instead. Frost `node-bg`.
+pub const NODE_BG: Color32 = Color32::from_rgb(0xe0, 0xe6, 0xec);
+/// Node header strip. Frost `node-head`.
+pub const NODE_HEAD: Color32 = Color32::from_rgb(0xc9, 0xd3, 0xdc);
+/// Node border and internal divider (1px). Frost `node-line`.
+pub const NODE_LINE: Color32 = Color32::from_rgb(0x9d, 0xae, 0xbc);
+/// Node title text, dark on the light card. Frost `node-ink`.
+pub const NODE_INK: Color32 = Color32::from_rgb(0x37, 0x3f, 0x4b);
+/// Port labels and carets, a lighter dark ink. Frost `node-ink-mid`.
+pub const NODE_INK_MID: Color32 = Color32::from_rgb(0x5d, 0x66, 0x74);
+
 // --- accents: aurora "splashes", all share L~=0.70 C~=0.13, hue varies ---
 /// Primary accent: wires, Build button, active tab, selection, focus. Frost `acc-cyan`.
 pub const ACCENT_PRIMARY: Color32 = Color32::from_rgb(0x1f, 0xa0, 0xc4);

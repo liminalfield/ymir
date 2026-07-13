@@ -516,12 +516,14 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
         // keeps the title from being text-selectable, so it shows the normal cursor
         // (not a text I-beam) and reads as a node title, not editable text.
         let is_selected = handle.is_some_and(|h| self.selection.contains(&h));
+        // Dark ink on the light node card (the node is the one light region in the dark chrome, so
+        // the global light-text visuals would vanish here); selection keeps the accent colour.
         let text = if is_selected {
             egui::RichText::new(title)
                 .strong()
                 .color(ui.visuals().selection.stroke.color)
         } else {
-            egui::RichText::new(title)
+            egui::RichText::new(title).color(crate::theme::NODE_INK)
         };
         // A bypassed node reads as off: its title (and footer thumbnail) fade, while the
         // header's enable toggle stays bright as the obvious way to switch it back on
@@ -643,20 +645,17 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
 
     fn draw_background(
         &mut self,
-        background: Option<&BackgroundPattern>,
-        viewport: &egui::Rect,
-        snarl_style: &SnarlStyle,
+        _background: Option<&BackgroundPattern>,
+        _viewport: &egui::Rect,
+        _snarl_style: &SnarlStyle,
         style: &egui::Style,
         painter: &egui::Painter,
         _snarl: &Snarl<Handle>,
     ) {
-        // The grid first, then frames on top of it so a frame tints the grid without
-        // hiding it (#94). This hook draws behind the nodes and wires, on the snarl layer
-        // whose transform is already applied, so the painter works in graph space, the
+        // No grid for now (the Frost canvas is a clean frosted surface; a grid treatment comes
+        // later). This hook still draws the canvas frames (#94), behind the nodes and wires, on the
+        // snarl layer whose transform is already applied, so the painter works in graph space, the
         // same coordinates the frame rects are stored in.
-        if let Some(background) = background {
-            background.draw(viewport, snarl_style, style, painter);
-        }
         for (index, frame) in self.frames.iter().enumerate() {
             let rect = egui::Rect::from_min_max(
                 egui::pos2(frame.rect[0], frame.rect[1]),
@@ -819,7 +818,7 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
         snarl: &mut Snarl<Handle>,
     ) -> impl SnarlPin + 'static {
         if let Some(label) = self.port_label(snarl, pin.id.node, true, pin.id.input) {
-            ui.label(label);
+            ui.label(egui::RichText::new(label).color(crate::theme::NODE_INK_MID));
         }
         PinInfo::circle()
     }
@@ -834,7 +833,7 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
             // Just the label, mirroring the input side: the vendored snarl reserves the pin
             // slot on the output side correctly now (it did not in RTL upstream, which jammed
             // labels under the output pins, #55). See patches/egui-snarl-output-pin-space.patch.
-            ui.label(label);
+            ui.label(egui::RichText::new(label).color(crate::theme::NODE_INK_MID));
         }
         PinInfo::circle()
     }
