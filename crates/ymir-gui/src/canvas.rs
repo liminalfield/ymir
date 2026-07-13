@@ -577,31 +577,37 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
 
     fn has_node_style(
         &mut self,
-        node: SnarlNodeId,
+        _node: SnarlNodeId,
         _inputs: &[InPin],
         _outputs: &[OutPin],
-        snarl: &Snarl<Handle>,
+        _snarl: &Snarl<Handle>,
     ) -> bool {
-        // Only selected nodes need a style override (a dark collapse caret on the accent header).
-        snarl
-            .get_node(node)
-            .is_some_and(|h| self.selection.contains(h))
+        // Every node overrides its style so the collapse caret contrasts its header.
+        true
     }
 
     fn apply_node_style(
         &mut self,
         style: &mut egui::Style,
-        _node: SnarlNodeId,
+        node: SnarlNodeId,
         _inputs: &[InPin],
         _outputs: &[OutPin],
-        _snarl: &Snarl<Handle>,
+        snarl: &Snarl<Handle>,
     ) {
         // Snarl paints the collapse caret from the node ui's widget foreground stroke, and there is no
-        // dedicated hook for it. On a selected node the header is the accent colour, where the resting
-        // light-grey caret nearly vanishes, so darken the foreground stroke to the same dark ink the
-        // title uses. Node text (title, port labels) is coloured explicitly, so this only reaches the
-        // caret. Scoped to this node's ui, so it does not leak to the rest of the canvas.
-        let ink = crate::theme::BG_ABYSS;
+        // dedicated hook for it. Left at the global (near-white) ink it nearly vanishes on the light
+        // icy header, so set a header-contrasting ink: dark port ink on a resting node, and the near-
+        // black chrome ink on a selected node's accent header. Node text (title, port labels) is
+        // coloured explicitly, so this only reaches the caret. Scoped to this node's ui, so it does
+        // not leak to the rest of the canvas.
+        let is_selected = snarl
+            .get_node(node)
+            .is_some_and(|h| self.selection.contains(h));
+        let ink = if is_selected {
+            crate::theme::BG_ABYSS
+        } else {
+            crate::theme::NODE_INK_MID
+        };
         for w in [
             &mut style.visuals.widgets.noninteractive,
             &mut style.visuals.widgets.inactive,

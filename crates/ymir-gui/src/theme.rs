@@ -43,15 +43,24 @@ pub const TEXT_SECONDARY: Color32 = Color32::from_rgb(0xb2, 0xb9, 0xc2);
 
 // --- canvas: the frosted icy node-graph surface (LIGHT; the one light region in the dark chrome) ---
 /// The frosted canvas fill. A solid stand-in for the handoff's `canvas-a -> canvas-b` gradient (the
-/// gradient is a later polish); the midpoint of those two tokens.
-pub const CANVAS_BASE: Color32 = Color32::from_rgb(0xb2, 0xbe, 0xc8);
+/// gradient is a later polish). Darkened and cooled from the handoff midpoint so the light node cards
+/// read as frosted glass rather than backlit slides on a light table.
+pub const CANVAS_BASE: Color32 = Color32::from_rgb(0x9a, 0xa8, 0xb6);
+
+/// The 3D viewport stage behind the terrain mesh. A mid cool slate: dark enough that the mesh's lit
+/// slopes stand out, light enough that its shadowed slopes do not sink into it (the previous dark
+/// `chrome` panel fill lost the shadows), and close enough to the canvas that the two regions no
+/// longer read as unrelated light-and-dark halves.
+pub const VIEWPORT_BG: Color32 = Color32::from_rgb(0x58, 0x6a, 0x7c);
 
 // --- node cards (light, floating on the frosted canvas) ---
 /// Node card body. The handoff frosts it with a backdrop blur, which egui cannot do, so this is a
-/// near-solid light fill instead. Frost `node-bg`.
-pub const NODE_BG: Color32 = Color32::from_rgb(0xe0, 0xe6, 0xec);
-/// Node header strip. Frost `node-head`.
-pub const NODE_HEAD: Color32 = Color32::from_rgb(0xc9, 0xd3, 0xdc);
+/// near-solid light fill instead. Softened from pure light so it is a frosted card, not a bright
+/// slide. Frost `node-bg`.
+pub const NODE_BG: Color32 = Color32::from_rgb(0xd7, 0xe0, 0xe8);
+/// Node header strip. An icier, more saturated frost-cyan than the near-grey handoff value, so the
+/// header reads as chilled glass rather than plain grey. Frost `node-head`.
+pub const NODE_HEAD: Color32 = Color32::from_rgb(0xb2, 0xcd, 0xdb);
 /// Node border and internal divider (1px). Frost `node-line`.
 pub const NODE_LINE: Color32 = Color32::from_rgb(0x9d, 0xae, 0xbc);
 /// Node title text, dark on the light card. Frost `node-ink`.

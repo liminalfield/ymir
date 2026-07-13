@@ -5858,6 +5858,10 @@ fn mount(layout: &Layout, ui: &mut egui::Ui, state: &mut AppState) {
                 .resizable(true)
                 .default_size(ui.available_height() * 0.4)
                 .show_separator_line(false)
+                // The 3D stage's own background, not the dark chrome panel fill: a mid cool slate
+                // that keeps the neutral grey terrain legible in both highlight and shadow. No inner
+                // margin, so the viewport hugs the panel edges.
+                .frame(egui::Frame::new().fill(theme::VIEWPORT_BG))
                 .show_inside(ui, |ui| draw_pane(layout.viewport, ui, state));
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
