@@ -4224,22 +4224,32 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
             shade::ShadeMode::Relief
         };
     }
-    // Second row: the Auto/Fixed scale in Heightfield, the light dial in Relief. Sized to its
-    // content, so it does not leave a gap above the image in Heightfield mode.
-    ui.horizontal(|ui| {
-        if mode == shade::ShadeMode::Relief {
-            ui.add(egui::Label::new(
-                egui::RichText::new("Light").color(theme::TEXT_SECONDARY),
-            ));
-            state.preview.light_indicator(ui);
-            // Read the angles after the dial so a drag this frame is reflected.
-            let (az, alt) = state.preview.light_angles();
-            ui.label(
-                egui::RichText::new(format!("{az:.0}° · {alt:.0}°"))
-                    .family(egui::FontFamily::Monospace)
-                    .color(theme::TEXT_TERTIARY),
-            );
-        } else {
+    // Second row: the Auto/Fixed scale in Heightfield, the light dial in Relief.
+    if mode == shade::ShadeMode::Relief {
+        // A fixed-height row equal to the dial, laid out centre-aligned, so the "Light" label,
+        // the dial, and the angle readout all sit on the dial's midline. A plain `ui.horizontal`
+        // centres each widget against the row height known when it is placed, so the label (added
+        // before the taller dial) would float up while the dial and readout centre lower.
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), preview::LIGHT_DIAL_SIZE),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.add(egui::Label::new(
+                    egui::RichText::new("Light").color(theme::TEXT_SECONDARY),
+                ));
+                state.preview.light_indicator(ui);
+                // Read the angles after the dial so a drag this frame is reflected.
+                let (az, alt) = state.preview.light_angles();
+                ui.label(
+                    egui::RichText::new(format!("{az:.0}° · {alt:.0}°"))
+                        .family(egui::FontFamily::Monospace)
+                        .color(theme::TEXT_TERTIARY),
+                );
+            },
+        );
+    } else {
+        // Sized to its content, so it does not leave a gap above the image in Heightfield mode.
+        ui.horizontal(|ui| {
             let scale_i = usize::from(scale == shade::HeightScale::Fixed);
             if let Some(i) = segmented(ui, &["Auto", "Fixed"], scale_i) {
                 scale = if i == 0 {
@@ -4248,8 +4258,8 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
                     shade::HeightScale::Fixed
                 };
             }
-        }
-    });
+        });
+    }
     state.preview.set_mode(mode);
     state.preview.set_scale(scale);
 
