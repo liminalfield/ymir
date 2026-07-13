@@ -44,6 +44,11 @@ pub(crate) const FRAME_TITLE_H: f32 = 24.0;
 /// grid and snapping arrive. Applied as a minimum on the header and footer rows; an
 /// unusually long title is the only thing that can push a node wider.
 const NODE_WIDTH: f32 = 140.0;
+/// Node title font size, and port-label font size, in graph units. Larger than egui's default body
+/// so the text stays legible at the zoomed-out fit view (egui-snarl scales the whole node layer for
+/// zoom, so smaller text turns soft until zoomed all the way in). The title leads the labels.
+const NODE_TITLE_SIZE: f32 = 16.0;
+const NODE_LABEL_SIZE: f32 = 14.5;
 /// Opacity a bypassed node's content is faded to, so it reads as off (#105).
 const BYPASS_OPACITY: f32 = 0.4;
 /// Below this canvas zoom, thumbnails are skipped (#74): the nodes are too small on
@@ -520,10 +525,13 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
         // the global light-text visuals would vanish here); selection keeps the accent colour.
         let text = if is_selected {
             egui::RichText::new(title)
+                .size(NODE_TITLE_SIZE)
                 .strong()
                 .color(ui.visuals().selection.stroke.color)
         } else {
-            egui::RichText::new(title).color(crate::theme::NODE_INK)
+            egui::RichText::new(title)
+                .size(NODE_TITLE_SIZE)
+                .color(crate::theme::NODE_INK)
         };
         // A bypassed node reads as off: its title (and footer thumbnail) fade, while the
         // header's enable toggle stays bright as the obvious way to switch it back on
@@ -818,7 +826,11 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
         snarl: &mut Snarl<Handle>,
     ) -> impl SnarlPin + 'static {
         if let Some(label) = self.port_label(snarl, pin.id.node, true, pin.id.input) {
-            ui.label(egui::RichText::new(label).color(crate::theme::NODE_INK_MID));
+            ui.label(
+                egui::RichText::new(label)
+                    .size(NODE_LABEL_SIZE)
+                    .color(crate::theme::NODE_INK_MID),
+            );
         }
         PinInfo::circle()
     }
@@ -833,7 +845,11 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
             // Just the label, mirroring the input side: the vendored snarl reserves the pin
             // slot on the output side correctly now (it did not in RTL upstream, which jammed
             // labels under the output pins, #55). See patches/egui-snarl-output-pin-space.patch.
-            ui.label(egui::RichText::new(label).color(crate::theme::NODE_INK_MID));
+            ui.label(
+                egui::RichText::new(label)
+                    .size(NODE_LABEL_SIZE)
+                    .color(crate::theme::NODE_INK_MID),
+            );
         }
         PinInfo::circle()
     }
