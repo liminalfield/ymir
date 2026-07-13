@@ -5892,10 +5892,65 @@ struct YmirApp {
 
 impl YmirApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // Install the Phosphor icon font as a fallback in the proportional family, so an
-        // icon const (a disclosure caret, etc.) renders anywhere text does. The default
-        // egui font has no triangle glyphs, which is why the node menu used ASCII chevrons.
+        // The Frost theme's typefaces: IBM Plex Sans (UI) and IBM Plex Mono (values, labels), both
+        // OFL, embedded so they ship in the binary (see assets/fonts/). egui has no synthetic bold,
+        // so each weight is a real file registered as its own named family; the built-in
+        // proportional/monospace families lead with the Regular weights and keep egui's own fonts as
+        // fallbacks after them. Phosphor is then appended as the icon fallback (below).
         let mut fonts = egui::FontDefinitions::default();
+        for (name, bytes) in [
+            (
+                "plex-sans",
+                include_bytes!("../assets/fonts/IBMPlexSans-Regular.ttf").as_slice(),
+            ),
+            (
+                "plex-sans-medium",
+                include_bytes!("../assets/fonts/IBMPlexSans-Medium.ttf").as_slice(),
+            ),
+            (
+                "plex-sans-semibold",
+                include_bytes!("../assets/fonts/IBMPlexSans-SemiBold.ttf").as_slice(),
+            ),
+            (
+                "plex-mono",
+                include_bytes!("../assets/fonts/IBMPlexMono-Regular.ttf").as_slice(),
+            ),
+            (
+                "plex-mono-medium",
+                include_bytes!("../assets/fonts/IBMPlexMono-Medium.ttf").as_slice(),
+            ),
+        ] {
+            fonts.font_data.insert(
+                name.to_owned(),
+                std::sync::Arc::new(egui::FontData::from_static(bytes)),
+            );
+        }
+        fonts
+            .families
+            .entry(egui::FontFamily::Proportional)
+            .or_default()
+            .insert(0, "plex-sans".to_owned());
+        fonts
+            .families
+            .entry(egui::FontFamily::Monospace)
+            .or_default()
+            .insert(0, "plex-mono".to_owned());
+        // The heavier weights, addressable via `FontFamily::Name` for titles and emphasis.
+        fonts.families.insert(
+            egui::FontFamily::Name("plex-medium".into()),
+            vec!["plex-sans-medium".to_owned()],
+        );
+        fonts.families.insert(
+            egui::FontFamily::Name("plex-semibold".into()),
+            vec!["plex-sans-semibold".to_owned()],
+        );
+        fonts.families.insert(
+            egui::FontFamily::Name("plex-mono-medium".into()),
+            vec!["plex-mono-medium".to_owned()],
+        );
+
+        // Install the Phosphor icon font as a fallback in the proportional family, so an
+        // icon const (a disclosure caret, etc.) renders anywhere text does.
         egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
         cc.egui_ctx.set_fonts(fonts);
 
