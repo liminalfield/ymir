@@ -103,6 +103,89 @@ pub(crate) fn value_text(value: &ParamValue) -> String {
     }
 }
 
+/// Height of a parameter row's reset-icon / value band.
+const DENSE_ROW_H: f32 = 22.0;
+/// Fixed width of a parameter row's value box.
+const VALUE_W: f32 = 54.0;
+
+/// A small faint revert glyph, shown when a value is off its default; clicking it resets that one
+/// parameter. Returns its response.
+fn reset_icon(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(16.0, DENSE_ROW_H), egui::Sense::click());
+    let color = if resp.hovered() {
+        crate::theme::TEXT_SECONDARY
+    } else {
+        crate::theme::TEXT_TERTIARY
+    };
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
+        egui::FontId::proportional(12.0),
+        color,
+    );
+    resp.on_hover_text("Reset to default")
+}
+
+/// A custom horizontal slider filling the available width: a 4px deep track, an accent fill up to
+/// the handle, and a white handle with a ring. Drag or click anywhere on it to set. Marks its
+/// response changed only when the value actually moves.
+fn slider(ui: &mut egui::Ui, value: &mut f64, min: f64, max: f64, log: bool) -> egui::Response {
+    let w = ui.available_width().max(24.0);
+    let (rect, mut resp) =
+        ui.allocate_exact_size(egui::vec2(w, 14.0), egui::Sense::click_and_drag());
+    let r = 5.5_f32;
+    let usable = (w - 2.0 * r).max(1.0);
+    let track = egui::Rect::from_center_size(rect.center(), egui::vec2(w, 4.0));
+    let t = to_t(*value, min, max, log).clamp(0.0, 1.0) as f32;
+    let hx = rect.left() + r + t * usable;
+    let cy = rect.center().y;
+    let painter = ui.painter();
+    painter.rect_filled(track, 2.0, crate::theme::BG_ABYSS);
+    painter.rect_filled(
+        egui::Rect::from_min_max(track.left_top(), egui::pos2(hx, track.bottom())),
+        2.0,
+        crate::theme::ACCENT_PRIMARY,
+    );
+    painter.circle_filled(egui::pos2(hx, cy), r, crate::theme::TEXT_PRIMARY);
+    painter.circle_stroke(
+        egui::pos2(hx, cy),
+        r,
+        egui::Stroke::new(2.0, crate::theme::BG_SURFACE),
+    );
+    let before = *value;
+    if (resp.dragged() || resp.clicked())
+        && let Some(pos) = resp.interact_pointer_pos()
+    {
+        let nt = (f64::from(pos.x - rect.left() - r) / f64::from(usable)).clamp(0.0, 1.0);
+        *value = from_t(nt, min, max, log);
+    }
+    if *value != before {
+        resp.mark_changed();
+    }
+    resp
+}
+
+/// Normalizes a value to `0..1` across `[min, max]`, log-scaled when `log` and the range is positive.
+fn to_t(x: f64, min: f64, max: f64, log: bool) -> f64 {
+    if log && min > 0.0 && max > 0.0 {
+        (x.ln() - min.ln()) / (max.ln() - min.ln())
+    } else if (max - min).abs() < f64::EPSILON {
+        0.0
+    } else {
+        (x - min) / (max - min)
+    }
+}
+
+/// The inverse of [`to_t`]: a `0..1` position back to a value in `[min, max]`.
+fn from_t(t: f64, min: f64, max: f64, log: bool) -> f64 {
+    if log && min > 0.0 && max > 0.0 {
+        (min.ln() + t * (max.ln() - min.ln())).exp()
+    } else {
+        min + t * (max - min)
+    }
+}
+
 /// Renders the editor for one parameter and returns the new value if the user
 /// changed it this frame, or `None` otherwise. The widget choice is [`widget_for`];
 /// this is the thin egui-touching layer over that pure mapping. A value whose
@@ -125,46 +208,46 @@ pub(crate) fn edit(
             },
             ParamValue::Float(v),
         ) => {
-            // egui's built-in slider value is a drag-value it won't let us configure,
-            // so it keeps smart-aim and snaps coarsely (about 1/100 of the range). Hide
-            // it and pair the handle with our own DragValue: smart-aim off on both for
-            // continuous values, a range-relative drag speed for fine control, and the
-            // number stays type-able. The handle gives the coarse visual position.
+            // A two-line row: the mono label and, right-aligned, a reset icon (only when off default)
+            // plus the scrub/type value; then a full-width slider beneath. The single-line label ->
+            // control -> value was too tight for the panel width.
             let mut x = *v;
+            let default = match &spec.default {
+                ParamValue::Float(d) => *d,
+                _ => x,
+            };
             let speed = (max - min) * 0.002;
-
-            // Reserve a constant width for the number box, sized to the widest value at
-            // our fixed decimals, so neither the mantissa nor the integer digit count
-            // resizes it and the slider beside it never shifts as you drag.
-            let extreme = if min.abs() > max.abs() { min } else { max };
-            let font = egui::TextStyle::Body.resolve(ui.style());
-            let text_w = ui
-                .painter()
-                .layout_no_wrap(format!("{extreme:.3}"), font, egui::Color32::WHITE)
-                .rect
-                .width();
-            let box_w = text_w + 2.0 * ui.spacing().button_padding.x + 2.0;
-
-            let resp = ui
-                .horizontal(|ui| {
-                    let value = ui.add_sized(
-                        egui::vec2(box_w, ui.spacing().interact_size.y),
-                        egui::DragValue::new(&mut x)
-                            .range(min..=max)
-                            .speed(speed)
-                            .fixed_decimals(3),
-                    );
-                    let handle = ui.add(
-                        egui::Slider::new(&mut x, min..=max)
-                            .show_value(false)
-                            .smart_aim(false)
-                            .logarithmic(logarithmic)
-                            .text(name),
-                    );
-                    value | handle
-                })
-                .inner;
-            resp.changed().then_some(ParamValue::Float(x))
+            let mut result = None;
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(name)
+                        .family(egui::FontFamily::Monospace)
+                        .size(12.0)
+                        .color(crate::theme::TEXT_SECONDARY),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let value = ui
+                        .add_sized(
+                            egui::vec2(VALUE_W, ui.spacing().interact_size.y),
+                            egui::DragValue::new(&mut x)
+                                .range(min..=max)
+                                .speed(speed)
+                                .fixed_decimals(3),
+                        )
+                        .on_hover_text("Drag to scrub \u{b7} click to type");
+                    if value.changed() {
+                        result = Some(ParamValue::Float(x));
+                    }
+                    if (x - default).abs() > f64::EPSILON && reset_icon(ui).clicked() {
+                        x = default;
+                        result = Some(ParamValue::Float(default));
+                    }
+                });
+            });
+            if slider(ui, &mut x, min, max, logarithmic).changed() {
+                result = Some(ParamValue::Float(x));
+            }
+            result
         }
         (Widget::Quantity { min, max, unit }, ParamValue::Float(v)) => {
             let mut x = *v;
