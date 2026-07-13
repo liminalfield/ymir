@@ -2812,7 +2812,7 @@ fn node_display_name(graph: &Graph, id: NodeId) -> String {
 /// collapse control at its far right later).
 fn right_panel_pane(ui: &mut egui::Ui, state: &mut AppState) {
     header_strip(ui, |ui| {
-        ui.label("Node");
+        ui.label("Node Inspector");
     });
     egui::Panel::top("preview-panel")
         // Fixed height so the preview does not change size between having a node selected (a tall
