@@ -3333,25 +3333,7 @@ fn library_inspector(ui: &mut egui::Ui, state: &mut AppState) {
                         }
                     });
                 } else {
-                    ui.horizontal(|ui| {
-                        if ui.button("Insert").clicked() {
-                            command = Some(LibraryCommand::Insert(path.clone()));
-                        }
-                        // The kebab carries the secondary actions, so the row stays uncluttered
-                        // behind its one primary button.
-                        ui.menu_button(egui_phosphor::regular::DOTS_THREE_VERTICAL, |ui| {
-                            canvas::style_context_menu(ui);
-                            if ui.button("Edit Details…").clicked() {
-                                command = Some(LibraryCommand::EditDetails(path.clone()));
-                                ui.close();
-                            }
-                            ui.separator();
-                            if ui.button("Delete").clicked() {
-                                command = Some(LibraryCommand::ArmDelete(path.clone()));
-                                ui.close();
-                            }
-                        });
-                    });
+                    library_command_bar(ui, &path, &mut command);
                 }
                 ui.add_space(8.0);
                 library_entry_detail(ui, &entry.file);
@@ -3406,6 +3388,108 @@ fn count_phrase(n: usize, noun: &str) -> String {
     } else {
         format!("{n} {noun}s")
     }
+}
+
+/// The inspector's action command bar: a primary accent-filled Insert that grows to fill the row,
+/// then compact Edit-details and Delete icon buttons. Replaces the old single Insert button plus a
+/// `⋮` kebab, so the actions are all visible. Delete arms the inspector's confirm rather than
+/// deleting outright.
+fn library_command_bar(
+    ui: &mut egui::Ui,
+    path: &std::path::Path,
+    command: &mut Option<LibraryCommand>,
+) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        // Insert takes the row minus the two fixed 34px icon buttons and their two 8px gaps.
+        let insert_w = (ui.available_width() - 2.0 * (34.0 + 8.0)).max(72.0);
+        if library_insert_button(ui, insert_w).clicked() {
+            *command = Some(LibraryCommand::Insert(path.to_path_buf()));
+        }
+        if library_icon_button(
+            ui,
+            egui_phosphor::regular::PENCIL_SIMPLE,
+            "Edit details",
+            false,
+        )
+        .clicked()
+        {
+            *command = Some(LibraryCommand::EditDetails(path.to_path_buf()));
+        }
+        if library_icon_button(ui, egui_phosphor::regular::TRASH, "Delete subgraph", true).clicked()
+        {
+            *command = Some(LibraryCommand::ArmDelete(path.to_path_buf()));
+        }
+    });
+}
+
+/// The primary Insert button: an accent-filled pill of the given width with a dark semibold label
+/// and a leading plus, brightening slightly on hover.
+fn library_insert_button(ui: &mut egui::Ui, width: f32) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 32.0), egui::Sense::click());
+    let fill = if resp.hovered() {
+        brighten(theme::ACCENT_PRIMARY, 1.08)
+    } else {
+        theme::ACCENT_PRIMARY
+    };
+    let painter = ui.painter();
+    painter.rect_filled(rect, 4.0, fill);
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "+  Insert",
+        egui::FontId::new(13.5, egui::FontFamily::Name("plex-semibold".into())),
+        theme::BG_ABYSS,
+    );
+    resp
+}
+
+/// A 34x32 command-bar icon button. Resting: raised fill, hairline border, muted glyph. Hover: a
+/// brighter fill and glyph; or, for a destructive button, a danger-tinted fill, border, and glyph.
+fn library_icon_button(
+    ui: &mut egui::Ui,
+    glyph: &str,
+    tooltip: &str,
+    danger: bool,
+) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(34.0, 32.0), egui::Sense::click());
+    let (fill, border, fg) = match (resp.hovered(), danger) {
+        (false, _) => (theme::BG_RAISED, theme::LINE, theme::TEXT_SECONDARY),
+        (true, false) => (theme::BG_HOVER, theme::LINE_STRONG, theme::TEXT_PRIMARY),
+        (true, true) => (
+            mix(theme::DANGER, theme::BG_RAISED, 0.20),
+            theme::DANGER,
+            theme::DANGER,
+        ),
+    };
+    let painter = ui.painter();
+    painter.rect_filled(rect, 4.0, fill);
+    painter.rect_stroke(
+        rect,
+        4.0,
+        egui::Stroke::new(1.0, border),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        glyph,
+        egui::FontId::proportional(15.0),
+        fg,
+    );
+    resp.on_hover_text(tooltip)
+}
+
+/// Opaque sRGB blend: `t` of `a` over `1 - t` of `b`.
+fn mix(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
+    let c = |x: u8, y: u8| (f32::from(x) * t + f32::from(y) * (1.0 - t)).round() as u8;
+    egui::Color32::from_rgb(c(a.r(), b.r()), c(a.g(), b.g()), c(a.b(), b.b()))
+}
+
+/// Scales a colour's channels by `f` (>1 lightens), clamped, keeping it opaque.
+fn brighten(c: egui::Color32, f: f32) -> egui::Color32 {
+    let s = |x: u8| (f32::from(x) * f).round().clamp(0.0, 255.0) as u8;
+    egui::Color32::from_rgb(s(c.r()), s(c.g()), s(c.b()))
 }
 
 /// Draws the inspector's reserved thumbnail slot: a framed, centered square (matching the square

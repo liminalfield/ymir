@@ -88,6 +88,9 @@ pub const SUCCESS: Color32 = Color32::from_rgb(0x2b, 0xff, 0x5c);
 pub const WARNING: Color32 = Color32::from_rgb(0xff, 0xbf, 0x47);
 /// Errors.
 pub const ERROR: Color32 = Color32::from_rgb(0xff, 0x4d, 0x6d);
+/// Destructive-action accent, used only on the hover state of a delete control (a muted brick red,
+/// distinct from the brighter `ERROR` status colour). Frost `danger`.
+pub const DANGER: Color32 = Color32::from_rgb(0xcf, 0x55, 0x45);
 /// Text & marquee selection fill: the primary cyan mixed down into the chrome so selected text
 /// stays legible against it.
 pub const SELECTION: Color32 = Color32::from_rgb(0x2f, 0x59, 0x6a);
