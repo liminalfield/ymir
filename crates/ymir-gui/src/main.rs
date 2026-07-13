@@ -3924,6 +3924,72 @@ fn world_settings(ui: &mut egui::Ui, state: &mut AppState) {
     }
 }
 
+/// The preview's pin toggle: a 24px square. Pinned = accent fill, accent border, light pin glyph
+/// (click to unpin). Unpinned but with something to pin = a raised outline with a muted glyph (click
+/// to pin). Nothing to pin = a faint, inert outline. Returns its response.
+fn pin_toggle(ui: &mut egui::Ui, pinned: bool, enabled: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::click());
+    let (fill, border, fg) = if pinned {
+        (
+            theme::ACCENT_PRIMARY,
+            theme::ACCENT_PRIMARY,
+            theme::TEXT_PRIMARY,
+        )
+    } else if !enabled {
+        (
+            egui::Color32::TRANSPARENT,
+            theme::LINE,
+            theme::TEXT_TERTIARY.gamma_multiply(0.6),
+        )
+    } else if resp.hovered() {
+        (theme::BG_HOVER, theme::LINE_STRONG, theme::TEXT_PRIMARY)
+    } else {
+        (theme::BG_RAISED, theme::LINE, theme::TEXT_SECONDARY)
+    };
+    let painter = ui.painter();
+    painter.rect_filled(rect, 4.0, fill);
+    painter.rect_stroke(
+        rect,
+        4.0,
+        egui::Stroke::new(1.0, border),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        egui_phosphor::regular::PUSH_PIN,
+        egui::FontId::proportional(14.0),
+        fg,
+    );
+    resp.on_hover_text(if pinned {
+        "Unpin preview"
+    } else {
+        "Pin this node's preview"
+    })
+}
+
+/// The small `PINNED` pill shown beside the pinned node's name: accent text in an accent outline.
+fn pinned_pill(ui: &mut egui::Ui) {
+    let font = egui::FontId::proportional(9.5);
+    let galley = ui
+        .painter()
+        .layout_no_wrap("PINNED".to_string(), font, theme::ACCENT_PRIMARY);
+    let pad = egui::vec2(6.0, 3.0);
+    let (rect, _) = ui.allocate_exact_size(galley.size() + pad * 2.0, egui::Sense::hover());
+    let painter = ui.painter();
+    painter.rect_stroke(
+        rect,
+        3.0,
+        egui::Stroke::new(1.0, theme::ACCENT_PRIMARY),
+        egui::StrokeKind::Inside,
+    );
+    painter.galley(
+        rect.center() - galley.size() * 0.5,
+        galley,
+        theme::ACCENT_PRIMARY,
+    );
+}
+
 fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // Drop a pin left pointing at a deleted node, so it never sticks the preview on
     // nothing.
@@ -3947,55 +4013,40 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
     let id = target.and_then(|t| state.graph.node_id_of(t));
     let is_pinned = target.is_some() && state.preview_pin == target;
 
-    // Row 1: the status dot (colour = up-to-date/evaluating/error, words on hover), the
-    // previewed node's name, a pinned/bypassed marker, and the Pin/Unpin toggle right-aligned.
-    // A plain row on the regular background (the tab header above is the panel's header).
+    // Pinned identity row: a pin toggle (accent-filled while pinned, an outline while the preview
+    // merely follows the selection), the previewed node's name, and a PINNED pill. The preview
+    // freshness (up to date / evaluating / error) is a hover on the name rather than a visible dot,
+    // keeping the row to the pin + name + pill of the design.
     ui.horizontal(|ui| {
-        let color = match id {
-            Some(_) => state.preview.status_color(ui.visuals()),
-            None => ui.visuals().weak_text_color(),
-        };
-        let d = ui.text_style_height(&egui::TextStyle::Body) * 0.6;
-        let (rect, resp) = ui.allocate_exact_size(egui::vec2(d, d), egui::Sense::hover());
-        ui.painter().circle_filled(rect.center(), d * 0.5, color);
-        if id.is_some() {
-            resp.on_hover_text(state.preview.status_label());
+        ui.spacing_mut().item_spacing.x = 6.0;
+        if pin_toggle(ui, is_pinned, target.is_some()).clicked() {
+            state.preview_pin = if is_pinned { None } else { target };
         }
-
         match id {
             Some(id) => {
-                ui.label(node_display_name(&state.graph, id));
+                ui.label(
+                    egui::RichText::new(node_display_name(&state.graph, id))
+                        .family(egui::FontFamily::Name("plex-semibold".into()))
+                        .size(14.0)
+                        .color(theme::TEXT_PRIMARY),
+                )
+                .on_hover_text(state.preview.status_label());
                 if is_pinned {
-                    ui.weak("· pinned");
+                    pinned_pill(ui);
                 }
                 // A bypassed node shows its input, not its own output (#105).
                 if state.graph.is_bypassed(id) {
-                    ui.weak("· bypassed");
+                    ui.label(
+                        egui::RichText::new("bypassed")
+                            .size(10.5)
+                            .color(theme::TEXT_TERTIARY),
+                    );
                 }
             }
             None => {
-                ui.weak("No node selected");
+                ui.label(egui::RichText::new("No node").color(theme::TEXT_TERTIARY));
             }
         }
-
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            match (target, is_pinned) {
-                (Some(_), true) => {
-                    if ui.button("Unpin").clicked() {
-                        state.preview_pin = None;
-                    }
-                }
-                (Some(t), false) => {
-                    if ui.button("Pin").clicked() {
-                        state.preview_pin = Some(t);
-                    }
-                }
-                // Nothing to pin, but keep the control for a stable header.
-                (None, _) => {
-                    ui.add_enabled(false, egui::Button::new("Pin"));
-                }
-            }
-        });
     });
 
     // Output picker: when the previewed node has more than one output (e.g. hydraulic
