@@ -149,6 +149,42 @@ pub(crate) struct ArmedWire {
     pub(crate) port: usize,
 }
 
+/// Draws a styled tooltip just above `anchor_rect` (a widget rect in the node layer's local space).
+///
+/// We render our own tooltip rather than `Response::on_hover_text` for two reasons the node header
+/// needs: egui's default (and the elided-title tooltip) inherit the node card's dark ink, which is
+/// unreadable on the dark popup; and the default opens over the node body. This uses the scheme's
+/// dark-chrome frame with light ink, and maps the anchor out of snarl's pan/zoom-transformed layer to
+/// screen space, so the tooltip renders on the tooltip layer at normal UI scale (crisp at any zoom)
+/// centred just above the widget.
+fn header_tooltip(ui: &egui::Ui, anchor_rect: egui::Rect, id: egui::Id, text: &str) {
+    let to_global = ui
+        .ctx()
+        .layer_transform_to_global(ui.layer_id())
+        .unwrap_or_default();
+    let anchor = to_global * anchor_rect.center_top() - egui::vec2(0.0, 6.0);
+    egui::Area::new(id)
+        .order(egui::Order::Tooltip)
+        .fixed_pos(anchor)
+        .pivot(egui::Align2::CENTER_BOTTOM)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::new()
+                .fill(crate::theme::BG_RAISED)
+                .stroke(egui::Stroke::new(1.0, crate::theme::LINE_STRONG))
+                .corner_radius(4)
+                .inner_margin(egui::Margin::symmetric(8, 5))
+                .shadow(egui::epaint::Shadow {
+                    offset: [0, 2],
+                    blur: 8,
+                    spread: 0,
+                    color: egui::Color32::from_black_alpha(90),
+                })
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new(text).color(crate::theme::TEXT_PRIMARY));
+                });
+        });
+}
+
 /// The first source pin of an armed/dropped wire as an [`ArmedWire`], or `None` for an
 /// empty set. Only the first pin matters: wire-to-create connects a single new node.
 fn armed_from_pins(pins: AnyPins) -> Option<ArmedWire> {
@@ -629,12 +665,12 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
         // the global light-text visuals would vanish here); a selected node's title is dark ink on
         // the accent header, matching the Build button's dark-on-accent treatment.
         let text = if is_selected {
-            egui::RichText::new(title)
+            egui::RichText::new(title.clone())
                 .size(NODE_TITLE_SIZE)
                 .strong()
                 .color(crate::theme::BG_ABYSS)
         } else {
-            egui::RichText::new(title)
+            egui::RichText::new(title.clone())
                 .size(NODE_TITLE_SIZE)
                 .color(crate::theme::NODE_INK)
         };
@@ -693,18 +729,13 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
                         egui::Stroke::new(1.5, header_mark),
                     );
                 }
-                // A gap between the status dot's slot and the title, so an active (green) pip does
-                // not butt up against the first letter.
+                // A gap after the status dot's slot, so an active (green) pip does not butt up
+                // against the title.
                 ui.add_space(4.0);
-                // The title, faded when bypassed (scoped, so the enable toggle stays bright).
-                ui.scope(|ui| {
-                    if is_bypassed {
-                        ui.multiply_opacity(BYPASS_OPACITY);
-                    }
-                    ui.add(egui::Label::new(text).selectable(false));
-                });
-                // Right-aligned enable toggle: filled = active, hollow = bypassed; clicking
-                // toggles. Full opacity always, so it stays an obvious, clickable target.
+                // Reserve the enable toggle at the far right first, then let the title fill the space
+                // between the two. A long title then truncates with an ellipsis instead of colliding
+                // with the toggle. The toggle: filled = active, hollow = bypassed; clicking toggles.
+                // Full opacity always, so it stays an obvious, clickable target.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let d = ui.text_style_height(&egui::TextStyle::Body) * 0.6;
                     let (toggle_rect, resp) =
@@ -718,12 +749,56 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
                     } else {
                         ui.painter().circle_filled(center, radius, header_mark);
                     }
-                    resp.on_hover_text(if is_bypassed {
-                        "Enable node"
-                    } else {
-                        "Bypass node"
-                    })
-                    .clicked()
+                    let clicked = resp.clicked();
+                    // Tooltip above the header, styled by `header_tooltip` (readable light ink, not the
+                    // default's dark-on-dark). `should_show_tooltip` reuses egui's hover delay.
+                    if egui::Tooltip::should_show_tooltip(&resp, false) {
+                        let tip_text = if is_bypassed {
+                            "Enable node"
+                        } else {
+                            "Bypass node"
+                        };
+                        header_tooltip(ui, resp.rect, resp.id.with("bypass_tooltip"), tip_text);
+                    }
+                    // A gap between the toggle and the title.
+                    ui.add_space(6.0);
+                    // The title fills the remaining space to the left, left-aligned and truncated,
+                    // faded when bypassed (scoped, so the toggle stays bright).
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        if is_bypassed {
+                            ui.multiply_opacity(BYPASS_OPACITY);
+                        }
+                        // Disable egui's built-in elided-title tooltip: it re-lays the title's own
+                        // sections, so it inherits the dark card ink and is unreadable on the dark
+                        // popup. Show our styled one instead, but only when the title is actually
+                        // elided (comparing the full text width to the laid-out width).
+                        let title_resp = ui.add(
+                            egui::Label::new(text)
+                                .selectable(false)
+                                .truncate()
+                                .show_tooltip_when_elided(false),
+                        );
+                        let full_width = ui
+                            .painter()
+                            .layout_no_wrap(
+                                title.clone(),
+                                egui::FontId::proportional(NODE_TITLE_SIZE),
+                                egui::Color32::WHITE,
+                            )
+                            .size()
+                            .x;
+                        if full_width > title_resp.rect.width() + 1.0
+                            && egui::Tooltip::should_show_tooltip(&title_resp, false)
+                        {
+                            header_tooltip(
+                                ui,
+                                title_resp.rect,
+                                title_resp.id.with("title_tooltip"),
+                                &title,
+                            );
+                        }
+                    });
+                    clicked
                 })
                 .inner
             })
