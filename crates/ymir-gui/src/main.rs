@@ -171,6 +171,11 @@ const RIBBON_BUTTON_PADDING: egui::Vec2 = egui::vec2(8.0, 5.0);
 /// edges. A touch tighter vertically than the button padding above, so the bands are snug.
 const RIBBON_BAND_MARGIN: egui::Margin = egui::Margin::symmetric(8, 4);
 
+/// The content height of the top ribbon row (tabs / search / Build). Forcing it up front makes every
+/// item in the row centre on the same height; without it the shorter tabs and the vertical divider
+/// are placed before the taller search field and end up top-aligned.
+const RIBBON_ROW_H: f32 = 26.0;
+
 /// The largest the library inspector's thumbnail slot grows. The slot is square, because the
 /// terrain render is square (the grid is square) — a landscape crop would letterbox, clip, or
 /// distort it. Capped so a full-width square does not dominate the short inspector: when the dock
@@ -2465,7 +2470,7 @@ fn category_tab(
     let resp = ui.add(
         egui::Button::new(egui::RichText::new(label).color(color))
             .frame(false)
-            .min_size(egui::vec2(0.0, ui.spacing().interact_size.y)),
+            .min_size(egui::vec2(0.0, RIBBON_ROW_H)),
     );
     if selected {
         let r = resp.rect;
@@ -2518,15 +2523,19 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // Roomier tabs and node buttons than egui's default (#—): both bands inherit this, so the
     // buttons carry whitespace on every side in both states and the ribbon stands a touch taller.
     ui.spacing_mut().button_padding = RIBBON_BUTTON_PADDING;
+    // The two bands sit flush so the hairline divider drawn between them (below) reads as one line.
+    ui.spacing_mut().item_spacing.y = 0.0;
 
-    // Two full-width bands with equal padding, so they are equal height with their content
-    // vertically centred: the categories/search/Build bar, then the node list below.
-    egui::Frame::new()
+    // Two full-width bands: the categories/search/Build bar, then the node list below, separated by
+    // a hairline. The row forces a fixed height so tabs, the divider, and the search field all
+    // centre on it.
+    let top_band = egui::Frame::new()
         .fill(theme::BG_SURFACE)
         .inner_margin(RIBBON_BAND_MARGIN)
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.horizontal(|ui| {
+                ui.set_min_height(RIBBON_ROW_H);
                 for cat in &cats {
                     let key = format!("category-{}", cat.id);
                     category_tab(
@@ -2596,6 +2605,13 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 });
             });
         });
+    // A hairline between the category row and the node-chip row below it.
+    let sep_y = top_band.response.rect.bottom();
+    ui.painter().hline(
+        top_band.response.rect.x_range(),
+        sep_y,
+        egui::Stroke::new(1.0, theme::LINE_STRONG),
+    );
 
     // The node list, a touch lighter so it reads as distinct from the bar above.
     let entries = node_entries();
@@ -4317,12 +4333,14 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // returns an unbounded `EVERYTHING` rect, so it cannot be used for hit-testing
     // or to locate the visible centre.
     let canvas_rect = ui.max_rect();
-    // Wires default to ~1px in a muted colour, which is hard to read; thicken them and
-    // colour them (and the pin fill, which wires inherit) with accent-frost, the brand's
-    // wire/connection accent (#104). Width/colour become user settings later (#57).
+    // Wires and pins in the cyan connection accent, drawn prominent: a thicker wire and larger pin
+    // than snarl's small defaults, so connections read clearly on the light canvas (our own pin
+    // style, just bolder, not the handoff's typed ringed ports). Width/colour become settings
+    // later (#57).
     let style = egui_snarl::ui::SnarlStyle {
-        wire_width: Some(2.5),
+        wire_width: Some(3.0),
         pin_fill: Some(theme::ACCENT_FROST),
+        pin_size: Some(13.0),
         // The Frost canvas is a frosted icy-light surface (the one light region in the dark chrome),
         // with no grid for now (the grid draw is suppressed in `draw_background`).
         bg_frame: Some(egui::Frame::new().fill(theme::CANVAS_BASE)),
