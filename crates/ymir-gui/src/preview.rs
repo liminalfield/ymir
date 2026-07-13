@@ -457,7 +457,18 @@ impl PreviewEngine {
         }
     }
 
-    /// A small disk that shows the relief light direction — a dot whose angle is the
+    /// The relief light's azimuth and altitude in degrees, for the dial readout: azimuth is the
+    /// horizontal direction (0-360), altitude the angle above the horizon.
+    pub(crate) fn light_angles(&self) -> (f32, f32) {
+        let az = self.light[1]
+            .atan2(self.light[0])
+            .to_degrees()
+            .rem_euclid(360.0);
+        let alt = self.light[2].clamp(-1.0, 1.0).asin().to_degrees();
+        (az, alt)
+    }
+
+    /// A small disk that shows the relief light direction — a sun whose angle is the
     /// azimuth and whose radius is the altitude — and lets you set it by dragging
     /// (sharing the image's mapping). Only meaningful in relief mode (#40).
     pub(crate) fn light_indicator(&mut self, ui: &mut egui::Ui) {
@@ -466,12 +477,19 @@ impl PreviewEngine {
         let center = rect.center();
         let radius = size * 0.5 - 3.0;
         let painter = ui.painter_at(rect);
-        let disk = ui.visuals().weak_text_color();
-        let sun = egui::Color32::from_rgb(0xf2, 0xc4, 0x4d);
-        painter.circle_stroke(center, radius, egui::Stroke::new(1.0, disk));
+        // An inset well: a deep fill with a hairline rim, so the dial reads as a control.
+        painter.circle_filled(center, radius, crate::theme::BG_ABYSS);
+        painter.circle_stroke(center, radius, egui::Stroke::new(1.0, crate::theme::LINE));
         // The light's horizontal projection (lx, ly) maps straight onto the disk.
         let dot = center + egui::vec2(self.light[0], self.light[1]) * radius;
-        painter.line_segment([center, dot], egui::Stroke::new(1.5, sun));
+        // A faint direction line from the centre out to the sun.
+        painter.line_segment(
+            [center, dot],
+            egui::Stroke::new(1.0, crate::theme::LINE_STRONG),
+        );
+        // The sun: a warm core with a soft glow.
+        let sun = egui::Color32::from_rgb(0xf2, 0xc4, 0x4d);
+        painter.circle_filled(dot, 6.0, sun.gamma_multiply(0.35));
         painter.circle_filled(dot, 3.5, sun);
 
         let resp = resp.on_hover_text("Drag to set the relief light");

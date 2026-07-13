@@ -4063,6 +4063,9 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // node. The eyebrow makes that pinned-vs-selected split explicit (the two are usually different
     // nodes).
     section_heading(ui, "Preview");
+    // One consistent gap between every preview row (the default is too tight; the reserved dial row
+    // was too loose).
+    ui.spacing_mut().item_spacing.y = 6.0;
 
     // The preview shows the pinned node if one is set, else the selection. Only nodes with
     // an output qualify; evaluating an endpoint would run its side effect. When nothing is
@@ -4147,32 +4150,41 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // stretches the field's actual range; Fixed maps a true [0, 1].
     let mut mode = state.preview.mode();
     let mut scale = state.preview.scale();
+    // Stacked, not side by side: the panel is too narrow for both segmented controls on one row.
+    // First row: the Heightfield/Relief mode.
+    let mode_i = usize::from(mode == shade::ShadeMode::Relief);
+    if let Some(i) = segmented(ui, &["Heightfield", "Relief"], mode_i) {
+        mode = if i == 0 {
+            shade::ShadeMode::Height
+        } else {
+            shade::ShadeMode::Relief
+        };
+    }
+    // Second row: the Auto/Fixed scale in Heightfield, the light dial in Relief. Sized to its
+    // content, so it does not leave a gap above the image in Heightfield mode.
     ui.horizontal(|ui| {
-        // Reserve the dial's height in both modes so the image never jumps when toggling
-        // Heightfield/Relief.
-        ui.set_min_height(preview::LIGHT_DIAL_SIZE);
-        let mode_i = usize::from(mode == shade::ShadeMode::Relief);
-        if let Some(i) = segmented(ui, &["Heightfield", "Relief"], mode_i) {
-            mode = if i == 0 {
-                shade::ShadeMode::Height
-            } else {
-                shade::ShadeMode::Relief
-            };
-        }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if mode == shade::ShadeMode::Relief {
-                state.preview.light_indicator(ui);
-            } else {
-                let scale_i = usize::from(scale == shade::HeightScale::Fixed);
-                if let Some(i) = segmented(ui, &["Auto", "Fixed"], scale_i) {
-                    scale = if i == 0 {
-                        shade::HeightScale::Auto
-                    } else {
-                        shade::HeightScale::Fixed
-                    };
-                }
+        if mode == shade::ShadeMode::Relief {
+            ui.add(egui::Label::new(
+                egui::RichText::new("Light").color(theme::TEXT_SECONDARY),
+            ));
+            state.preview.light_indicator(ui);
+            // Read the angles after the dial so a drag this frame is reflected.
+            let (az, alt) = state.preview.light_angles();
+            ui.label(
+                egui::RichText::new(format!("{az:.0}° · {alt:.0}°"))
+                    .family(egui::FontFamily::Monospace)
+                    .color(theme::TEXT_TERTIARY),
+            );
+        } else {
+            let scale_i = usize::from(scale == shade::HeightScale::Fixed);
+            if let Some(i) = segmented(ui, &["Auto", "Fixed"], scale_i) {
+                scale = if i == 0 {
+                    shade::HeightScale::Auto
+                } else {
+                    shade::HeightScale::Fixed
+                };
             }
-        });
+        }
     });
     state.preview.set_mode(mode);
     state.preview.set_scale(scale);
