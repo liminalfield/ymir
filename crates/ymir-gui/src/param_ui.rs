@@ -341,42 +341,44 @@ pub(crate) fn edit(
             result
         }
         (Widget::Quantity { min, max, unit }, ParamValue::Float(v)) => {
+            // Same row grammar as the other params (mono label left, control right), but a
+            // type/scrub value field with the unit as a suffix and no slider beneath: a wide
+            // world-unit range is too coarse to slide. Degrees wrap rather than clamp, so
+            // dragging below 0 rolls to 359.9 (a small counter-clockwise turn); metric quantities
+            // clamp to their range.
             let mut x = *v;
-            if matches!(unit, Unit::Degrees) {
-                // Angles wrap rather than clamp: dragging below 0 rolls to 359.9 (a small
-                // counter-clockwise turn) instead of sticking at 0, and one decimal gives
-                // fine control. The stored value is kept in [0, 360) by the wrap below.
-                let resp = ui
-                    .horizontal(|ui| {
-                        let r = ui.add(
-                            egui::DragValue::new(&mut x)
-                                .speed(0.5)
-                                .fixed_decimals(1)
-                                .suffix(unit_suffix(unit)),
-                        );
-                        ui.label(name);
-                        r
-                    })
-                    .inner;
-                resp.changed()
-                    .then(|| ParamValue::Float(x.rem_euclid(360.0)))
-            } else {
-                // An open physical quantity: a clamped, type-able value field with a
-                // 1-unit drag step and the unit shown, not a coarse wide slider.
-                let resp = ui
-                    .horizontal(|ui| {
-                        let r = ui.add(
-                            egui::DragValue::new(&mut x)
-                                .range(min..=max)
-                                .speed(1.0)
-                                .suffix(unit_suffix(unit)),
-                        );
-                        ui.label(name);
-                        r
-                    })
-                    .inner;
-                resp.changed().then_some(ParamValue::Float(x))
-            }
+            let default = match &spec.default {
+                ParamValue::Float(d) => *d,
+                _ => x,
+            };
+            let degrees = matches!(unit, Unit::Degrees);
+            let mut result = None;
+            ui.horizontal(|ui| {
+                param_label(ui, name);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let mut drag = egui::DragValue::new(&mut x).suffix(unit_suffix(unit));
+                    drag = if degrees {
+                        drag.speed(0.5).fixed_decimals(1)
+                    } else {
+                        drag.speed(1.0).range(min..=max)
+                    };
+                    let value = ui
+                        .add_sized(
+                            egui::vec2(VALUE_W + 16.0, ui.spacing().interact_size.y),
+                            drag,
+                        )
+                        .on_hover_text("Drag to scrub \u{b7} click to type");
+                    if value.changed() {
+                        let stored = if degrees { x.rem_euclid(360.0) } else { x };
+                        result = Some(ParamValue::Float(stored));
+                    }
+                    if (x - default).abs() > f64::EPSILON && reset_icon(ui).clicked() {
+                        x = default;
+                        result = Some(ParamValue::Float(default));
+                    }
+                });
+            });
+            result
         }
         (Widget::IntDrag { min, max }, ParamValue::Int(v)) => {
             let mut x = *v;
