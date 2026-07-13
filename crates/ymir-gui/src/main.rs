@@ -2897,18 +2897,10 @@ fn library_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // usable third of the dock, floored so a bad first-frame height cannot shrink it to a sliver.
     // The user can still drag the divider to make it larger.
     let third = (ui.available_height() / 3.0).max(180.0);
-    // The selected entry's name, folded into the inspector heading ("INSPECTOR: <name>") so the
-    // card need not repeat it on its own line below.
-    let selected_name = state
-        .library_selection
-        .as_ref()
-        .and_then(|path| state.library.entries.iter().find(|e| &e.path == path))
-        .map(|e| e.file.name.clone());
-    // Each subpane carries a subtle all-caps heading on its own background (like a sidebar's
-    // WORKSPACE/OUTLINER label), so the browser and the inspector each read as their own thing
-    // rather than the dock's switcher header appearing to title the browser alone. The full-width
-    // divider (below) marks the split; the panel rects stay full width, so it reaches both borders
-    // even though the content is padded.
+    // The browser and the inspector each read as their own subpane: the browser opens with its
+    // SUBGRAPH LIBRARY section label, the inspector with its own SUBGRAPH eyebrow + name heading (see
+    // `library_inspector`). The full-width divider (below) marks the split; the panel rects stay full
+    // width, so it reaches both borders even though the content is padded.
     let inspector = egui::Panel::bottom("library-inspector")
         .resizable(true)
         .min_size(third)
@@ -2919,7 +2911,6 @@ fn library_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 .inner_margin(pad),
         )
         .show_inside(ui, |ui| {
-            inspector_heading(ui, selected_name.as_deref());
             library_inspector(ui, state);
         });
     egui::CentralPanel::default()
@@ -3319,11 +3310,13 @@ fn library_inspector(ui: &mut egui::Ui, state: &mut AppState) {
                 let Some(entry) = listing.entries.iter().find(|e| e.path == path) else {
                     return;
                 };
-                // The name titles the card via the pane heading ("INSPECTOR: <name>"), so the card
-                // opens straight with the preview. The actions sit directly under the image: seeing
-                // the thumbnail is what tells the user this is the subgraph they want to act on, so
-                // the buttons must be in view without scrolling. The descriptive detail
-                // (description, ports, footer) follows below the actions.
+                // The inspector opens with its own heading block (SUBGRAPH eyebrow + name + stat
+                // line), then the preview. The actions sit directly under the image: seeing the
+                // thumbnail is what tells the user this is the subgraph they want to act on, so the
+                // buttons must be in view without scrolling. The descriptive detail (description,
+                // ports, footer) follows below the actions.
+                library_inspector_heading(ui, &entry.file);
+                ui.add_space(11.0);
                 library_thumbnail_slot(ui);
                 ui.add_space(8.0);
                 if armed {
@@ -3367,6 +3360,52 @@ fn library_inspector(ui: &mut egui::Ui, state: &mut AppState) {
     }
     if let Some(command) = command {
         apply_library_command(state, command);
+    }
+}
+
+/// The inspector's heading block: a `SUBGRAPH` eyebrow, the subgraph name as a 17px semibold
+/// heading, and a one-line stat (input/output counts and category) in muted monospace. Replaces the
+/// old "INSPECTOR: <name>" pane heading, so the name reads as the subject of the card.
+fn library_inspector_heading(ui: &mut egui::Ui, file: &library::SubgraphFile) {
+    ui.add_space(2.0);
+    ui.label(
+        egui::RichText::new("SUBGRAPH")
+            .size(10.5)
+            .color(theme::TEXT_TERTIARY),
+    );
+    ui.add_space(2.0);
+    ui.label(
+        egui::RichText::new(file.name.as_str())
+            .size(17.0)
+            .family(egui::FontFamily::Name("plex-semibold".into()))
+            .color(theme::TEXT_PRIMARY),
+    );
+    ui.add_space(3.0);
+    let category = if file.category.trim().is_empty() {
+        "Uncategorized"
+    } else {
+        file.category.trim()
+    };
+    let stat = format!(
+        "{} · {} · {}",
+        count_phrase(file.inputs.len(), "input"),
+        count_phrase(file.outputs.len(), "output"),
+        category,
+    );
+    ui.label(
+        egui::RichText::new(stat)
+            .family(egui::FontFamily::Monospace)
+            .size(11.0)
+            .color(theme::TEXT_TERTIARY),
+    );
+}
+
+/// A count with its noun, pluralised: "1 input", "3 inputs".
+fn count_phrase(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
     }
 }
 
@@ -3909,33 +3948,16 @@ fn preview_black_image(ui: &mut egui::Ui) {
     ui.painter().rect_filled(rect, 0.0, egui::Color32::BLACK);
 }
 
-/// A subtle all-caps section heading for a subpane, in the muted style of a sidebar's
-/// "WORKSPACE"/"OUTLINER" label: uppercased and dimmed, set on the pane background rather than a
-/// heavy header band. Shared so subpane titles stay consistent.
+/// A subtle all-caps section label (the handoff's `ink-lo` eyebrow): uppercased, small, and muted,
+/// set on the pane background rather than a heavy header band. Shared by the browser and the port
+/// lists so their section labels match.
 fn section_heading(ui: &mut egui::Ui, text: &str) {
     ui.add_space(2.0);
-    ui.label(egui::RichText::new(text.to_uppercase()).weak());
-    ui.add_space(4.0);
-}
-
-/// The inspector subpane's heading. Like [`section_heading`] it is the muted all-caps subpane
-/// label, but it folds the selected entry's name into the line ("INSPECTOR: <name>") so the card
-/// need not repeat it below. The name keeps its own case and strong weight, so it reads as the
-/// item's name rather than being shouted in all-caps. Falls back to the plain label when nothing
-/// is selected.
-fn inspector_heading(ui: &mut egui::Ui, name: Option<&str>) {
-    ui.add_space(2.0);
-    match name {
-        Some(name) => {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("INSPECTOR:").weak());
-                ui.strong(name);
-            });
-        }
-        None => {
-            ui.label(egui::RichText::new("SUBGRAPH INSPECTOR").weak());
-        }
-    }
+    ui.label(
+        egui::RichText::new(text.to_uppercase())
+            .size(10.5)
+            .color(theme::TEXT_TERTIARY),
+    );
     ui.add_space(4.0);
 }
 
