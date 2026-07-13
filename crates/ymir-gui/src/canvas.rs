@@ -504,6 +504,65 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
         }
     }
 
+    fn has_node_style(
+        &mut self,
+        node: SnarlNodeId,
+        _inputs: &[InPin],
+        _outputs: &[OutPin],
+        snarl: &Snarl<Handle>,
+    ) -> bool {
+        // Only selected nodes need a style override (a dark collapse caret on the accent header).
+        snarl
+            .get_node(node)
+            .is_some_and(|h| self.selection.contains(h))
+    }
+
+    fn apply_node_style(
+        &mut self,
+        style: &mut egui::Style,
+        _node: SnarlNodeId,
+        _inputs: &[InPin],
+        _outputs: &[OutPin],
+        _snarl: &Snarl<Handle>,
+    ) {
+        // Snarl paints the collapse caret from the node ui's widget foreground stroke, and there is no
+        // dedicated hook for it. On a selected node the header is the accent colour, where the resting
+        // light-grey caret nearly vanishes, so darken the foreground stroke to the same dark ink the
+        // title uses. Node text (title, port labels) is coloured explicitly, so this only reaches the
+        // caret. Scoped to this node's ui, so it does not leak to the rest of the canvas.
+        let ink = crate::theme::BG_ABYSS;
+        for w in [
+            &mut style.visuals.widgets.noninteractive,
+            &mut style.visuals.widgets.inactive,
+            &mut style.visuals.widgets.hovered,
+            &mut style.visuals.widgets.active,
+        ] {
+            w.fg_stroke.color = ink;
+        }
+    }
+
+    fn header_frame(
+        &mut self,
+        default: egui::Frame,
+        node: SnarlNodeId,
+        _inputs: &[InPin],
+        _outputs: &[OutPin],
+        snarl: &Snarl<Handle>,
+    ) -> egui::Frame {
+        // A selected node's header is the accent colour: recolouring snarl's own header frame keeps
+        // the exact geometry of a resting header (same height, same margins), so selection reads as a
+        // lit title bar rather than a differently-sized one. The title flips to dark ink on it in
+        // `show_header`. Selection is otherwise unmarked here; the body stays the plain light card.
+        let is_selected = snarl
+            .get_node(node)
+            .is_some_and(|h| self.selection.contains(h));
+        if is_selected {
+            default.fill(crate::theme::ACCENT_PRIMARY)
+        } else {
+            default
+        }
+    }
+
     fn show_header(
         &mut self,
         node: SnarlNodeId,
@@ -521,13 +580,24 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
         // keeps the title from being text-selectable, so it shows the normal cursor
         // (not a text I-beam) and reads as a node title, not editable text.
         let is_selected = handle.is_some_and(|h| self.selection.contains(&h));
+        // The selected node's header is filled with the accent by the `header_frame` override, which
+        // recolours snarl's own header frame so it keeps the exact geometry of a resting header.
+        // Marks that sit on the header (the enable toggle, the pinned ring) are the accent cyan on a
+        // resting node, but that would vanish on the accent-filled header of a selected node, so they
+        // flip to dark ink there.
+        let header_mark = if is_selected {
+            crate::theme::BG_ABYSS
+        } else {
+            ui.visuals().selection.stroke.color
+        };
         // Dark ink on the light node card (the node is the one light region in the dark chrome, so
-        // the global light-text visuals would vanish here); selection keeps the accent colour.
+        // the global light-text visuals would vanish here); a selected node's title is dark ink on
+        // the accent header, matching the Build button's dark-on-accent treatment.
         let text = if is_selected {
             egui::RichText::new(title)
                 .size(NODE_TITLE_SIZE)
                 .strong()
-                .color(ui.visuals().selection.stroke.color)
+                .color(crate::theme::BG_ABYSS)
         } else {
             egui::RichText::new(title)
                 .size(NODE_TITLE_SIZE)
@@ -575,9 +645,12 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
                     ui.painter().circle_stroke(
                         rect.center(),
                         diameter * 0.5 + 1.5,
-                        egui::Stroke::new(1.5, ui.visuals().selection.stroke.color),
+                        egui::Stroke::new(1.5, header_mark),
                     );
                 }
+                // A gap between the status dot's slot and the title, so an active (green) pip does
+                // not butt up against the first letter.
+                ui.add_space(4.0);
                 // The title, faded when bypassed (scoped, so the enable toggle stays bright).
                 ui.scope(|ui| {
                     if is_bypassed {
@@ -598,8 +671,7 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
                         ui.painter()
                             .circle_stroke(center, radius, egui::Stroke::new(1.5, off));
                     } else {
-                        let on = ui.visuals().selection.stroke.color;
-                        ui.painter().circle_filled(center, radius, on);
+                        ui.painter().circle_filled(center, radius, header_mark);
                     }
                     resp.on_hover_text(if is_bypassed {
                         "Enable node"
@@ -623,10 +695,14 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
         _ui: &mut egui::Ui,
         snarl: &mut Snarl<Handle>,
     ) {
+        let handle = snarl.get_node(node).copied();
+        // Selection is carried by the accent-filled header (painted in `show_header`) plus snarl's
+        // accent frame. No outer glow: a faint cyan glow desaturates to a muddy pale halo over the
+        // light frosted canvas (glows only read on a dark background).
         // Record the node's rect for post-frame click resolution. Deliberately no
         // interaction here: registering one would sit on top of snarl's own widgets
         // (the collapse chevron, the pins) and swallow their clicks.
-        if let Some(handle) = snarl.get_node(node).copied() {
+        if let Some(handle) = handle {
             self.node_rects.push((handle, rect));
         }
     }

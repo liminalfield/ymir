@@ -4341,6 +4341,13 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         wire_width: Some(3.0),
         pin_fill: Some(theme::ACCENT_FROST),
         pin_size: Some(13.0),
+        // Selection reads as a filled accent header strip (painted in `show_header`) plus a bold
+        // accent frame and an outer glow (painted in `final_node_rect`) — a lit title bar that stands
+        // out in a dense graph. No selection fill over the body: snarl's default grey fill dimmed the
+        // card and read like a bypassed node, and even a faint cyan wash muddied the preview thumbnail
+        // and text, so the body stays fully legible and the header carries the signal.
+        select_stoke: Some(egui::Stroke::new(2.5, theme::ACCENT_PRIMARY)),
+        select_fill: Some(egui::Color32::TRANSPARENT),
         // The Frost canvas is a frosted icy-light surface (the one light region in the dark chrome),
         // with no grid for now (the grid draw is suppressed in `draw_background`).
         bg_frame: Some(egui::Frame::new().fill(theme::CANVAS_BASE)),
@@ -4358,7 +4365,16 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
                     spread: 0,
                     color: egui::Color32::from_rgba_unmultiplied(15, 30, 50, 115),
                 })
-                .inner_margin(egui::Margin::same(6)),
+                // Top margin matches the header frame's top margin (4) so the header sits flush with
+                // the card's top edge: any larger top margin leaves a band of the light card body
+                // above the header, which is jarring once the header is filled with the accent. The
+                // sides and bottom keep 6px so the body pins and preview have room.
+                .inner_margin(egui::Margin {
+                    left: 6,
+                    right: 6,
+                    top: 4,
+                    bottom: 6,
+                }),
         ),
         header_frame: Some(
             egui::Frame::new()
