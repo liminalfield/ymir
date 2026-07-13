@@ -73,7 +73,13 @@ fn main() -> eframe::Result {
     // ignored (no runtime icon protocol); there the icon comes from a `.desktop` entry
     // matched by `app_id`, so set a stable one. Falls back to eframe's default if the
     // PNG can't be decoded (it is cosmetic, never worth failing startup over).
-    let viewport = egui::ViewportBuilder::default().with_app_id("ymir");
+    // Open at a workable default size rather than the tiny window some WMs otherwise give a
+    // surfaceless app; remembering the last size/position across sessions is window state, deferred
+    // to #127 (XDG_STATE). A minimum keeps the ribbon and both side panels usable.
+    let viewport = egui::ViewportBuilder::default()
+        .with_app_id("ymir")
+        .with_inner_size([1440.0, 900.0])
+        .with_min_inner_size([900.0, 600.0]);
     let viewport = match app_icon() {
         Some(icon) => viewport.with_icon(icon),
         None => viewport,
@@ -665,7 +671,9 @@ impl AppState {
             world_height: project_file::DEFAULT_WORLD_HEIGHT,
             project_path: None,
             recent: Vec::new(),
-            frame_to_graph_request: false,
+            // The built-in starter has no saved camera, so fit it to the screen on the first
+            // render (the comment above; this is the one-shot the open path also uses).
+            frame_to_graph_request: true,
             viewport_mesh: None,
             viewport_mode: viewport2d::Mode::default(),
             viewport_2d: viewport2d::View2d::default(),
@@ -692,11 +700,25 @@ impl AppState {
         }
     }
 
+    /// Applies a restored canvas camera: when the project saved one, restore that pan/zoom so it
+    /// reopens exactly as it was left; otherwise fit the graph to the screen (an older project, a
+    /// graph-only file, or the built-in starter). Both routes go through the same one-shot the
+    /// canvas already applies next frame.
+    fn apply_restored_view(&mut self, camera: Option<egui::emath::TSTransform>) {
+        match camera {
+            Some(transform) => {
+                self.pending_view = Some(transform);
+                self.frame_to_graph_request = false;
+            }
+            None => self.frame_to_graph_request = true,
+        }
+    }
+
     /// Installs a project opened from disk (#75): swaps in the rebuilt graph, canvas,
     /// and world settings, and clears view-state that referenced the old graph's
-    /// handles (selection, preview pin, open dialogs). Requests a frame-to-graph so the
-    /// loaded layout is visible. The background engines pick up the new graph on the
-    /// next frame, so no explicit reset is needed.
+    /// handles (selection, preview pin, open dialogs). Restores the saved camera, or fits the
+    /// graph when none was saved. The background engines pick up the new graph on the next
+    /// frame, so no explicit reset is needed.
     fn install_project(
         &mut self,
         restored: project_file::RestoredProject,
@@ -719,7 +741,7 @@ impl AppState {
         self.node_menu = None;
         self.rename = None;
         self.library_save = None;
-        self.frame_to_graph_request = true;
+        self.apply_restored_view(restored.camera);
         // The name indicator shows which file; the status only needs the action.
         self.status = Some("Opened".to_string());
         self.project_path = Some(path);
@@ -844,6 +866,18 @@ impl AppState {
                 &layouts,
             )
         }
+    }
+
+    /// The project file to write to disk: the current [`snapshot`](Self::snapshot) plus the live
+    /// canvas camera (pan/zoom). The camera is added only here, not in `snapshot`, because panning
+    /// is not an undoable edit and must not dirty the project; it is captured at write time so a
+    /// reopened project restores the exact view.
+    fn project_for_save(&self) -> project_file::ProjectFile {
+        let mut file = self.snapshot();
+        file.view.camera = self
+            .canvas_view
+            .map(|v| project_file::Camera::from_transform(v.to_global));
+        file
     }
 
     /// Every known subgraph interior layout, keyed by navigation path: the remembered
@@ -2153,7 +2187,7 @@ fn save_project(state: &mut AppState, path: Option<std::path::PathBuf>) -> bool 
         Some(path) => path,
         None => return false,
     };
-    let file = state.snapshot();
+    let file = state.project_for_save();
     match write_project(&path, &file) {
         Ok(()) => {
             state.status = Some("Saved".to_string());
@@ -2344,7 +2378,7 @@ fn save_as_default(state: &mut AppState) {
         state.status = Some(format!("Could not create {}: {err}", parent.display()));
         return;
     }
-    let file = state.snapshot();
+    let file = state.project_for_save();
     match write_project(&path, &file) {
         Ok(()) => {
             state.status = Some(format!(
@@ -2376,7 +2410,7 @@ fn apply_default(state: &mut AppState) {
             state.world_extent = restored.world_extent;
             state.world_height = restored.world_height;
             state.build_res = restored.build_res;
-            state.frame_to_graph_request = true;
+            state.apply_restored_view(restored.camera);
             // Anchor undo and the clean point at the default, not the starter it replaced.
             state.reset_history();
             state.mark_clean();
@@ -4097,6 +4131,12 @@ fn fit_view(
     Some(egui::emath::TSTransform::new(translation, scale))
 }
 
+/// Whether two canvas transforms are close enough to treat as equal, so a re-fit that reproduces
+/// the applied view can stop requesting frames. Sub-pixel translation and a tiny scale epsilon.
+fn transforms_close(a: egui::emath::TSTransform, b: egui::emath::TSTransform) -> bool {
+    (a.scaling - b.scaling).abs() < 1e-3 && (a.translation - b.translation).length() < 0.5
+}
+
 /// A fresh node-creation menu anchored at `anchor` (screen space), placing into
 /// `view`. Shared by the Space gesture and the right-click "Add node" (#51, #60).
 /// `pending_wire` is the wire to connect when a node is picked (wire-to-create, #123),
@@ -4169,10 +4209,11 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // The thumbnail toggle (#74), read before the disjoint borrow. Gates whether nodes
     // get a thumbnail footer at all.
     let show_thumbnails = state.thumbnails_enabled;
-    // A one-shot request to frame the whole graph this frame (#75), set after opening a
-    // project. Taken so it fires once; the canvas computes the fit from this frame's
-    // node rects.
-    let frame_to_graph = std::mem::take(&mut state.frame_to_graph_request);
+    // A request to frame the whole graph, set after opening a project or on first launch. Read,
+    // not taken: it is cleared only once the fit actually succeeds (below), because on the very
+    // first render the snarl has not measured its nodes yet, so the fit has no rects to frame and
+    // must retry next frame rather than being consumed to no effect (the startup top-left bug).
+    let frame_to_graph = state.frame_to_graph_request;
 
     // Per-node thumbnails (#42): evaluate every output-producing node at thumbnail
     // resolution off-thread, and draw each result in its node body below.
@@ -4474,10 +4515,34 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         canvas::splice_node_into_wire(&mut state.graph, &mut state.snarl, node, out_pin, in_pin);
     }
 
-    // The pending "zoom to graph" view was consumed by this frame's render; replace
-    // it with a freshly requested fit (or clear it). One-shot, so it does not fight
-    // subsequent pan/zoom (#65).
-    state.pending_view = frame_all_fit.flatten();
+    // The pending view was consumed by this frame's render; it is one-shot, so replace it with a
+    // freshly computed fit (or clear it) rather than let it fight later pan/zoom (#65). A fit only
+    // lands once the snarl has measured its nodes, so clear the frame request only when the fit
+    // succeeds; a request that found no rects yet (the very first render) stays set and retries
+    // next frame instead of being silently lost (the startup top-left bug).
+    match frame_all_fit.flatten() {
+        Some(fit) => {
+            state.pending_view = Some(fit);
+            // Clear the frame request only once the fit is a no-op against the view already
+            // applied (`to_global`): the first renders report a not-yet-settled canvas rect (a
+            // small window still sizing up), and accepting that early fit would frame the graph to
+            // the wrong rect and never re-fit. Re-fit until it converges, then stop.
+            if transforms_close(to_global, fit) {
+                state.frame_to_graph_request = false;
+            } else {
+                ui.ctx().request_repaint();
+            }
+        }
+        None => {
+            // One-shot: clear any applied camera/subgraph-pop view so it does not fight later
+            // pan/zoom. If a fit was requested but found no rects yet (the snarl has not measured
+            // its nodes), keep the request and repaint so it retries.
+            state.pending_view = None;
+            if state.frame_to_graph_request {
+                ui.ctx().request_repaint();
+            }
+        }
+    }
 
     // Apply the click to the selection: a plain click selects one node (or clears on
     // empty canvas), Ctrl/Cmd-click toggles a node in or out of the set (#84).

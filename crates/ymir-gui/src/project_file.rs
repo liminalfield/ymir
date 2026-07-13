@@ -13,6 +13,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use eframe::egui::Pos2;
+use eframe::egui::emath::TSTransform;
 use egui_snarl::{InPinId, NodeId as SnarlNodeId, OutPinId, Snarl};
 use serde::{Deserialize, Serialize};
 use ymir_core::{Graph, ProjectDocument};
@@ -123,13 +124,45 @@ pub(crate) struct Frame {
     pub label_placement: LabelPlacement,
 }
 
-/// GUI view-state: where each node sits on the canvas, keyed by `stable_id`, plus any
-/// canvas frames.
+/// The saved canvas camera: the pan/zoom of the view, so a project reopens looking exactly as it
+/// was left. Stored as plain data (translation and a uniform scale) rather than an egui transform,
+/// and converted at the boundary. Optional on [`ViewState`]: a project saved before this existed,
+/// or a graph-only file, has none, and the editor fits the graph to the screen instead.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Camera {
+    /// Canvas translation `[x, y]`: the screen offset of the graph origin.
+    pub translation: [f32; 2],
+    /// Uniform zoom scale.
+    pub scale: f32,
+}
+
+impl Camera {
+    /// The camera as an egui view transform, for applying it to the canvas.
+    pub(crate) fn to_transform(self) -> TSTransform {
+        TSTransform::new(self.translation.into(), self.scale)
+    }
+
+    /// Captures an egui view transform as a saveable camera.
+    pub(crate) fn from_transform(t: TSTransform) -> Self {
+        Self {
+            translation: [t.translation.x, t.translation.y],
+            scale: t.scaling,
+        }
+    }
+}
+
+/// GUI view-state: where each node sits on the canvas, keyed by `stable_id`, plus the canvas
+/// camera and any canvas frames.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ViewState {
     /// Canvas position `[x, y]` per node, keyed by `stable_id`. A `BTreeMap` keeps
     /// the keys ordered for clean diffs.
     pub nodes: BTreeMap<u64, [f32; 2]>,
+    /// The saved canvas camera (pan/zoom). Optional and defaulted, so an older project (or a
+    /// graph-only file) opens by fitting the graph to the screen instead. Not part of the undo
+    /// snapshot (panning is not an edit); set only when the project is written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera: Option<Camera>,
     /// Canvas frames (#94), in creation order. Optional and defaulted, so a project saved
     /// before frames existed opens with none (no format bump, like `world_height`). Kept
     /// last so adding or moving a frame localizes its diff.
@@ -158,6 +191,9 @@ pub(crate) struct RestoredProject {
     pub world_height: f64,
     /// The restored full-Build resolution (square).
     pub build_res: usize,
+    /// The restored canvas camera (pan/zoom), if the project saved one. `None` for an older
+    /// project or a graph-only file, in which case the editor fits the graph to the screen.
+    pub camera: Option<TSTransform>,
     /// The restored canvas frames (#94).
     pub frames: Vec<Frame>,
     /// The restored interior layouts of subgraph containers, flattened to a path-keyed map
@@ -206,6 +242,9 @@ impl ProjectFile {
             graph: graph.to_document(),
             view: ViewState {
                 nodes,
+                // The camera is not captured in the snapshot (panning is not an undoable edit);
+                // it is injected only when the project is written to disk.
+                camera: None,
                 frames: frames.to_vec(),
                 subgraphs: subgraph_view(graph, &[], layouts),
             },
@@ -278,6 +317,7 @@ impl ProjectFile {
             world_extent: self.world.world_extent,
             world_height: self.world.world_height,
             build_res: self.world.build_res,
+            camera: self.view.camera.map(Camera::to_transform),
             frames: self.view.frames.clone(),
             subgraph_layouts,
             warnings,
@@ -360,6 +400,8 @@ fn subgraph_view(
                 nd.stable_id,
                 ViewState {
                     nodes,
+                    // Subgraph interior cameras are not persisted yet; they fit on first dive.
+                    camera: None,
                     frames: Vec::new(),
                     subgraphs: nested,
                 },
@@ -473,6 +515,8 @@ mod tests {
         assert_eq!(restored.world_extent, 4096.0);
         assert_eq!(restored.world_height, 800.0);
         assert_eq!(restored.build_res, 2048);
+        // No camera was saved, so the load will fit the graph to the screen.
+        assert!(restored.camera.is_none());
 
         // Positions restored by stable_id.
         let gen_sid = graph.stable_id(generator).expect("gen sid");
@@ -491,6 +535,38 @@ mod tests {
 
         // The wire was reattached on the canvas.
         assert_eq!(restored.snarl.wires().count(), 1);
+    }
+
+    #[test]
+    fn saved_camera_round_trips_to_a_transform() {
+        // A project that saved a camera restores that exact pan/zoom (so it reopens as left),
+        // rather than falling back to fitting the graph.
+        let mut graph = Graph::new();
+        let mut snarl = Snarl::<Handle>::new();
+        add_node(&mut graph, &mut snarl, "generator.fbm", Pos2::new(0.0, 0.0)).expect("fbm");
+        let mut file = ProjectFile::capture(
+            &graph,
+            &snarl,
+            WorldSettings {
+                seed: 0,
+                world_extent: 1024.0,
+                world_height: 256.0,
+                build_res: DEFAULT_BUILD_RES,
+            },
+            &[],
+        );
+        file.view.camera = Some(Camera {
+            translation: [12.0, -34.0],
+            scale: 1.5,
+        });
+
+        let json = serde_json::to_string(&file).expect("serialize");
+        let parsed: ProjectFile = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed, file);
+
+        let t = parsed.restore().expect("restore").camera.expect("camera");
+        assert_eq!((t.translation.x, t.translation.y), (12.0, -34.0));
+        assert_eq!(t.scaling, 1.5);
     }
 
     #[test]
