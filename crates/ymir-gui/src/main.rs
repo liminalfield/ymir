@@ -3990,6 +3990,65 @@ fn pinned_pill(ui: &mut egui::Ui) {
     );
 }
 
+/// A segmented control: `labels` shown as one pill in a deep `c0` container, the active segment
+/// filled `c3` with bright ink, the rest muted (an inactive segment lifts slightly on hover).
+/// Returns the index of a newly-clicked (inactive) segment, else `None`. Sizes to its labels.
+fn segmented(ui: &mut egui::Ui, labels: &[&str], active: usize) -> Option<usize> {
+    let font = egui::FontId::proportional(12.0);
+    let seg_pad_x = 12.0;
+    let widths: Vec<f32> = labels
+        .iter()
+        .map(|l| {
+            ui.painter()
+                .layout_no_wrap((*l).to_string(), font.clone(), egui::Color32::WHITE)
+                .size()
+                .x
+                + seg_pad_x * 2.0
+        })
+        .collect();
+    let inner_h = 22.0;
+    let outer = 2.0;
+    let total_w = widths.iter().sum::<f32>() + outer * 2.0;
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(total_w, inner_h + outer * 2.0),
+        egui::Sense::hover(),
+    );
+    ui.painter().rect_filled(rect, 5.0, theme::BG_ABYSS);
+    let mut clicked = None;
+    let mut x = rect.left() + outer;
+    let top = rect.top() + outer;
+    for (i, (label, w)) in labels.iter().zip(&widths).enumerate() {
+        let seg = egui::Rect::from_min_size(egui::pos2(x, top), egui::vec2(*w, inner_h));
+        let resp = ui.interact(
+            seg,
+            ui.id().with(("segmented", i, *label)),
+            egui::Sense::click(),
+        );
+        let is_active = i == active;
+        if is_active {
+            ui.painter().rect_filled(seg, 4.0, theme::BG_HOVER);
+        } else if resp.hovered() {
+            ui.painter().rect_filled(seg, 4.0, theme::BG_RAISED);
+        }
+        ui.painter().text(
+            seg.center(),
+            egui::Align2::CENTER_CENTER,
+            *label,
+            font.clone(),
+            if is_active {
+                theme::TEXT_PRIMARY
+            } else {
+                theme::TEXT_TERTIARY
+            },
+        );
+        if resp.clicked() && !is_active {
+            clicked = Some(i);
+        }
+        x += w;
+    }
+    clicked
+}
+
 fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // Drop a pin left pointing at a deleted node, so it never sticks the preview on
     // nothing.
@@ -4060,40 +4119,58 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
         let mut selected = state.preview.display_output().min(output_names.len() - 1);
         ui.horizontal(|ui| {
             ui.label("Output");
-            egui::ComboBox::from_id_salt("preview-output")
-                .selected_text(output_names[selected].clone())
-                .show_ui(ui, |ui| {
-                    for (index, name) in output_names.iter().enumerate() {
-                        ui.selectable_value(&mut selected, index, name);
+            // A plain menu popup, not an egui ComboBox: the ComboBox wraps its items in a scroll
+            // area whose auto-shrink makes the viewport equal the content height, so rounding
+            // flickers a scrollbar in and out. This handful of outputs needs no scrolling, so a menu
+            // renders them directly.
+            let button = ui.button(format!(
+                "{}   {}",
+                output_names[selected],
+                egui_phosphor::regular::CARET_DOWN
+            ));
+            egui::Popup::menu(&button).show(|ui| {
+                ui.set_min_width(button.rect.width());
+                for (index, name) in output_names.iter().enumerate() {
+                    if ui.selectable_label(index == selected, name).clicked() {
+                        selected = index;
+                        ui.close();
                     }
-                });
+                }
+            });
         });
         state.preview.set_display_output(selected);
     }
 
-    // Row 2: shading toggle (relief makes subtle height changes legible, #40); in relief the
-    // light dial, in height the Auto/Fixed scale toggle. These are persistent display
-    // settings, so they show even with no node selected.
+    // View controls (persistent display settings, shown even with no node selected): a segmented
+    // Heightfield/Relief mode, and on the right either the relief light dial or a segmented
+    // Auto/Fixed scale. Heightfield is the greyscale field; Relief is the lit topography. Auto
+    // stretches the field's actual range; Fixed maps a true [0, 1].
     let mut mode = state.preview.mode();
     let mut scale = state.preview.scale();
     ui.horizontal(|ui| {
         // Reserve the dial's height in both modes so the image never jumps when toggling
-        // Height/Relief.
+        // Heightfield/Relief.
         ui.set_min_height(preview::LIGHT_DIAL_SIZE);
-        ui.selectable_value(&mut mode, shade::ShadeMode::Height, "Height");
-        ui.selectable_value(&mut mode, shade::ShadeMode::Relief, "Relief");
-        // The mode-specific control sits at the right, separated from Height/Relief.
+        let mode_i = usize::from(mode == shade::ShadeMode::Relief);
+        if let Some(i) = segmented(ui, &["Heightfield", "Relief"], mode_i) {
+            mode = if i == 0 {
+                shade::ShadeMode::Height
+            } else {
+                shade::ShadeMode::Relief
+            };
+        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if mode == shade::ShadeMode::Relief {
                 state.preview.light_indicator(ui);
             } else {
-                // Auto stretches the actual range (shape); Fixed maps [0, 1] (true amplitude,
-                // clips out of range). right_to_left places the first-added widget rightmost,
-                // so add Fixed then Auto to keep the pair reading "Auto  Fixed".
-                ui.selectable_value(&mut scale, shade::HeightScale::Fixed, "Fixed")
-                    .on_hover_text("Map a fixed [0, 1]: true height, clips out of range");
-                ui.selectable_value(&mut scale, shade::HeightScale::Auto, "Auto")
-                    .on_hover_text("Stretch the field's actual range to black/white");
+                let scale_i = usize::from(scale == shade::HeightScale::Fixed);
+                if let Some(i) = segmented(ui, &["Auto", "Fixed"], scale_i) {
+                    scale = if i == 0 {
+                        shade::HeightScale::Auto
+                    } else {
+                        shade::HeightScale::Fixed
+                    };
+                }
             }
         });
     });
