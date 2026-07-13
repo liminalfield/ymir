@@ -176,12 +176,11 @@ const RIBBON_BAND_MARGIN: egui::Margin = egui::Margin::symmetric(8, 4);
 /// are placed before the taller search field and end up top-aligned.
 const RIBBON_ROW_H: f32 = 26.0;
 
-/// The largest the library inspector's thumbnail slot grows. The slot is square, because the
-/// terrain render is square (the grid is square) — a landscape crop would letterbox, clip, or
-/// distort it. Capped so a full-width square does not dominate the short inspector: when the dock
-/// is wider than this the square stays this size and centers. The offline subgraph render (a later
-/// step) fills the same box, so reserving it now keeps the inspector from reflowing when it lands.
-const LIBRARY_THUMB_MAX_SIZE: f32 = 150.0;
+/// The height of the library inspector's thumbnail slot (the handoff's 150px landscape preview). It
+/// spans the pane width. The offline subgraph render (a later step) will fill the same box (cover),
+/// so reserving it now keeps the inspector from reflowing when it lands; until then it shows an empty
+/// state.
+const LIBRARY_THUMB_HEIGHT: f32 = 150.0;
 
 /// Minimum drag (px) before a left-press on empty canvas counts as a marquee rather than
 /// a click; below it, the press is the click that selects/clears (#84).
@@ -3410,30 +3409,52 @@ fn count_phrase(n: usize, noun: &str) -> String {
 }
 
 /// Draws the inspector's reserved thumbnail slot: a framed, centered square (matching the square
-/// terrain render), sized to the pane but capped by [`LIBRARY_THUMB_MAX_SIZE`]. The offline
-/// subgraph render is a later step, so today the box holds a muted image glyph as a placeholder;
-/// reserving it now keeps the inspector from reflowing when the render lands.
+/// terrain render), spanning the pane width at [`LIBRARY_THUMB_HEIGHT`]. The offline subgraph render
+/// is a later step, so today the box shows an empty state: a graph glyph and "No preview yet" over a
+/// faint 45-degree hatch, on the deepest chrome fill. Reserving it now keeps the inspector from
+/// reflowing when the render lands.
 fn library_thumbnail_slot(ui: &mut egui::Ui) {
-    let size = ui.available_width().min(LIBRARY_THUMB_MAX_SIZE);
-    ui.vertical_centered(|ui| {
-        let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(size), egui::Sense::hover());
-        let visuals = ui.visuals();
-        let painter = ui.painter();
-        painter.rect_filled(rect, 4.0, visuals.extreme_bg_color);
-        painter.rect_stroke(
-            rect,
-            4.0,
-            visuals.widgets.noninteractive.bg_stroke,
-            egui::StrokeKind::Inside,
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), LIBRARY_THUMB_HEIGHT),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter();
+    painter.rect_filled(rect, 5.0, theme::BG_ABYSS);
+    // A faint 45-degree hatch, clipped to the box, so the empty inset reads as an intentional "no
+    // image" surface rather than a flat void. Drawn between the fill and the border.
+    let hatched = painter.with_clip_rect(rect);
+    let hatch = theme::LINE.gamma_multiply(0.35);
+    let mut x = rect.left() - rect.height();
+    while x < rect.right() {
+        hatched.line_segment(
+            [
+                egui::pos2(x, rect.bottom()),
+                egui::pos2(x + rect.height(), rect.top()),
+            ],
+            egui::Stroke::new(1.0, hatch),
         );
-        painter.text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            egui_phosphor::regular::IMAGE,
-            egui::FontId::proportional(28.0),
-            visuals.weak_text_color(),
-        );
-    });
+        x += 9.0;
+    }
+    painter.rect_stroke(
+        rect,
+        5.0,
+        egui::Stroke::new(1.0, theme::LINE),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        rect.center() - egui::vec2(0.0, 12.0),
+        egui::Align2::CENTER_CENTER,
+        egui_phosphor::regular::GRAPH,
+        egui::FontId::proportional(28.0),
+        theme::TEXT_TERTIARY,
+    );
+    painter.text(
+        rect.center() + egui::vec2(0.0, 18.0),
+        egui::Align2::CENTER_CENTER,
+        "No preview yet",
+        egui::FontId::proportional(11.0),
+        theme::TEXT_TERTIARY,
+    );
 }
 
 /// The detail card below the thumbnail and actions: the description, the named input and output
