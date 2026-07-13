@@ -3336,7 +3336,7 @@ fn library_inspector(ui: &mut egui::Ui, state: &mut AppState) {
                     library_command_bar(ui, &path, &mut command);
                 }
                 ui.add_space(8.0);
-                library_entry_detail(ui, &entry.file);
+                library_port_sections(ui, &entry.file);
             });
     }
     if let Some(command) = command {
@@ -3541,49 +3541,23 @@ fn library_thumbnail_slot(ui: &mut egui::Ui) {
     );
 }
 
-/// The detail card below the thumbnail and actions: the description, the named input and output
-/// ports under all-caps headings, and a footer of muted metadata (category, author, license). Thin
-/// separators divide the blocks. The name titles the card via the pane heading. Fuller than the
-/// hover tooltip, which shows only port counts.
-fn library_entry_detail(ui: &mut egui::Ui, file: &library::SubgraphFile) {
-    if !file.description.trim().is_empty() {
-        ui.add_space(2.0);
-        ui.label(&file.description);
+/// The inspector's port sections below the command bar: a divider, then the input and output ports
+/// as role lists. Per the Frost handoff, the ports (name + role description) carry what the subgraph
+/// does; the standalone description and the category/author/license footer are omitted here (they
+/// remain in the browser hover card and are editable via Edit details). Draws nothing when the
+/// subgraph is portless.
+fn library_port_sections(ui: &mut egui::Ui, file: &library::SubgraphFile) {
+    if file.inputs.is_empty() && file.outputs.is_empty() {
+        return;
     }
-    if !file.inputs.is_empty() || !file.outputs.is_empty() {
-        ui.add_space(6.0);
-        ui.separator();
-        library_port_list(ui, "Inputs", &file.inputs);
-        library_port_list(ui, "Outputs", &file.outputs);
-    }
-    // Footer: category, author, and license as one muted line, so the grouping and provenance sit
-    // quietly under the card. Category moved here off the title line (the name now lives in the
-    // pane heading).
-    let mut footer = Vec::new();
-    if !file.category.trim().is_empty() {
-        footer.push(file.category.clone());
-    }
-    if !file.author.is_empty() {
-        let who = if file.author.name.trim().is_empty() {
-            "(unnamed author)".to_string()
-        } else {
-            file.author.name.clone()
-        };
-        footer.push(format!("by {who}"));
-    }
-    if !file.license.trim().is_empty() {
-        footer.push(file.license.clone());
-    }
-    if !footer.is_empty() {
-        ui.add_space(6.0);
-        ui.separator();
-        ui.weak(footer.join(" · "));
-    }
+    ui.separator();
+    library_port_list(ui, "Inputs", &file.inputs);
+    library_port_list(ui, "Outputs", &file.outputs);
 }
 
-/// Lists a subgraph's ports under an all-caps heading (matching the pane section headings): each
-/// port's name (falling back to the port index for an unnamed one), with its description indented
-/// beneath in muted text. Draws nothing when there are no ports on that side.
+/// A subgraph's ports on one side, as a role list under the section label: one row per port, each a
+/// neutral accent dot, the port name in monospace, and a wrapped plain-language description of the
+/// port's role. Draws nothing for a portless side.
 fn library_port_list(ui: &mut egui::Ui, heading: &str, ports: &[library::PortDoc]) {
     if ports.is_empty() {
         return;
@@ -3595,13 +3569,43 @@ fn library_port_list(ui: &mut egui::Ui, heading: &str, ports: &[library::PortDoc
         } else {
             port.name.clone()
         };
-        ui.label(name);
-        if !port.description.trim().is_empty() {
-            ui.indent((heading, port.index), |ui| {
-                ui.weak(&port.description);
-            });
-        }
+        library_port_row(ui, &name, port.description.trim());
+        ui.add_space(8.0);
     }
+}
+
+/// One port row: a neutral accent dot aligned to the name line, the port name in monospace, and its
+/// role description wrapped beneath in muted ink. The dot is the single accent colour for every port
+/// (Ymir has one data type, so ports are distinguished by role, not by a type colour).
+fn library_port_row(ui: &mut egui::Ui, name: &str, description: &str) {
+    let line_h = 18.0;
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        // A fixed dot column, so the names and descriptions align down the list. The dot sits on the
+        // name's line, top-aligned to it.
+        let (dot_rect, _) = ui.allocate_exact_size(egui::vec2(18.0, line_h), egui::Sense::hover());
+        ui.painter().circle_filled(
+            egui::pos2(dot_rect.left() + 6.5, dot_rect.top() + line_h * 0.5),
+            4.5,
+            theme::ACCENT_PRIMARY,
+        );
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.label(
+                egui::RichText::new(name)
+                    .family(egui::FontFamily::Name("plex-mono-medium".into()))
+                    .size(12.0)
+                    .color(theme::TEXT_PRIMARY),
+            );
+            if !description.is_empty() {
+                ui.label(
+                    egui::RichText::new(description)
+                        .size(11.0)
+                        .color(theme::TEXT_SECONDARY),
+                );
+            }
+        });
+    });
 }
 
 /// The hover card for a library entry: its name, description, port counts, and (when present)
