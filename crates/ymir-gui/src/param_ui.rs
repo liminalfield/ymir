@@ -186,6 +186,102 @@ fn from_t(t: f64, min: f64, max: f64, log: bool) -> f64 {
     }
 }
 
+/// A parameter row's label: monospace and muted.
+fn param_label(ui: &mut egui::Ui, name: &str) {
+    ui.label(
+        egui::RichText::new(name)
+            .family(egui::FontFamily::Monospace)
+            .size(12.0)
+            .color(crate::theme::TEXT_SECONDARY),
+    );
+}
+
+/// A 34x18 pill toggle: an accent track with the knob right when on, a raised track with the knob
+/// left when off. Returns its response (click to flip).
+fn toggle(ui: &mut egui::Ui, on: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(34.0, 18.0), egui::Sense::click());
+    let track = if on {
+        crate::theme::ACCENT_PRIMARY
+    } else {
+        crate::theme::BG_HOVER
+    };
+    let painter = ui.painter();
+    painter.rect_filled(rect, 9.0, track);
+    let knob_x = if on {
+        rect.right() - 9.0
+    } else {
+        rect.left() + 9.0
+    };
+    painter.circle_filled(
+        egui::pos2(knob_x, rect.center().y),
+        6.5,
+        crate::theme::TEXT_PRIMARY,
+    );
+    resp.on_hover_text(if on { "On" } else { "Off" })
+}
+
+/// An integer stepper: a deep field with a minus button, the value in the centre, and a plus button.
+/// Steps by one within `[min, max]`. Returns whether the value changed.
+fn stepper(ui: &mut egui::Ui, value: &mut i64, min: i64, max: i64) -> bool {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(104.0, 24.0), egui::Sense::hover());
+    let btn_w = 26.0;
+    let minus = egui::Rect::from_min_size(rect.left_top(), egui::vec2(btn_w, rect.height()));
+    let plus = egui::Rect::from_min_size(
+        egui::pos2(rect.right() - btn_w, rect.top()),
+        egui::vec2(btn_w, rect.height()),
+    );
+    let minus_resp = ui.interact(minus, ui.id().with("stepper_minus"), egui::Sense::click());
+    let plus_resp = ui.interact(plus, ui.id().with("stepper_plus"), egui::Sense::click());
+    let mut changed = false;
+    if minus_resp.clicked() && *value > min {
+        *value -= 1;
+        changed = true;
+    }
+    if plus_resp.clicked() && *value < max {
+        *value += 1;
+        changed = true;
+    }
+    let painter = ui.painter();
+    painter.rect_filled(rect, 4.0, crate::theme::BG_ABYSS);
+    painter.rect_stroke(
+        rect,
+        4.0,
+        egui::Stroke::new(1.0, crate::theme::LINE),
+        egui::StrokeKind::Inside,
+    );
+    let glyph = |r: &egui::Response, active: bool| {
+        if !active {
+            crate::theme::TEXT_TERTIARY
+        } else if r.hovered() {
+            crate::theme::TEXT_PRIMARY
+        } else {
+            crate::theme::TEXT_SECONDARY
+        }
+    };
+    painter.text(
+        minus.center(),
+        egui::Align2::CENTER_CENTER,
+        "\u{2212}",
+        egui::FontId::proportional(15.0),
+        glyph(&minus_resp, *value > min),
+    );
+    painter.text(
+        plus.center(),
+        egui::Align2::CENTER_CENTER,
+        "+",
+        egui::FontId::proportional(15.0),
+        glyph(&plus_resp, *value < max),
+    );
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        value.to_string(),
+        egui::FontId::new(13.0, egui::FontFamily::Monospace),
+        crate::theme::TEXT_PRIMARY,
+    );
+    changed
+}
+
 /// Renders the editor for one parameter and returns the new value if the user
 /// changed it this frame, or `None` otherwise. The widget choice is [`widget_for`];
 /// this is the thin egui-touching layer over that pure mapping. A value whose
@@ -219,12 +315,7 @@ pub(crate) fn edit(
             let speed = (max - min) * 0.002;
             let mut result = None;
             ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(name)
-                        .family(egui::FontFamily::Monospace)
-                        .size(12.0)
-                        .color(crate::theme::TEXT_SECONDARY),
-                );
+                param_label(ui, name);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let value = ui
                         .add_sized(
@@ -289,79 +380,108 @@ pub(crate) fn edit(
         }
         (Widget::IntDrag { min, max }, ParamValue::Int(v)) => {
             let mut x = *v;
-            let resp = ui
-                .horizontal(|ui| {
-                    let r = ui.add(egui::DragValue::new(&mut x).range(min..=max));
-                    ui.label(name);
-                    r
-                })
-                .inner;
-            resp.changed().then_some(ParamValue::Int(x))
+            let mut result = None;
+            ui.horizontal(|ui| {
+                param_label(ui, name);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if stepper(ui, &mut x, min, max) {
+                        result = Some(ParamValue::Int(x));
+                    }
+                });
+            });
+            result
         }
         (Widget::Checkbox, ParamValue::Bool(v)) => {
             let mut x = *v;
-            let resp = ui.checkbox(&mut x, name);
-            resp.changed().then_some(ParamValue::Bool(x))
+            let mut result = None;
+            ui.horizontal(|ui| {
+                param_label(ui, name);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if toggle(ui, x).clicked() {
+                        x = !x;
+                        result = Some(ParamValue::Bool(x));
+                    }
+                });
+            });
+            result
         }
         (Widget::Text, ParamValue::Text(v)) => {
             let mut x = v.clone();
-            let resp = ui
-                .horizontal(|ui| {
-                    ui.label(name);
-                    ui.add(egui::TextEdit::singleline(&mut x))
-                })
-                .inner;
-            resp.changed().then_some(ParamValue::Text(x))
+            let mut result = None;
+            ui.horizontal(|ui| {
+                param_label(ui, name);
+                if ui
+                    .add(
+                        egui::TextEdit::singleline(&mut x)
+                            .font(egui::FontSelection::Style(egui::TextStyle::Monospace))
+                            .text_color(crate::theme::TEXT_PRIMARY)
+                            .background_color(crate::theme::BG_ABYSS)
+                            .desired_width(f32::INFINITY),
+                    )
+                    .changed()
+                {
+                    result = Some(ParamValue::Text(x.clone()));
+                }
+            });
+            result
         }
         (Widget::Path, ParamValue::Text(v)) => {
             // A path text field plus a Browse button opening the native file picker. The
             // text stays editable (paste or type a path); Browse fills it in.
             let mut x = v.clone();
-            let new_value = ui
-                .horizontal(|ui| {
-                    ui.label(name);
-                    let mut new_value = None;
-                    if ui.button("Browse…").clicked()
-                        && let Some(path) = rfd::FileDialog::new()
-                            .add_filter("Image", &["png"])
-                            .pick_file()
-                    {
-                        // Reflect the pick in the field this frame, and adopt it.
-                        x = path.display().to_string();
-                        new_value = Some(x.clone());
-                    }
-                    if ui
-                        .add(egui::TextEdit::singleline(&mut x).desired_width(f32::INFINITY))
-                        .changed()
-                    {
-                        new_value = Some(x.clone());
-                    }
-                    new_value
-                })
-                .inner;
-            new_value.map(ParamValue::Text)
+            let mut result = None;
+            ui.horizontal(|ui| {
+                param_label(ui, name);
+                if ui.button("Browse\u{2026}").clicked()
+                    && let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Image", &["png"])
+                        .pick_file()
+                {
+                    x = path.display().to_string();
+                    result = Some(ParamValue::Text(x.clone()));
+                }
+                if ui
+                    .add(
+                        egui::TextEdit::singleline(&mut x)
+                            .font(egui::FontSelection::Style(egui::TextStyle::Monospace))
+                            .text_color(crate::theme::TEXT_PRIMARY)
+                            .background_color(crate::theme::BG_ABYSS)
+                            .desired_width(f32::INFINITY),
+                    )
+                    .changed()
+                {
+                    result = Some(ParamValue::Text(x.clone()));
+                }
+            });
+            result
         }
         (Widget::Dropdown { options }, ParamValue::Text(v)) => {
             let mut selected = v.clone();
-            let changed = ui
-                .horizontal(|ui| {
-                    ui.label(name);
-                    egui::ComboBox::from_id_salt(name)
-                        .selected_text(selected.clone())
-                        .show_ui(ui, |ui| {
-                            let mut changed = false;
-                            for option in options {
-                                changed |= ui
-                                    .selectable_value(&mut selected, (*option).to_string(), *option)
-                                    .changed();
+            let mut result = None;
+            ui.horizontal(|ui| {
+                param_label(ui, name);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let button = ui.button(format!(
+                        "{}   {}",
+                        selected,
+                        egui_phosphor::regular::CARET_DOWN
+                    ));
+                    egui::Popup::menu(&button).show(|ui| {
+                        ui.set_min_width(button.rect.width());
+                        for option in options {
+                            if ui
+                                .selectable_label(selected.as_str() == *option, *option)
+                                .clicked()
+                            {
+                                selected = (*option).to_string();
+                                result = Some(ParamValue::Text(selected.clone()));
+                                ui.close();
                             }
-                            changed
-                        })
-                        .inner
-                        .unwrap_or(false)
-                })
-                .inner;
-            changed.then_some(ParamValue::Text(selected))
+                        }
+                    });
+                });
+            });
+            result
         }
         (Widget::CurveEditor, ParamValue::Curve(curve)) => {
             ui.label(name);
