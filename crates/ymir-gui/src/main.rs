@@ -480,11 +480,21 @@ struct AppState {
     workspace_mode: WorkspaceMode,
     /// The mode drawn last frame, so [`mount`] can tell when the mode just changed and force the
     /// viewport panel to its target height for that frame (egui otherwise reloads its own persisted
-    /// size, which would leave the divider at the previous mode's extreme).
-    workspace_mode_prev: WorkspaceMode,
+    /// size, which would leave the divider at the previous mode's extreme). `None` before the first
+    /// frame, so the initial frame forces the default split rather than inheriting a stale size.
+    workspace_mode_prev: Option<WorkspaceMode>,
     /// The remembered viewport fraction of the workspace body while in Split, so restoring from a
     /// maximized mode reopens the divider at the position it last had. Updated from divider drags.
     viewport_frac: f32,
+    /// The viewport panel height at the start of the current collapse/expand animation, the value it
+    /// eases from toward the new mode's target.
+    viewport_anim_from: f32,
+    /// The egui time (seconds) the current collapse/expand animation began, so its progress is a
+    /// function of elapsed time rather than a frame count.
+    viewport_anim_start: f64,
+    /// The viewport panel height rendered last frame, captured as the `from` value when a mode
+    /// change starts an animation.
+    viewport_last_h: f32,
     /// The build cache's disk store (read view), opened once in the app shell so the viewport
     /// can show build-quality terrain. `None` if the cache directory is unavailable, or in the
     /// test-constructed state, which never touches the filesystem.
@@ -700,8 +710,11 @@ impl AppState {
                 ambient: 0.25,
             },
             workspace_mode: WorkspaceMode::Split,
-            workspace_mode_prev: WorkspaceMode::Split,
+            workspace_mode_prev: None,
             viewport_frac: 0.4,
+            viewport_anim_from: 0.0,
+            viewport_anim_start: 0.0,
+            viewport_last_h: 0.0,
             field_store: None,
             viewport_build: None,
             status: None,
@@ -2950,11 +2963,12 @@ fn library_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // A solid divider spanning the full dock width (the panes now reach both borders), matching the
     // canvas/viewport border rather than egui's faint default separator, so the inspector reads as
     // a distinct pane below the browser.
-    ui.painter().hline(
-        inspector.response.rect.x_range(),
-        inspector.response.rect.top(),
-        egui::Stroke::new(1.0, divider),
-    );
+    let divider_y = inspector.response.rect.top();
+    let x_range = inspector.response.rect.x_range();
+    ui.painter()
+        .hline(x_range, divider_y, egui::Stroke::new(1.0, divider));
+    // The same grab handle as the workspace divider, so this browser/inspector resize reads the same.
+    divider_handle(ui, divider_y, x_range);
 }
 inventory::submit! {
     dock::DockPane {
@@ -4912,9 +4926,9 @@ enum ClickHit {
 }
 
 fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
-    // Collapsed (the preview is maximized): draw only the labeled bar, no graph. The stat is the
-    // node count of the active graph.
-    if state.workspace_mode == WorkspaceMode::Preview {
+    // Collapsed (or animating past the collapse point): draw only the labeled bar, no graph. The
+    // stat is the node count of the active graph.
+    if pane_collapsed(ui.available_height()) {
         let n = state.graph.node_count();
         let stat = format!("{n} node{}", if n == 1 { "" } else { "s" });
         workspace_collapsed_bar(ui, egui_phosphor::regular::GRAPH, "Graph", &stat, state);
@@ -6305,9 +6319,11 @@ fn refresh_viewport_build(state: &mut AppState) {
 }
 
 fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
-    // Collapsed (the graph is maximized): draw only the labeled bar, no render. The stat names the
-    // current projection.
-    if state.workspace_mode == WorkspaceMode::Graph {
+    // The pane rect, captured before `show` consumes it, anchors the floating control HUD.
+    let rect = ui.available_rect_before_wrap();
+    // Collapsed (or animating past the collapse point): draw only the labeled bar, no render. The
+    // stat names the current projection.
+    if pane_collapsed(rect.height()) {
         let stat = match state.viewport_mode {
             viewport2d::Mode::ThreeD => "3D",
             viewport2d::Mode::TwoD => "2D",
@@ -6321,8 +6337,6 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
         );
         return;
     }
-    // The pane rect, captured before `show` consumes it, anchors the floating control HUD.
-    let rect = ui.available_rect_before_wrap();
 
     // Prefer build-quality fields for the shown node when the disk cache has them (after a
     // Build of the unchanged graph), else the live preview field. The same field feeds both
@@ -6370,7 +6384,10 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
     let mut exaggeration = state.viewport_exaggeration;
     let mut light = state.viewport_lighting;
     let mut shade_mode = state.viewport_2d.shade_mode();
-    egui::Area::new(ui.id().with("viewport-hud"))
+    // Draw the floating HUD only when the viewport is tall enough to hold it, so a short viewport
+    // shows only the render rather than a HUD overflowing it.
+    if rect.height() >= WORKSPACE_HUD_MIN {
+        egui::Area::new(ui.id().with("viewport-hud"))
         .order(egui::Order::Foreground)
         .fixed_pos(rect.left_top() + egui::vec2(8.0, 8.0))
         .show(ui.ctx(), |ui| {
@@ -6403,6 +6420,7 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 }
             });
         });
+    }
     state.viewport_mode = mode;
     state.viewport_scale = scale;
     state.viewport_exaggeration = exaggeration;
@@ -6554,6 +6572,32 @@ const SIDE_PANEL_WIDTH: f32 = 260.0;
 /// draws only this bar, never its content.
 const WORKSPACE_BAR_H: f32 = 32.0;
 
+/// The minimum height of a *shown* pane in Split, and the point at which dragging the divider
+/// collapses the shrinking pane to its labeled bar.
+const WORKSPACE_COLLAPSE_SNAP: f32 = 100.0;
+
+/// Clearance from the snap thresholds that a *restore* reopens Split with, so the divider never
+/// lands right at the edge of the snap zone (where the next click on the handle would re-collapse
+/// it). Only affects where restore/startup opens; free dragging still reaches the snap point.
+const WORKSPACE_RESTORE_CLEARANCE: f32 = 40.0;
+
+/// Below this height a pane draws its labeled bar instead of its content; above it, its content.
+/// Between this and [`WORKSPACE_COLLAPSE_SNAP`] a pane shows content but not its floating controls.
+/// Sits between the bar height and the snap, so it is only crossed while a collapse/expand animates.
+const WORKSPACE_PANE_CONTENT_MIN: f32 = 64.0;
+
+/// The viewport must be at least this tall to draw its floating HUD, so a short viewport shows only
+/// the render rather than a HUD overflowing it.
+const WORKSPACE_HUD_MIN: f32 = 150.0;
+
+/// Duration (seconds) of the collapse/expand height animation when the layout mode changes.
+const WORKSPACE_ANIM_SECS: f64 = 0.22;
+
+/// Whether a workspace pane of this height draws its labeled bar rather than its content.
+fn pane_collapsed(height: f32) -> bool {
+    height <= WORKSPACE_PANE_CONTENT_MIN
+}
+
 /// The workspace layout mode: which of the two stacked panes is emphasized. `Split` shares the
 /// height over a draggable divider; `Graph` maximizes the node graph (the viewport collapses to a
 /// bottom bar); `Preview` maximizes the 2D/3D viewport (the graph collapses to a top bar).
@@ -6698,6 +6742,37 @@ fn layout_mode_switcher(ui: &egui::Ui, body_rect: egui::Rect, state: &mut AppSta
                     });
                 });
         });
+}
+
+/// Draws a resize divider's grab handle: a short centered pill on the divider line at screen `y`
+/// over `x_range`, brightening when the pointer is near (where the owning resizable panel accepts
+/// the drag). Purely a visual affordance; the panel handles the drag itself. Shared by the
+/// workspace split and the left dock's browser/inspector split so both read the same.
+fn divider_handle(ui: &egui::Ui, y: f32, x_range: egui::Rangef) {
+    let near = ui
+        .input(|i| i.pointer.hover_pos())
+        .is_some_and(|p| (p.y - y).abs() <= 6.0 && x_range.contains(p.x));
+    let handle = egui::Rect::from_center_size(
+        egui::pos2((x_range.min + x_range.max) * 0.5, y),
+        egui::vec2(44.0, 5.0),
+    );
+    // Paint on a clip expanded past the pane edge, so the lower half of the pill (which sits over the
+    // pane below the divider) is not cut off.
+    let painter = ui.painter().with_clip_rect(ui.clip_rect().expand(8.0));
+    // A light fill with a dark rim reads against both the light canvas above and the dark viewport
+    // below; it brightens to near-white when the pointer is near, where the drag is accepted.
+    let fill = if near {
+        theme::TEXT_PRIMARY
+    } else {
+        theme::TEXT_SECONDARY
+    };
+    painter.rect_filled(handle, 2.5, fill);
+    painter.rect_stroke(
+        handle,
+        2.5,
+        egui::Stroke::new(1.0, theme::BG_ABYSS),
+        egui::StrokeKind::Outside,
+    );
 }
 
 /// Mounts the left dock (#106): archetype 2's project/global column, mirroring the right pane
@@ -6847,45 +6922,99 @@ fn mount(layout: &Layout, ui: &mut egui::Ui, state: &mut AppState) {
             let body_rect = ui.max_rect();
             let avail = ui.available_height();
             let bar = WORKSPACE_BAR_H;
-            let max_h = (avail - bar).max(bar);
-            let target = match state.workspace_mode {
-                WorkspaceMode::Split => (state.viewport_frac * avail).clamp(bar, max_h),
+            // Split keeps each shown pane at least the snap height; the collapsed modes shrink the
+            // off pane all the way to the bar.
+            let split_min = WORKSPACE_COLLAPSE_SNAP;
+            let split_max = (avail - WORKSPACE_COLLAPSE_SNAP).max(split_min);
+            let goal = match state.workspace_mode {
+                // Open Split with clearance from the snap thresholds, so a restore never reopens the
+                // pane sitting on the edge of the snap zone. Free dragging (below) still reaches the
+                // real min/max.
+                WorkspaceMode::Split => {
+                    let lo = split_min + WORKSPACE_RESTORE_CLEARANCE;
+                    let hi = (split_max - WORKSPACE_RESTORE_CLEARANCE).max(lo);
+                    (state.viewport_frac * avail).clamp(lo, hi)
+                }
                 WorkspaceMode::Graph => bar,
-                WorkspaceMode::Preview => max_h,
+                WorkspaceMode::Preview => (avail - bar).max(bar),
             };
             let split = state.workspace_mode == WorkspaceMode::Split;
-            // On a mode change, force the target for this frame (egui then persists it, so Split's
-            // divider is draggable again next frame); a steady Split frame is freely resizable.
-            let entering = state.workspace_mode != state.workspace_mode_prev;
-            state.workspace_mode_prev = state.workspace_mode;
+            // Animate the viewport height toward the mode's goal. On a mode change, ease from the
+            // height rendered last frame; the first frame snaps (no animation) and forces the size,
+            // so a stale persisted size never shows as a sliver viewport at startup.
+            let now = ui.input(|i| i.time);
+            let first = state.workspace_mode_prev.is_none();
+            if state.workspace_mode_prev != Some(state.workspace_mode) {
+                state.viewport_anim_from = if first { goal } else { state.viewport_last_h };
+                // Start the first frame already finished (no startup animation); a real mode change
+                // starts now.
+                state.viewport_anim_start = if first {
+                    now - WORKSPACE_ANIM_SECS
+                } else {
+                    now
+                };
+                state.workspace_mode_prev = Some(state.workspace_mode);
+            }
+            let t = if first {
+                1.0
+            } else {
+                ((now - state.viewport_anim_start) / WORKSPACE_ANIM_SECS).clamp(0.0, 1.0) as f32
+            };
+            // Ease-out quart: fast to start, decelerating into a soft settle at the target.
+            let eased = 1.0 - (1.0 - t).powi(4);
+            let animated = state.viewport_anim_from + (goal - state.viewport_anim_from) * eased;
+            let animating = t < 1.0;
+            // Steady Split is the only freely-resizable state; a collapse/expand animation or a
+            // maximized mode drives the height directly.
+            let steady_split = split && !animating && !first;
             let panel = egui::Panel::bottom("viewport-panel")
                 .show_separator_line(false)
                 // The 3D stage's own background, not the dark chrome panel fill: a mid cool slate
                 // that keeps the neutral grey terrain legible in both highlight and shadow. No inner
                 // margin, so the viewport hugs the panel edges.
                 .frame(egui::Frame::new().fill(theme::VIEWPORT_BG));
-            let panel = if split && !entering {
-                panel.resizable(true).min_size(bar).max_size(max_h)
+            let panel = if steady_split {
+                panel
+                    .resizable(true)
+                    .min_size(split_min)
+                    .max_size(split_max)
+                    .default_size(animated)
             } else {
-                panel.resizable(false).exact_size(target)
+                panel
+                    .resizable(false)
+                    .exact_size(animated.clamp(bar, (avail - bar).max(bar)))
             };
             let viewport = panel.show_inside(ui, |ui| draw_pane(layout.viewport, ui, state));
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
                 .show_inside(ui, |ui| draw_pane(layout.canvas, ui, state));
 
-            // Remember the divider position while in Split, so a maximize round-trip returns to it.
             let vp_h = viewport.response.rect.height();
-            if split && avail > 0.0 && vp_h > bar + 1.0 && vp_h < max_h - 1.0 {
-                state.viewport_frac = (vp_h / avail).clamp(0.05, 0.95);
+            state.viewport_last_h = vp_h;
+            if animating {
+                ui.ctx().request_repaint();
+            }
+            // In steady Split, dragging a pane down to the snap point collapses it (the shrinking
+            // pane is replaced by its labeled bar); otherwise remember the divider position so a
+            // restore returns to it. Skipped while animating, so restoring never re-collapses.
+            if steady_split && avail > 0.0 {
+                if vp_h <= split_min + 1.0 {
+                    state.workspace_mode = WorkspaceMode::Graph;
+                } else if vp_h >= split_max - 1.0 {
+                    state.workspace_mode = WorkspaceMode::Preview;
+                } else {
+                    state.viewport_frac = (vp_h / avail).clamp(0.05, 0.95);
+                }
             }
 
-            // A light border between the canvas and the viewport.
-            ui.painter().hline(
-                viewport.response.rect.x_range(),
-                viewport.response.rect.top(),
-                line,
-            );
+            // A light border between the canvas and the viewport; in steady Split, a centered grab
+            // handle makes the resize affordance obvious.
+            let divider_y = viewport.response.rect.top();
+            let x_range = viewport.response.rect.x_range();
+            ui.painter().hline(x_range, divider_y, line);
+            if steady_split {
+                divider_handle(ui, divider_y, x_range);
+            }
 
             // The single layout switcher, floated at the workspace top-right regardless of mode.
             layout_mode_switcher(ui, body_rect, state);
