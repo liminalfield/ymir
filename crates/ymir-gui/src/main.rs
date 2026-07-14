@@ -473,6 +473,18 @@ struct AppState {
     /// The 3D viewport's sun direction and response (azimuth/elevation degrees, diffuse
     /// intensity, ambient fill). A non-persisted view aid; raking the sun low reads form.
     viewport_lighting: viewport::Lighting,
+    /// The workspace layout mode (#): Split shows both panes over a draggable divider; Graph
+    /// maximizes the node graph (the viewport collapses to a labeled bottom bar); Preview maximizes
+    /// the 2D/3D viewport (the graph collapses to a labeled top bar). Set by the top-right layout
+    /// switcher and by clicking a collapsed bar to restore.
+    workspace_mode: WorkspaceMode,
+    /// The mode drawn last frame, so [`mount`] can tell when the mode just changed and force the
+    /// viewport panel to its target height for that frame (egui otherwise reloads its own persisted
+    /// size, which would leave the divider at the previous mode's extreme).
+    workspace_mode_prev: WorkspaceMode,
+    /// The remembered viewport fraction of the workspace body while in Split, so restoring from a
+    /// maximized mode reopens the divider at the position it last had. Updated from divider drags.
+    viewport_frac: f32,
     /// The build cache's disk store (read view), opened once in the app shell so the viewport
     /// can show build-quality terrain. `None` if the cache directory is unavailable, or in the
     /// test-constructed state, which never touches the filesystem.
@@ -687,6 +699,9 @@ impl AppState {
                 intensity: 0.75,
                 ambient: 0.25,
             },
+            workspace_mode: WorkspaceMode::Split,
+            workspace_mode_prev: WorkspaceMode::Split,
+            viewport_frac: 0.4,
             field_store: None,
             viewport_build: None,
             status: None,
@@ -4897,6 +4912,14 @@ enum ClickHit {
 }
 
 fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
+    // Collapsed (the preview is maximized): draw only the labeled bar, no graph. The stat is the
+    // node count of the active graph.
+    if state.workspace_mode == WorkspaceMode::Preview {
+        let n = state.graph.node_count();
+        let stat = format!("{n} node{}", if n == 1 { "" } else { "s" });
+        workspace_collapsed_bar(ui, egui_phosphor::regular::GRAPH, "Graph", &stat, state);
+        return;
+    }
     // No vertical item spacing in the pane: the breadcrumb bar (when shown) then butts directly
     // against the snarl canvas below it, with no strip of dark pane background showing between them.
     ui.spacing_mut().item_spacing.y = 0.0;
@@ -6282,6 +6305,22 @@ fn refresh_viewport_build(state: &mut AppState) {
 }
 
 fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
+    // Collapsed (the graph is maximized): draw only the labeled bar, no render. The stat names the
+    // current projection.
+    if state.workspace_mode == WorkspaceMode::Graph {
+        let stat = match state.viewport_mode {
+            viewport2d::Mode::ThreeD => "3D",
+            viewport2d::Mode::TwoD => "2D",
+        };
+        workspace_collapsed_bar(
+            ui,
+            egui_phosphor::regular::MOUNTAINS,
+            "Preview",
+            stat,
+            state,
+        );
+        return;
+    }
     // The pane rect, captured before `show` consumes it, anchors the floating control HUD.
     let rect = ui.available_rect_before_wrap();
 
@@ -6511,6 +6550,156 @@ const DOCK_RAIL_WIDTH: f32 = 36.0;
 /// the workspace is symmetric. Sized to the right panel's square preview plus a small margin.
 const SIDE_PANEL_WIDTH: f32 = 260.0;
 
+/// Height of a workspace pane collapsed to a labeled bar (the design's edge tab). A collapsed pane
+/// draws only this bar, never its content.
+const WORKSPACE_BAR_H: f32 = 32.0;
+
+/// The workspace layout mode: which of the two stacked panes is emphasized. `Split` shares the
+/// height over a draggable divider; `Graph` maximizes the node graph (the viewport collapses to a
+/// bottom bar); `Preview` maximizes the 2D/3D viewport (the graph collapses to a top bar).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WorkspaceMode {
+    Split,
+    Graph,
+    Preview,
+}
+
+/// Draws a collapsed pane as a labeled bar filling the pane, drawing no pane content (the design's
+/// core fix: a minimized pane is an identity bar, not a tiny render). Shows the pane icon, name, and
+/// a live stat; the whole bar is clickable to restore the Split layout (the quick "click the tab to
+/// bring it back"). Deep chrome fill, brightening on hover.
+fn workspace_collapsed_bar(
+    ui: &mut egui::Ui,
+    icon: &str,
+    name: &str,
+    stat: &str,
+    state: &mut AppState,
+) {
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), ui.available_height()),
+        egui::Sense::click(),
+    );
+    let painter = ui.painter();
+    let fill = if resp.hovered() {
+        theme::BG_RAISED
+    } else {
+        theme::BG_ABYSS
+    };
+    painter.rect_filled(rect, 0.0, fill);
+    let cy = rect.center().y;
+    let icon_rect = painter.text(
+        egui::pos2(rect.left() + 12.0, cy),
+        egui::Align2::LEFT_CENTER,
+        icon,
+        egui::FontId::proportional(15.0),
+        theme::TEXT_SECONDARY,
+    );
+    let name_rect = painter.text(
+        egui::pos2(icon_rect.right() + 8.0, cy),
+        egui::Align2::LEFT_CENTER,
+        name,
+        egui::FontId::new(12.5, egui::FontFamily::Name("plex-medium".into())),
+        theme::TEXT_PRIMARY,
+    );
+    if !stat.is_empty() {
+        painter.text(
+            egui::pos2(name_rect.right() + 10.0, cy),
+            egui::Align2::LEFT_CENTER,
+            stat,
+            egui::FontId::new(11.0, egui::FontFamily::Monospace),
+            theme::TEXT_TERTIARY,
+        );
+    }
+    if resp
+        .on_hover_text("Click to restore the split view")
+        .clicked()
+    {
+        state.workspace_mode = WorkspaceMode::Split;
+    }
+}
+
+/// Draws one segment of the layout switcher: a mini ratio icon (two stacked bars sized to the mode's
+/// split) over a segment background that fills when active or hovered. The emphasized pane's bar is
+/// the accent when active. Returns the segment's response.
+fn layout_mode_segment(ui: &mut egui::Ui, mode: WorkspaceMode, active: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(30.0, 22.0), egui::Sense::click());
+    let painter = ui.painter();
+    let bg = if active {
+        theme::BG_HOVER
+    } else if resp.hovered() {
+        theme::BG_RAISED
+    } else {
+        theme::BG_ABYSS
+    };
+    painter.rect_filled(rect, 4.0, bg);
+    let inner = egui::Rect::from_center_size(rect.center(), egui::vec2(16.0, 13.0));
+    let gap = 1.5;
+    // The top bar's share of the icon; the bottom takes the rest. Graph is top-heavy (the graph
+    // sits on top), Preview bottom-heavy.
+    let top_frac = match mode {
+        WorkspaceMode::Split => 0.5,
+        WorkspaceMode::Graph => 0.68,
+        WorkspaceMode::Preview => 0.32,
+    };
+    let bars_h = inner.height() - gap;
+    let top_h = bars_h * top_frac;
+    let top = egui::Rect::from_min_size(inner.left_top(), egui::vec2(inner.width(), top_h));
+    let bot = egui::Rect::from_min_size(
+        egui::pos2(inner.left(), inner.top() + top_h + gap),
+        egui::vec2(inner.width(), bars_h - top_h),
+    );
+    // Emphasize the focused (larger) pane in accent when active; both panes neutral otherwise.
+    let accent = theme::ACCENT_PRIMARY;
+    let dim = theme::TEXT_TERTIARY;
+    let (top_col, bot_col) = match (mode, active) {
+        (WorkspaceMode::Split, true) => (accent, accent),
+        (WorkspaceMode::Graph, true) => (accent, dim),
+        (WorkspaceMode::Preview, true) => (dim, accent),
+        _ => (theme::TEXT_SECONDARY, theme::TEXT_SECONDARY),
+    };
+    painter.rect_filled(top, 1.5, top_col);
+    painter.rect_filled(bot, 1.5, bot_col);
+    resp
+}
+
+/// The workspace layout switcher (design 1c): a compact three-segment control — Split, Graph,
+/// Preview — floated at the top-right of the workspace, matching the app's segmented toggles. A
+/// click picks that mode; clicking the active Graph or Preview segment toggles back to Split (a
+/// quick restore, alongside clicking the collapsed bar itself).
+fn layout_mode_switcher(ui: &egui::Ui, body_rect: egui::Rect, state: &mut AppState) {
+    let modes = [
+        (WorkspaceMode::Split, "Split view"),
+        (WorkspaceMode::Graph, "Maximize the graph"),
+        (WorkspaceMode::Preview, "Maximize the preview"),
+    ];
+    egui::Area::new(ui.id().with("layout-switcher"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(body_rect.right_top() + egui::vec2(-8.0, 8.0))
+        .pivot(egui::Align2::RIGHT_TOP)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style())
+                .inner_margin(egui::Margin::same(3))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        for (mode, tip) in modes {
+                            let active = state.workspace_mode == mode;
+                            if layout_mode_segment(ui, mode, active)
+                                .on_hover_text(tip)
+                                .clicked()
+                            {
+                                state.workspace_mode = if active && mode != WorkspaceMode::Split {
+                                    WorkspaceMode::Split
+                                } else {
+                                    mode
+                                };
+                            }
+                        }
+                    });
+                });
+        });
+}
+
 /// Mounts the left dock (#106): archetype 2's project/global column, mirroring the right pane
 /// below the full-width ribbon. Collapsed, it is a narrow icon rail (one button per registered
 /// dock pane); open, it is a full pane with a switcher header (the pane icons plus a collapse
@@ -6651,18 +6840,45 @@ fn mount(layout: &Layout, ui: &mut egui::Ui, state: &mut AppState) {
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE)
         .show_inside(ui, |ui| {
-            let viewport = egui::Panel::bottom("viewport-panel")
-                .resizable(true)
-                .default_size(ui.available_height() * 0.4)
+            // The viewport panel's height is driven by the layout mode: a remembered fraction in
+            // Split (with the divider draggable), a single bar in Graph (the viewport collapses),
+            // or all but a bar in Preview (the graph collapses). Each collapsed pane draws only its
+            // labeled bar, never its content.
+            let body_rect = ui.max_rect();
+            let avail = ui.available_height();
+            let bar = WORKSPACE_BAR_H;
+            let max_h = (avail - bar).max(bar);
+            let target = match state.workspace_mode {
+                WorkspaceMode::Split => (state.viewport_frac * avail).clamp(bar, max_h),
+                WorkspaceMode::Graph => bar,
+                WorkspaceMode::Preview => max_h,
+            };
+            let split = state.workspace_mode == WorkspaceMode::Split;
+            // On a mode change, force the target for this frame (egui then persists it, so Split's
+            // divider is draggable again next frame); a steady Split frame is freely resizable.
+            let entering = state.workspace_mode != state.workspace_mode_prev;
+            state.workspace_mode_prev = state.workspace_mode;
+            let panel = egui::Panel::bottom("viewport-panel")
                 .show_separator_line(false)
                 // The 3D stage's own background, not the dark chrome panel fill: a mid cool slate
                 // that keeps the neutral grey terrain legible in both highlight and shadow. No inner
                 // margin, so the viewport hugs the panel edges.
-                .frame(egui::Frame::new().fill(theme::VIEWPORT_BG))
-                .show_inside(ui, |ui| draw_pane(layout.viewport, ui, state));
+                .frame(egui::Frame::new().fill(theme::VIEWPORT_BG));
+            let panel = if split && !entering {
+                panel.resizable(true).min_size(bar).max_size(max_h)
+            } else {
+                panel.resizable(false).exact_size(target)
+            };
+            let viewport = panel.show_inside(ui, |ui| draw_pane(layout.viewport, ui, state));
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
                 .show_inside(ui, |ui| draw_pane(layout.canvas, ui, state));
+
+            // Remember the divider position while in Split, so a maximize round-trip returns to it.
+            let vp_h = viewport.response.rect.height();
+            if split && avail > 0.0 && vp_h > bar + 1.0 && vp_h < max_h - 1.0 {
+                state.viewport_frac = (vp_h / avail).clamp(0.05, 0.95);
+            }
 
             // A light border between the canvas and the viewport.
             ui.painter().hline(
@@ -6670,6 +6886,9 @@ fn mount(layout: &Layout, ui: &mut egui::Ui, state: &mut AppState) {
                 viewport.response.rect.top(),
                 line,
             );
+
+            // The single layout switcher, floated at the workspace top-right regardless of mode.
+            layout_mode_switcher(ui, body_rect, state);
         });
 
     // Section borders, drawn last so they sit on top: the full-width lines under the menu and
