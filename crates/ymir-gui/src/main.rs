@@ -396,6 +396,8 @@ struct AppState {
     /// The "Save to library" dialog (#106), open while documenting a subgraph being saved.
     /// `None` when closed.
     library_save: Option<LibrarySave>,
+    /// The active tab of the Save/Edit-to-library dialog, reset to Details when it opens.
+    library_save_tab: LibraryTab,
     /// The subgraph library listing (#106): the saved subgraphs the left dock browses. Loaded
     /// from disk in the app shell (never in `AppState::new`) and refreshed after a save.
     library: library::LibraryListing,
@@ -591,6 +593,29 @@ impl SubgraphSource {
 
 /// The "Save to library" dialog (#106): a documentation template for a subgraph being saved or
 /// edited, pre-filled from its source and edited by the author. `None` when closed.
+/// The active tab of the Save/Edit-to-library dialog (design 1c). Kept on [`AppState`] so the
+/// overwrite-reconfirm flow, which rebuilds the dialog, does not reset it.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum LibraryTab {
+    #[default]
+    Details,
+    Ports,
+    Attribution,
+}
+
+/// Common SPDX license ids offered as quick picks in the license combobox. The field stays free
+/// text, so any other license (or none) is always typeable; this only shortcuts the frequent few.
+const LICENSE_SUGGESTIONS: &[&str] = &[
+    "CC0-1.0",
+    "MIT",
+    "Apache-2.0",
+    "GPL-3.0-or-later",
+    "GPL-3.0-only",
+    "CC-BY-4.0",
+    "CC-BY-SA-4.0",
+    "Unlicense",
+];
+
 struct LibrarySave {
     /// Where the subgraph being documented comes from: a live container, or an existing entry.
     source: SubgraphSource,
@@ -673,6 +698,7 @@ impl AppState {
             preview_pin: None,
             rename: None,
             library_save: None,
+            library_save_tab: LibraryTab::Details,
             // Env-free defaults (empty listing, collapsed dock); the real library is loaded in
             // the app shell so the test-constructed state never touches the filesystem, matching
             // apply_default.
@@ -1068,6 +1094,7 @@ impl AppState {
         if self.graph.nested(id).is_none() {
             return; // not a container
         }
+        self.library_save_tab = LibraryTab::Details;
         let Some(spec) = self.graph.spec(id) else {
             return;
         };
@@ -1105,6 +1132,7 @@ impl AppState {
         let Some(entry) = self.library.entries.iter().find(|e| e.path == path) else {
             return;
         };
+        self.library_save_tab = LibraryTab::Details;
         let file = &entry.file;
         self.library_save = Some(LibrarySave {
             source: SubgraphSource::Existing {
@@ -6019,102 +6047,329 @@ fn library_save_dialog(ctx: &egui::Context, state: &mut AppState) {
     if state.library_save.is_none() {
         return;
     }
-    let mut open = true;
-    let mut save = false;
-    let mut cancel = false;
-    // Editing an existing entry reuses this dialog; the title says which so the two are not
-    // confused.
+    // Category quick-picks are the categories already used in the library; collected before the
+    // dialog is borrowed, since both live on `state`. Licenses are a fixed common set. Both fields
+    // stay free text (the dropdown only suggests).
+    let mut categories: Vec<String> = state
+        .library
+        .entries
+        .iter()
+        .map(|e| e.file.category.trim().to_string())
+        .filter(|c| !c.is_empty())
+        .collect();
+    categories.sort();
+    categories.dedup();
+    let licenses: Vec<String> = LICENSE_SUGGESTIONS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+
     let editing = matches!(
         state.library_save.as_ref().map(|d| &d.source),
         Some(SubgraphSource::Existing { .. })
     );
-    let title = if editing {
-        "Edit library subgraph"
-    } else {
-        "Save subgraph to library"
-    };
-    egui::Window::new(title)
+    let mut tab = state.library_save_tab;
+    let mut save = false;
+    let mut cancel = false;
+    let style = ctx.global_style();
+    egui::Window::new("library-save-dialog")
+        .title_bar(false)
         .collapsible(false)
-        .resizable(true)
-        .open(&mut open)
+        .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .frame(
+            egui::Frame::window(&style)
+                .fill(theme::BG_SURFACE)
+                .stroke(egui::Stroke::new(1.0, theme::LINE_STRONG))
+                .inner_margin(egui::Margin::same(16)),
+        )
         .show(ctx, |ui| {
+            ui.set_width(452.0);
             let Some(dialog) = state.library_save.as_mut() else {
                 return;
             };
-            egui::Grid::new("library-save-meta")
-                .num_columns(2)
-                .spacing([8.0, 6.0])
-                .show(ui, |ui| {
-                    ui.label("Name");
-                    let name_resp =
-                        ui.add(egui::TextEdit::singleline(&mut dialog.name).desired_width(260.0));
-                    // Editing the name re-arms the overwrite guard and clears any stale message,
-                    // so switching to a fresh name is never silently overwritten.
+
+            // Header: an eyebrow over the subgraph name, with a close button at the right.
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(
+                        egui::RichText::new(if editing {
+                            "EDIT LIBRARY SUBGRAPH"
+                        } else {
+                            "SAVE SUBGRAPH TO LIBRARY"
+                        })
+                        .size(10.0)
+                        .color(theme::TEXT_TERTIARY),
+                    );
+                    let name = if dialog.name.trim().is_empty() {
+                        "Untitled subgraph"
+                    } else {
+                        dialog.name.trim()
+                    };
+                    ui.label(
+                        egui::RichText::new(name)
+                            .family(egui::FontFamily::Name("plex-semibold".into()))
+                            .size(16.0)
+                            .color(theme::TEXT_PRIMARY),
+                    );
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new(egui_phosphor::regular::X)
+                                    .color(theme::TEXT_TERTIARY),
+                            )
+                            .frame(false),
+                        )
+                        .on_hover_text("Close")
+                        .clicked()
+                    {
+                        cancel = true;
+                    }
+                });
+            });
+
+            // Tabs, over a divider.
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 18.0;
+                dialog_tab(ui, &mut tab, LibraryTab::Details, "Details");
+                let ports = format!(
+                    "Ports  {}\u{b7}{}",
+                    dialog.inputs.len(),
+                    dialog.outputs.len()
+                );
+                dialog_tab(ui, &mut tab, LibraryTab::Ports, &ports);
+                dialog_tab(ui, &mut tab, LibraryTab::Attribution, "Attribution");
+            });
+            ui.add_space(5.0);
+            ui.separator();
+            ui.add_space(8.0);
+
+            match tab {
+                LibraryTab::Details => {
+                    dialog_label(ui, "Name");
+                    let name_resp = ui.add(
+                        egui::TextEdit::singleline(&mut dialog.name)
+                            .background_color(theme::BG_ABYSS)
+                            .desired_width(f32::INFINITY),
+                    );
+                    // Editing the name re-arms the overwrite guard and clears any stale message.
                     if name_resp.changed() {
                         dialog.confirm_overwrite = false;
                         dialog.error = None;
                     }
-                    ui.end_row();
-                    ui.label("Category");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut dialog.category)
-                            .hint_text("optional")
-                            .desired_width(260.0),
+                    ui.add_space(8.0);
+                    dialog_label(ui, "Category");
+                    editable_combo(
+                        ui,
+                        "lib-cat",
+                        &mut dialog.category,
+                        "Uncategorized",
+                        &categories,
                     );
-                    ui.end_row();
-                    ui.label("License");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut dialog.license)
-                            .hint_text("optional, e.g. CC0-1.0 or GPL-3.0-or-later")
-                            .desired_width(260.0),
+                    ui.add_space(8.0);
+                    dialog_label(ui, "License");
+                    editable_combo(
+                        ui,
+                        "lib-lic",
+                        &mut dialog.license,
+                        "optional, e.g. CC0-1.0",
+                        &licenses,
                     );
-                    ui.end_row();
-                });
-            ui.add_space(6.0);
-            ui.label("Description");
-            ui.add(
-                egui::TextEdit::multiline(&mut dialog.description)
-                    .hint_text("what this subgraph produces")
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(2),
-            );
-            port_docs_ui(ui, "Inputs", INPUT_TYPE_ID, &mut dialog.inputs);
-            port_docs_ui(ui, "Outputs", OUTPUT_TYPE_ID, &mut dialog.outputs);
-            ui.add_space(6.0);
-            ui.separator();
-            ui.horizontal(|ui| {
-                ui.strong("Author");
-                ui.label(egui::RichText::new("optional, from your Settings profile").weak());
-            });
-            author_fields_ui(ui, "library-save-author", &mut dialog.author);
-            if let Some(err) = &dialog.error {
-                ui.add_space(4.0);
-                ui.colored_label(ui.visuals().error_fg_color, err);
+                    ui.add_space(8.0);
+                    dialog_label(ui, "Description");
+                    ui.add(
+                        egui::TextEdit::multiline(&mut dialog.description)
+                            .hint_text("what this subgraph produces")
+                            .background_color(theme::BG_ABYSS)
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(2),
+                    );
+                }
+                LibraryTab::Ports => {
+                    ui.label(
+                        egui::RichText::new(
+                            "These ports come from the subgraph \u{2014} edit each name and \
+                             description. To change the set itself, edit the graph and re-save it \
+                             to the library.",
+                        )
+                        .size(11.0)
+                        .color(theme::TEXT_SECONDARY),
+                    );
+                    library_port_fields(ui, "INPUTS", INPUT_TYPE_ID, &mut dialog.inputs);
+                    library_port_fields(ui, "OUTPUTS", OUTPUT_TYPE_ID, &mut dialog.outputs);
+                }
+                LibraryTab::Attribution => {
+                    ui.label(
+                        egui::RichText::new(
+                            "Optional. Attached to the subgraph so others know who made it. \
+                             Prefilled from your Settings profile.",
+                        )
+                        .size(11.0)
+                        .color(theme::TEXT_SECONDARY),
+                    );
+                    ui.add_space(6.0);
+                    author_fields_ui(ui, "library-save-author", &mut dialog.author);
+                }
             }
+
+            // Footer: any error, then the ghost Cancel and primary Save at the right.
+            ui.add_space(12.0);
             ui.separator();
+            ui.add_space(8.0);
+            if let Some(err) = &dialog.error {
+                ui.colored_label(ui.visuals().error_fg_color, err);
+                ui.add_space(6.0);
+            }
             // The button relabels once an overwrite is armed, so the second click reads as the
-            // deliberate action it is rather than a plain re-save.
+            // deliberate action it is.
             let save_label = if dialog.confirm_overwrite {
                 "Overwrite"
             } else {
-                "Save"
+                "Save changes"
             };
-            ui.horizontal(|ui| {
-                if ui.button(save_label).clicked() {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if dialog_primary_button(ui, save_label).clicked() {
                     save = true;
                 }
-                if ui.button("Cancel").clicked() {
+                ui.add_space(6.0);
+                if dialog_ghost_button(ui, "Cancel").clicked() {
                     cancel = true;
                 }
             });
         });
 
+    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        cancel = true;
+    }
+    state.library_save_tab = tab;
     if save {
         state.save_subgraph_to_library();
-    } else if cancel || !open {
+    } else if cancel {
         state.library_save = None;
     }
+}
+
+/// A small muted field label for the Save-to-library dialog.
+fn dialog_label(ui: &mut egui::Ui, text: &str) {
+    ui.label(
+        egui::RichText::new(text)
+            .size(11.0)
+            .color(theme::TEXT_TERTIARY),
+    );
+}
+
+/// One tab of the Save-to-library dialog: a frameless text button that sets the active tab and, when
+/// active, carries an accent underline.
+fn dialog_tab(ui: &mut egui::Ui, active: &mut LibraryTab, this: LibraryTab, text: &str) {
+    let is_active = *active == this;
+    let color = if is_active {
+        theme::TEXT_PRIMARY
+    } else {
+        theme::TEXT_SECONDARY
+    };
+    let family = if is_active {
+        egui::FontFamily::Name("plex-medium".into())
+    } else {
+        egui::FontFamily::Proportional
+    };
+    let resp = ui.add(
+        egui::Button::new(
+            egui::RichText::new(text)
+                .size(13.0)
+                .color(color)
+                .family(family),
+        )
+        .frame(false),
+    );
+    if resp.clicked() {
+        *active = this;
+    }
+    if is_active {
+        ui.painter().hline(
+            resp.rect.x_range(),
+            resp.rect.bottom() + 3.0,
+            egui::Stroke::new(2.0, theme::ACCENT_PRIMARY),
+        );
+    }
+}
+
+/// The primary (accent-filled, dark-text) dialog action button.
+fn dialog_primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    ui.add(
+        egui::Button::new(
+            egui::RichText::new(label)
+                .size(13.0)
+                .color(theme::BG_ABYSS)
+                .family(egui::FontFamily::Name("plex-medium".into())),
+        )
+        .fill(theme::ACCENT_PRIMARY)
+        .corner_radius(5.0)
+        .min_size(egui::vec2(0.0, 30.0)),
+    )
+}
+
+/// A ghost (outlined, transparent) dialog action button.
+fn dialog_ghost_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    ui.add(
+        egui::Button::new(
+            egui::RichText::new(label)
+                .size(13.0)
+                .color(theme::TEXT_SECONDARY),
+        )
+        .fill(egui::Color32::TRANSPARENT)
+        .stroke(egui::Stroke::new(1.0, theme::LINE))
+        .corner_radius(5.0)
+        .min_size(egui::vec2(0.0, 30.0)),
+    )
+}
+
+/// An editable combobox: a free-text field plus a dropdown of suggestions that only *fill* it. The
+/// user can always type a value not in the list; the suggestions just shortcut the common ones.
+fn editable_combo(
+    ui: &mut egui::Ui,
+    id: &str,
+    text: &mut String,
+    hint: &str,
+    suggestions: &[String],
+) {
+    let btn_w = 26.0;
+    let gap = 4.0;
+    let field_w = (ui.available_width() - btn_w - gap).max(60.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = gap;
+        ui.add(
+            egui::TextEdit::singleline(text)
+                .id_salt(id)
+                .hint_text(hint)
+                .background_color(theme::BG_ABYSS)
+                .desired_width(field_w),
+        );
+        let btn = ui.add_sized(
+            [btn_w, ui.spacing().interact_size.y],
+            egui::Button::new(egui_phosphor::regular::CARET_DOWN),
+        );
+        if !suggestions.is_empty() {
+            let mut picked: Option<String> = None;
+            egui::Popup::menu(&btn).show(|ui| {
+                ui.set_min_width(field_w);
+                for s in suggestions {
+                    if ui
+                        .selectable_label(text.as_str() == s.as_str(), s)
+                        .clicked()
+                    {
+                        picked = Some(s.clone());
+                        ui.close();
+                    }
+                }
+            });
+            if let Some(p) = picked {
+                *text = p;
+            }
+        }
+    });
 }
 
 /// Writes the dialog's edited port names onto the subgraph document's boundary-marker nodes of
@@ -6162,30 +6417,48 @@ fn reconcile_port_names(
         .collect()
 }
 
-/// A titled block of per-port documentation rows (an editable port name, then an editable
-/// description) for the Save-to-library dialog. Renders nothing for a portless side. The name's
-/// hint is the positional fallback ("Input 1"), so clearing a field reverts the port to it.
-fn port_docs_ui(ui: &mut egui::Ui, title: &str, marker_type: &str, ports: &mut [library::PortDoc]) {
+/// A titled block of per-port rows for the Save-to-library dialog: an eyebrow (INPUTS / OUTPUTS)
+/// over one row per port, each an editable mono name field and an editable description. The name's
+/// hint is the positional fallback ("Input 1"), so clearing it reverts the port to that label.
+/// Renders nothing for a portless side. No port dot: it carries no information here.
+fn library_port_fields(
+    ui: &mut egui::Ui,
+    title: &str,
+    marker_type: &str,
+    ports: &mut [library::PortDoc],
+) {
     if ports.is_empty() {
         return;
     }
-    ui.add_space(6.0);
-    ui.separator();
-    ui.strong(title);
+    ui.add_space(10.0);
+    ui.label(
+        egui::RichText::new(title)
+            .size(10.5)
+            .color(theme::TEXT_TERTIARY),
+    );
+    ui.add_space(3.0);
     for (index, port) in ports.iter_mut().enumerate() {
         let fallback = marker_port_label(marker_type, index);
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
             ui.add(
                 egui::TextEdit::singleline(&mut port.name)
+                    .id_salt(("port-name", marker_type, index))
                     .hint_text(fallback.as_str())
+                    .font(egui::FontSelection::Style(egui::TextStyle::Monospace))
+                    .text_color(theme::TEXT_PRIMARY)
+                    .background_color(theme::BG_ABYSS)
                     .desired_width(120.0),
             );
             ui.add(
                 egui::TextEdit::singleline(&mut port.description)
+                    .id_salt(("port-desc", marker_type, index))
                     .hint_text("description")
+                    .background_color(theme::BG_ABYSS)
                     .desired_width(f32::INFINITY),
             );
         });
+        ui.add_space(4.0);
     }
 }
 
