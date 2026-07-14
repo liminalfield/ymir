@@ -1,4 +1,4 @@
-# Ymir
+# <img src="ymir-icon-512.png" alt="" height="30" align="middle"> Ymir
 
 An open-source, node-based procedural terrain generator for Linux.
 

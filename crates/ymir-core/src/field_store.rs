@@ -42,7 +42,7 @@ impl FieldStore {
 
     /// The default cache directory, `<cache>/ymir/fields/build-<tag>`, reading the real
     /// environment. `None` if neither `XDG_CACHE_HOME` nor `HOME` is set. The `build-<tag>`
-    /// segment (see [`build_tag`]) isolates the cache per executable, so fields computed by an
+    /// segment (see `build_tag`) isolates the cache per executable, so fields computed by an
     /// older build of the operators are never served to a newer one that reuses their keys.
     #[must_use]
     pub fn default_dir() -> Option<PathBuf> {

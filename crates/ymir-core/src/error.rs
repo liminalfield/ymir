@@ -140,5 +140,5 @@ pub enum Error {
     },
 }
 
-/// Convenience alias for results carrying the crate [`Error`].
+/// Convenience alias for results carrying the crate [`Error`](enum@Error).
 pub type Result<T> = std::result::Result<T, Error>;

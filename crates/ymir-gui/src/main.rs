@@ -3359,7 +3359,7 @@ fn library_inspector(ui: &mut egui::Ui, state: &mut AppState) {
 
 /// The inspector's heading block: a `SUBGRAPH` eyebrow, the subgraph name as a 17px semibold
 /// heading, and a one-line stat (input/output counts and category) in muted monospace. Replaces the
-/// old "INSPECTOR: <name>" pane heading, so the name reads as the subject of the card.
+/// old `INSPECTOR: <name>` pane heading, so the name reads as the subject of the card.
 fn library_inspector_heading(ui: &mut egui::Ui, file: &library::SubgraphFile) {
     ui.add_space(2.0);
     ui.label(

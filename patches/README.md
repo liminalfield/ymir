@@ -6,8 +6,9 @@ hardcoded and not configurable through its public API. `egui-snarl` is vendored 
 `Cargo.toml`. Each patch below is also kept as a unified diff against the pristine crate
 source, so the changes are reviewable and re-appliable on an upgrade.
 
-The patches are independent and touch different regions of `src/ui.rs`; applied in order
-(middle-pan, then click-to-wire) they reproduce the vendored source exactly.
+The patches are independent and touch different regions of `src/ui.rs` and
+`src/ui/viewer.rs`; applied in order (the five below) they reproduce the vendored source
+exactly.
 
 ## 1. `egui-snarl-middle-pan.patch`
 

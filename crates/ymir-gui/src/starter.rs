@@ -25,7 +25,7 @@ const STARTER_NODE_GAP: f32 = 220.0;
 /// The default starter graph: an fBm generator → thermal erosion → PNG export
 /// chain, laid out left to right and pre-wired in core and on the canvas.
 ///
-/// If a node type is unregistered (the link-time strip [`CLAUDE.md`] warns about)
+/// If a node type is unregistered (the link-time strip `CLAUDE.md` warns about)
 /// or a connection is rejected, the chain cannot be built and the app opens to a
 /// blank canvas instead of a partly wired graph. In a correctly linked build every
 /// type is present, so the chain is always complete.

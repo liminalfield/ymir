@@ -11,9 +11,7 @@ use crate::hash::{ContentHash, Fnv1a64};
 /// Floats are `f64` for configuration precision; an operator casts to `f32` when
 /// it applies the value to a field. There is intentionally no `std::hash::Hash`
 /// impl: a `ParamValue` is only ever a map value (keyed by name), never a hash
-/// key, and the determinism-critical hashing goes through [`hash_into`] instead.
-///
-/// [`hash_into`]: ParamValue::hash_into
+/// key, and the determinism-critical hashing goes through `hash_into` instead.
 ///
 /// Serializes for project files with the variant tag in `snake_case` (`float`,
 /// `int`, `bool`, `text`, `curve`), so the on-disk format does not track the Rust

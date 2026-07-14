@@ -306,7 +306,7 @@ impl Graph {
     }
 
     /// Evaluates a set of outputs with some source nodes' results supplied directly
-    /// rather than computed, reusing the same memoized [`pull`](Self::pull) as
+    /// rather than computed, reusing the same memoized `pull` as
     /// [`evaluate`](Self::evaluate).
     ///
     /// `bound` pairs a node with the field to stand in as that node's single output: the
