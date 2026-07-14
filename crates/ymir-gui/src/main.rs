@@ -16,7 +16,8 @@ use egui_snarl::{NodeId as SnarlNodeId, Snarl};
 use ymir_core::registry;
 use ymir_core::{
     EvalCache, EvalRequest, Extraction, Field, FieldStore, Graph, INPUT_TYPE_ID, NodeId,
-    OUTPUT_TYPE_ID, ParamValue, Params, Region, SUBGRAPH_TYPE_ID,
+    OUTPUT_TYPE_ID, ParamValue, Params, ProjectDocument, Region, SUBGRAPH_TYPE_ID,
+    marker_port_label,
 };
 use ymir_nodes::{CategoryDef, categories, find_category, node_group, tr};
 
@@ -1129,13 +1130,19 @@ impl AppState {
                 graph, seed, view, ..
             } => (graph.clone(), *seed, view.clone()),
         };
+        // Reconcile the edited port names into the graph's boundary markers, so a copy dropped from
+        // the library derives the same names the library card shows. Done in place on the document
+        // (its nodes stay in stable-id order, the order ports derive in), so nothing else moves.
+        let mut graph = graph;
+        let inputs = reconcile_port_names(&mut graph, INPUT_TYPE_ID, &dialog.inputs);
+        let outputs = reconcile_port_names(&mut graph, OUTPUT_TYPE_ID, &dialog.outputs);
         Ok(library::SubgraphFile {
             format_version: library::SUBGRAPH_FORMAT_VERSION,
             name: dialog.name.trim().to_string(),
             category: dialog.category.trim().to_string(),
             description: dialog.description.trim().to_string(),
-            inputs: dialog.inputs.clone(),
-            outputs: dialog.outputs.clone(),
+            inputs,
+            outputs,
             author: dialog.author.clone(),
             license: dialog.license.trim().to_string(),
             seed,
@@ -2840,10 +2847,16 @@ fn right_panel_pane(ui: &mut egui::Ui, state: &mut AppState) {
         .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::symmetric(4, 2)))
         .show_inside(ui, |ui| preview_2d_pane(ui, state));
     // A selected frame shows the frame inspector here instead of the node inspector (selection is
-    // mutually exclusive, #94).
-    egui::CentralPanel::default().show_inside(ui, |ui| match state.selected_frame {
-        Some(index) => frame_inspector(ui, state, index),
-        None => node_inspector(ui, state),
+    // mutually exclusive, #94). The body scrolls: a node with many parameters, or a subgraph with
+    // its input/output port lists, can exceed the panel height below the fixed preview, and without
+    // a scroll area that overflow is clipped and unreachable.
+    egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| match state.selected_frame {
+                Some(index) => frame_inspector(ui, state, index),
+                None => node_inspector(ui, state),
+            });
     });
 }
 inventory::submit! { PaneKind { id: "right-panel", draw: right_panel_pane } }
@@ -3784,6 +3797,92 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
         // than swallow it.
         ui.colored_label(ui.visuals().error_fg_color, err.to_string());
     }
+
+    // A subgraph container: its input/output ports are named by the inner boundary nodes, so let
+    // them be renamed here without diving in (a container always has the `seed` param, so the
+    // empty-params early return above never skips this). Placed after the params to match the
+    // Name / seed / INPUTS / OUTPUTS reading order.
+    if state.graph.nested(id).is_some() {
+        subgraph_port_editor(ui, state, id);
+    }
+}
+
+/// Editable input/output port lists for a selected subgraph container (#106 follow-up). A
+/// subgraph port's name *is* the name of its inner `Input`/`Output` boundary node, so this reads
+/// those names, shows the `marker_port_label` fallback ("Input 1", "Output 2", ...) for the unnamed
+/// ones, and writes edits back through the container's inner graph. Because the derived ports and
+/// the canvas pins both read the same boundary-node names, a rename here updates them too, and it
+/// persists (the name rides `NodeDocument.name`) without invalidating caches (name overrides are
+/// excluded from the content hash).
+fn subgraph_port_editor(ui: &mut egui::Ui, state: &mut AppState, id: NodeId) {
+    // Collect any rename requested this frame while only borrowing the inner graph immutably; apply
+    // it afterwards against a mutable clone, so the display borrow never overlaps the write.
+    let mut pending: Vec<(NodeId, Option<String>)> = Vec::new();
+    if let Some(inner) = state.graph.nested(id) {
+        pending.extend(port_section(ui, "INPUTS", inner, INPUT_TYPE_ID));
+        pending.extend(port_section(ui, "OUTPUTS", inner, OUTPUT_TYPE_ID));
+    }
+    if pending.is_empty() {
+        return;
+    }
+    let Some(mut inner) = state.graph.nested(id).cloned() else {
+        return;
+    };
+    for (marker, name) in pending {
+        if let Err(err) = inner.set_name(marker, name) {
+            ui.colored_label(ui.visuals().error_fg_color, err.to_string());
+        }
+    }
+    if let Err(err) = state.graph.set_nested(id, inner) {
+        ui.colored_label(ui.visuals().error_fg_color, err.to_string());
+    }
+}
+
+/// Renders one port section (all `marker_type` boundary nodes of `inner`, in port order) as a
+/// heading over a row per port: an accent dot and a mono name field whose hint is the enumerated
+/// fallback. Returns the `(marker, new name)` edits requested this frame; an empty field clears the
+/// override back to the fallback. Nothing is drawn when the subgraph has no ports of this kind.
+fn port_section(
+    ui: &mut egui::Ui,
+    heading: &str,
+    inner: &Graph,
+    marker_type: &str,
+) -> Vec<(NodeId, Option<String>)> {
+    let markers = inner.nodes_of_type(marker_type);
+    let mut edits = Vec::new();
+    if markers.is_empty() {
+        return edits;
+    }
+    ui.add_space(10.0);
+    ui.label(
+        egui::RichText::new(heading)
+            .size(10.5)
+            .color(theme::TEXT_TERTIARY),
+    );
+    ui.add_space(2.0);
+    for (index, &marker) in markers.iter().enumerate() {
+        let fallback = marker_port_label(marker_type, index);
+        let mut name = inner.name(marker).unwrap_or("").to_string();
+        ui.horizontal(|ui| {
+            let (dot, _) = ui.allocate_exact_size(egui::vec2(12.0, 18.0), egui::Sense::hover());
+            ui.painter()
+                .circle_filled(dot.center(), 3.0, theme::ACCENT_PRIMARY);
+            if ui
+                .add(
+                    egui::TextEdit::singleline(&mut name)
+                        .hint_text(fallback.as_str())
+                        .font(egui::FontSelection::Style(egui::TextStyle::Monospace))
+                        .text_color(theme::TEXT_PRIMARY)
+                        .background_color(theme::BG_ABYSS)
+                        .desired_width(f32::INFINITY),
+                )
+                .changed()
+            {
+                edits.push((marker, name_override(&name)));
+            }
+        });
+    }
+    edits
 }
 
 /// Quick-pick frame tints: a set spread across the hue wheel and separated in lightness, so any
@@ -5943,8 +6042,8 @@ fn library_save_dialog(ctx: &egui::Context, state: &mut AppState) {
                     .desired_width(f32::INFINITY)
                     .desired_rows(2),
             );
-            port_docs_ui(ui, "Inputs", &mut dialog.inputs);
-            port_docs_ui(ui, "Outputs", &mut dialog.outputs);
+            port_docs_ui(ui, "Inputs", INPUT_TYPE_ID, &mut dialog.inputs);
+            port_docs_ui(ui, "Outputs", OUTPUT_TYPE_ID, &mut dialog.outputs);
             ui.add_space(6.0);
             ui.separator();
             ui.horizontal(|ui| {
@@ -5981,18 +6080,69 @@ fn library_save_dialog(ctx: &egui::Context, state: &mut AppState) {
     }
 }
 
-/// A titled block of per-port documentation rows (the port name, then an editable
-/// description) for the Save-to-library dialog. Renders nothing for a portless side.
-fn port_docs_ui(ui: &mut egui::Ui, title: &str, ports: &mut [library::PortDoc]) {
+/// Writes the dialog's edited port names onto the subgraph document's boundary-marker nodes of
+/// `marker_type`, and returns the normalized [`library::PortDoc`]s. A copy dropped from the library
+/// derives its port names from these markers, so applying the edits here is what keeps a renamed
+/// port consistent between the library card and an instance.
+///
+/// The document keeps its nodes in ascending `stable_id` order, the same order ports derive in, so
+/// the k-th marker of `marker_type` is port k (sorted defensively rather than relying on the
+/// invariant). A blank name, or one left at the positional default ("Input 2"), clears the marker
+/// override so the port falls back to that label; any other name is stored on both the marker and
+/// the returned doc, whose `name` is therefore always the resolved display name.
+fn reconcile_port_names(
+    graph: &mut ProjectDocument,
+    marker_type: &str,
+    docs: &[library::PortDoc],
+) -> Vec<library::PortDoc> {
+    let mut markers: Vec<usize> = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| node.type_id == marker_type)
+        .map(|(i, _)| i)
+        .collect();
+    markers.sort_by_key(|&i| graph.nodes[i].stable_id);
+    docs.iter()
+        .enumerate()
+        .map(|(index, doc)| {
+            let fallback = marker_port_label(marker_type, index);
+            let typed = doc.name.trim();
+            let (override_name, display) = if typed.is_empty() || typed == fallback {
+                (None, fallback)
+            } else {
+                (Some(typed.to_string()), typed.to_string())
+            };
+            if let Some(&node) = markers.get(index) {
+                graph.nodes[node].name = override_name;
+            }
+            library::PortDoc {
+                index,
+                name: display,
+                description: doc.description.clone(),
+            }
+        })
+        .collect()
+}
+
+/// A titled block of per-port documentation rows (an editable port name, then an editable
+/// description) for the Save-to-library dialog. Renders nothing for a portless side. The name's
+/// hint is the positional fallback ("Input 1"), so clearing a field reverts the port to it.
+fn port_docs_ui(ui: &mut egui::Ui, title: &str, marker_type: &str, ports: &mut [library::PortDoc]) {
     if ports.is_empty() {
         return;
     }
     ui.add_space(6.0);
     ui.separator();
     ui.strong(title);
-    for port in ports {
+    for (index, port) in ports.iter_mut().enumerate() {
+        let fallback = marker_port_label(marker_type, index);
         ui.horizontal(|ui| {
-            ui.label(format!("{}:", port.name));
+            ui.add(
+                egui::TextEdit::singleline(&mut port.name)
+                    .hint_text(fallback.as_str())
+                    .desired_width(120.0),
+            );
             ui.add(
                 egui::TextEdit::singleline(&mut port.description)
                     .hint_text("description")
@@ -7910,10 +8060,14 @@ mod tests {
     }
 
     #[test]
-    fn editing_a_library_entry_preserves_the_graph_and_applies_edited_metadata() {
+    fn editing_a_library_entry_applies_metadata_and_reconciles_port_names() {
         // build_subgraph_file for an Existing source uses the stored graph, so no canvas is needed.
         let state = AppState::new();
         let original = sample_library_file(9);
+        // The sample's graph markers are unnamed while its port docs read "In"/"Out": exactly the
+        // divergence the reconcile fixes. Rename the input to prove an edit propagates too.
+        let mut inputs = original.inputs.clone();
+        inputs[0].name = "base terrain".to_string();
         let dialog = LibrarySave {
             source: SubgraphSource::Existing {
                 original_path: std::path::PathBuf::from("/lib/passthrough.ymirsub"),
@@ -7924,7 +8078,7 @@ mod tests {
             name: "Renamed".to_string(),
             category: "Terrain".to_string(),
             description: "Edited description.".to_string(),
-            inputs: original.inputs.clone(),
+            inputs,
             outputs: original.outputs.clone(),
             author: original.author.clone(),
             license: original.license.clone(),
@@ -7936,16 +8090,79 @@ mod tests {
             .build_subgraph_file(&dialog)
             .expect("build the edited file");
 
-        // The stored graph and seed pass through a metadata edit untouched.
-        assert_eq!(
-            built.graph, original.graph,
-            "the graph is preserved verbatim"
-        );
+        // The seed and the edited metadata are applied.
         assert_eq!(built.seed, original.seed, "the seed is preserved");
-        // The edited documentation is applied.
         assert_eq!(built.name, "Renamed");
         assert_eq!(built.description, "Edited description.");
         assert_eq!(built.category, "Terrain");
+        // The port names are reconciled onto the graph's boundary markers, so an instance dropped
+        // from the library derives the same names the card shows (marker name -> derived port name
+        // is covered by ymir-core's own subgraph tests).
+        assert_eq!(built.inputs[0].name, "base terrain");
+        assert_eq!(built.outputs[0].name, "Out");
+        let input_marker = built
+            .graph
+            .nodes
+            .iter()
+            .find(|n| n.type_id == INPUT_TYPE_ID)
+            .expect("an input marker");
+        let output_marker = built
+            .graph
+            .nodes
+            .iter()
+            .find(|n| n.type_id == OUTPUT_TYPE_ID)
+            .expect("an output marker");
+        assert_eq!(input_marker.name.as_deref(), Some("base terrain"));
+        assert_eq!(output_marker.name.as_deref(), Some("Out"));
+    }
+
+    #[test]
+    fn reconcile_port_names_writes_names_and_keeps_defaults_unnamed() {
+        // Two input markers on a document; name the first, leave the second at its default.
+        let mut inner = Graph::new();
+        // The first input marker stays wired-free; only its presence and order matter here.
+        let _a = inner.add_op(
+            ymir_core::registry::make("subgraph.input").expect("input a"),
+            Params::default(),
+        );
+        let b = inner.add_op(
+            ymir_core::registry::make("subgraph.input").expect("input b"),
+            Params::default(),
+        );
+        let out = inner.add_op(
+            ymir_core::registry::make("subgraph.output").expect("output"),
+            Params::default(),
+        );
+        inner.connect(b, 0, out, 0).expect("wire");
+        let mut doc = inner.to_document();
+
+        let docs = vec![
+            library::PortDoc {
+                index: 0,
+                name: "height".to_string(),
+                description: String::new(),
+            },
+            // Left at the positional default: should clear the override, not store a literal.
+            library::PortDoc {
+                index: 1,
+                name: "Input 2".to_string(),
+                description: String::new(),
+            },
+        ];
+        let out_docs = reconcile_port_names(&mut doc, INPUT_TYPE_ID, &docs);
+
+        // The returned docs carry the resolved display names.
+        assert_eq!(out_docs[0].name, "height");
+        assert_eq!(out_docs[1].name, "Input 2");
+        // The markers (in stable-id order, so port order): the first named, the second left a
+        // genuine `None` so it falls back to its positional label rather than storing a literal.
+        let markers: Vec<_> = doc
+            .nodes
+            .iter()
+            .filter(|n| n.type_id == INPUT_TYPE_ID)
+            .collect();
+        assert_eq!(markers[0].name.as_deref(), Some("height"));
+        assert_eq!(markers[1].name, None, "a default port stays unnamed");
     }
 
     #[test]
