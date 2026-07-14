@@ -224,15 +224,17 @@ fn toggle(ui: &mut egui::Ui, on: bool) -> egui::Response {
 /// An integer stepper: a deep field with a minus button, the value in the centre, and a plus button.
 /// Steps by one within `[min, max]`. Returns whether the value changed.
 fn stepper(ui: &mut egui::Ui, value: &mut i64, min: i64, max: i64) -> bool {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(104.0, 24.0), egui::Sense::hover());
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(104.0, 24.0), egui::Sense::hover());
     let btn_w = 26.0;
     let minus = egui::Rect::from_min_size(rect.left_top(), egui::vec2(btn_w, rect.height()));
     let plus = egui::Rect::from_min_size(
         egui::pos2(rect.right() - btn_w, rect.top()),
         egui::vec2(btn_w, rect.height()),
     );
-    let minus_resp = ui.interact(minus, ui.id().with("stepper_minus"), egui::Sense::click());
-    let plus_resp = ui.interact(plus, ui.id().with("stepper_plus"), egui::Sense::click());
+    // Seed the button ids from this allocation's own (auto-unique) id, not `ui.id()`, which several
+    // stepper rows share: otherwise every stepper's minus/plus collide (egui's red id-clash boxes).
+    let minus_resp = ui.interact(minus, resp.id.with("minus"), egui::Sense::click());
+    let plus_resp = ui.interact(plus, resp.id.with("plus"), egui::Sense::click());
     let mut changed = false;
     if minus_resp.clicked() && *value > min {
         *value -= 1;
