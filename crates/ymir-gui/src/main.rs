@@ -3786,11 +3786,164 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
     }
 }
 
+/// Quick-pick frame tints: a set spread across the hue wheel and separated in lightness, so any
+/// two are easy to tell apart at a glance. General good practice for a grouping colour, offered
+/// alongside the full HSV picker for an arbitrary choice.
+const FRAME_SWATCHES: [[u8; 3]; 10] = [
+    [0x5a, 0x61, 0x6b], // slate (the default)
+    [0x1f, 0xa0, 0xc4], // cyan
+    [0x4d, 0x7e, 0xf2], // blue
+    [0x9b, 0x6c, 0xf2], // violet
+    [0xd2, 0x4d, 0xa0], // magenta
+    [0xe0, 0x5a, 0x5a], // rose
+    [0xe0, 0x91, 0x3a], // amber
+    [0xd9, 0xc9, 0x4d], // yellow
+    [0x3c, 0xa8, 0x8a], // teal
+    [0x5a, 0xb8, 0x4d], // green
+];
+
+/// Paints a colour swatch into `rect`: the colour over a neutral backing (so a translucent fill
+/// reads as lighter), with a hairline rim. `alpha` false forces the swatch opaque (border/text).
+fn paint_swatch(painter: &egui::Painter, rect: egui::Rect, srgba: [u8; 4], alpha: bool) {
+    let a = if alpha { srgba[3] } else { 255 };
+    // A mid-grey backing behind a translucent fill, so lower opacity reads as a paler swatch.
+    if a < 255 {
+        painter.rect_filled(rect, 4.0, egui::Color32::from_gray(120));
+    }
+    painter.rect_filled(
+        rect,
+        4.0,
+        egui::Color32::from_rgba_unmultiplied(srgba[0], srgba[1], srgba[2], a),
+    );
+    painter.rect_stroke(
+        rect,
+        4.0,
+        egui::Stroke::new(1.0, theme::LINE_STRONG),
+        egui::StrokeKind::Inside,
+    );
+}
+
+/// One colour row of the frame inspector: a mono label, a swatch of the current colour, and a mono
+/// hex readout. Clicking the swatch opens a popup with the quick-pick tints and the full HSV picker
+/// (opacity included when `alpha` is `OnlyBlend`). Edits `hsva` in place; returns whether it moved.
+fn color_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    hsva: &mut egui::ecolor::Hsva,
+    alpha: egui::widgets::color_picker::Alpha,
+) -> bool {
+    use egui::widgets::color_picker::{Alpha, color_picker_hsva_2d};
+    let show_alpha = matches!(alpha, Alpha::OnlyBlend);
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        param_ui::param_label(ui, label);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let srgba = hsva.to_srgba_unmultiplied();
+            let hex = if show_alpha {
+                format!(
+                    "#{:02x}{:02x}{:02x}{:02x}",
+                    srgba[0], srgba[1], srgba[2], srgba[3]
+                )
+            } else {
+                format!("#{:02x}{:02x}{:02x}", srgba[0], srgba[1], srgba[2])
+            };
+            // Reserve the width of the longest possible readout (#rrggbbaa) and right-align the hex
+            // within it, so the swatch column lines up on every row whether or not alpha is shown.
+            let font = egui::FontId::new(11.0, egui::FontFamily::Monospace);
+            let color = theme::TEXT_TERTIARY;
+            let hex_w = ui
+                .painter()
+                .layout_no_wrap("#000000ff".to_owned(), font.clone(), color)
+                .size()
+                .x;
+            let (hex_rect, _) = ui.allocate_exact_size(
+                egui::vec2(hex_w, ui.spacing().interact_size.y),
+                egui::Sense::hover(),
+            );
+            ui.painter().text(
+                hex_rect.right_center(),
+                egui::Align2::RIGHT_CENTER,
+                hex,
+                font,
+                color,
+            );
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(26.0, 16.0), egui::Sense::click());
+            paint_swatch(ui.painter(), rect, srgba, show_alpha);
+            let resp = resp.on_hover_text("Edit colour");
+            egui::Popup::menu(&resp).show(|ui| {
+                ui.set_min_width(184.0);
+                ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                ui.horizontal_wrapped(|ui| {
+                    for sw in FRAME_SWATCHES {
+                        let (r, sresp) =
+                            ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::click());
+                        paint_swatch(ui.painter(), r, [sw[0], sw[1], sw[2], 255], false);
+                        // A bright ring marks the swatch matching the current colour.
+                        if [srgba[0], srgba[1], srgba[2]] == sw {
+                            ui.painter().rect_stroke(
+                                r,
+                                4.0,
+                                egui::Stroke::new(2.0, theme::TEXT_PRIMARY),
+                                egui::StrokeKind::Outside,
+                            );
+                        }
+                        if sresp.clicked() {
+                            let keep = hsva.a;
+                            *hsva = egui::ecolor::Hsva::from_srgb(sw);
+                            if show_alpha {
+                                hsva.a = keep;
+                            }
+                            changed = true;
+                        }
+                    }
+                });
+                ui.separator();
+                if color_picker_hsva_2d(ui, hsva, alpha) {
+                    changed = true;
+                }
+            });
+        });
+    });
+    changed
+}
+
+/// The frame inspector's Delete action: a full-width button that stays quiet until hovered, when it
+/// takes the danger colour so a destructive click is deliberate. Returns its response.
+fn frame_delete_button(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::click());
+    let (fill, border, fg) = if resp.hovered() {
+        (
+            mix(theme::DANGER, theme::BG_RAISED, 0.20),
+            theme::DANGER,
+            theme::DANGER,
+        )
+    } else {
+        (theme::BG_RAISED, theme::LINE, theme::TEXT_SECONDARY)
+    };
+    let painter = ui.painter();
+    painter.rect_filled(rect, 5.0, fill);
+    painter.rect_stroke(
+        rect,
+        5.0,
+        egui::Stroke::new(1.0, border),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        format!("{}  Delete frame", egui_phosphor::regular::TRASH),
+        egui::FontId::proportional(13.0),
+        fg,
+    );
+    resp
+}
+
 /// The selected frame's inspector (#94): edits its label, fill colour and opacity, border
 /// colour, and label placement, plus a delete action. Shown in place of the node inspector
 /// while a frame is selected.
 fn frame_inspector(ui: &mut egui::Ui, state: &mut AppState, index: usize) {
-    use egui::widgets::color_picker::{Alpha, color_edit_button_hsva};
+    use egui::widgets::color_picker::Alpha;
 
     // The frame can vanish (deleted, or a session swapped in) between selection and draw.
     if index >= state.frames.len() {
@@ -3815,68 +3968,66 @@ fn frame_inspector(ui: &mut egui::Ui, state: &mut AppState, index: usize) {
         return;
     };
 
+    ui.spacing_mut().item_spacing.y = 8.0;
+
     ui.horizontal(|ui| {
-        ui.label("Label");
+        param_ui::param_label(ui, "Label");
         ui.add(
             egui::TextEdit::singleline(&mut state.frames[index].label)
                 .hint_text("Frame")
+                .font(egui::FontSelection::Style(egui::TextStyle::Monospace))
+                .text_color(theme::TEXT_PRIMARY)
+                .background_color(theme::BG_ABYSS)
                 .desired_width(f32::INFINITY),
         );
     });
-    ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        ui.label("Fill");
-        // OnlyBlend keeps the alpha a normal 0..1 opacity (no additive/HDR mode).
-        if color_edit_button_hsva(ui, &mut fill_hsva, Alpha::OnlyBlend).changed() {
-            state.frames[index].fill = fill_hsva.to_srgba_unmultiplied();
-        }
-    });
-    ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        ui.label("Border");
-        if color_edit_button_hsva(ui, &mut border_hsva, Alpha::Opaque).changed() {
-            let c = border_hsva.to_srgba_unmultiplied();
-            state.frames[index].border = [c[0], c[1], c[2]];
-        }
-    });
-    ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        ui.label("Label text");
-        // A dark text colour stays readable on a bright header where the light default does not.
-        if color_edit_button_hsva(ui, &mut text_hsva, Alpha::Opaque).changed() {
-            let c = text_hsva.to_srgba_unmultiplied();
-            state.frames[index].text = [c[0], c[1], c[2]];
-        }
-    });
+
+    // OnlyBlend keeps the fill alpha a normal 0..1 opacity (no additive/HDR mode). Border and
+    // label text are opaque. A dark label colour stays readable on a bright header.
+    if color_row(ui, "Fill", &mut fill_hsva, Alpha::OnlyBlend) {
+        state.frames[index].fill = fill_hsva.to_srgba_unmultiplied();
+    }
+    if color_row(ui, "Border", &mut border_hsva, Alpha::Opaque) {
+        let c = border_hsva.to_srgba_unmultiplied();
+        state.frames[index].border = [c[0], c[1], c[2]];
+    }
+    if color_row(ui, "Label text", &mut text_hsva, Alpha::Opaque) {
+        let c = text_hsva.to_srgba_unmultiplied();
+        state.frames[index].text = [c[0], c[1], c[2]];
+    }
     // Persist the (possibly dragged) HSVA buffers so the hue carries to the next frame.
     state.frame_color_edit = Some((index, fill_hsva, border_hsva, text_hsva));
 
-    ui.add_space(6.0);
     ui.horizontal(|ui| {
-        ui.label("Label position");
-        let current = state.frames[index].label_placement;
-        let label = match current {
+        param_ui::param_label(ui, "Label position");
+        let placement = &mut state.frames[index].label_placement;
+        let label = match placement {
             project_file::LabelPlacement::TopLeft => "Top left",
             project_file::LabelPlacement::TopCenter => "Top centre",
         };
-        egui::ComboBox::from_id_salt("frame-label-placement")
-            .selected_text(label)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(
-                    &mut state.frames[index].label_placement,
-                    project_file::LabelPlacement::TopLeft,
-                    "Top left",
-                );
-                ui.selectable_value(
-                    &mut state.frames[index].label_placement,
-                    project_file::LabelPlacement::TopCenter,
-                    "Top centre",
-                );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let button = ui.button(format!(
+                "{}   {}",
+                label,
+                egui_phosphor::regular::CARET_DOWN
+            ));
+            egui::Popup::menu(&button).show(|ui| {
+                ui.set_min_width(button.rect.width());
+                for (value, text) in [
+                    (project_file::LabelPlacement::TopLeft, "Top left"),
+                    (project_file::LabelPlacement::TopCenter, "Top centre"),
+                ] {
+                    if ui.selectable_label(*placement == value, text).clicked() {
+                        *placement = value;
+                        ui.close();
+                    }
+                }
             });
+        });
     });
 
-    ui.add_space(10.0);
-    if ui.button("Delete frame").clicked() {
+    ui.add_space(4.0);
+    if frame_delete_button(ui).clicked() {
         state.frames.remove(index);
         state.selected_frame = None;
         state.frame_color_edit = None;

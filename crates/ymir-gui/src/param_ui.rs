@@ -186,8 +186,9 @@ fn from_t(t: f64, min: f64, max: f64, log: bool) -> f64 {
     }
 }
 
-/// A parameter row's label: monospace and muted.
-fn param_label(ui: &mut egui::Ui, name: &str) {
+/// A parameter row's label: monospace and muted. Shared with the frame inspector so its rows
+/// read in the same grammar as the node parameters.
+pub(crate) fn param_label(ui: &mut egui::Ui, name: &str) {
     ui.label(
         egui::RichText::new(name)
             .family(egui::FontFamily::Monospace)
