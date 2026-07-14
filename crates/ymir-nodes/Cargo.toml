@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
+repository.workspace = true
 description = "Concrete operators (the nodes) for Ymir, plus their terrain math."
 
 [lints]

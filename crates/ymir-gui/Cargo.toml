@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
+repository.workspace = true
 description = "Ymir's node editor and viewport (egui + wgpu)."
 
 [lints]

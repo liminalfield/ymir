@@ -1,0 +1,178 @@
+# Architecture
+
+This is the contributor's orientation to Ymir: how the pieces fit together and why.
+It is deliberately high level. The design notes in [`docs/design/`](docs/design/) go
+deeper on individual subsystems, and [`CLAUDE.md`](CLAUDE.md) records the working
+brief and quality bar. For the terminology and conventions, read this first.
+
+## The one idea
+
+Everything is data. A single type, `Field`, flows on every edge of the node graph.
+The engine never needs to know what a node does, and the user is never forced into a
+fixed build order. This is modelled on Houdini's heightfield workflow: one element,
+the 2D grid, plus a small bag of scalar globals. Ymir deliberately does not build a
+points/vertices/primitives schema; holding that line is what keeps it a terrain tool
+rather than a general dataflow engine.
+
+## Workspace layout
+
+```
+ymir/
+  crates/
+    ymir-core/   headless engine: the Field data model, the Operator trait,
+                 NodeSpec, the registry mechanism, the evaluator, and file I/O.
+                 No concrete nodes.
+    ymir-nodes/  the concrete operators (the nodes) and their terrain math.
+                 Depends on ymir-core.
+    ymir-cli/    a headless runner (currently a sample render).
+    ymir-gui/    the node editor and 3D viewport (egui + wgpu).
+  vendor/        a lightly patched egui-snarl (see patches/).
+  docs/          design notes and reference.
+```
+
+The dependency arrow points from `ymir-nodes` to `ymir-core`, never back. The engine
+crate therefore cannot name any concrete operator, which is how a core invariant
+(below) is enforced by the compiler rather than by discipline. A node's potentially
+heavy dependencies never reach the engine.
+
+## The data model
+
+The single type on every edge is a `Field`:
+
+- `width`, `height`: grid resolution.
+- `region`: normalized bounds, for resolution and region independence.
+- `layers`: a map of named scalar layers (`Arc<Layer>`, so pass-through is cheap).
+  `"height"` is primary by convention; nodes may create arbitrary layers (`mask`,
+  `flow`, `water`, `sediment`, `wear`, `deposition`, ...).
+- `detail`: a small map of scalar globals (seed, world bounds, vertical scale). The
+  only non-grid data.
+
+Height values are nominally normalized to `[0, 1]` as a working convention, but are
+not hard-clamped: intermediate operations may exceed the range, and export maps the
+actual range. Layer names are constants (`layers::HEIGHT`, `layers::MASK`, ...), so a
+typo is a compile error while arbitrary custom names are still allowed.
+
+**Soft layer contracts.** A node declares the layers it would like, degrades
+gracefully when one is absent (`field.layer_or(layers::MASK, 1.0)`), and never gates a
+connection. A modifier that touches only `height` returns the field with that layer
+replaced and every other layer passed through untouched (cheap via `Arc`). This
+pass-through is what makes a node insertable anywhere.
+
+## Nodes and the registry
+
+`Operator` is a trait: stateless behavior plus a `NodeSpec` schema. Its signature is
+
+```rust
+fn eval(&self, inputs: Inputs, params: &Params, ctx: &EvalContext) -> Result<Vec<Field>, Error>;
+```
+
+- **Inputs** are an ordered, named list. Required inputs are guaranteed present by
+  index; optional inputs come via `inputs.optional(i)` and return `None` when unwired.
+  Combine and blend nodes with two or more inputs are first class, and a node can take
+  an optional input (such as a mask) that degrades gracefully when absent.
+- **NodeSpec** declares the `type_id`, a palette `category`, the `inputs`, `outputs`,
+  and a `params` schema (name, type, range, default). It is schema only, never GUI
+  widgets, and carries ids and keys, never display prose. Human names and descriptions
+  are resolved by convention from the `type_id` through a `tr(key)` layer, so the
+  engine stays free of localization.
+- **NodeKind** (generator, modifier, endpoint) is derived from arity, never a
+  hard-coded enum: no inputs means a generator, no outputs an endpoint, both a
+  modifier. "Generators only at the head" enforces itself, since a generator has no
+  input socket.
+
+A graph node instance stores `(stable_id, type_id, params, connections)`. The
+`stable_id` is a persistent identity assigned at creation and serialized, distinct
+from the runtime slotmap `NodeId` used only for wiring. Seeding and per-node identity
+derive from `stable_id`, so a saved project reloads to identical output.
+
+### The invariant that keeps nodes additive
+
+Nothing in the application may ask "which node is this?" Everything either dispatches
+polymorphically or reads the node's own spec. Adding a node touches only its own new
+file. This is enforced in four places:
+
+1. The evaluator dispatches through `dyn Operator::eval`. It also lives in `ymir-core`,
+   which cannot name a concrete node, so it could not match on one even by accident.
+2. The node palette is generated by iterating the registry (`inventory`), not a
+   hand-kept list.
+3. The parameter UI is built by introspecting `ParamSpec`, not per-node widget code.
+4. Save/load stores `type_id` plus params and rebuilds via the registry.
+
+So **a new node is one new file implementing `Operator` plus one `inventory::submit!`**.
+A registry smoke test (`crates/ymir-nodes/tests/registry_smoke.rs`) asserts the exact
+set of registered nodes, so a registration silently dropped by the linker fails CI.
+
+## The evaluator
+
+Evaluation is pull based and memoized. The evaluator validates the graph is a DAG,
+evaluates from a requested endpoint, and recomputes only downstream of a change. The
+operator-facing `EvalContext` carries resolution, region, seed, and world height,
+threaded together so `eval`'s signature stays stable as the engine grows. The target
+endpoint is the evaluator's argument, not part of the context.
+
+The cache is bounded by policy (the active evaluation path plus a small LRU), not an
+unbounded memo of every node, since a full-resolution `Field` per node would exhaust
+memory on a large graph.
+
+Two kinds of resolution behavior are kept distinct:
+
+- **Sampled operations** (noise, anything evaluated per cell from continuous
+  coordinates) are resolution independent: the same world coordinates yield the same
+  value at any resolution.
+- **Iterative simulations** (erosion) are resolution-dependent physics. A low
+  resolution preview approximates the full build, it is not identical to it.
+
+## Determinism and hashing
+
+Determinism serves reproducibility; it is a means, not the goal. The contract:
+
+- **Same-machine repeatability (required).** Same seed, graph, and machine yields the
+  same output every time. The memo cache depends on this, since cache keys are content
+  hashes.
+- **Cross-machine (visual equivalence).** A project shared to another machine, or
+  built with a different core count, regenerates visually equivalent terrain, not
+  necessarily bit-identical. A parallel reduction may differ in the last bits.
+
+Per-cell pure functions use `Layer::from_par_fn` and are byte-identical regardless of
+thread count at no cost. Byte-exactness is relaxed only where it is expensive (an
+order-sensitive parallel scatter). Seeds derive from the global seed and the node's
+`stable_id`, never the runtime key, the clock, or a thread id.
+
+Memoization keys, golden tests, and save/load all rest on canonical, deterministic
+hashing: `f32` by bits, layers in sorted name order, cells row-major, floats
+normalized (every NaN to one pattern, `-0.0` to `+0.0`). A node's cache key is its
+`type_id`, its canonical param hash, its input hashes, and the `EvalContext` fields it
+depends on.
+
+## Error model
+
+There is one crate error type (`thiserror`). The engine surfaces per-node failures as
+values and never panics: a failing node is reported (and shown red in the GUI) while
+the rest of the graph still evaluates. A graph cycle is detected before evaluation and
+reported as a graph error. There are no `unwrap`, `expect`, or panics in library code
+on expected conditions.
+
+## The GUI
+
+`ymir-gui` is an egui + wgpu application. The canvas is a vendored, lightly patched
+[`egui-snarl`](vendor/egui-snarl) node editor; the graph it draws mirrors the core
+`Graph`, with the core graph as the single source of truth. A "Frost" theme (a dark
+chrome shell around a frosted light canvas, IBM Plex type) lives in `theme.rs`. The
+right panel is a node inspector split into a preview half (the pinned node's output)
+and a settings half (the selected node's parameters). Subgraphs let a set of nodes be
+collapsed into a container you dive into, with a saveable library of them.
+
+The core has no GUI dependency and is fully usable headless (see `ymir-cli`).
+
+## Adding a node
+
+The short version, expanded by the invariant section above:
+
+1. Add one file under `crates/ymir-nodes/src/` implementing `Operator` (a `spec()`
+   returning its `NodeSpec`, and `eval()` doing the work).
+2. Register it with `inventory::submit!`.
+3. Add its display strings and a unit test. Update the registry smoke test's expected
+   set.
+
+You do not touch the evaluator, the palette, the parameter UI, or save/load. If you
+find yourself needing to, something has drifted from the invariant; stop and reconsider.

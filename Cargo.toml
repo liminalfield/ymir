@@ -10,6 +10,8 @@ edition = "2024"
 license = "GPL-3.0-only"
 authors = ["Oluf Andrews <oluf@oandrews.com>"]
 rust-version = "1.95"
+repository = "https://github.com/liminalfield/ymir"
+homepage = "https://github.com/liminalfield/ymir"
 
 # egui stack pinned centrally: egui-snarl, egui-phosphor, and any future
 # egui_tiles/egui_dock must share one egui major, so the GUI crates inherit this

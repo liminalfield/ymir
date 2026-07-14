@@ -12,5 +12,5 @@ IBM Plex is licensed under the **SIL Open Font License, Version 1.1** (OFL-1.1),
 bundling and redistribution with the application. Source and full license text:
 <https://github.com/IBM/plex>.
 
-The OFL requires the license to accompany the fonts. Add the upstream `OFL.txt` here (from the IBM
-Plex release) so the bundle is self-describing; this note records the license until it is added.
+The OFL requires the license to accompany the fonts. The full license text (with IBM's copyright and
+reserved font name) is in [`OFL.txt`](OFL.txt) alongside the fonts, so the bundle is self-describing.
