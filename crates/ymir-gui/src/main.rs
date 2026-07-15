@@ -1695,7 +1695,8 @@ impl AppState {
         let res = self.preview_res;
         let request = EvalRequest::new(res, res, Region::UNIT, self.seed)
             .with_world_extent(self.world_extent)
-            .with_world_height(self.world_height);
+            .with_world_height(self.world_height)
+            .with_sea_level(self.sea_level);
         let now = ctx.input(|i| i.time);
         // Inside a subgraph, bind the live input fields so the 2D preview shows real data
         // rather than the Input markers' zero stand-in (#106). `None` at the top level.
@@ -2678,7 +2679,8 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
                             let res = state.build_res;
                             let request = EvalRequest::new(res, res, Region::UNIT, state.seed)
                                 .with_world_extent(state.world_extent)
-                                .with_world_height(state.world_height);
+                                .with_world_height(state.world_height)
+                                .with_sea_level(state.sea_level);
                             state.build.start(top, targets, request, ui.ctx().clone());
                         }
                     }
@@ -5087,7 +5089,8 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         state.seed,
     )
     .with_world_extent(state.world_extent)
-    .with_world_height(state.world_height);
+    .with_world_height(state.world_height)
+    .with_sea_level(state.sea_level);
     // The working set is culled to the last-frame view (#74): off-screen nodes and a
     // zoomed-out canvas (where a thumbnail is too small to read) are skipped, so a
     // large graph evaluates only what is on screen. Disabled entirely from the View
@@ -6591,7 +6594,8 @@ fn refresh_viewport_build(state: &mut AppState) {
         let res = state.build_res;
         let request = EvalRequest::new(res, res, Region::UNIT, state.seed)
             .with_world_extent(state.world_extent)
-            .with_world_height(state.world_height);
+            .with_world_height(state.world_height)
+            .with_sea_level(state.sea_level);
         state.graph.output_key(id, &request).ok()
     })();
     // Diagnostic (logged, so it shows headless too): report the lookup once per distinct
