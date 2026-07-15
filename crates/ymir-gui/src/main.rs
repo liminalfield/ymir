@@ -192,6 +192,10 @@ const MARQUEE_MIN_DRAG: f32 = 4.0;
 /// world-unit parameters (scale-aware nodes consume it via `EvalContext`).
 const DEFAULT_WORLD_EXTENT: f64 = 1024.0;
 
+/// Default sea level as a normalized height. A little below mid-relief, so a fresh launch shows
+/// the water plane cutting across the starter terrain rather than sitting at the very base.
+const DEFAULT_SEA_LEVEL: f64 = 0.3;
+
 /// The canvas's pan/zoom view, captured each frame so other panes (the ribbon
 /// add) can place a node where the user is actually looking. The transform maps
 /// the canvas's local graph space to screen; `rect` is the canvas area on screen.
@@ -442,6 +446,12 @@ struct AppState {
     /// proportion in the viewport. An interpretation of the normalized height, not an input
     /// to evaluation, so it is not threaded into the eval request.
     world_height: f64,
+    /// The sea/base level as a normalized height in `[0, 1]`. A world global: the 3D viewport
+    /// draws a water plane at it, and coastal/stream nodes will read it as base level once wired.
+    sea_level: f64,
+    /// Whether the 3D viewport draws the water plane at [`sea_level`](Self::sea_level). A view
+    /// aid, on by default so the sea reads on a fresh launch.
+    show_water: bool,
     /// The project file the session is bound to, if any (#75). `Save` writes here;
     /// `None` until the project is first saved or opened, when `Save` falls back to
     /// `Save As`.
@@ -717,6 +727,8 @@ impl AppState {
             preview_res: PREVIEW_RES,
             world_extent: DEFAULT_WORLD_EXTENT,
             world_height: project_file::DEFAULT_WORLD_HEIGHT,
+            sea_level: DEFAULT_SEA_LEVEL,
+            show_water: true,
             project_path: None,
             recent: Vec::new(),
             // The built-in starter has no saved camera, so fit it to the screen on the first
@@ -4231,6 +4243,23 @@ fn world_settings(ui: &mut egui::Ui, state: &mut AppState) {
     });
 
     ui.separator();
+    ui.horizontal(|ui| {
+        ui.label("Sea level");
+        ui.checkbox(&mut state.show_water, "Show water");
+    });
+    ui.horizontal(|ui| {
+        // Normalized height in [0, 1]; the 3D viewport draws a water plane here. The height in
+        // meters (sea_level × world_height) makes the level tangible against the world height.
+        ui.add(
+            egui::Slider::new(&mut state.sea_level, 0.0..=1.0)
+                .fixed_decimals(3)
+                .clamping(egui::SliderClamping::Always),
+        );
+        let meters = state.sea_level * state.world_height;
+        ui.weak(format!("≈ {meters:.0} m"));
+    });
+
+    ui.separator();
     ui.label("Build resolution");
     ui.horizontal(|ui| {
         // Custom value (UE5 landscapes need specific sizes), with presets as
@@ -6633,6 +6662,8 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
             let settings = viewport::ViewSettings {
                 fixed_range: state.viewport_scale == shade::HeightScale::Fixed,
                 vertical_scale: true_proportion * state.viewport_exaggeration,
+                sea_level: state.sea_level as f32,
+                show_water: state.show_water,
             };
             viewport::show(
                 ui,

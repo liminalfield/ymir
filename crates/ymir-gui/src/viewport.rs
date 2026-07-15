@@ -37,7 +37,7 @@ fn mesh_res(field: &Field) -> usize {
     field.width().clamp(2, MAX_MESH_RES)
 }
 
-/// Depth of the solid base below the terrain's lowest point, in mesh units (the footprint is
+/// Depth of the solid base below the world datum (height 0), in mesh units (the footprint is
 /// `1.0` wide). Closes the heightfield into a solid block so orbiting underneath shows a
 /// plinth rather than the hollow underside (#117).
 const BASE_DEPTH: f32 = 0.06;
@@ -63,12 +63,18 @@ struct Uniforms {
     mvp: [[f32; 4]; 4],
     light_dir: [f32; 4],
     light: [f32; 4],
+    /// Water plane: x = surface height in mesh units, y = enabled (`1.0`) or off (`0.0`); z/w unused.
+    water: [f32; 4],
 }
 
 /// GPU resources for the viewport, created once at startup and stored in egui_wgpu's
 /// callback-resource type map so the per-frame paint callback can reach them.
 struct ViewportResources {
     pipeline: wgpu::RenderPipeline,
+    /// Draws the translucent water plane after the terrain. Shares the uniform bind group; a
+    /// separate pipeline so it can alpha-blend and test (but not write) depth, letting the
+    /// terrain clip it cleanly at the waterline.
+    water_pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
     /// Vertices the vertex buffer can hold; grown (the buffer reallocated) when a higher-
     /// resolution mesh arrives, so same-resolution updates stay in-place writes.
@@ -179,12 +185,49 @@ pub(crate) fn init(render_state: &egui_wgpu::RenderState) {
         cache: None,
     });
 
+    // Water pipeline: same uniforms and layout, but its own vertex/fragment entry points that
+    // generate a flat quad and shade it translucent blue. Alpha blending over the terrain, depth
+    // *tested* against the terrain (so peaks above the water occlude it) but not *written* (a
+    // single translucent surface needs no self-occlusion), which yields a clean waterline.
+    let water_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("viewport-water-pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_water"),
+            buffers: &[],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_water"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: render_state.target_format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    });
+
     render_state
         .renderer
         .write()
         .callback_resources
         .insert(ViewportResources {
             pipeline,
+            water_pipeline,
             vertex_buffer,
             vertex_capacity,
             index_buffer,
@@ -206,6 +249,10 @@ struct ViewportCallback {
     light: [f32; 4],
     /// New mesh to upload this frame (the field changed), or `None` to keep the current mesh.
     mesh: Option<MeshUpload>,
+    /// Water surface height in mesh units (`sea_level` mapped the same way terrain height is).
+    water_y: f32,
+    /// Whether to draw the water plane this frame.
+    water_enabled: bool,
 }
 
 /// A mesh ready to upload: its vertices and the grid resolution they were built at (so the
@@ -229,6 +276,12 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                 mvp: self.view_proj,
                 light_dir: self.light_dir,
                 light: self.light,
+                water: [
+                    self.water_y,
+                    if self.water_enabled { 1.0 } else { 0.0 },
+                    0.0,
+                    0.0,
+                ],
             };
             queue.write_buffer(&res.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
@@ -283,6 +336,15 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
         render_pass.set_vertex_buffer(0, res.vertex_buffer.slice(..));
         render_pass.set_index_buffer(res.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         render_pass.draw_indexed(0..res.index_count, 0, 0..1);
+
+        // The water plane, drawn after the terrain so depth testing clips it at the waterline.
+        // Its geometry is generated in the vertex shader (no vertex buffer), so only the uniform
+        // carrying its height differs frame to frame.
+        if self.water_enabled {
+            render_pass.set_pipeline(&res.water_pipeline);
+            render_pass.set_bind_group(0, &res.bind_group, &[]);
+            render_pass.draw(0..6, 0..1);
+        }
     }
 }
 
@@ -295,6 +357,11 @@ pub(crate) struct ViewSettings {
     pub fixed_range: bool,
     /// Height that a value of `1.0` reaches over the unit footprint.
     pub vertical_scale: f32,
+    /// Sea level as a normalized height in `[0, 1]`, where the water plane sits (mapped into the
+    /// same height space as the terrain before it reaches clip space).
+    pub sea_level: f32,
+    /// Whether to draw the water plane at all.
+    pub show_water: bool,
 }
 
 /// The viewport's directional sun: where it sits (azimuth around the compass, elevation above
@@ -372,6 +439,20 @@ pub(crate) fn show(
         }
     });
 
+    // Place the water surface in the same height space the terrain uses, so the plane meets the
+    // terrain exactly where the terrain's height equals the sea level. In Fixed mode height is
+    // taken raw, so `sea_level` maps straight through; in Auto mode the terrain is normalized to
+    // its own value range, so the sea level must ride that same remap.
+    let mapped_sea = match field {
+        Some(f) if !settings.fixed_range => {
+            let (lo, hi) = f.layer_or(layers::HEIGHT, 0.0).value_range();
+            let range = (hi - lo).max(1e-6);
+            ((settings.sea_level - lo) / range).clamp(0.0, 1.0)
+        }
+        _ => settings.sea_level.clamp(0.0, 1.0),
+    };
+    let water_y = mapped_sea * settings.vertical_scale;
+
     let view_proj = camera.view_proj(aspect).to_cols_array_2d();
     let callback = egui_wgpu::Callback::new_paint_callback(
         rect,
@@ -380,6 +461,8 @@ pub(crate) fn show(
             light_dir: lighting.travel_dir(),
             light: [lighting.intensity, lighting.ambient, 0.0, 0.0],
             mesh,
+            water_y,
+            water_enabled: settings.show_water,
         },
     );
     ui.painter().add(callback);
@@ -532,16 +615,23 @@ fn bilinear(layer: &Layer, u: f32, v: f32) -> f32 {
 /// Builds the mesh vertices from a `[0, 1]` height grid: the `res * res` terrain
 /// top (positions over the unit square in x/z with `y = height * vertical_scale`, smooth
 /// normals from the height gradient), plus the side walls and bottom that close it into a
-/// solid block (#117). The base sits `BASE_DEPTH` below the lowest point, so the slab has a
-/// visible thickness in both range modes. Vertex order (top, four wall strips, bottom) is
-/// mirrored by [`build_indices`].
+/// solid block (#117). The base is anchored to a fixed world datum (height 0), not the field's
+/// own minimum, so the terrain keeps a stable vertical position when a different node is
+/// previewed. Vertex order (top, four wall strips, bottom) is mirrored by [`build_indices`].
 fn build_vertices(heights: &[f32], vertical_scale: f32, res: usize) -> Vec<Vertex> {
     let at = |i: usize, j: usize| heights[j * res + i] * vertical_scale;
     let cell = 1.0 / (res - 1) as f32;
     let max = (res - 1) as f32 * cell; // The far x/z edge, 1.0.
 
+    // Anchor the block's base to the world datum (height 0), not the field's own minimum, so the
+    // terrain does not shift vertically in world space when a different node (with a different
+    // height range) is previewed, and the water plane — always at height >= 0 — never ends up
+    // below the block. A terrain whose floor sits above the datum shows a taller plinth; a field
+    // that dips below the datum still gets a base beneath its lowest point. In Auto mode the
+    // mapped minimum is already 0, so this re-anchors only Fixed mode.
+    let datum_y = 0.0_f32;
     let min_y = heights.iter().copied().fold(f32::INFINITY, f32::min) * vertical_scale;
-    let base_y = min_y - BASE_DEPTH;
+    let base_y = min_y.min(datum_y) - BASE_DEPTH;
 
     let mut vertices = Vec::with_capacity(res * res + 8 * res + 4);
 
@@ -688,6 +778,7 @@ struct Uniforms {
     mvp: mat4x4<f32>,
     light_dir: vec4<f32>,
     light: vec4<f32>,
+    water: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 
@@ -722,5 +813,24 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let plinth = vec3<f32>(0.36, 0.33, 0.30);
     let base = mix(terrain, plinth, in.kind);
     return vec4<f32>(base * shade, 1.0);
+}
+
+// Water plane: two triangles over the [0,1] x/z footprint at the sea-level height in u.water.x.
+// Generated from the vertex index, so no vertex buffer is needed.
+@vertex
+fn vs_water(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
+    var corners = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0),
+    );
+    let c = corners[vi];
+    return u.mvp * vec4<f32>(c.x, u.water.x, c.y, 1.0);
+}
+
+@fragment
+fn fs_water() -> @location(0) vec4<f32> {
+    // A simple translucent blue: enough to read the surface and see it clip against the terrain.
+    // Depth testing (not writing) does the intersection; richer shading comes later.
+    return vec4<f32>(0.10, 0.28, 0.42, 0.6);
 }
 ";
