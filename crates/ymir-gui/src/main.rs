@@ -3001,6 +3001,7 @@ fn library_pane(ui: &mut egui::Ui, state: &mut AppState) {
 inventory::submit! {
     dock::DockPane {
         id: "library",
+        order: 10,
         icon: egui_phosphor::regular::BOOKS,
         title: "Library",
         draw: library_pane,
@@ -3022,6 +3023,7 @@ fn world_dock_pane(ui: &mut egui::Ui, state: &mut AppState) {
 inventory::submit! {
     dock::DockPane {
         id: "world",
+        order: 0,
         icon: egui_phosphor::regular::GLOBE_HEMISPHERE_WEST,
         title: "World",
         draw: world_dock_pane,
@@ -7055,8 +7057,8 @@ fn divider_handle(ui: &egui::Ui, y: f32, x_range: egui::Rangef) {
 /// right border with the other section borders.
 fn mount_dock(ui: &mut egui::Ui, state: &mut AppState) -> egui::InnerResponse<()> {
     let panes = dock::dock_panes();
-    // Resolve the active pane: an empty or stale id falls back to the first registered pane, so
-    // the dock always has something to show once opened.
+    // Resolve the active pane: an empty or stale id falls back to the first pane in rail order
+    // (the lowest `order`), so the dock always has something to show once opened.
     let active_id: String = panes
         .iter()
         .find(|pane| pane.id == state.dock.active)

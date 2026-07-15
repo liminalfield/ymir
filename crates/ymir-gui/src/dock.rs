@@ -2,8 +2,8 @@
 //!
 //! Archetype 2 (see the layout note in `mount`): the dock flanks the canvas on the left, below
 //! the full-width ribbon, mirroring the right inspector pane. "Left = project/global sources and
-//! tools" is the scope rule; the subgraph library is its first pane, with a node outliner and a
-//! build list expected later.
+//! tools" is the scope rule; the World settings pane leads the rail, with the subgraph library,
+//! a node outliner, and a build list beside and after it.
 //!
 //! A dock pane is a [`DockPane`]: a stable id, a rail icon, a title, and a mount-agnostic draw
 //! function. Panes self-register with `inventory::submit!` (like the window's [`crate::PaneKind`]),
@@ -20,6 +20,11 @@ use crate::AppState;
 pub(crate) struct DockPane {
     /// A stable id, used as the active-pane key in [`DockState`].
     pub id: &'static str,
+    /// The rail sort order: panes sort ascending by this, so it fixes both the rail sequence and
+    /// which pane opens by default (the lowest one, when no pane is explicitly active). Leave gaps
+    /// (0, 10, 20, ...) so a later pane can slot between two without renumbering. Ties break by
+    /// `id` for a stable order.
+    pub order: i32,
     /// A Phosphor glyph for the rail button and the open switcher.
     pub icon: &'static str,
     /// A human title: the rail-button tooltip and the open header.
@@ -30,12 +35,12 @@ pub(crate) struct DockPane {
 
 inventory::collect!(DockPane);
 
-/// All registered dock panes, sorted by id for a stable rail order (registration order is
-/// unspecified). One pane today (the library); the sort keeps the rail from reshuffling as more
-/// are added.
+/// All registered dock panes in rail order: sorted by [`DockPane::order`], then `id` to break ties
+/// (registration order is unspecified). The explicit order both fixes the rail sequence and picks
+/// the default-open pane (the first here), so the rail never reshuffles as more panes are added.
 pub(crate) fn dock_panes() -> Vec<&'static DockPane> {
     let mut panes: Vec<&'static DockPane> = inventory::iter::<DockPane>().collect();
-    panes.sort_by_key(|pane| pane.id);
+    panes.sort_by_key(|pane| (pane.order, pane.id));
     panes
 }
 
@@ -59,7 +64,7 @@ pub(crate) struct DockState {
 
 impl Default for DockState {
     fn default() -> Self {
-        // Open on launch so the library is visible without a click; the switcher's collapse
+        // Open on launch so World settings is visible without a click; the switcher's collapse
         // button hides it to the rail.
         Self {
             open: true,
