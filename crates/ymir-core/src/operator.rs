@@ -72,6 +72,55 @@ impl<'a> Index<usize> for Inputs<'a> {
     }
 }
 
+/// Which [`EvalContext`] fields a node's output depends on, so the memo cache keys only
+/// those and a change to a world setting the node ignores does not invalidate it.
+///
+/// Only the world globals and the seed are represented here. Resolution and region are
+/// *always* keyed (nearly every node's output depends on them, so making them declarable
+/// would be risk for no gain) and so are not fields of this type.
+///
+/// The default is [`ALL`](Self::ALL): a node that does not narrow this is keyed on every
+/// field, exactly as if this mechanism did not exist. That is the safe default, because
+/// the one direction that corrupts the cache is *under*-declaring (dropping a field the
+/// node actually reads leaves a stale field memoized). A node narrows this only once its
+/// independence from a field is established, and [`Operator::context_deps`] is where it
+/// declares the narrower set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContextDeps {
+    /// The node reads the derived per-node seed (via [`EvalContext::seed`] and the noise
+    /// it drives). Generators set this; a pure transform of its input does not.
+    pub seed: bool,
+    /// The node reads the world horizontal extent, directly or through
+    /// [`EvalContext::meters_per_cell`] / [`world_to_cells`](EvalContext::world_to_cells)
+    /// (any node that interprets a param in world units: a blur radius, a warp amount).
+    pub world_extent: bool,
+    /// The node reads the world vertical extent, directly via
+    /// [`EvalContext::world_height`] or through
+    /// [`real_slope_scale`](EvalContext::real_slope_scale) (slope-aware erosion, metric
+    /// export, the coastal grade).
+    pub world_height: bool,
+    /// The node reads the world sea level via [`EvalContext::sea_level`] (the coastal
+    /// bevel today; base-level-aware river grading later).
+    pub sea_level: bool,
+}
+
+impl ContextDeps {
+    /// Depends on every keyable field. The default, and the only safe choice for a node
+    /// whose field dependence has not been deliberately narrowed.
+    pub const ALL: Self = Self {
+        seed: true,
+        world_extent: true,
+        world_height: true,
+        sea_level: true,
+    };
+}
+
+impl Default for ContextDeps {
+    fn default() -> Self {
+        Self::ALL
+    }
+}
+
 /// Stateless node behavior plus its schema.
 ///
 /// The engine depends only on this trait and holds `Box<dyn Operator>`; it never
@@ -112,6 +161,17 @@ pub trait Operator: OperatorClone + Send + Sync {
     /// return, since the evaluator calls it whenever it computes a key (precompute it).
     fn content_hash(&self) -> Option<u64> {
         None
+    }
+
+    /// Which [`EvalContext`] fields this node's output depends on, so the memo cache keys
+    /// only those. [`ALL`](ContextDeps::ALL) (the default) keys every field, exactly as
+    /// before this existed, and is the safe choice: dropping a field the node actually
+    /// reads would memoize a stale result. A node overrides this to exclude a world
+    /// setting it provably ignores, so changing that setting does not invalidate it (nor,
+    /// transitively, anything downstream of it). Cheap to return, since the evaluator calls
+    /// it whenever it computes a key.
+    fn context_deps(&self) -> ContextDeps {
+        ContextDeps::ALL
     }
 
     /// The inner graph this operator contains, if it is a container (a subgraph), so the
