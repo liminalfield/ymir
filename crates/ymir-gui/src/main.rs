@@ -192,9 +192,18 @@ const MARQUEE_MIN_DRAG: f32 = 4.0;
 /// world-unit parameters (scale-aware nodes consume it via `EvalContext`).
 const DEFAULT_WORLD_EXTENT: f64 = 1024.0;
 
-/// Default sea level as a normalized height. A little below mid-relief, so a fresh launch shows
-/// the water plane cutting across the starter terrain rather than sitting at the very base.
-const DEFAULT_SEA_LEVEL: f64 = 0.3;
+/// The world settings for a fresh, untitled project: the app-level defaults, with the water plane
+/// shown. Used to anchor a new session's clean point and to reset on New/Close/open-default.
+fn fresh_world_settings() -> project_file::WorldSettings {
+    project_file::WorldSettings {
+        seed: 0,
+        world_extent: DEFAULT_WORLD_EXTENT,
+        world_height: project_file::DEFAULT_WORLD_HEIGHT,
+        build_res: project_file::DEFAULT_BUILD_RES,
+        sea_level: project_file::DEFAULT_SEA_LEVEL,
+        show_water: true,
+    }
+}
 
 /// The canvas's pan/zoom view, captured each frame so other panes (the ribbon
 /// add) can place a node where the user is actually looking. The transform maps
@@ -671,17 +680,8 @@ impl AppState {
         let (graph, snarl) = starter::starter_graph();
         // Anchor the undo history and the clean point at this initial session, so the
         // first edit records an undo step and marks the session modified.
-        let initial = project_file::ProjectFile::capture(
-            &graph,
-            &snarl,
-            project_file::WorldSettings {
-                seed: 0,
-                world_extent: DEFAULT_WORLD_EXTENT,
-                world_height: project_file::DEFAULT_WORLD_HEIGHT,
-                build_res: project_file::DEFAULT_BUILD_RES,
-            },
-            &[],
-        );
+        let initial =
+            project_file::ProjectFile::capture(&graph, &snarl, fresh_world_settings(), &[]);
         let history = EditHistory::new(initial.clone());
         Self {
             graph,
@@ -727,7 +727,7 @@ impl AppState {
             preview_res: PREVIEW_RES,
             world_extent: DEFAULT_WORLD_EXTENT,
             world_height: project_file::DEFAULT_WORLD_HEIGHT,
-            sea_level: DEFAULT_SEA_LEVEL,
+            sea_level: project_file::DEFAULT_SEA_LEVEL,
             show_water: true,
             project_path: None,
             recent: Vec::new(),
@@ -802,6 +802,8 @@ impl AppState {
         self.world_extent = restored.world_extent;
         self.world_height = restored.world_height;
         self.build_res = restored.build_res;
+        self.sea_level = restored.sea_level;
+        self.show_water = restored.show_water;
         self.clear_selection();
         self.preview_pin = None;
         self.node_menu = None;
@@ -817,16 +819,15 @@ impl AppState {
         self.mark_clean();
     }
 
-    /// Replaces the session with a fresh untitled one built from `graph`/`snarl`: resets
-    /// world settings and view-state, drops the project path, and re-anchors undo and the
-    /// clean point. Shared by New (a starter graph) and Close (an empty graph).
+    /// Replaces the session with a fresh untitled one built from `graph`/`snarl`: installs the
+    /// given `world` settings (seed, extent, height, build resolution, sea level, water toggle),
+    /// resets view-state, drops the project path, and re-anchors undo and the clean point. Shared
+    /// by New (a starter graph) and Close (an empty graph).
     fn install_fresh(
         &mut self,
         graph: Graph,
         snarl: Snarl<Handle>,
-        seed: u64,
-        world_extent: f64,
-        world_height: f64,
+        world: project_file::WorldSettings,
         subgraph_layouts: HashMap<Vec<u64>, BTreeMap<u64, [f32; 2]>>,
     ) {
         self.nav.clear();
@@ -837,9 +838,12 @@ impl AppState {
         self.selected_frame = None;
         self.frame_drag = None;
         self.frame_color_edit = None;
-        self.seed = seed;
-        self.world_extent = world_extent;
-        self.world_height = world_height;
+        self.seed = world.seed;
+        self.world_extent = world.world_extent;
+        self.world_height = world.world_height;
+        self.build_res = world.build_res;
+        self.sea_level = world.sea_level;
+        self.show_water = world.show_water;
         self.clear_selection();
         self.preview_pin = None;
         self.node_menu = None;
@@ -859,9 +863,7 @@ impl AppState {
         self.install_fresh(
             Graph::new(),
             Snarl::new(),
-            0,
-            DEFAULT_WORLD_EXTENT,
-            project_file::DEFAULT_WORLD_HEIGHT,
+            fresh_world_settings(),
             HashMap::new(),
         );
     }
@@ -873,36 +875,35 @@ impl AppState {
             .filter(|p| p.exists())
             .and_then(|p| read_project(&p).ok());
         match loaded {
-            Some(r) => self.install_fresh(
-                r.graph,
-                r.snarl,
-                r.seed,
-                r.world_extent,
-                r.world_height,
-                r.subgraph_layouts,
-            ),
+            Some(r) => {
+                let world = project_file::WorldSettings {
+                    seed: r.seed,
+                    world_extent: r.world_extent,
+                    world_height: r.world_height,
+                    build_res: r.build_res,
+                    sea_level: r.sea_level,
+                    show_water: r.show_water,
+                };
+                self.install_fresh(r.graph, r.snarl, world, r.subgraph_layouts);
+            }
             None => {
                 let (graph, snarl) = starter::starter_graph();
-                self.install_fresh(
-                    graph,
-                    snarl,
-                    0,
-                    DEFAULT_WORLD_EXTENT,
-                    project_file::DEFAULT_WORLD_HEIGHT,
-                    HashMap::new(),
-                );
+                self.install_fresh(graph, snarl, fresh_world_settings(), HashMap::new());
             }
         }
     }
 
-    /// The current world settings (seed, extent, height, build resolution), bundled for a
-    /// [`project_file`] capture.
+    /// The current world settings (seed, extent, height, build resolution, sea level), bundled
+    /// for a [`project_file`] capture. Everything here is part of the saved project and the dirty
+    /// check, so changing the sea level or the water toggle marks the project modified.
     fn world_settings(&self) -> project_file::WorldSettings {
         project_file::WorldSettings {
             seed: self.seed,
             world_extent: self.world_extent,
             world_height: self.world_height,
             build_res: self.build_res,
+            sea_level: self.sea_level,
+            show_water: self.show_water,
         }
     }
 
@@ -1488,6 +1489,8 @@ impl AppState {
                 self.seed = restored.seed;
                 self.world_extent = restored.world_extent;
                 self.world_height = restored.world_height;
+                self.sea_level = restored.sea_level;
+                self.show_water = restored.show_water;
                 self.selection
                     .retain(|&h| self.graph.node_id_of(h).is_some());
                 self.primary = self.primary.filter(|h| self.selection.contains(h));
@@ -2484,6 +2487,8 @@ fn apply_default(state: &mut AppState) {
             state.world_extent = restored.world_extent;
             state.world_height = restored.world_height;
             state.build_res = restored.build_res;
+            state.sea_level = restored.sea_level;
+            state.show_water = restored.show_water;
             state.apply_restored_view(restored.camera);
             // Anchor undo and the clean point at the default, not the starter it replaced.
             state.reset_history();
@@ -8830,6 +8835,8 @@ mod tests {
                 world_extent: 2048.0,
                 world_height: 640.0,
                 build_res: 4096,
+                sea_level: 0.55,
+                show_water: true,
             },
             &[],
         );
@@ -8845,6 +8852,8 @@ mod tests {
         assert_eq!(restored.world_extent, 2048.0);
         assert_eq!(restored.world_height, 640.0);
         assert_eq!(restored.build_res, 4096);
+        assert_eq!(restored.sea_level, 0.55);
+        assert!(restored.show_water);
     }
 
     #[test]
