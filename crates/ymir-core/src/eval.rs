@@ -49,6 +49,10 @@ pub struct EvalRequest {
     /// each node's [`EvalContext`] so slope-aware nodes get a true rise-over-run. Defaults to
     /// `1.0`.
     world_height: f64,
+    /// The sea/base level as a normalized height, threaded into each node's [`EvalContext`]: a
+    /// world global several nodes agree on (coastal reshaping, stream-power base level, the
+    /// viewport water). Defaults to `0.0`.
+    sea_level: f64,
     /// Subgraph nesting depth this request evaluates at; 0 at the top level. The evaluator
     /// threads it into each node's context, and a subgraph container raises it by one for
     /// its inner evaluation. Not part of the cache key: depth never changes a node's output.
@@ -69,6 +73,7 @@ impl EvalRequest {
             seed,
             world_extent: 1.0,
             world_height: 1.0,
+            sea_level: 0.0,
             depth: 0,
             cancel: CancelToken::new(),
         }
@@ -109,6 +114,15 @@ impl EvalRequest {
     #[must_use]
     pub fn with_world_height(mut self, world_height: f64) -> Self {
         self.world_height = world_height;
+        self
+    }
+
+    /// Sets the sea/base level as a normalized height, threaded into each node's [`EvalContext`].
+    /// Defaults to `0.0`. A world global that several nodes agree on (coastal, stream-power base
+    /// level, viewport water).
+    #[must_use]
+    pub fn with_sea_level(mut self, sea_level: f64) -> Self {
+        self.sea_level = sea_level;
         self
     }
 }
@@ -504,6 +518,7 @@ impl Graph {
             .with_cancel(request.cancel.clone())
             .with_world_extent(request.world_extent)
             .with_world_height(request.world_height)
+            .with_sea_level(request.sea_level)
             .with_depth(request.depth);
         let inputs = Inputs::new(&required, &optional);
         let outputs = Arc::new(node.operator.eval(inputs, &node.params, &ctx)?);
@@ -712,6 +727,9 @@ fn compute_key(
     // node. world_height is a world setting, changed rarely, so this is acceptable; per-node
     // context dependence (so non-slope nodes are spared) is a future optimization for both.
     h.write_f64_bits(request.world_height);
+    // Same rationale for sea_level: a rarely-changed world setting that base-level-aware nodes
+    // (stream-power, coastal) depend on, keyed unconditionally for now.
+    h.write_f64_bits(request.sea_level);
     h.write_u64(seed);
     // Folded only when present, so an ordinary operator's key is byte-identical to before
     // this hook existed; a subgraph folds its inner-graph hash so inner edits invalidate.
@@ -1175,6 +1193,20 @@ mod tests {
         let b = EvalRequest::new(64, 64, Region::UNIT, 0).with_world_height(512.0);
         // The vertical scale is part of the cache key too, so a different height is a different
         // key (and threads through to each node's context).
+        assert_ne!(
+            graph.output_key(probe, &a).unwrap(),
+            graph.output_key(probe, &b).unwrap()
+        );
+    }
+
+    #[test]
+    fn changing_sea_level_invalidates_the_cache() {
+        let mut graph = Graph::new();
+        let probe = graph.add_op(Box::new(ProbeExtent), Params::new());
+        let a = EvalRequest::new(64, 64, Region::UNIT, 0).with_sea_level(0.2);
+        let b = EvalRequest::new(64, 64, Region::UNIT, 0).with_sea_level(0.5);
+        // Sea level is keyed like the other world settings, so a different level is a different
+        // key and threads through to each node's context.
         assert_ne!(
             graph.output_key(probe, &a).unwrap(),
             graph.output_key(probe, &b).unwrap()

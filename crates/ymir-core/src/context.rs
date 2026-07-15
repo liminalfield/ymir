@@ -30,6 +30,11 @@ pub struct EvalContext {
     /// Private so slope-aware operators go through [`real_slope_scale`](Self::real_slope_scale),
     /// which combines it with the horizontal cell size into a true rise-over-run scale.
     world_height: f64,
+    /// The sea/base level as a normalized height: a world global several nodes agree on (the
+    /// coastal shaper reshapes to it, stream-power grades rivers to it, the viewport draws water
+    /// at it). Defaults to `0.0` (sea at the world base, i.e. no configured sea); the World-panel
+    /// slider sets it. A world setting like [`world_height`](Self::world_height), never a node output.
+    sea_level: f64,
     /// Subgraph nesting depth: 0 at the top level, raised by one each time a subgraph
     /// container evaluates its inner graph. A container checks it against the nesting limit
     /// so a pathologically deep stack reports rather than overflows.
@@ -48,6 +53,7 @@ impl EvalContext {
             seed,
             world_extent: 1.0,
             world_height: 1.0,
+            sea_level: 0.0,
             depth: 0,
             cancel: CancelToken::new(),
         }
@@ -79,6 +85,14 @@ impl EvalContext {
         self
     }
 
+    /// Sets the sea/base level as a normalized height. Defaults to `0.0`. A world global that
+    /// several nodes agree on (coastal reshaping, stream-power base level, the viewport water).
+    #[must_use]
+    pub fn with_sea_level(mut self, sea_level: f64) -> Self {
+        self.sea_level = sea_level;
+        self
+    }
+
     /// The factor that turns a *per-cell* normalized height delta into a true slope
     /// (rise over run): `world_height / meters_per_cell`. A slope-aware operator multiplies its
     /// normalized `delta_height / cell_distance` by this to get a real tangent, so a talus angle
@@ -97,6 +111,14 @@ impl EvalContext {
     #[must_use]
     pub fn world_height(&self) -> f64 {
         self.world_height
+    }
+
+    /// The sea/base level as a normalized height (see [`with_sea_level`](Self::with_sea_level)).
+    /// A world global; the coastal shaper and stream-power base level read it, and the viewport
+    /// draws water at it.
+    #[must_use]
+    pub fn sea_level(&self) -> f64 {
+        self.sea_level
     }
 
     /// The world's physical size along x, in world units (meters) across the full `UNIT`
@@ -210,6 +232,14 @@ mod tests {
         // scale is its reciprocal.
         let ctx = EvalContext::new(256, 256, Region::UNIT, 0);
         assert!((ctx.real_slope_scale() - 256.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn sea_level_defaults_to_zero_and_round_trips() {
+        // No configured sea by default (sea at the world base); the setter carries it through.
+        assert_eq!(EvalContext::new(4, 4, Region::UNIT, 0).sea_level(), 0.0);
+        let ctx = EvalContext::new(4, 4, Region::UNIT, 0).with_sea_level(0.35);
+        assert!((ctx.sea_level() - 0.35).abs() < 1e-12);
     }
 
     #[test]
