@@ -30,16 +30,23 @@ const ZOOM_SPEED: f32 = 0.0015;
 const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 64.0;
 
+/// The identity a 2D-map texture was built from: field hash, output index, shading mode and scale,
+/// relief light bits, sea-level bits, and whether water is shown. The texture is rebuilt when any
+/// of these change.
+type TextureKey = (u64, usize, ShadeMode, HeightScale, [u32; 3], u32, bool);
+
 /// The 2D view's own state: the uploaded texture and the key it was built for (so it is
-/// rebuilt only when the field or shading changes) and the pan/zoom transform.
+/// rebuilt only when the field or shading changes), the relief light, and the pan/zoom transform.
 ///
 /// `zoom` is a multiplier over the fit-to-pane scale (`1.0` = the whole map fits), and
 /// `pan` is the screen-space offset of the image centre from the pane centre, in points.
-/// Both reset to fit on a double-click.
+/// Both reset to fit on a double-click. `light` is this view's own relief sun (independent of the
+/// preview pane and the 3D light), ephemeral like the camera and not persisted.
 pub(crate) struct View2d {
     texture: Option<egui::TextureHandle>,
-    texture_key: Option<(u64, usize, ShadeMode, HeightScale, u32, bool)>,
+    texture_key: Option<TextureKey>,
     mode: ShadeMode,
+    light: [f32; 3],
     zoom: f32,
     pan: egui::Vec2,
 }
@@ -50,6 +57,7 @@ impl Default for View2d {
             texture: None,
             texture_key: None,
             mode: ShadeMode::Height,
+            light: DEFAULT_LIGHT,
             zoom: 1.0,
             pan: egui::Vec2::ZERO,
         }
@@ -65,6 +73,17 @@ impl View2d {
     /// Sets the shading mode; the texture rebuilds on the next `show` if it changed.
     pub(crate) fn set_shade_mode(&mut self, mode: ShadeMode) {
         self.mode = mode;
+    }
+
+    /// Draws the relief sun dial and steers this view's light on drag; the texture rebuilds on the
+    /// next `show` if it moved. Only meaningful in relief mode.
+    pub(crate) fn sun_dial(&mut self, ui: &mut egui::Ui) {
+        crate::sun::dial(ui, &mut self.light);
+    }
+
+    /// This view's relief light azimuth and altitude in degrees, for the dial readout.
+    pub(crate) fn light_angles(&self) -> (f32, f32) {
+        crate::sun::light_angles(self.light)
     }
 
     /// Resets to fit-to-view (the whole map centred in the pane).
@@ -165,14 +184,14 @@ impl View2d {
             output,
             self.mode,
             scale,
+            self.light.map(f32::to_bits),
             water_bits,
             show_water,
         );
         if self.texture_key == Some(key) {
             return;
         }
-        let mut image =
-            shade::field_to_image(field, layers::HEIGHT, self.mode, scale, DEFAULT_LIGHT);
+        let mut image = shade::field_to_image(field, layers::HEIGHT, self.mode, scale, self.light);
         if show_water {
             shade::apply_water(
                 &mut image,

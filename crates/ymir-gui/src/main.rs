@@ -35,6 +35,8 @@ use preview::PreviewEngine;
 
 mod shade;
 
+mod sun;
+
 mod thumbnails;
 use thumbnails::ThumbnailEngine;
 // Off-thread full-resolution Build (#7).
@@ -4574,7 +4576,7 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
         // centres each widget against the row height known when it is placed, so the label (added
         // before the taller dial) would float up while the dial and readout centre lower.
         ui.allocate_ui_with_layout(
-            egui::vec2(ui.available_width(), preview::LIGHT_DIAL_SIZE),
+            egui::vec2(ui.available_width(), sun::DIAL_SIZE),
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
                 ui.add(egui::Label::new(
@@ -6750,6 +6752,39 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
     state.viewport_exaggeration = exaggeration;
     state.viewport_lighting = light;
     state.viewport_2d.set_shade_mode(shade_mode);
+
+    // The relief sun, anchored top-right and shown only in the 2D map's relief mode (#96): a
+    // compact dial to steer the hillshade light the flat map cannot otherwise set. Its own
+    // Foreground area, mirroring the top-left HUD, so dragging it never pans the map beneath.
+    if rect.height() >= WORKSPACE_HUD_MIN
+        && mode == viewport2d::Mode::TwoD
+        && shade_mode == shade::ShadeMode::Relief
+    {
+        egui::Area::new(ui.id().with("viewport-sun"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(rect.right_top() + egui::vec2(-8.0, 8.0))
+            .pivot(egui::Align2::RIGHT_TOP)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Label::new(
+                            egui::RichText::new("Sun").color(theme::TEXT_SECONDARY),
+                        ));
+                        state.viewport_2d.sun_dial(ui);
+                        // Read the angles after the dial so a drag this frame is reflected.
+                        // Right-pad to a fixed width (azimuth 3 digits, altitude 2) so the
+                        // monospace readout, and thus the popup, keeps a constant size as the
+                        // digit count changes instead of jittering while the dial is dragged.
+                        let (az, alt) = state.viewport_2d.light_angles();
+                        ui.label(
+                            egui::RichText::new(format!("{az:>3.0}° · {alt:>2.0}°"))
+                                .family(egui::FontFamily::Monospace)
+                                .color(theme::TEXT_TERTIARY),
+                        );
+                    });
+                });
+            });
+    }
 }
 
 /// The 3D viewport HUD controls: the Auto/Fixed height scale, the vertical exaggeration,
