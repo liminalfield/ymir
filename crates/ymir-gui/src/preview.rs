@@ -15,7 +15,9 @@ use ymir_core::{
     CancelToken, Error, EvalCache, EvalRequest, Field, Graph, NodeId, OUTPUT_TYPE_ID, layers,
 };
 
-use crate::shade::{DEFAULT_LIGHT, HeightScale, ShadeMode, field_to_image};
+use crate::shade::{
+    DEFAULT_LIGHT, HeightScale, ShadeMode, WaterStyle, apply_water, field_to_image,
+};
 
 /// Worker-side persistent cache capacity, in cached node results.
 const WORKER_CACHE_CAP: usize = 64;
@@ -89,6 +91,11 @@ enum Status {
     Error,
 }
 
+/// The identity a preview texture was built from: field hash, output index, shading mode and
+/// scale, relief light bits, sea-level bits, and whether water is shown. The texture is rebuilt
+/// when any of these change.
+type TextureKey = (u64, usize, ShadeMode, HeightScale, [u32; 3], u32, bool);
+
 /// Drives background preview evaluation. The UI calls [`sync`](Self::sync) (submit
 /// if changed), [`poll`](Self::poll) (collect results), then [`show`](Self::show)
 /// (render), every frame.
@@ -125,6 +132,11 @@ pub(crate) struct PreviewEngine {
     /// Relief light direction (unit vector), steered by dragging over the relief
     /// image (#40).
     light: [f32; 3],
+    /// Sea level (normalized height) for the water overlay, mirrored from the World settings
+    /// each frame. Presentation only: it drives the overlay, never the evaluation (#96).
+    sea_level: f32,
+    /// Whether to draw the water overlay, mirrored from the World settings' Show water toggle.
+    show_water: bool,
     /// Which output port the preview displays, by index. A multi-output node (e.g. hydraulic
     /// erosion's heightfield/water/sediment) is viewed one output at a time; switching is
     /// instant since all outputs are kept. Clamped to the available outputs.
@@ -137,9 +149,10 @@ pub(crate) struct PreviewEngine {
     last_histogram: Option<Vec<f32>>,
     histogram_target: Option<u64>,
     texture: Option<egui::TextureHandle>,
-    /// The (field hash, output index, mode, scale, light bits) the current texture was built
-    /// from; the texture is rebuilt when any changes.
-    texture_key: Option<(u64, usize, ShadeMode, HeightScale, [u32; 3])>,
+    /// The (field hash, output index, mode, scale, light bits, sea-level bits, show-water) the
+    /// current texture was built from; the texture is rebuilt when any changes. Sea level enters
+    /// the key only while water is shown, so moving the slider with water off costs no rebuild.
+    texture_key: Option<TextureKey>,
 }
 
 impl PreviewEngine {
@@ -162,6 +175,8 @@ impl PreviewEngine {
             mode: ShadeMode::Height,
             scale: HeightScale::Auto,
             light: DEFAULT_LIGHT,
+            sea_level: 0.0,
+            show_water: false,
             display_output: 0,
             last_outputs: Vec::new(),
             last_histogram: None,
@@ -206,6 +221,14 @@ impl PreviewEngine {
     /// changed.
     pub(crate) fn set_scale(&mut self, scale: HeightScale) {
         self.scale = scale;
+    }
+
+    /// Mirrors the World settings' sea level and Show water toggle into the preview, so the water
+    /// overlay follows the same controls as the 3D plane. The texture recomposites on the next
+    /// `poll` if either changed (no graph re-evaluation).
+    pub(crate) fn set_water(&mut self, sea_level: f32, show_water: bool) {
+        self.sea_level = sea_level;
+        self.show_water = show_water;
     }
 
     /// The output index the preview is set to display.
@@ -359,18 +382,35 @@ impl PreviewEngine {
         let Some(field) = self.last_outputs.get(index) else {
             return;
         };
-        // Each output is a standalone field; show its height layer.
+        // Each output is a standalone field; show its height layer. Sea level enters the key only
+        // while water is shown, so toggling water off frees the slider from rebuilding.
+        let water_bits = if self.show_water {
+            self.sea_level.to_bits()
+        } else {
+            0
+        };
         let key = (
             field.content_hash().to_u64(),
             index,
             self.mode,
             self.scale,
             self.light.map(f32::to_bits),
+            water_bits,
+            self.show_water,
         );
         if self.texture_key == Some(key) {
             return;
         }
-        let image = field_to_image(field, layers::HEIGHT, self.mode, self.scale, self.light);
+        let mut image = field_to_image(field, layers::HEIGHT, self.mode, self.scale, self.light);
+        if self.show_water {
+            apply_water(
+                &mut image,
+                field,
+                layers::HEIGHT,
+                self.sea_level,
+                &WaterStyle::default(),
+            );
+        }
         self.texture = Some(ctx.load_texture("preview", image, egui::TextureOptions::LINEAR));
         self.texture_key = Some(key);
     }

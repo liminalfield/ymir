@@ -38,7 +38,7 @@ const MAX_ZOOM: f32 = 64.0;
 /// Both reset to fit on a double-click.
 pub(crate) struct View2d {
     texture: Option<egui::TextureHandle>,
-    texture_key: Option<(u64, usize, ShadeMode, HeightScale)>,
+    texture_key: Option<(u64, usize, ShadeMode, HeightScale, u32, bool)>,
     mode: ShadeMode,
     zoom: f32,
     pan: egui::Vec2,
@@ -76,15 +76,18 @@ impl View2d {
     /// Draws the field flat over the pane, handling pan (drag), zoom (scroll about the
     /// cursor), and reset (double-click). `field` is the field the 3D view would mesh;
     /// `output` names which output it is (part of the texture key); `scale` is the shared
-    /// Auto/Fixed Height scale. A black fill stands in when there is no field.
+    /// Auto/Fixed Height scale; `sea_level`/`show_water` mirror the World settings to draw the
+    /// same water overlay the 3D plane shows. A black fill stands in when there is no field.
     pub(crate) fn show(
         &mut self,
         ui: &mut egui::Ui,
         field: Option<&Field>,
         output: usize,
         scale: HeightScale,
+        sea_level: f32,
+        show_water: bool,
     ) {
-        self.refresh_texture(ui.ctx(), field, output, scale);
+        self.refresh_texture(ui.ctx(), field, output, scale, sea_level, show_water);
 
         let rect = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
@@ -146,17 +149,39 @@ impl View2d {
         field: Option<&Field>,
         output: usize,
         scale: HeightScale,
+        sea_level: f32,
+        show_water: bool,
     ) {
         let Some(field) = field else {
             self.texture = None;
             self.texture_key = None;
             return;
         };
-        let key = (field.content_hash().to_u64(), output, self.mode, scale);
+        // Sea level enters the key only while water is shown, so moving the slider with water off
+        // costs no rebuild.
+        let water_bits = if show_water { sea_level.to_bits() } else { 0 };
+        let key = (
+            field.content_hash().to_u64(),
+            output,
+            self.mode,
+            scale,
+            water_bits,
+            show_water,
+        );
         if self.texture_key == Some(key) {
             return;
         }
-        let image = shade::field_to_image(field, layers::HEIGHT, self.mode, scale, DEFAULT_LIGHT);
+        let mut image =
+            shade::field_to_image(field, layers::HEIGHT, self.mode, scale, DEFAULT_LIGHT);
+        if show_water {
+            shade::apply_water(
+                &mut image,
+                field,
+                layers::HEIGHT,
+                sea_level,
+                &shade::WaterStyle::default(),
+            );
+        }
         let options = egui::TextureOptions {
             magnification: egui::TextureFilter::Nearest,
             minification: egui::TextureFilter::Linear,

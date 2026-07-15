@@ -30,6 +30,38 @@ pub(crate) enum HeightScale {
     Fixed,
 }
 
+/// Appearance of the map water overlay (#96): a tint colour plus how its opacity grows with
+/// depth. Isolated as one value, rather than scattered constants, so a future "Water" section in
+/// the World panel can drive it (and later persist it into `WorldSettings`) without re-plumbing.
+/// This is presentation only: it never reaches `EvalContext`, evaluation, or the determinism
+/// contract, so it can be as aesthetic as we like.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) struct WaterStyle {
+    /// Water tint (sRGB bytes). Blue reads unambiguously under red/green colour vision.
+    pub colour: [u8; 3],
+    /// Overlay opacity right at the shoreline (a cell just below sea level), in `[0, 1]`.
+    pub shore_opacity: f32,
+    /// Overlay opacity at or beyond [`full_depth`](Self::full_depth), in `[0, 1]`. Deeper water
+    /// reads more opaque, so submerged relief fades out with depth. A depth *cue*, not a physical
+    /// Beer-Lambert model (that is the 3D shader tiers, #140/#141).
+    pub deep_opacity: f32,
+    /// Depth below sea level, in normalized height units, at which opacity reaches
+    /// [`deep_opacity`](Self::deep_opacity). Shallower cells interpolate from `shore_opacity`.
+    pub full_depth: f32,
+}
+
+impl Default for WaterStyle {
+    fn default() -> Self {
+        // A mid Frost-blue, translucent at the shore and near-opaque in the depths.
+        Self {
+            colour: [46, 110, 174],
+            shore_opacity: 0.35,
+            deep_opacity: 0.85,
+            full_depth: 0.12,
+        }
+    }
+}
+
 /// Default relief light: from the upper-left, partway up (a conventional NW
 /// hillshade). `+x` is right, `+y` is down (image space). Pre-normalized. Steerable by
 /// dragging over the relief image (#40).
@@ -71,6 +103,53 @@ pub(crate) fn field_to_image(
         ShadeMode::Height => height_image(field, layer, scale),
         ShadeMode::Relief => relief_image(field, layer, light),
     }
+}
+
+/// Composites the water overlay onto an already-shaded image in place (#96): every cell whose
+/// `layer` value sits below `sea_level` is tinted toward the water colour, more opaquely the
+/// deeper it lies. The base image (grey height or hillshade) shows through, so submerged relief
+/// stays legible near the shore and fades with depth.
+///
+/// The waterline is compared in raw layer space (`value < sea_level`), so it is independent of the
+/// shading mode and of the Auto/Fixed display scale, which only remap the base tone. `image` and
+/// `field`'s `layer` must share cell order and count (they do at every call site: the same field
+/// and layer feed [`field_to_image`] and this).
+pub(crate) fn apply_water(
+    image: &mut egui::ColorImage,
+    field: &Field,
+    layer: &str,
+    sea_level: f32,
+    style: &WaterStyle,
+) {
+    let layer = field.layer_or(layer, 0.0);
+    debug_assert_eq!(
+        image.pixels.len(),
+        layer.len(),
+        "water overlay expects the image and layer to align cell-for-cell"
+    );
+    let full_depth = style.full_depth.max(f32::EPSILON);
+    for (pixel, &value) in image.pixels.iter_mut().zip(layer.as_slice()) {
+        let depth = sea_level - value;
+        if depth <= 0.0 {
+            continue; // at or above the waterline: dry, left untouched.
+        }
+        let t = (depth / full_depth).clamp(0.0, 1.0);
+        let alpha = style.shore_opacity + (style.deep_opacity - style.shore_opacity) * t;
+        *pixel = blend(*pixel, style.colour, alpha);
+    }
+}
+
+/// Alpha-blends `over` onto `base` at opacity `alpha` (`0` keeps `base`, `1` yields `over`),
+/// returning an opaque colour: the translucency is baked against the terrain shade beneath, since
+/// the composited texture itself is drawn fully opaque.
+fn blend(base: egui::Color32, over: [u8; 3], alpha: f32) -> egui::Color32 {
+    let a = alpha.clamp(0.0, 1.0);
+    let mix = |b: u8, o: u8| (f32::from(b) * (1.0 - a) + f32::from(o) * a + 0.5) as u8;
+    egui::Color32::from_rgb(
+        mix(base.r(), over[0]),
+        mix(base.g(), over[1]),
+        mix(base.b(), over[2]),
+    )
 }
 
 /// The named layer mapped to grayscale over the chosen [`HeightScale`]: the layer's actual
@@ -197,6 +276,67 @@ mod tests {
         assert_eq!(gray8(-0.5), 0);
         assert_eq!(gray8(1.5), 255);
         assert_eq!(gray8(0.5), 128);
+    }
+
+    #[test]
+    fn water_tints_below_sea_level_and_leaves_dry_cells() {
+        // One cell below the sea level (0.5), one above.
+        let field = height_field(&[0.2, 0.8]);
+        let mut img = height_image(&field, layers::HEIGHT, HeightScale::Fixed);
+        let dry_before = img.pixels[1];
+        apply_water(
+            &mut img,
+            &field,
+            layers::HEIGHT,
+            0.5,
+            &WaterStyle::default(),
+        );
+        // The submerged cell reads blue (its blue channel now dominates red).
+        let wet = img.pixels[0];
+        assert!(wet.b() > wet.r(), "submerged cell {wet:?} should read blue");
+        // The dry cell is untouched.
+        assert_eq!(
+            img.pixels[1], dry_before,
+            "cell above the waterline must not change"
+        );
+    }
+
+    #[test]
+    fn deeper_water_is_more_opaque() {
+        // Two submerged cells at different depths; start both from the same base grey so only the
+        // depth-driven opacity differs, not the base tone.
+        let field = height_field(&[0.0, 0.45]);
+        let mut img = egui::ColorImage::from_rgba_unmultiplied(
+            [2, 1],
+            &[128, 128, 128, 255, 128, 128, 128, 255],
+        );
+        let style = WaterStyle::default();
+        apply_water(&mut img, &field, layers::HEIGHT, 0.5, &style);
+        let dist = |c: egui::Color32| {
+            let d = |a: u8, b: u8| (i32::from(a) - i32::from(b)).pow(2);
+            d(c.r(), style.colour[0]) + d(c.g(), style.colour[1]) + d(c.b(), style.colour[2])
+        };
+        // The deeper cell (0.0) sits nearer the water colour than the shallow one (0.45).
+        assert!(
+            dist(img.pixels[0]) < dist(img.pixels[1]),
+            "deeper water should be nearer the water colour"
+        );
+    }
+
+    #[test]
+    fn default_sea_level_leaves_a_normalized_field_dry() {
+        // sea_level 0.0: nothing is strictly below it, so a [0, 1] field is unchanged.
+        let field = height_field(&[0.0, 0.5, 1.0]);
+        let mut img = height_image(&field, layers::HEIGHT, HeightScale::Fixed);
+        let before = img.pixels.clone();
+        apply_water(
+            &mut img,
+            &field,
+            layers::HEIGHT,
+            0.0,
+            &WaterStyle::default(),
+        );
+        assert_eq!(img.pixels, before, "default sea level should tint nothing");
     }
 
     #[test]

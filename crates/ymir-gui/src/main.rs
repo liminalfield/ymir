@@ -4605,6 +4605,9 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
     }
     state.preview.set_mode(mode);
     state.preview.set_scale(scale);
+    state
+        .preview
+        .set_water(state.sea_level as f32, state.show_water);
 
     // The image: the previewed node's output (evaluated each frame by `drive_preview`,
     // independent of this pane being visible), or a black placeholder when there is no
@@ -6659,6 +6662,11 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
     let showing_build = build_field.is_some();
     let field = build_field.or_else(|| state.preview.field());
 
+    // Sea level and the Show water toggle drive the same overlay across projections: the 3D water
+    // plane and the 2D map's water tint. Presentation only, so no re-evaluation on change (#96).
+    let sea_level = state.sea_level as f32;
+    let show_water = state.show_water;
+
     match state.viewport_mode {
         viewport2d::Mode::ThreeD => {
             // True world proportion: a height of 1.0 rises to (world_height / world_extent)
@@ -6669,8 +6677,8 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
             let settings = viewport::ViewSettings {
                 fixed_range: state.viewport_scale == shade::HeightScale::Fixed,
                 vertical_scale: true_proportion * state.viewport_exaggeration,
-                sea_level: state.sea_level as f32,
-                show_water: state.show_water,
+                sea_level,
+                show_water,
             };
             viewport::show(
                 ui,
@@ -6682,9 +6690,14 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
             );
         }
         viewport2d::Mode::TwoD => {
-            state
-                .viewport_2d
-                .show(ui, field, display, state.viewport_scale);
+            state.viewport_2d.show(
+                ui,
+                field,
+                display,
+                state.viewport_scale,
+                sea_level,
+                show_water,
+            );
         }
     }
 
