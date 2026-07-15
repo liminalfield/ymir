@@ -54,6 +54,7 @@ const EXPECTED: &[&str] = &[
     "modifier.blur",
     "modifier.curvature",
     "modifier.curve",
+    "modifier.distance",
     "modifier.expression",
     "modifier.height",
     "modifier.hydraulic_erosion",

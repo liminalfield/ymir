@@ -151,6 +151,14 @@ pub fn tr(key: &str) -> &str {
              min..max degrees, softening over the falloff. Scale it with an upstream Blur."
         }
 
+        // Distance selector.
+        "node-modifier.distance" => "Distance",
+        "node-modifier.distance-desc" => {
+            "Selects a band around a height contour by true distance: one near the level, \
+             fading over the range (in metres), optionally on just one side. The distance is \
+             an isotropic eikonal solve, so the band width does not vary with direction."
+        }
+
         // Invert.
         "node-modifier.invert" => "Invert",
         "node-modifier.invert-desc" => "Flips the height layer (1 - height).",
