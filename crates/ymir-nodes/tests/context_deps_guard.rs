@@ -28,7 +28,10 @@ use std::sync::atomic::{AtomicU8, Ordering};
 // Anchor the operator crate so its registrations link into this test binary.
 use ymir_nodes as _;
 
-use ymir_core::{ContextDeps, EvalContext, Field, Inputs, Layer, NodeKind, Params, Region, layers};
+use ymir_core::{
+    ContextDeps, EvalContext, EvalRequest, Field, Graph, Inputs, Layer, NodeKind, Params, Region,
+    layers,
+};
 
 /// A non-trivial probe input: a height ramp across x with a fully-selecting mask, so a modifier
 /// has real data to work on and its `eval` runs far enough to reach the world-field reads.
@@ -139,5 +142,37 @@ fn declared_context_deps_cover_every_world_field_read() {
         verified >= 20,
         "only {verified} nodes were evaluated; the guard is not covering the node set \
          (skipped: {skipped:?})"
+    );
+}
+
+#[test]
+fn the_sea_level_slider_does_not_invalidate_a_graph_that_ignores_it() {
+    // The end-to-end payoff of the annotation: fBm reads no world globals, so moving the sea level
+    // leaves its cache key (and that of any graph of such nodes) untouched, and the slider no longer
+    // forces a re-evaluation.
+    let mut graph = Graph::new();
+    let fbm = graph.add_op(
+        ymir_core::registry::make("generator.fbm").expect("fbm"),
+        Params::new(),
+    );
+    let low = EvalRequest::new(64, 64, Region::UNIT, 0).with_sea_level(0.2);
+    let high = EvalRequest::new(64, 64, Region::UNIT, 0).with_sea_level(0.8);
+    assert_eq!(
+        graph.output_key(fbm, &low).unwrap(),
+        graph.output_key(fbm, &high).unwrap(),
+        "a graph with no sea-level reader must not re-key when the sea level changes"
+    );
+
+    // Adding a Coastal node (which reads the sea level) makes the slider invalidate again, from the
+    // coastal node downward: the mechanism is precise, not blanket-off.
+    let coastal = graph.add_op(
+        ymir_core::registry::make("modifier.coastal").expect("coastal"),
+        Params::new(),
+    );
+    graph.connect(fbm, 0, coastal, 0).expect("fbm -> coastal");
+    assert_ne!(
+        graph.output_key(coastal, &low).unwrap(),
+        graph.output_key(coastal, &high).unwrap(),
+        "a graph containing a sea-level reader must re-key when the sea level changes"
     );
 }

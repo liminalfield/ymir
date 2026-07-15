@@ -105,6 +105,12 @@ impl Operator for Polygon {
         }
     }
 
+    /// Reads only the world horizontal extent (a world-unit param), not the world height or
+    /// sea level, so those two sliders never invalidate this node.
+    fn context_deps(&self) -> ymir_core::ContextDeps {
+        ymir_core::ContextDeps::WORLD_EXTENT
+    }
+
     fn eval(&self, _inputs: Inputs, params: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
         let width = ctx.width;
         let height = ctx.height;

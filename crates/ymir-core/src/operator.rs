@@ -113,6 +113,35 @@ impl ContextDeps {
         world_height: true,
         sea_level: true,
     };
+
+    /// Depends on no world global: the node's output is a pure function of its inputs, params,
+    /// resolution, region, and seed. A generator sampling normalized coordinates, or a per-cell
+    /// height transform, is `NO_WORLD`. The seed stays depended-on (its narrowing is deferred),
+    /// so a world-setting slider does not invalidate the node but a reseed still does.
+    pub const NO_WORLD: Self = Self {
+        world_extent: false,
+        world_height: false,
+        sea_level: false,
+        ..Self::ALL
+    };
+
+    /// Depends on the world *horizontal* extent (a param sized in world units, read through
+    /// [`meters_per_cell`](crate::EvalContext::meters_per_cell) /
+    /// [`world_to_cells`](crate::EvalContext::world_to_cells)), but not the vertical extent or the
+    /// sea level. A blur radius or a warp amount is `WORLD_EXTENT`.
+    pub const WORLD_EXTENT: Self = Self {
+        world_height: false,
+        sea_level: false,
+        ..Self::ALL
+    };
+
+    /// Depends on the world's vertical *and* horizontal extent (a slope-aware node, read through
+    /// [`real_slope_scale`](crate::EvalContext::real_slope_scale)), but not the sea level. A talus
+    /// angle or a slope selection is `SLOPE`.
+    pub const SLOPE: Self = Self {
+        sea_level: false,
+        ..Self::ALL
+    };
 }
 
 impl Default for ContextDeps {

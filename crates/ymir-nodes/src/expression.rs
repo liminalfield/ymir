@@ -66,6 +66,12 @@ impl Operator for Expression {
         }
     }
 
+    /// Pure of the world globals: no sea level, world height, or world extent, so those
+    /// world-setting sliders never invalidate this node.
+    fn context_deps(&self) -> ymir_core::ContextDeps {
+        ymir_core::ContextDeps::NO_WORLD
+    }
+
     fn eval(&self, inputs: Inputs, params: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
         let input = inputs.optional(0);
         let (width, height, region) = (ctx.width, ctx.height, ctx.region);
