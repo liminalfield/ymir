@@ -215,6 +215,15 @@ pub fn tr(key: &str) -> &str {
             "Carves drainage networks from flow accumulation; outputs the river/flow map."
         }
 
+        // Coastal bevel.
+        "node-modifier.coastal" => "Coastal",
+        "node-modifier.coastal-desc" => {
+            "Reshapes the shore into a beach-and-bluff bevel: cuts the land down and lifts the \
+             seabed toward a gentle wedge at the world sea level, fading over a width in metres. \
+             Bevels by true distance from the shoreline, so the beach is even all around. Taps the \
+             shore band."
+        }
+
         // Null (pass-through utility).
         "node-modifier.null" => "Null",
         "node-modifier.null-desc" => {
