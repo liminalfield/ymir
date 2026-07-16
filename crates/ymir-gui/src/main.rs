@@ -463,6 +463,11 @@ struct AppState {
     /// Whether the 3D viewport draws the water plane at [`sea_level`](Self::sea_level). A view
     /// aid, on by default so the sea reads on a fresh launch.
     show_water: bool,
+    /// Water depth falloff (Beer-Lambert extinction) for the 3D viewport water (#154). Ephemeral
+    /// view state for now (not persisted); a higher value clears to opaque faster.
+    water_extinction: f32,
+    /// Water tint (linear RGB) for the 3D viewport water. Ephemeral view state.
+    water_color: [f32; 3],
     /// The project file the session is bound to, if any (#75). `Save` writes here;
     /// `None` until the project is first saved or opened, when `Save` falls back to
     /// `Save As`.
@@ -731,6 +736,9 @@ impl AppState {
             world_height: project_file::DEFAULT_WORLD_HEIGHT,
             sea_level: project_file::DEFAULT_SEA_LEVEL,
             show_water: true,
+            // Ephemeral water look; matches the shader's previous hardcoded defaults.
+            water_extinction: 9.0,
+            water_color: [0.10, 0.28, 0.42],
             project_path: None,
             recent: Vec::new(),
             // The built-in starter has no saved camera, so fit it to the screen on the first
@@ -4269,6 +4277,16 @@ fn world_settings(ui: &mut egui::Ui, state: &mut AppState) {
         let meters = state.sea_level * state.world_height;
         ui.weak(format!("≈ {meters:.0} m"));
     });
+    ui.horizontal(|ui| {
+        ui.label("Water");
+        ui.color_edit_button_rgb(&mut state.water_color);
+    });
+    ui.horizontal(|ui| {
+        // Beer-Lambert depth falloff for the 3D viewport water: higher clears to opaque faster,
+        // lower stays see-through deeper. Ephemeral view state (not saved with the project yet).
+        ui.label("Depth falloff");
+        ui.add(egui::Slider::new(&mut state.water_extinction, 1.0..=30.0).fixed_decimals(1));
+    });
 
     ui.separator();
     ui.label("Build resolution");
@@ -6685,6 +6703,8 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 vertical_scale: true_proportion * state.viewport_exaggeration,
                 sea_level,
                 show_water,
+                water_extinction: state.water_extinction,
+                water_color: state.water_color,
             };
             viewport::show(
                 ui,

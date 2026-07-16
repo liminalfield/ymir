@@ -68,8 +68,10 @@ struct Uniforms {
     light_dir: [f32; 4],
     light: [f32; 4],
     /// Water plane: x = surface height in mesh units, y = enabled (`1.0`) or off (`0.0`),
-    /// z = sea level as a normalized `[0, 1]` height (for the depth colour); w unused.
+    /// z = sea level as a normalized `[0, 1]` height (for the depth colour), w = depth falloff.
     water: [f32; 4],
+    /// Water tint (linear RGB in xyz; w unused).
+    water_color: [f32; 4],
 }
 
 /// The offscreen color + depth targets the scene renders into, plus the bind group that lets
@@ -564,6 +566,9 @@ struct ViewportCallback {
     /// The same sea level as a normalized `[0, 1]` height, for the water shader's depth (kept
     /// independent of the vertical-scale slider so the depth colour looks consistent).
     sea_norm: f32,
+    /// Water depth falloff (extinction) and tint, from the World-panel water controls.
+    water_extinction: f32,
+    water_color: [f32; 3],
     /// Whether to draw the water plane this frame.
     water_enabled: bool,
     /// Physical-pixel size of the viewport rect this frame; the offscreen targets track it.
@@ -601,6 +606,12 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                     self.water_y,
                     if self.water_enabled { 1.0 } else { 0.0 },
                     self.sea_norm,
+                    self.water_extinction,
+                ],
+                water_color: [
+                    self.water_color[0],
+                    self.water_color[1],
+                    self.water_color[2],
                     0.0,
                 ],
             };
@@ -748,6 +759,11 @@ pub(crate) struct ViewSettings {
     pub sea_level: f32,
     /// Whether to draw the water plane at all.
     pub show_water: bool,
+    /// Water depth falloff (Beer-Lambert extinction, in normalized-height units): higher clears
+    /// to opaque faster, lower stays see-through deeper.
+    pub water_extinction: f32,
+    /// Water tint (linear RGB).
+    pub water_color: [f32; 3],
 }
 
 /// The viewport's directional sun: where it sits (azimuth around the compass, elevation above
@@ -859,6 +875,8 @@ pub(crate) fn show(
             mesh,
             water_y,
             sea_norm: mapped_sea,
+            water_extinction: settings.water_extinction,
+            water_color: settings.water_color,
             water_enabled: settings.show_water,
             target_size,
         },
@@ -1177,6 +1195,7 @@ struct Uniforms {
     light_dir: vec4<f32>,
     light: vec4<f32>,
     water: vec4<f32>,
+    water_color: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 
@@ -1218,10 +1237,6 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 @group(1) @binding(0) var height_tex: texture_2d<f32>;
 @group(1) @binding(1) var height_samp: sampler;
 
-// Depth extinction in normalized-height units, and the base water tint.
-const WATER_K: f32 = 9.0;
-const WATER_TINT: vec3<f32> = vec3<f32>(0.10, 0.28, 0.42);
-
 struct WaterOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -1253,9 +1268,9 @@ fn fs_water(in: WaterOut) -> @location(0) vec4<f32> {
         discard; // terrain is above the waterline here: no water
     }
     // Beer-Lambert: more opaque and darker with depth; shallow water is light and see-through.
-    let transmit = exp(-depth * WATER_K);
+    let transmit = exp(-depth * u.water.w);
     let alpha = clamp(1.0 - transmit, 0.12, 0.95);
-    let color = WATER_TINT * (0.35 + 0.65 * transmit);
+    let color = u.water_color.rgb * (0.35 + 0.65 * transmit);
     return vec4<f32>(color, alpha);
 }
 ";
