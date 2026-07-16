@@ -90,9 +90,9 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport,
-        // A 24-bit depth buffer on egui's render pass, used by the 3D viewport for correct
-        // occlusion (egui clears it to far and never writes it, so it is ours to use).
-        depth_buffer: 24,
+        // No shared depth on egui's pass: the 3D viewport renders to its own offscreen
+        // color+depth and composites the result as a texture (#138), so egui's pass is
+        // colour-only and the composite blit needs no depth attachment.
         ..Default::default()
     };
     eframe::run_native(

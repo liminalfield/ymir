@@ -23,6 +23,46 @@ as a texture. This is the same effort as the always-planned viewport rework, don
 and it buys controlled depth testing, MSAA, multi-pass, GPU picking, HDR headroom, and
 screen-space refraction. Worth taking regardless of how fancy the water gets.
 
+### Implementation
+
+The fork is one **pixel-stable** step: move our rendering onto targets we own without
+changing what the viewport looks like. MSAA, HDR, refraction, and picking are follow-ons the
+fork enables, each its own change, never bundled into the fork itself. The verification for
+the fork is precisely that the viewport looks identical the moment it lands.
+
+Mechanism, inside the existing `egui_wgpu::CallbackTrait` (`ViewportCallback`):
+
+- **`prepare`** renders the whole scene into our own offscreen color + depth textures, in its
+  own render pass returned as a command buffer: clear, terrain, then the water plane, exactly
+  the draws that live in `paint` today. Depth is ours (`DEPTH_FORMAT`), not egui's.
+- **`paint`** stops drawing the scene and instead composites: one fullscreen textured quad
+  sampling the offscreen color into egui's pass.
+
+So the real rendering (depth today, MSAA and multi-pass later) happens offscreen under our
+control, and egui only composites the finished image. This is *blit-in-paint*. The
+alternative is `register_native_texture` plus drawing the color as an `egui::Image`;
+blit-in-paint is preferred because it stays inside the callback's prepare-then-paint timing
+and avoids managing a `TextureId` across the renderer mutex.
+
+Offscreen targets:
+
+- Color format matches the surface (`RenderState::target_format`, sRGB included) so the
+  composite is a 1:1 copy and the result is pixel-identical to today; usage is
+  `RENDER_ATTACHMENT | TEXTURE_BINDING`.
+- Depth is `DEPTH_FORMAT`.
+- Both are sized to the viewport rect in physical pixels (rect size times points-per-pixel,
+  passed into the callback), and recreated when that size changes. Guard zero and tiny sizes.
+- Clear to the current viewport background and keep a single sample count, so nothing about
+  the image shifts.
+
+Once the scene no longer draws into egui's pass, egui's shared depth
+(`NativeOptions::depth_buffer = 24`) is unused and can be dropped.
+
+What the fork then unlocks, each a separate follow-up: **MSAA** (multisample the offscreen
+targets, resolve before the composite, the first visible win), the **water tiers** below
+(Tier 2 refraction samples the offscreen color directly), **GPU picking** (an id/depth target
+read back), and **HDR** (offscreen `Rgba16Float` plus a tonemap in the composite).
+
 ## Where the water surface comes from
 
 Two sources feed one fragment shader path:

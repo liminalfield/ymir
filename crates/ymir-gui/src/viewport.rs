@@ -16,8 +16,8 @@ use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt as _;
 use ymir_core::{Field, Layer, layers};
 
-/// Depth format requested in `main` (`NativeOptions::depth_buffer = 24`), which the terrain
-/// pipeline must match.
+/// Depth format of the viewport's own offscreen depth target (#138); the terrain and water
+/// pipelines and the offscreen render pass all use it.
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
 
 /// Initial mesh grid resolution (vertices per side), used for the flat startup mesh. The live
@@ -67,6 +67,84 @@ struct Uniforms {
     water: [f32; 4],
 }
 
+/// The offscreen color + depth targets the scene renders into, plus the bind group that lets
+/// the blit sample the color. Owning our own attachments (rather than egui's shared pass) is
+/// the whole point of the fork: controlled depth now, and MSAA / multi-pass / refraction later
+/// (see `docs/design/viewport-water.md`). Recreated whenever the viewport rect changes size.
+struct Offscreen {
+    color_view: wgpu::TextureView,
+    depth_view: wgpu::TextureView,
+    /// Binds `color_view` and the shared sampler for the blit; recreated with the textures.
+    blit_bind_group: wgpu::BindGroup,
+    /// Physical-pixel size of the current targets.
+    size: [u32; 2],
+    // Kept alive because the views above borrow them.
+    _color: wgpu::Texture,
+    _depth: wgpu::Texture,
+}
+
+impl Offscreen {
+    /// Creates color + depth targets at `size` (physical pixels, clamped non-zero) and the blit
+    /// bind group over the new color view.
+    fn new(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        size: [u32; 2],
+        blit_layout: &wgpu::BindGroupLayout,
+        sampler: &wgpu::Sampler,
+    ) -> Self {
+        let extent = wgpu::Extent3d {
+            width: size[0].max(1),
+            height: size[1].max(1),
+            depth_or_array_layers: 1,
+        };
+        let color = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("viewport-offscreen-color"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let depth = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("viewport-offscreen-depth"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+        let blit_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("viewport-blit-bind-group"),
+            layout: blit_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&color_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+            ],
+        });
+        Self {
+            color_view,
+            depth_view,
+            blit_bind_group,
+            size,
+            _color: color,
+            _depth: depth,
+        }
+    }
+}
+
 /// GPU resources for the viewport, created once at startup and stored in egui_wgpu's
 /// callback-resource type map so the per-frame paint callback can reach them.
 struct ViewportResources {
@@ -86,6 +164,13 @@ struct ViewportResources {
     mesh_res: usize,
     uniform_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    /// Offscreen fork: the color+depth targets the scene renders into, the pipeline + layout +
+    /// sampler that composite them into egui's pass, and the surface format the targets match.
+    offscreen: Offscreen,
+    blit_pipeline: wgpu::RenderPipeline,
+    blit_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    target_format: wgpu::TextureFormat,
 }
 
 /// Builds the viewport's wgpu pipeline, fixed grid topology, and uniforms, storing them for
@@ -221,6 +306,77 @@ pub(crate) fn init(render_state: &egui_wgpu::RenderState) {
         cache: None,
     });
 
+    // The offscreen fork: a sampler, bind-group layout, and pipeline that composite the offscreen
+    // color into egui's pass with a fullscreen triangle. The scene renders into the offscreen
+    // targets in `prepare`; `paint` runs this blit. See docs/design/viewport-water.md.
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("viewport-blit-sampler"),
+        ..Default::default()
+    });
+    let blit_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("viewport-blit-layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
+    let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("viewport-blit-shader"),
+        source: wgpu::ShaderSource::Wgsl(BLIT_SHADER.into()),
+    });
+    let blit_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("viewport-blit-pipeline-layout"),
+        bind_group_layouts: &[Some(&blit_layout)],
+        immediate_size: 0,
+    });
+    let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("viewport-blit-pipeline"),
+        layout: Some(&blit_pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &blit_shader,
+            entry_point: Some("vs_blit"),
+            buffers: &[],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &blit_shader,
+            entry_point: Some("fs_blit"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: render_state.target_format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    });
+    // Start at 1x1; `prepare` recreates it at the real viewport size on the first frame.
+    let offscreen = Offscreen::new(
+        device,
+        render_state.target_format,
+        [1, 1],
+        &blit_layout,
+        &sampler,
+    );
+
     render_state
         .renderer
         .write()
@@ -235,6 +391,11 @@ pub(crate) fn init(render_state: &egui_wgpu::RenderState) {
             mesh_res: MESH_RES,
             uniform_buffer,
             bind_group,
+            offscreen,
+            blit_pipeline,
+            blit_layout,
+            sampler,
+            target_format: render_state.target_format,
         });
 }
 
@@ -253,6 +414,8 @@ struct ViewportCallback {
     water_y: f32,
     /// Whether to draw the water plane this frame.
     water_enabled: bool,
+    /// Physical-pixel size of the viewport rect this frame; the offscreen targets track it.
+    target_size: [u32; 2],
 }
 
 /// A mesh ready to upload: its vertices and the grid resolution they were built at (so the
@@ -271,7 +434,10 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
         _egui_encoder: &mut wgpu::CommandEncoder,
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
-        if let Some(res) = resources.get_mut::<ViewportResources>() {
+        let Some(res) = resources.get_mut::<ViewportResources>() else {
+            return Vec::new();
+        };
+        {
             let uniforms = Uniforms {
                 mvp: self.view_proj,
                 light_dir: self.light_dir,
@@ -318,7 +484,63 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                 }
             }
         }
-        Vec::new()
+
+        // Recreate the offscreen targets when the viewport size changes.
+        if res.offscreen.size != self.target_size {
+            res.offscreen = Offscreen::new(
+                device,
+                res.target_format,
+                self.target_size,
+                &res.blit_layout,
+                &res.sampler,
+            );
+        }
+
+        // Render the whole scene into our own color + depth. Clear the color to transparent so the
+        // blit composites over egui's existing viewport background exactly as drawing the terrain
+        // into egui's pass did: the terrain writes opaque, the water alpha-blends over it, and any
+        // area the mesh does not cover stays transparent and shows egui's background through.
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("viewport-offscreen-encoder"),
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("viewport-offscreen-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &res.offscreen.color_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &res.offscreen.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&res.pipeline);
+            pass.set_bind_group(0, &res.bind_group, &[]);
+            pass.set_vertex_buffer(0, res.vertex_buffer.slice(..));
+            pass.set_index_buffer(res.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..res.index_count, 0, 0..1);
+
+            // Water after the terrain, so depth testing clips it at the waterline.
+            if self.water_enabled {
+                pass.set_pipeline(&res.water_pipeline);
+                pass.set_bind_group(0, &res.bind_group, &[]);
+                pass.draw(0..6, 0..1);
+            }
+        }
+        vec![encoder.finish()]
     }
 
     fn paint(
@@ -331,20 +553,12 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
         let Some(res) = resources.get::<ViewportResources>() else {
             return;
         };
-        render_pass.set_pipeline(&res.pipeline);
-        render_pass.set_bind_group(0, &res.bind_group, &[]);
-        render_pass.set_vertex_buffer(0, res.vertex_buffer.slice(..));
-        render_pass.set_index_buffer(res.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-        render_pass.draw_indexed(0..res.index_count, 0, 0..1);
-
-        // The water plane, drawn after the terrain so depth testing clips it at the waterline.
-        // Its geometry is generated in the vertex shader (no vertex buffer), so only the uniform
-        // carrying its height differs frame to frame.
-        if self.water_enabled {
-            render_pass.set_pipeline(&res.water_pipeline);
-            render_pass.set_bind_group(0, &res.bind_group, &[]);
-            render_pass.draw(0..6, 0..1);
-        }
+        // Composite: the scene was rendered offscreen in `prepare`; here we draw a fullscreen
+        // triangle sampling that color into egui's pass. egui has set the viewport to this pane's
+        // rect, so the triangle fills exactly it, 1:1 with the same-size offscreen texture.
+        render_pass.set_pipeline(&res.blit_pipeline);
+        render_pass.set_bind_group(0, &res.offscreen.blit_bind_group, &[]);
+        render_pass.draw(0..3, 0..1);
     }
 }
 
@@ -453,6 +667,14 @@ pub(crate) fn show(
     };
     let water_y = mapped_sea * settings.vertical_scale;
 
+    // The offscreen targets are sized in physical pixels: the rect (egui points) times the
+    // points-to-pixels scale, clamped non-zero so a collapsed pane never makes a zero texture.
+    let ppp = ui.ctx().pixels_per_point();
+    let target_size = [
+        (rect.width() * ppp).round().max(1.0) as u32,
+        (rect.height() * ppp).round().max(1.0) as u32,
+    ];
+
     let view_proj = camera.view_proj(aspect).to_cols_array_2d();
     let callback = egui_wgpu::Callback::new_paint_callback(
         rect,
@@ -463,6 +685,7 @@ pub(crate) fn show(
             mesh,
             water_y,
             water_enabled: settings.show_water,
+            target_size,
         },
     );
     ui.painter().add(callback);
@@ -832,5 +1055,37 @@ fn fs_water() -> @location(0) vec4<f32> {
     // A simple translucent blue: enough to read the surface and see it clip against the terrain.
     // Depth testing (not writing) does the intersection; richer shading comes later.
     return vec4<f32>(0.10, 0.28, 0.42, 0.6);
+}
+";
+
+/// The composite (blit): a fullscreen triangle that samples the offscreen color and draws it into
+/// egui's pass. The UVs flip Y so the rendered image is upright, and at 1:1 size the sample is an
+/// exact copy, keeping the result pixel-identical to drawing the scene into egui's pass directly.
+const BLIT_SHADER: &str = r"
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+
+struct BlitOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_blit(@builtin(vertex_index) vi: u32) -> BlitOut {
+    var pos = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0),
+    );
+    var uv = array<vec2<f32>, 3>(
+        vec2<f32>(0.0, 1.0), vec2<f32>(2.0, 1.0), vec2<f32>(0.0, -1.0),
+    );
+    var out: BlitOut;
+    out.clip = vec4<f32>(pos[vi], 0.0, 1.0);
+    out.uv = uv[vi];
+    return out;
+}
+
+@fragment
+fn fs_blit(in: BlitOut) -> @location(0) vec4<f32> {
+    return textureSample(src, samp, in.uv);
 }
 ";
