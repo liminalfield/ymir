@@ -20,6 +20,10 @@ use ymir_core::{Field, Layer, layers};
 /// pipelines and the offscreen render pass all use it.
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
 
+/// MSAA sample count for the offscreen scene (#153). 4x is universally supported for renderable
+/// formats. The color is resolved to a single-sample texture before the composite blit.
+const SAMPLE_COUNT: u32 = 4;
+
 /// Initial mesh grid resolution (vertices per side), used for the flat startup mesh. The live
 /// mesh then follows the previewed field's own resolution (see [`mesh_res`]), so raising the
 /// preview resolution shows finer terrain instead of resampling back down to a fixed grid.
@@ -72,20 +76,25 @@ struct Uniforms {
 /// the whole point of the fork: controlled depth now, and MSAA / multi-pass / refraction later
 /// (see `docs/design/viewport-water.md`). Recreated whenever the viewport rect changes size.
 struct Offscreen {
+    /// The multisampled color target the scene draws into.
     color_view: wgpu::TextureView,
+    /// The single-sample texture the multisampled color resolves into; the blit samples this.
+    resolve_view: wgpu::TextureView,
+    /// The multisampled depth target (not resolved: depth is never sampled).
     depth_view: wgpu::TextureView,
-    /// Binds `color_view` and the shared sampler for the blit; recreated with the textures.
+    /// Binds `resolve_view` and the shared sampler for the blit; recreated with the textures.
     blit_bind_group: wgpu::BindGroup,
     /// Physical-pixel size of the current targets.
     size: [u32; 2],
     // Kept alive because the views above borrow them.
     _color: wgpu::Texture,
+    _resolve: wgpu::Texture,
     _depth: wgpu::Texture,
 }
 
 impl Offscreen {
-    /// Creates color + depth targets at `size` (physical pixels, clamped non-zero) and the blit
-    /// bind group over the new color view.
+    /// Creates the multisampled color + depth targets and the single-sample resolve target at
+    /// `size` (physical pixels, clamped non-zero), plus the blit bind group over the resolve.
     fn new(
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
@@ -98,8 +107,20 @@ impl Offscreen {
             height: size[1].max(1),
             depth_or_array_layers: 1,
         };
+        // Multisampled color: a render target only (a multisampled texture cannot be sampled).
         let color = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("viewport-offscreen-color"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: SAMPLE_COUNT,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        // Single-sample resolve target: the color the blit samples.
+        let resolve = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("viewport-offscreen-resolve"),
             size: extent,
             mip_level_count: 1,
             sample_count: 1,
@@ -112,13 +133,14 @@ impl Offscreen {
             label: Some("viewport-offscreen-depth"),
             size: extent,
             mip_level_count: 1,
-            sample_count: 1,
+            sample_count: SAMPLE_COUNT,
             dimension: wgpu::TextureDimension::D2,
             format: DEPTH_FORMAT,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
         let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
+        let resolve_view = resolve.create_view(&wgpu::TextureViewDescriptor::default());
         let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
         let blit_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("viewport-blit-bind-group"),
@@ -126,7 +148,7 @@ impl Offscreen {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&color_view),
+                    resource: wgpu::BindingResource::TextureView(&resolve_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -136,10 +158,12 @@ impl Offscreen {
         });
         Self {
             color_view,
+            resolve_view,
             depth_view,
             blit_bind_group,
             size,
             _color: color,
+            _resolve: resolve,
             _depth: depth,
         }
     }
@@ -265,7 +289,10 @@ pub(crate) fn init(render_state: &egui_wgpu::RenderState) {
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
-        multisample: wgpu::MultisampleState::default(),
+        multisample: wgpu::MultisampleState {
+            count: SAMPLE_COUNT,
+            ..Default::default()
+        },
         multiview_mask: None,
         cache: None,
     });
@@ -301,7 +328,10 @@ pub(crate) fn init(render_state: &egui_wgpu::RenderState) {
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
-        multisample: wgpu::MultisampleState::default(),
+        multisample: wgpu::MultisampleState {
+            count: SAMPLE_COUNT,
+            ..Default::default()
+        },
         multiview_mask: None,
         cache: None,
     });
@@ -509,7 +539,8 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &res.offscreen.color_view,
                     depth_slice: None,
-                    resolve_target: None,
+                    // Resolve the multisampled color into the single-sample target the blit samples.
+                    resolve_target: Some(&res.offscreen.resolve_view),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
