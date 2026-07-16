@@ -166,6 +166,125 @@ pub(crate) fn signed_distance_to_contour(layer: &Layer, level: f32, cell_size: f
     Layer::from_vec(w, h, signed)
 }
 
+/// The below-`level` region of `g = height - level` that is connected to the map border, by a
+/// 4-connected flood fill inward from the edges. `true` marks "open" cells; an enclosed below-level
+/// basin is never reached from the border, so it reads `false`. Reachability is order-independent,
+/// so this is deterministic.
+fn flood_open_sea(g: &[f32], w: usize, h: usize) -> Vec<bool> {
+    let mut open = vec![false; w * h];
+    let mut stack: Vec<usize> = Vec::new();
+    // Seed from every below-level cell on the border (top/bottom rows, left/right columns). The
+    // `!open` guard makes the corner cells, seeded twice, harmless.
+    for x in 0..w {
+        for idx in [x, (h - 1) * w + x] {
+            if g[idx] < 0.0 && !open[idx] {
+                open[idx] = true;
+                stack.push(idx);
+            }
+        }
+    }
+    for y in 0..h {
+        for idx in [y * w, y * w + (w - 1)] {
+            if g[idx] < 0.0 && !open[idx] {
+                open[idx] = true;
+                stack.push(idx);
+            }
+        }
+    }
+    // Flood 4-connected through the below-level region (must match the 4-neighbour seeding below,
+    // so an open cell and an enclosed cell are never adjacent).
+    while let Some(idx) = stack.pop() {
+        let (x, y) = (idx % w, idx / w);
+        let neighbours = [
+            (x > 0).then(|| idx - 1),
+            (x + 1 < w).then_some(idx + 1),
+            (y > 0).then(|| idx - w),
+            (y + 1 < h).then_some(idx + w),
+        ];
+        for nb in neighbours.into_iter().flatten() {
+            if g[nb] < 0.0 && !open[nb] {
+                open[nb] = true;
+                stack.push(nb);
+            }
+        }
+    }
+    open
+}
+
+/// Signed distance (world units) to the shoreline, like [`signed_distance_to_contour`] at the sea
+/// level, but only the below-sea region **connected to the map border** counts as sea. An enclosed
+/// below-sea basin (a dry pit, an inland depression) is treated as land: it seeds no shoreline and
+/// reads a positive distance to the real, connected coast, so a coastal modifier leaves it alone.
+///
+/// Sub-cell shoreline precision is preserved: an open-sea/land edge is still a true `height`
+/// crossing, so the seeding is fractional exactly as in [`signed_distance_to_contour`]. Only the
+/// enclosed-basin edges are dropped. `cell_size` is the world spacing between cells.
+pub(crate) fn sea_signed_distance(layer: &Layer, sea_level: f32, cell_size: f32) -> Layer {
+    let (w, h) = (layer.width(), layer.height());
+    let g: Vec<f32> = layer.as_slice().iter().map(|&v| v - sea_level).collect();
+    let open = flood_open_sea(&g, w, h);
+    let mut init = vec![f32::INFINITY; w * h];
+    let mut frozen = vec![false; w * h];
+
+    for y in 0..h {
+        for x in 0..w {
+            let idx = y * w + x;
+            let ga = g[idx];
+            // "Sea" for both sign and seeding means below the level *and* connected to the edge.
+            let a_sea = ga < 0.0 && open[idx];
+            let neighbours = [
+                (x > 0).then(|| idx - 1),
+                (x + 1 < w).then_some(idx + 1),
+                (y > 0).then(|| idx - w),
+                (y + 1 < h).then_some(idx + w),
+            ];
+            for nb in neighbours.into_iter().flatten() {
+                let gb = g[nb];
+                let b_sea = gb < 0.0 && open[nb];
+                // Seed only where open sea meets land. Interior sea, interior land, and an enclosed
+                // basin's rim (land next to a non-open below-sea cell) all have `a_sea == b_sea`
+                // and are skipped, so no false shoreline forms around a basin.
+                if a_sea == b_sea {
+                    continue;
+                }
+                if gb != 0.0 && (ga > 0.0) != (gb > 0.0) {
+                    // The open-sea side is g<0 and the land side g>0 (an open cell and an enclosed
+                    // cell are never 4-adjacent), so the zero crossing sits between them; seed the
+                    // sub-cell distance to it.
+                    let t = ga / (ga - gb);
+                    let d = t * cell_size;
+                    if d < init[idx] {
+                        init[idx] = d;
+                    }
+                    frozen[idx] = true;
+                } else if ga == 0.0 {
+                    // This cell lies exactly on the waterline beside open sea.
+                    init[idx] = 0.0;
+                    frozen[idx] = true;
+                }
+            }
+        }
+    }
+
+    let dist = eikonal_solve(&init, &frozen, w, h, cell_size);
+    // With no open sea anywhere (no real coast) every cell stays at +infinity; report them as
+    // uniformly "far" and positive, so nothing is reshaped.
+    let far = (w + h) as f32 * cell_size;
+    let signed: Vec<f32> = dist
+        .iter()
+        .enumerate()
+        .map(|(i, &d)| {
+            let magnitude = if d.is_finite() { d } else { far };
+            if g[i] < 0.0 && open[i] {
+                -magnitude
+            } else {
+                magnitude
+            }
+        })
+        .collect();
+    Layer::from_vec(w, h, signed)
+}
+
 /// Stable type identifier and registry key.
 const TYPE_ID: &str = "modifier.distance";
 
@@ -345,6 +464,50 @@ mod tests {
         let a = eikonal_solve(&init, &frozen, w, h, 1.0);
         let b = eikonal_solve(&init, &frozen, w, h, 1.0);
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn sea_distance_excludes_enclosed_basins() {
+        // A land plain (1.0), an ocean filling the left column (0.0, connected to the border), and
+        // a single enclosed below-sea pit in the interior (0.0 at (3,3), ringed by land).
+        let (w, h) = (7, 7);
+        let mut data = vec![1.0_f32; w * h];
+        for y in 0..h {
+            data[y * w] = 0.0; // left column: open sea
+        }
+        data[3 * w + 3] = 0.0; // enclosed interior pit
+        let layer = Layer::from_vec(w, h, data);
+        let signed = sea_signed_distance(&layer, 0.5, 1.0);
+
+        // The edge-connected ocean reads as offshore (negative).
+        assert!(
+            signed.get(0, 3).unwrap() < 0.0,
+            "edge-connected sea should be offshore"
+        );
+        // The enclosed pit is treated as land: a positive distance to the real, far coast, not a
+        // shoreline of its own.
+        assert!(
+            signed.get(3, 3).unwrap() > 0.0,
+            "an enclosed basin should read as land, not sea: {}",
+            signed.get(3, 3).unwrap()
+        );
+        // Land next to the real ocean is near the coast (small positive distance).
+        assert!(signed.get(1, 3).unwrap() > 0.0 && signed.get(1, 3).unwrap() < 2.0);
+    }
+
+    #[test]
+    fn sea_distance_is_deterministic() {
+        let (w, h) = (16, 16);
+        let mut data = vec![1.0_f32; w * h];
+        for y in 0..h {
+            data[y * w] = 0.0;
+        }
+        data[8 * w + 8] = 0.0;
+        let layer = Layer::from_vec(w, h, data);
+        assert_eq!(
+            sea_signed_distance(&layer, 0.5, 1.0),
+            sea_signed_distance(&layer, 0.5, 1.0)
+        );
     }
 
     fn radial_island(size: usize) -> Field {
