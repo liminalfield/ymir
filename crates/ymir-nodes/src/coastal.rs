@@ -29,7 +29,7 @@ use ymir_core::{
     Params, PortSpec, Result, Unit, layers,
 };
 
-use crate::distance::signed_distance_to_contour;
+use crate::distance::{sea_signed_distance, signed_distance_to_contour};
 use crate::erosion;
 
 /// Stable type identifier and registry key.
@@ -83,6 +83,11 @@ impl Operator for Coastal {
                     ParamKind::Float { min: 0.0, max: 1.0 },
                     ParamValue::Float(1.0),
                 ),
+                ParamSpec::new(
+                    "erode_inland_basins",
+                    ParamKind::Bool,
+                    ParamValue::Bool(false),
+                ),
             ],
         }
     }
@@ -115,7 +120,16 @@ impl Operator for Coastal {
         };
 
         // Signed distance (world metres) from the shoreline: negative offshore, positive on land.
-        let signed = signed_distance_to_contour(&source, sea, cell_size);
+        // By default only sea connected to the map edge counts, so enclosed below-sea basins (dry
+        // pits, inland depressions) are treated as land and get no coast. Enabling
+        // `erode_inland_basins` restores the plain contour, where every below-sea cell is sea, for
+        // an inland-sea world.
+        let erode_inland_basins = params.get_bool("erode_inland_basins", false);
+        let signed = if erode_inland_basins {
+            signed_distance_to_contour(&source, sea, cell_size)
+        } else {
+            sea_signed_distance(&source, sea, cell_size)
+        };
 
         let mut reshaped = vec![0.0_f32; width * height];
         let mut shore = vec![0.0_f32; width * height];
@@ -374,6 +388,66 @@ mod tests {
         assert!(
             (axis - diag).abs() < 0.02,
             "axis and diagonal cuts should match (no star): {axis} vs {diag}"
+        );
+    }
+
+    /// A land plateau (above sea) with an enclosed below-sea pit in the middle, ringed by land all
+    /// the way to the border, so the pit is not connected to any edge.
+    fn enclosed_basin(size: usize) -> Field {
+        let mut data = vec![0.8_f32; size * size];
+        let c = size / 2;
+        for y in (c - 3)..=(c + 3) {
+            for x in (c - 3)..=(c + 3) {
+                data[y * size + x] = 0.2;
+            }
+        }
+        Field::new(size, size, Region::UNIT)
+            .with_layer(layers::HEIGHT, Arc::new(Layer::from_vec(size, size, data)))
+    }
+
+    #[test]
+    fn an_enclosed_basin_is_left_untouched() {
+        // The pit is below sea level but reaches no edge, and there is no real coast, so with
+        // connectivity on (the default) nothing is reshaped.
+        let field = enclosed_basin(33);
+        let out = run(&field, &beach_params(), &ctx(33));
+        assert_eq!(
+            out[0].layer(layers::HEIGHT).unwrap().content_hash(),
+            field.layer(layers::HEIGHT).unwrap().content_hash(),
+            "an enclosed basin with no real coast must not be reshaped"
+        );
+    }
+
+    #[test]
+    fn eroding_inland_basins_reshapes_the_basin() {
+        // With `erode_inland_basins` on, the pit's contour is treated as a shoreline (v0 behaviour),
+        // so the field changes: this is the escape hatch, and it proves the basin *would* have been
+        // carved without the exclusion.
+        let field = enclosed_basin(33);
+        let params = beach_params().with("erode_inland_basins", ParamValue::Bool(true));
+        let out = run(&field, &params, &ctx(33));
+        assert_ne!(
+            out[0].layer(layers::HEIGHT).unwrap().content_hash(),
+            field.layer(layers::HEIGHT).unwrap().content_hash(),
+            "eroding inland basins treats the pit as sea and reshapes it"
+        );
+    }
+
+    #[test]
+    fn basin_exclusion_does_not_change_an_open_coast() {
+        // The cone island's sea reaches the map edge and encloses no basins, so excluding enclosed
+        // basins (the default) is a no-op there: the result is identical either way.
+        let island = cone_island(65);
+        let excluded = run(&island, &beach_params(), &ctx(65));
+        let eroded = run(
+            &island,
+            &beach_params().with("erode_inland_basins", ParamValue::Bool(true)),
+            &ctx(65),
+        );
+        assert_eq!(
+            excluded[0].layer(layers::HEIGHT).unwrap().content_hash(),
+            eroded[0].layer(layers::HEIGHT).unwrap().content_hash(),
+            "an edge-connected coast is identical with or without basin exclusion"
         );
     }
 
