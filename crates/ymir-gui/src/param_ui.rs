@@ -186,15 +186,33 @@ fn from_t(t: f64, min: f64, max: f64, log: bool) -> f64 {
     }
 }
 
-/// A parameter row's label: monospace and muted. Shared with the frame inspector so its rows
-/// read in the same grammar as the node parameters.
+/// A parameter row's label: muted, in a friendly Title-Case form. Shared with the frame inspector
+/// so its rows read in the same grammar as the node parameters.
 pub(crate) fn param_label(ui: &mut egui::Ui, name: &str) {
     ui.label(
-        egui::RichText::new(name)
+        egui::RichText::new(prettify_param_name(name))
             .family(egui::FontFamily::Monospace)
             .size(12.0)
             .color(crate::theme::TEXT_SECONDARY),
     );
+}
+
+/// Turns a snake_case parameter id into a friendly display label: underscores become spaces and
+/// each word is capitalised (`erode_inland_basins` -> `Erode Inland Basins`), matching the
+/// Title-Case of node names. A pure presentation transform; the underlying param id is unchanged,
+/// so lookups, hashing, and save/load still use the raw name.
+fn prettify_param_name(name: &str) -> String {
+    name.split('_')
+        .filter(|word| !word.is_empty())
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().chain(chars).collect::<String>(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// A 34x18 pill toggle: an accent track with the knob right when on, a raised track with the knob
@@ -510,6 +528,18 @@ mod tests {
 
     fn spec(kind: ParamKind, default: ParamValue) -> ParamSpec {
         ParamSpec::new("p", kind, default)
+    }
+
+    #[test]
+    fn param_names_display_as_friendly_title_case() {
+        assert_eq!(prettify_param_name("width"), "Width");
+        assert_eq!(
+            prettify_param_name("erode_inland_basins"),
+            "Erode Inland Basins"
+        );
+        assert_eq!(prettify_param_name("world_extent"), "World Extent");
+        // Stray underscores do not leave double spaces or empty words.
+        assert_eq!(prettify_param_name("a__b_"), "A B");
     }
 
     #[test]
