@@ -468,6 +468,10 @@ struct AppState {
     water_extinction: f32,
     /// Water tint (linear RGB) for the 3D viewport water. Ephemeral view state.
     water_color: [f32; 3],
+    /// Tier 1 water surface controls (ephemeral): ripple strength, sky reflectivity, specular.
+    water_wave: f32,
+    water_reflectivity: f32,
+    water_specular: f32,
     /// The project file the session is bound to, if any (#75). `Save` writes here;
     /// `None` until the project is first saved or opened, when `Save` falls back to
     /// `Save As`.
@@ -739,6 +743,9 @@ impl AppState {
             // Ephemeral water look; matches the shader's previous hardcoded defaults.
             water_extinction: 9.0,
             water_color: [0.10, 0.28, 0.42],
+            water_wave: 0.5,
+            water_reflectivity: 0.6,
+            water_specular: 0.5,
             project_path: None,
             recent: Vec::new(),
             // The built-in starter has no saved camera, so fit it to the screen on the first
@@ -4287,6 +4294,18 @@ fn world_settings(ui: &mut egui::Ui, state: &mut AppState) {
         ui.label("Depth falloff");
         ui.add(egui::Slider::new(&mut state.water_extinction, 1.0..=30.0).fixed_decimals(1));
     });
+    ui.horizontal(|ui| {
+        ui.label("Waves");
+        ui.add(egui::Slider::new(&mut state.water_wave, 0.0..=1.0).fixed_decimals(2));
+    });
+    ui.horizontal(|ui| {
+        ui.label("Reflectivity");
+        ui.add(egui::Slider::new(&mut state.water_reflectivity, 0.0..=1.0).fixed_decimals(2));
+    });
+    ui.horizontal(|ui| {
+        ui.label("Specular");
+        ui.add(egui::Slider::new(&mut state.water_specular, 0.0..=1.0).fixed_decimals(2));
+    });
 
     ui.separator();
     ui.label("Build resolution");
@@ -6705,6 +6724,9 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 show_water,
                 water_extinction: state.water_extinction,
                 water_color: state.water_color,
+                water_wave: state.water_wave,
+                water_reflectivity: state.water_reflectivity,
+                water_specular: state.water_specular,
             };
             viewport::show(
                 ui,

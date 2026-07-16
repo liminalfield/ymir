@@ -72,6 +72,11 @@ struct Uniforms {
     water: [f32; 4],
     /// Water tint (linear RGB in xyz; w unused).
     water_color: [f32; 4],
+    /// Camera eye position in model space (xyz), for the water view vector (Tier 1); w unused.
+    eye: [f32; 4],
+    /// Water surface params (Tier 1): x = time (seconds), y = wave strength, z = reflectivity,
+    /// w = specular intensity.
+    surface: [f32; 4],
 }
 
 /// The offscreen color + depth targets the scene renders into, plus the bind group that lets
@@ -569,6 +574,13 @@ struct ViewportCallback {
     /// Water depth falloff (extinction) and tint, from the World-panel water controls.
     water_extinction: f32,
     water_color: [f32; 3],
+    /// Tier 1 surface: camera eye (model space), animation time, and the wave / reflectivity /
+    /// specular controls.
+    eye: [f32; 3],
+    time: f32,
+    water_wave: f32,
+    water_reflectivity: f32,
+    water_specular: f32,
     /// Whether to draw the water plane this frame.
     water_enabled: bool,
     /// Physical-pixel size of the viewport rect this frame; the offscreen targets track it.
@@ -613,6 +625,13 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                     self.water_color[1],
                     self.water_color[2],
                     0.0,
+                ],
+                eye: [self.eye[0], self.eye[1], self.eye[2], 0.0],
+                surface: [
+                    self.time,
+                    self.water_wave,
+                    self.water_reflectivity,
+                    self.water_specular,
                 ],
             };
             queue.write_buffer(&res.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
@@ -764,6 +783,10 @@ pub(crate) struct ViewSettings {
     pub water_extinction: f32,
     /// Water tint (linear RGB).
     pub water_color: [f32; 3],
+    /// Tier 1 surface controls: ripple strength, sky reflectivity, and specular intensity.
+    pub water_wave: f32,
+    pub water_reflectivity: f32,
+    pub water_specular: f32,
 }
 
 /// The viewport's directional sun: where it sits (azimuth around the compass, elevation above
@@ -877,10 +900,19 @@ pub(crate) fn show(
             sea_norm: mapped_sea,
             water_extinction: settings.water_extinction,
             water_color: settings.water_color,
+            eye: camera.eye().into(),
+            time: ui.input(|i| i.time) as f32,
+            water_wave: settings.water_wave,
+            water_reflectivity: settings.water_reflectivity,
+            water_specular: settings.water_specular,
             water_enabled: settings.show_water,
             target_size,
         },
     );
+    // Animate the water while it is shown: keep repainting so the ripples scroll.
+    if settings.show_water {
+        ui.ctx().request_repaint();
+    }
     ui.painter().add(callback);
 }
 
@@ -1196,6 +1228,8 @@ struct Uniforms {
     light: vec4<f32>,
     water: vec4<f32>,
     water_color: vec4<f32>,
+    eye: vec4<f32>,
+    surface: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 
@@ -1258,6 +1292,20 @@ fn vs_water(@builtin(vertex_index) vi: u32) -> WaterOut {
     return out;
 }
 
+// A perturbed water normal from three scrolling directional ripples. `p` is the surface XZ, `amp`
+// scales the ripple slope (already faded at the shore by the caller). Each ripple's analytic slope
+// (dir * freq * cos(phase)) accumulates into the gradient; the normal tilts against it.
+fn water_normal(p: vec2<f32>, t: f32, amp: f32) -> vec3<f32> {
+    var grad = vec2<f32>(0.0, 0.0);
+    let d0 = normalize(vec2<f32>(1.0, 0.3));
+    grad = grad + d0 * (42.0 * cos(dot(p, d0) * 42.0 + t * 1.1));
+    let d1 = normalize(vec2<f32>(-0.4, 1.0));
+    grad = grad + d1 * (60.0 * cos(dot(p, d1) * 60.0 + t * 1.7));
+    let d2 = normalize(vec2<f32>(0.7, -0.8));
+    grad = grad + d2 * (88.0 * cos(dot(p, d2) * 88.0 + t * 2.3));
+    return normalize(vec3<f32>(-grad.x * amp, 1.0, -grad.y * amp));
+}
+
 @fragment
 fn fs_water(in: WaterOut) -> @location(0) vec4<f32> {
     // Seabed height (normalized) under this fragment; depth is how far below the sea it sits.
@@ -1267,10 +1315,38 @@ fn fs_water(in: WaterOut) -> @location(0) vec4<f32> {
     if (depth <= 0.0) {
         discard; // terrain is above the waterline here: no water
     }
-    // Beer-Lambert: more opaque and darker with depth; shallow water is light and see-through.
+
+    // Beer-Lambert transmitted colour (Tier 0): shallow water light, deep water dark and opaque.
     let transmit = exp(-depth * u.water.w);
-    let alpha = clamp(1.0 - transmit, 0.12, 0.95);
-    let color = u.water_color.rgb * (0.35 + 0.65 * transmit);
+    let transmitted = u.water_color.rgb * (0.35 + 0.65 * transmit);
+    let base_alpha = clamp(1.0 - transmit, 0.12, 0.95);
+
+    // Ripple amplitude fades to zero at the shore so waves don't chew the waterline. The 0.008
+    // converts the 0..1 wave control to a plausible ripple slope given the high wave frequencies.
+    let shore_fade = smoothstep(0.0, 0.03, depth);
+    let n = water_normal(in.uv, u.surface.x, u.surface.y * shore_fade * 0.008);
+
+    // View and light directions in model space.
+    let frag = vec3<f32>(in.uv.x, u.water.x, in.uv.y);
+    let v = normalize(u.eye.xyz - frag);
+    let l = normalize(-u.light_dir.xyz);
+
+    // Schlick-Fresnel: grazing angles reflect the sky, head-on transmits the depth colour.
+    let f0 = 0.02;
+    let fresnel = (f0 + (1.0 - f0) * pow(1.0 - max(dot(n, v), 0.0), 5.0)) * u.surface.z;
+    // A cheap sky gradient along the reflected ray: paler near the horizon, bluer overhead.
+    let r = reflect(-v, n);
+    let sky = mix(vec3<f32>(0.72, 0.80, 0.90), vec3<f32>(0.33, 0.48, 0.70), clamp(r.y, 0.0, 1.0));
+
+    var color = mix(transmitted, sky, clamp(fresnel, 0.0, 1.0));
+
+    // Blinn-Phong sun specular.
+    let h = normalize(v + l);
+    let spec = pow(max(dot(n, h), 0.0), 80.0) * u.surface.w;
+    color = color + vec3<f32>(spec);
+
+    // Reflective (grazing) water reads more opaque.
+    let alpha = clamp(max(base_alpha, fresnel), 0.12, 1.0);
     return vec4<f32>(color, alpha);
 }
 ";
