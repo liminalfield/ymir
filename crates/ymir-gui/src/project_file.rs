@@ -63,6 +63,22 @@ fn default_build_res() -> usize {
     DEFAULT_BUILD_RES
 }
 
+/// The sea/base level (normalized height) for a fresh project, and the value assumed for a
+/// project saved before the field existed. Matches the app-level default so enabling water on an
+/// older project starts at a sensible level rather than the very base.
+pub(crate) const DEFAULT_SEA_LEVEL: f64 = 0.3;
+
+/// The sea level for a project file that predates the field.
+fn default_sea_level() -> f64 {
+    DEFAULT_SEA_LEVEL
+}
+
+/// Whether to draw the water plane for a project that predates the toggle: off, so an older
+/// project opens looking as it did before water existed. A fresh project turns it on explicitly.
+fn default_show_water() -> bool {
+    false
+}
+
 /// World settings restored with the project.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub(crate) struct WorldSettings {
@@ -80,6 +96,15 @@ pub(crate) struct WorldSettings {
     /// specific size), so it travels with the project. Defaulted on load for older files.
     #[serde(default = "default_build_res")]
     pub build_res: usize,
+    /// The sea/base level as a normalized height in `[0, 1]`: the 3D viewport draws water at it,
+    /// and it feeds evaluation as base level. A world global that travels with the project.
+    /// Defaulted on load for files saved before it existed.
+    #[serde(default = "default_sea_level")]
+    pub sea_level: f64,
+    /// Whether the 3D viewport draws the water plane. Saved so a world with a configured sea
+    /// reopens showing it. Defaulted off for files that predate the toggle.
+    #[serde(default = "default_show_water")]
+    pub show_water: bool,
 }
 
 /// The default frame label colour: the brand's light text, readable on the dark default
@@ -191,6 +216,10 @@ pub(crate) struct RestoredProject {
     pub world_height: f64,
     /// The restored full-Build resolution (square).
     pub build_res: usize,
+    /// The restored sea/base level (normalized height).
+    pub sea_level: f64,
+    /// Whether the restored project draws the water plane.
+    pub show_water: bool,
     /// The restored canvas camera (pan/zoom), if the project saved one. `None` for an older
     /// project or a graph-only file, in which case the editor fits the graph to the screen.
     pub camera: Option<TSTransform>,
@@ -317,6 +346,8 @@ impl ProjectFile {
             world_extent: self.world.world_extent,
             world_height: self.world.world_height,
             build_res: self.world.build_res,
+            sea_level: self.world.sea_level,
+            show_water: self.world.show_water,
             camera: self.view.camera.map(Camera::to_transform),
             frames: self.view.frames.clone(),
             subgraph_layouts,
@@ -497,6 +528,8 @@ mod tests {
                 world_extent: 4096.0,
                 world_height: 800.0,
                 build_res: 2048,
+                sea_level: 0.42,
+                show_water: true,
             },
             &[],
         );
@@ -515,6 +548,8 @@ mod tests {
         assert_eq!(restored.world_extent, 4096.0);
         assert_eq!(restored.world_height, 800.0);
         assert_eq!(restored.build_res, 2048);
+        assert_eq!(restored.sea_level, 0.42);
+        assert!(restored.show_water);
         // No camera was saved, so the load will fit the graph to the screen.
         assert!(restored.camera.is_none());
 
@@ -552,6 +587,8 @@ mod tests {
                 world_extent: 1024.0,
                 world_height: 256.0,
                 build_res: DEFAULT_BUILD_RES,
+                sea_level: DEFAULT_SEA_LEVEL,
+                show_water: false,
             },
             &[],
         );
@@ -584,6 +621,8 @@ mod tests {
                 world_extent: 1024.0,
                 world_height: 256.0,
                 build_res: DEFAULT_BUILD_RES,
+                sea_level: DEFAULT_SEA_LEVEL,
+                show_water: false,
             },
             &[],
         );
@@ -613,6 +652,8 @@ mod tests {
                 world_extent: 1024.0,
                 world_height: 256.0,
                 build_res: DEFAULT_BUILD_RES,
+                sea_level: DEFAULT_SEA_LEVEL,
+                show_water: false,
             },
             &[],
         );
@@ -625,9 +666,9 @@ mod tests {
 
     #[test]
     fn world_height_defaults_when_absent_from_an_older_file() {
-        // A version-1 project saved before world_height existed: its `world` section has
-        // only seed and world_extent. It must still load, taking the default height rather
-        // than failing to deserialize.
+        // A version-1 project saved before world_height (and sea level) existed: its `world`
+        // section has only seed and world_extent. It must still load, taking the defaults rather
+        // than failing to deserialize, and open looking as it did before water existed.
         let json = r#"{
             "format_version": 1,
             "world": { "seed": 3, "world_extent": 2048.0 },
@@ -635,9 +676,13 @@ mod tests {
         }"#;
         let file: ProjectFile = serde_json::from_str(json).expect("deserialize legacy file");
         assert_eq!(file.world.world_height, DEFAULT_WORLD_HEIGHT);
+        assert_eq!(file.world.sea_level, DEFAULT_SEA_LEVEL);
+        assert!(!file.world.show_water);
         let restored = file.restore().expect("restore legacy file");
         assert_eq!(restored.world_extent, 2048.0);
         assert_eq!(restored.world_height, DEFAULT_WORLD_HEIGHT);
+        assert_eq!(restored.sea_level, DEFAULT_SEA_LEVEL);
+        assert!(!restored.show_water);
     }
 
     #[test]
@@ -662,6 +707,8 @@ mod tests {
                 world_extent: 1024.0,
                 world_height: 256.0,
                 build_res: DEFAULT_BUILD_RES,
+                sea_level: DEFAULT_SEA_LEVEL,
+                show_water: false,
             },
             &frames,
         );

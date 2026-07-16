@@ -108,6 +108,12 @@ impl Operator for Fbm {
         }
     }
 
+    /// Pure of the world globals: no sea level, world height, or world extent, so those
+    /// world-setting sliders never invalidate this node.
+    fn context_deps(&self) -> ymir_core::ContextDeps {
+        ymir_core::ContextDeps::NO_WORLD
+    }
+
     fn eval(&self, _inputs: Inputs, params: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
         let fbm = FbmParams {
             frequency: params.get_f64("frequency", 2.0),

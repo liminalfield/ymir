@@ -30,16 +30,23 @@ const ZOOM_SPEED: f32 = 0.0015;
 const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 64.0;
 
+/// The identity a 2D-map texture was built from: field hash, output index, shading mode and scale,
+/// relief light bits, sea-level bits, and whether water is shown. The texture is rebuilt when any
+/// of these change.
+type TextureKey = (u64, usize, ShadeMode, HeightScale, [u32; 3], u32, bool);
+
 /// The 2D view's own state: the uploaded texture and the key it was built for (so it is
-/// rebuilt only when the field or shading changes) and the pan/zoom transform.
+/// rebuilt only when the field or shading changes), the relief light, and the pan/zoom transform.
 ///
 /// `zoom` is a multiplier over the fit-to-pane scale (`1.0` = the whole map fits), and
 /// `pan` is the screen-space offset of the image centre from the pane centre, in points.
-/// Both reset to fit on a double-click.
+/// Both reset to fit on a double-click. `light` is this view's own relief sun (independent of the
+/// preview pane and the 3D light), ephemeral like the camera and not persisted.
 pub(crate) struct View2d {
     texture: Option<egui::TextureHandle>,
-    texture_key: Option<(u64, usize, ShadeMode, HeightScale)>,
+    texture_key: Option<TextureKey>,
     mode: ShadeMode,
+    light: [f32; 3],
     zoom: f32,
     pan: egui::Vec2,
 }
@@ -50,6 +57,7 @@ impl Default for View2d {
             texture: None,
             texture_key: None,
             mode: ShadeMode::Height,
+            light: DEFAULT_LIGHT,
             zoom: 1.0,
             pan: egui::Vec2::ZERO,
         }
@@ -67,6 +75,17 @@ impl View2d {
         self.mode = mode;
     }
 
+    /// Draws the relief sun dial and steers this view's light on drag; the texture rebuilds on the
+    /// next `show` if it moved. Only meaningful in relief mode.
+    pub(crate) fn sun_dial(&mut self, ui: &mut egui::Ui) {
+        crate::sun::dial(ui, &mut self.light);
+    }
+
+    /// This view's relief light azimuth and altitude in degrees, for the dial readout.
+    pub(crate) fn light_angles(&self) -> (f32, f32) {
+        crate::sun::light_angles(self.light)
+    }
+
     /// Resets to fit-to-view (the whole map centred in the pane).
     pub(crate) fn reset_view(&mut self) {
         self.zoom = 1.0;
@@ -76,15 +95,18 @@ impl View2d {
     /// Draws the field flat over the pane, handling pan (drag), zoom (scroll about the
     /// cursor), and reset (double-click). `field` is the field the 3D view would mesh;
     /// `output` names which output it is (part of the texture key); `scale` is the shared
-    /// Auto/Fixed Height scale. A black fill stands in when there is no field.
+    /// Auto/Fixed Height scale; `sea_level`/`show_water` mirror the World settings to draw the
+    /// same water overlay the 3D plane shows. A black fill stands in when there is no field.
     pub(crate) fn show(
         &mut self,
         ui: &mut egui::Ui,
         field: Option<&Field>,
         output: usize,
         scale: HeightScale,
+        sea_level: f32,
+        show_water: bool,
     ) {
-        self.refresh_texture(ui.ctx(), field, output, scale);
+        self.refresh_texture(ui.ctx(), field, output, scale, sea_level, show_water);
 
         let rect = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
@@ -146,17 +168,39 @@ impl View2d {
         field: Option<&Field>,
         output: usize,
         scale: HeightScale,
+        sea_level: f32,
+        show_water: bool,
     ) {
         let Some(field) = field else {
             self.texture = None;
             self.texture_key = None;
             return;
         };
-        let key = (field.content_hash().to_u64(), output, self.mode, scale);
+        // Sea level enters the key only while water is shown, so moving the slider with water off
+        // costs no rebuild.
+        let water_bits = if show_water { sea_level.to_bits() } else { 0 };
+        let key = (
+            field.content_hash().to_u64(),
+            output,
+            self.mode,
+            scale,
+            self.light.map(f32::to_bits),
+            water_bits,
+            show_water,
+        );
         if self.texture_key == Some(key) {
             return;
         }
-        let image = shade::field_to_image(field, layers::HEIGHT, self.mode, scale, DEFAULT_LIGHT);
+        let mut image = shade::field_to_image(field, layers::HEIGHT, self.mode, scale, self.light);
+        if show_water {
+            shade::apply_water(
+                &mut image,
+                field,
+                layers::HEIGHT,
+                sea_level,
+                &shade::WaterStyle::default(),
+            );
+        }
         let options = egui::TextureOptions {
             magnification: egui::TextureFilter::Nearest,
             minification: egui::TextureFilter::Linear,

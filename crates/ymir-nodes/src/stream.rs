@@ -144,6 +144,12 @@ impl Operator for StreamErosion {
         }
     }
 
+    /// Reads only the world horizontal extent (a world-unit param), not the world height or
+    /// sea level, so those two sliders never invalidate this node.
+    fn context_deps(&self) -> ymir_core::ContextDeps {
+        ymir_core::ContextDeps::WORLD_EXTENT
+    }
+
     fn eval(&self, inputs: Inputs, params: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
         let input = inputs[0];
         let width = input.width();

@@ -151,6 +151,14 @@ pub fn tr(key: &str) -> &str {
              min..max degrees, softening over the falloff. Scale it with an upstream Blur."
         }
 
+        // Distance selector.
+        "node-modifier.distance" => "Distance",
+        "node-modifier.distance-desc" => {
+            "Selects a band around a height contour by true distance: one near the level, \
+             fading over the range (in metres), optionally on just one side. The distance is \
+             an isotropic eikonal solve, so the band width does not vary with direction."
+        }
+
         // Invert.
         "node-modifier.invert" => "Invert",
         "node-modifier.invert-desc" => "Flips the height layer (1 - height).",
@@ -205,6 +213,15 @@ pub fn tr(key: &str) -> &str {
         "node-modifier.stream_erosion" => "Stream Erosion",
         "node-modifier.stream_erosion-desc" => {
             "Carves drainage networks from flow accumulation; outputs the river/flow map."
+        }
+
+        // Coastal bevel.
+        "node-modifier.coastal" => "Coastal",
+        "node-modifier.coastal-desc" => {
+            "Reshapes the shore into a beach-and-bluff bevel: cuts the land down and lifts the \
+             seabed toward a gentle wedge at the world sea level, fading over a width in metres. \
+             Bevels by true distance from the shoreline, so the beach is even all around. Taps the \
+             shore band."
         }
 
         // Null (pass-through utility).

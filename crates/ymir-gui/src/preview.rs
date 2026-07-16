@@ -15,15 +15,14 @@ use ymir_core::{
     CancelToken, Error, EvalCache, EvalRequest, Field, Graph, NodeId, OUTPUT_TYPE_ID, layers,
 };
 
-use crate::shade::{DEFAULT_LIGHT, HeightScale, ShadeMode, field_to_image};
+use crate::shade::{
+    DEFAULT_LIGHT, HeightScale, ShadeMode, WaterStyle, apply_water, field_to_image,
+};
 
 /// Worker-side persistent cache capacity, in cached node results.
 const WORKER_CACHE_CAP: usize = 64;
 /// Number of bins in the input histogram drawn behind the curve/levels editors (#15).
 const HISTOGRAM_BINS: usize = 64;
-/// Size (px) of the relief light dial. Also the reserved height of the shading
-/// controls row, so toggling Height/Relief never shifts the preview (#40).
-pub(crate) const LIGHT_DIAL_SIZE: f32 = 40.0;
 /// Minimum interval between preview submissions. A fast parameter drag throttles to
 /// this cadence instead of queuing a job every frame; the final, settled value is
 /// always submitted once the interval elapses (the trailing value wins).
@@ -89,6 +88,11 @@ enum Status {
     Error,
 }
 
+/// The identity a preview texture was built from: field hash, output index, shading mode and
+/// scale, relief light bits, sea-level bits, and whether water is shown. The texture is rebuilt
+/// when any of these change.
+type TextureKey = (u64, usize, ShadeMode, HeightScale, [u32; 3], u32, bool);
+
 /// Drives background preview evaluation. The UI calls [`sync`](Self::sync) (submit
 /// if changed), [`poll`](Self::poll) (collect results), then [`show`](Self::show)
 /// (render), every frame.
@@ -125,6 +129,11 @@ pub(crate) struct PreviewEngine {
     /// Relief light direction (unit vector), steered by dragging over the relief
     /// image (#40).
     light: [f32; 3],
+    /// Sea level (normalized height) for the water overlay, mirrored from the World settings
+    /// each frame. Presentation only: it drives the overlay, never the evaluation (#96).
+    sea_level: f32,
+    /// Whether to draw the water overlay, mirrored from the World settings' Show water toggle.
+    show_water: bool,
     /// Which output port the preview displays, by index. A multi-output node (e.g. hydraulic
     /// erosion's heightfield/water/sediment) is viewed one output at a time; switching is
     /// instant since all outputs are kept. Clamped to the available outputs.
@@ -137,9 +146,10 @@ pub(crate) struct PreviewEngine {
     last_histogram: Option<Vec<f32>>,
     histogram_target: Option<u64>,
     texture: Option<egui::TextureHandle>,
-    /// The (field hash, output index, mode, scale, light bits) the current texture was built
-    /// from; the texture is rebuilt when any changes.
-    texture_key: Option<(u64, usize, ShadeMode, HeightScale, [u32; 3])>,
+    /// The (field hash, output index, mode, scale, light bits, sea-level bits, show-water) the
+    /// current texture was built from; the texture is rebuilt when any changes. Sea level enters
+    /// the key only while water is shown, so moving the slider with water off costs no rebuild.
+    texture_key: Option<TextureKey>,
 }
 
 impl PreviewEngine {
@@ -162,6 +172,8 @@ impl PreviewEngine {
             mode: ShadeMode::Height,
             scale: HeightScale::Auto,
             light: DEFAULT_LIGHT,
+            sea_level: 0.0,
+            show_water: false,
             display_output: 0,
             last_outputs: Vec::new(),
             last_histogram: None,
@@ -206,6 +218,14 @@ impl PreviewEngine {
     /// changed.
     pub(crate) fn set_scale(&mut self, scale: HeightScale) {
         self.scale = scale;
+    }
+
+    /// Mirrors the World settings' sea level and Show water toggle into the preview, so the water
+    /// overlay follows the same controls as the 3D plane. The texture recomposites on the next
+    /// `poll` if either changed (no graph re-evaluation).
+    pub(crate) fn set_water(&mut self, sea_level: f32, show_water: bool) {
+        self.sea_level = sea_level;
+        self.show_water = show_water;
     }
 
     /// The output index the preview is set to display.
@@ -359,18 +379,35 @@ impl PreviewEngine {
         let Some(field) = self.last_outputs.get(index) else {
             return;
         };
-        // Each output is a standalone field; show its height layer.
+        // Each output is a standalone field; show its height layer. Sea level enters the key only
+        // while water is shown, so toggling water off frees the slider from rebuilding.
+        let water_bits = if self.show_water {
+            self.sea_level.to_bits()
+        } else {
+            0
+        };
         let key = (
             field.content_hash().to_u64(),
             index,
             self.mode,
             self.scale,
             self.light.map(f32::to_bits),
+            water_bits,
+            self.show_water,
         );
         if self.texture_key == Some(key) {
             return;
         }
-        let image = field_to_image(field, layers::HEIGHT, self.mode, self.scale, self.light);
+        let mut image = field_to_image(field, layers::HEIGHT, self.mode, self.scale, self.light);
+        if self.show_water {
+            apply_water(
+                &mut image,
+                field,
+                layers::HEIGHT,
+                self.sea_level,
+                &WaterStyle::default(),
+            );
+        }
         self.texture = Some(ctx.load_texture("preview", image, egui::TextureOptions::LINEAR));
         self.texture_key = Some(key);
     }
@@ -449,78 +486,24 @@ impl PreviewEngine {
         }
     }
 
-    /// Steers the relief light from a drag at `pos` over `rect` (the image or the
-    /// indicator); the exact centre is ignored, keeping the current light.
+    /// Steers the relief light from a drag at `pos` over `rect` (the previewed image); the exact
+    /// centre is ignored, keeping the current light.
     fn set_light_from_drag(&mut self, pos: egui::Pos2, rect: egui::Rect) {
-        if let Some(light) = light_from_drag(pos, rect) {
+        if let Some(light) = crate::sun::light_from_drag(pos, rect) {
             self.light = light;
         }
     }
 
-    /// The relief light's azimuth and altitude in degrees, for the dial readout: azimuth is the
-    /// horizontal direction (0-360), altitude the angle above the horizon.
+    /// The relief light's azimuth and altitude in degrees, for the dial readout.
     pub(crate) fn light_angles(&self) -> (f32, f32) {
-        let az = self.light[1]
-            .atan2(self.light[0])
-            .to_degrees()
-            .rem_euclid(360.0);
-        let alt = self.light[2].clamp(-1.0, 1.0).asin().to_degrees();
-        (az, alt)
+        crate::sun::light_angles(self.light)
     }
 
-    /// A small disk that shows the relief light direction — a sun whose angle is the
-    /// azimuth and whose radius is the altitude — and lets you set it by dragging
-    /// (sharing the image's mapping). Only meaningful in relief mode (#40).
+    /// The relief sun dial: shows the light direction and steers it on drag. Only meaningful in
+    /// relief mode (#40). A thin wrapper over the shared [`crate::sun::dial`] widget.
     pub(crate) fn light_indicator(&mut self, ui: &mut egui::Ui) {
-        let size = LIGHT_DIAL_SIZE;
-        let (rect, resp) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::drag());
-        let center = rect.center();
-        let radius = size * 0.5 - 3.0;
-        let painter = ui.painter_at(rect);
-        // An inset well: a deep fill with a hairline rim, so the dial reads as a control.
-        painter.circle_filled(center, radius, crate::theme::BG_ABYSS);
-        painter.circle_stroke(center, radius, egui::Stroke::new(1.0, crate::theme::LINE));
-        // The light's horizontal projection (lx, ly) maps straight onto the disk.
-        let dot = center + egui::vec2(self.light[0], self.light[1]) * radius;
-        // A faint direction line from the centre out to the sun.
-        painter.line_segment(
-            [center, dot],
-            egui::Stroke::new(1.0, crate::theme::LINE_STRONG),
-        );
-        // The sun: a warm core with a soft glow.
-        let sun = egui::Color32::from_rgb(0xf2, 0xc4, 0x4d);
-        painter.circle_filled(dot, 6.0, sun.gamma_multiply(0.35));
-        painter.circle_filled(dot, 3.5, sun);
-
-        let resp = resp.on_hover_text("Drag to set the relief light");
-        if resp.dragged()
-            && let Some(pos) = resp.interact_pointer_pos()
-        {
-            self.set_light_from_drag(pos, rect);
-        }
+        crate::sun::dial(ui, &mut self.light);
     }
-}
-
-/// The relief light direction for a drag at `pos` over `rect`: the cursor's angle
-/// from the centre sets the azimuth, and its distance the altitude (centre =
-/// high/soft, edge = low/grazing), clamped so the light is never fully overhead nor
-/// fully grazing. `None` for the exact centre (no direction). Pure and unit-tested.
-fn light_from_drag(pos: egui::Pos2, rect: egui::Rect) -> Option<[f32; 3]> {
-    let half = rect.size() * 0.5;
-    if half.x <= 0.0 || half.y <= 0.0 {
-        return None;
-    }
-    let (u, v) = (
-        (pos.x - rect.center().x) / half.x,
-        (pos.y - rect.center().y) / half.y,
-    );
-    let dist = (u * u + v * v).sqrt();
-    if dist < 1e-4 {
-        return None;
-    }
-    let horizontal = dist.clamp(0.2, 0.95);
-    let lz = (1.0 - horizontal * horizontal).max(0.0).sqrt();
-    Some([u / dist * horizontal, v / dist * horizontal, lz])
 }
 
 /// The worker: evaluates submitted jobs with a persistent cache, skipping
@@ -664,26 +647,6 @@ fn field_histogram(field: &Field, bins: usize) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn light_from_drag_maps_cursor_to_a_unit_light() {
-        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 100.0));
-
-        // Dragging to the right edge → light points right (+x), level (y ≈ 0).
-        let right = light_from_drag(egui::pos2(100.0, 50.0), rect).expect("direction");
-        assert!(right[0] > 0.0 && right[1].abs() < 1e-3);
-
-        // Upper-left → light points up-left (-x, -y).
-        let up_left = light_from_drag(egui::pos2(0.0, 0.0), rect).expect("direction");
-        assert!(up_left[0] < 0.0 && up_left[1] < 0.0);
-
-        // Always a unit vector.
-        let n = up_left[0] * up_left[0] + up_left[1] * up_left[1] + up_left[2] * up_left[2];
-        assert!((n.sqrt() - 1.0).abs() < 1e-4);
-
-        // The exact centre has no direction.
-        assert!(light_from_drag(egui::pos2(50.0, 50.0), rect).is_none());
-    }
 
     #[test]
     fn field_histogram_bins_clamps_and_normalizes() {

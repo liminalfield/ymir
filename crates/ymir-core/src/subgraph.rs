@@ -246,6 +246,7 @@ impl Operator for SubgraphNode {
         let request = EvalRequest::new(ctx.width, ctx.height, ctx.region, inner_seed)
             .with_world_extent(ctx.world_extent())
             .with_world_height(ctx.world_height())
+            .with_sea_level(ctx.sea_level())
             .with_cancel(ctx.cancel_token())
             .with_depth(ctx.depth() + 1);
         let mut cache = EvalCache::new(0);

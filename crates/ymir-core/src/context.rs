@@ -1,5 +1,8 @@
 //! Per-evaluation context handed to operators.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
+
 use crate::cancel::CancelToken;
 use crate::region::Region;
 
@@ -30,11 +33,23 @@ pub struct EvalContext {
     /// Private so slope-aware operators go through [`real_slope_scale`](Self::real_slope_scale),
     /// which combines it with the horizontal cell size into a true rise-over-run scale.
     world_height: f64,
+    /// The sea/base level as a normalized height: a world global several nodes agree on (the
+    /// coastal shaper reshapes to it, stream-power grades rivers to it, the viewport draws water
+    /// at it). Defaults to `0.0` (sea at the world base, i.e. no configured sea); the World-panel
+    /// slider sets it. A world setting like [`world_height`](Self::world_height), never a node output.
+    sea_level: f64,
     /// Subgraph nesting depth: 0 at the top level, raised by one each time a subgraph
     /// container evaluates its inner graph. A container checks it against the nesting limit
     /// so a pathologically deep stack reports rather than overflows.
     depth: u32,
     cancel: CancelToken,
+    /// Test-only recorder of which world fields an evaluation actually reads, an OR of the
+    /// [`ACCESS_WORLD_EXTENT`](Self::ACCESS_WORLD_EXTENT) / `_HEIGHT` / `_SEA_LEVEL` bits. `None`
+    /// in production, so every accessor does a single null check and nothing more; the cache-key
+    /// dependency guard (a test over every node) attaches one to verify a node's declared
+    /// [`ContextDeps`](crate::ContextDeps) cover every field its `eval` touches. Not part of the
+    /// context's identity, so it is ignored by hashing and cloning-for-identity concerns.
+    access_log: Option<Arc<AtomicU8>>,
 }
 
 impl EvalContext {
@@ -48,8 +63,37 @@ impl EvalContext {
             seed,
             world_extent: 1.0,
             world_height: 1.0,
+            sea_level: 0.0,
             depth: 0,
             cancel: CancelToken::new(),
+            access_log: None,
+        }
+    }
+
+    /// The access-log bit for a read of the world horizontal extent (directly or through
+    /// [`meters_per_cell`](Self::meters_per_cell) / [`world_to_cells`](Self::world_to_cells)).
+    pub const ACCESS_WORLD_EXTENT: u8 = 1;
+    /// The access-log bit for a read of the world vertical extent (directly or through
+    /// [`real_slope_scale`](Self::real_slope_scale)).
+    pub const ACCESS_WORLD_HEIGHT: u8 = 2;
+    /// The access-log bit for a read of the world sea level.
+    pub const ACCESS_SEA_LEVEL: u8 = 4;
+
+    /// Attaches a recorder that accumulates which world fields this context's accessors read,
+    /// for the dependency guard. Production evaluation never sets one, so the accessors stay a
+    /// null check away from their prior behavior.
+    #[must_use]
+    pub fn with_access_log(mut self, log: Arc<AtomicU8>) -> Self {
+        self.access_log = Some(log);
+        self
+    }
+
+    /// Records a world-field read into the access log when one is attached (a no-op otherwise).
+    /// `Relaxed` is sufficient: the guard reads the log only after the evaluation it observes has
+    /// fully joined, and the bits only ever accumulate by OR.
+    fn record(&self, bits: u8) {
+        if let Some(log) = &self.access_log {
+            log.fetch_or(bits, Ordering::Relaxed);
         }
     }
 
@@ -79,6 +123,14 @@ impl EvalContext {
         self
     }
 
+    /// Sets the sea/base level as a normalized height. Defaults to `0.0`. A world global that
+    /// several nodes agree on (coastal reshaping, stream-power base level, the viewport water).
+    #[must_use]
+    pub fn with_sea_level(mut self, sea_level: f64) -> Self {
+        self.sea_level = sea_level;
+        self
+    }
+
     /// The factor that turns a *per-cell* normalized height delta into a true slope
     /// (rise over run): `world_height / meters_per_cell`. A slope-aware operator multiplies its
     /// normalized `delta_height / cell_distance` by this to get a real tangent, so a talus angle
@@ -86,6 +138,9 @@ impl EvalContext {
     /// correctly with the world's vertical and horizontal extents.
     #[must_use]
     pub fn real_slope_scale(&self) -> f64 {
+        // Reads world_height directly and world_extent through meters_per_cell, so it records
+        // both: a slope-aware node depends on the vertical and the horizontal extent alike.
+        self.record(Self::ACCESS_WORLD_HEIGHT);
         self.world_height / self.meters_per_cell()
     }
 
@@ -96,7 +151,17 @@ impl EvalContext {
     /// which folds in the horizontal cell size to give a true rise-over-run.
     #[must_use]
     pub fn world_height(&self) -> f64 {
+        self.record(Self::ACCESS_WORLD_HEIGHT);
         self.world_height
+    }
+
+    /// The sea/base level as a normalized height (see [`with_sea_level`](Self::with_sea_level)).
+    /// A world global; the coastal shaper and stream-power base level read it, and the viewport
+    /// draws water at it.
+    #[must_use]
+    pub fn sea_level(&self) -> f64 {
+        self.record(Self::ACCESS_SEA_LEVEL);
+        self.sea_level
     }
 
     /// The world's physical size along x, in world units (meters) across the full `UNIT`
@@ -105,6 +170,7 @@ impl EvalContext {
     /// [`world_to_cells`](Self::world_to_cells), which fold in resolution and region.
     #[must_use]
     pub fn world_extent(&self) -> f64 {
+        self.record(Self::ACCESS_WORLD_EXTENT);
         self.world_extent
     }
 
@@ -140,6 +206,9 @@ impl EvalContext {
     /// makes world-unit parameters resolution-independent.
     #[must_use]
     pub fn meters_per_cell(&self) -> f64 {
+        // Folds in world_extent (resolution and region are always keyed, so they are not
+        // recorded), so any node sizing a param in world units records a world_extent read.
+        self.record(Self::ACCESS_WORLD_EXTENT);
         self.region.width() * self.world_extent / self.width as f64
     }
 
@@ -210,6 +279,74 @@ mod tests {
         // scale is its reciprocal.
         let ctx = EvalContext::new(256, 256, Region::UNIT, 0);
         assert!((ctx.real_slope_scale() - 256.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn sea_level_defaults_to_zero_and_round_trips() {
+        // No configured sea by default (sea at the world base); the setter carries it through.
+        assert_eq!(EvalContext::new(4, 4, Region::UNIT, 0).sea_level(), 0.0);
+        let ctx = EvalContext::new(4, 4, Region::UNIT, 0).with_sea_level(0.35);
+        assert!((ctx.sea_level() - 0.35).abs() < 1e-12);
+    }
+
+    fn logged() -> (EvalContext, Arc<AtomicU8>) {
+        let log = Arc::new(AtomicU8::new(0));
+        let ctx = EvalContext::new(64, 64, Region::UNIT, 0)
+            .with_world_extent(1000.0)
+            .with_world_height(256.0)
+            .with_sea_level(0.3)
+            .with_access_log(Arc::clone(&log));
+        (ctx, log)
+    }
+
+    #[test]
+    fn access_log_records_each_world_field_read() {
+        // Each accessor records exactly the fields it reads, so the dependency guard sees the
+        // true read-set. Resolution and region are always keyed, so they are never recorded.
+        // Each accessor's return value is used (it is `#[must_use]`), which is also what triggers
+        // the recording being asserted.
+        let (ctx, log) = logged();
+        assert_eq!(ctx.sea_level(), 0.3);
+        assert_eq!(log.load(Ordering::Relaxed), EvalContext::ACCESS_SEA_LEVEL);
+
+        let (ctx, log) = logged();
+        assert!(ctx.meters_per_cell() > 0.0);
+        assert_eq!(
+            log.load(Ordering::Relaxed),
+            EvalContext::ACCESS_WORLD_EXTENT
+        );
+
+        let (ctx, log) = logged();
+        assert_eq!(ctx.world_height(), 256.0);
+        assert_eq!(
+            log.load(Ordering::Relaxed),
+            EvalContext::ACCESS_WORLD_HEIGHT
+        );
+
+        // The two indirect readers must record their full dependence, or a node could exclude a
+        // field it reaches through them and silently serve a stale field.
+        let (ctx, log) = logged();
+        assert!(ctx.world_to_cells(50.0) > 0.0);
+        assert_eq!(
+            log.load(Ordering::Relaxed),
+            EvalContext::ACCESS_WORLD_EXTENT
+        );
+
+        let (ctx, log) = logged();
+        assert!(ctx.real_slope_scale() > 0.0);
+        assert_eq!(
+            log.load(Ordering::Relaxed),
+            EvalContext::ACCESS_WORLD_HEIGHT | EvalContext::ACCESS_WORLD_EXTENT,
+            "a slope-aware read depends on both the vertical and the horizontal extent"
+        );
+    }
+
+    #[test]
+    fn accessors_are_a_no_op_without_a_log() {
+        // Production evaluation attaches no log, so the accessors just return their values.
+        let ctx = EvalContext::new(64, 64, Region::UNIT, 0).with_sea_level(0.3);
+        assert_eq!(ctx.sea_level(), 0.3);
+        assert!(ctx.real_slope_scale().is_finite());
     }
 
     #[test]

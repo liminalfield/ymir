@@ -35,6 +35,8 @@ use preview::PreviewEngine;
 
 mod shade;
 
+mod sun;
+
 mod thumbnails;
 use thumbnails::ThumbnailEngine;
 // Off-thread full-resolution Build (#7).
@@ -191,6 +193,19 @@ const MARQUEE_MIN_DRAG: f32 = 4.0;
 /// build resolution to give a clean 1 m/cell, and is the meters-to-cells bridge for
 /// world-unit parameters (scale-aware nodes consume it via `EvalContext`).
 const DEFAULT_WORLD_EXTENT: f64 = 1024.0;
+
+/// The world settings for a fresh, untitled project: the app-level defaults, with the water plane
+/// shown. Used to anchor a new session's clean point and to reset on New/Close/open-default.
+fn fresh_world_settings() -> project_file::WorldSettings {
+    project_file::WorldSettings {
+        seed: 0,
+        world_extent: DEFAULT_WORLD_EXTENT,
+        world_height: project_file::DEFAULT_WORLD_HEIGHT,
+        build_res: project_file::DEFAULT_BUILD_RES,
+        sea_level: project_file::DEFAULT_SEA_LEVEL,
+        show_water: true,
+    }
+}
 
 /// The canvas's pan/zoom view, captured each frame so other panes (the ribbon
 /// add) can place a node where the user is actually looking. The transform maps
@@ -442,6 +457,12 @@ struct AppState {
     /// proportion in the viewport. An interpretation of the normalized height, not an input
     /// to evaluation, so it is not threaded into the eval request.
     world_height: f64,
+    /// The sea/base level as a normalized height in `[0, 1]`. A world global: the 3D viewport
+    /// draws a water plane at it, and coastal/stream nodes will read it as base level once wired.
+    sea_level: f64,
+    /// Whether the 3D viewport draws the water plane at [`sea_level`](Self::sea_level). A view
+    /// aid, on by default so the sea reads on a fresh launch.
+    show_water: bool,
     /// The project file the session is bound to, if any (#75). `Save` writes here;
     /// `None` until the project is first saved or opened, when `Save` falls back to
     /// `Save As`.
@@ -661,17 +682,8 @@ impl AppState {
         let (graph, snarl) = starter::starter_graph();
         // Anchor the undo history and the clean point at this initial session, so the
         // first edit records an undo step and marks the session modified.
-        let initial = project_file::ProjectFile::capture(
-            &graph,
-            &snarl,
-            project_file::WorldSettings {
-                seed: 0,
-                world_extent: DEFAULT_WORLD_EXTENT,
-                world_height: project_file::DEFAULT_WORLD_HEIGHT,
-                build_res: project_file::DEFAULT_BUILD_RES,
-            },
-            &[],
-        );
+        let initial =
+            project_file::ProjectFile::capture(&graph, &snarl, fresh_world_settings(), &[]);
         let history = EditHistory::new(initial.clone());
         Self {
             graph,
@@ -717,6 +729,8 @@ impl AppState {
             preview_res: PREVIEW_RES,
             world_extent: DEFAULT_WORLD_EXTENT,
             world_height: project_file::DEFAULT_WORLD_HEIGHT,
+            sea_level: project_file::DEFAULT_SEA_LEVEL,
+            show_water: true,
             project_path: None,
             recent: Vec::new(),
             // The built-in starter has no saved camera, so fit it to the screen on the first
@@ -790,6 +804,8 @@ impl AppState {
         self.world_extent = restored.world_extent;
         self.world_height = restored.world_height;
         self.build_res = restored.build_res;
+        self.sea_level = restored.sea_level;
+        self.show_water = restored.show_water;
         self.clear_selection();
         self.preview_pin = None;
         self.node_menu = None;
@@ -805,16 +821,15 @@ impl AppState {
         self.mark_clean();
     }
 
-    /// Replaces the session with a fresh untitled one built from `graph`/`snarl`: resets
-    /// world settings and view-state, drops the project path, and re-anchors undo and the
-    /// clean point. Shared by New (a starter graph) and Close (an empty graph).
+    /// Replaces the session with a fresh untitled one built from `graph`/`snarl`: installs the
+    /// given `world` settings (seed, extent, height, build resolution, sea level, water toggle),
+    /// resets view-state, drops the project path, and re-anchors undo and the clean point. Shared
+    /// by New (a starter graph) and Close (an empty graph).
     fn install_fresh(
         &mut self,
         graph: Graph,
         snarl: Snarl<Handle>,
-        seed: u64,
-        world_extent: f64,
-        world_height: f64,
+        world: project_file::WorldSettings,
         subgraph_layouts: HashMap<Vec<u64>, BTreeMap<u64, [f32; 2]>>,
     ) {
         self.nav.clear();
@@ -825,9 +840,12 @@ impl AppState {
         self.selected_frame = None;
         self.frame_drag = None;
         self.frame_color_edit = None;
-        self.seed = seed;
-        self.world_extent = world_extent;
-        self.world_height = world_height;
+        self.seed = world.seed;
+        self.world_extent = world.world_extent;
+        self.world_height = world.world_height;
+        self.build_res = world.build_res;
+        self.sea_level = world.sea_level;
+        self.show_water = world.show_water;
         self.clear_selection();
         self.preview_pin = None;
         self.node_menu = None;
@@ -847,9 +865,7 @@ impl AppState {
         self.install_fresh(
             Graph::new(),
             Snarl::new(),
-            0,
-            DEFAULT_WORLD_EXTENT,
-            project_file::DEFAULT_WORLD_HEIGHT,
+            fresh_world_settings(),
             HashMap::new(),
         );
     }
@@ -861,36 +877,35 @@ impl AppState {
             .filter(|p| p.exists())
             .and_then(|p| read_project(&p).ok());
         match loaded {
-            Some(r) => self.install_fresh(
-                r.graph,
-                r.snarl,
-                r.seed,
-                r.world_extent,
-                r.world_height,
-                r.subgraph_layouts,
-            ),
+            Some(r) => {
+                let world = project_file::WorldSettings {
+                    seed: r.seed,
+                    world_extent: r.world_extent,
+                    world_height: r.world_height,
+                    build_res: r.build_res,
+                    sea_level: r.sea_level,
+                    show_water: r.show_water,
+                };
+                self.install_fresh(r.graph, r.snarl, world, r.subgraph_layouts);
+            }
             None => {
                 let (graph, snarl) = starter::starter_graph();
-                self.install_fresh(
-                    graph,
-                    snarl,
-                    0,
-                    DEFAULT_WORLD_EXTENT,
-                    project_file::DEFAULT_WORLD_HEIGHT,
-                    HashMap::new(),
-                );
+                self.install_fresh(graph, snarl, fresh_world_settings(), HashMap::new());
             }
         }
     }
 
-    /// The current world settings (seed, extent, height, build resolution), bundled for a
-    /// [`project_file`] capture.
+    /// The current world settings (seed, extent, height, build resolution, sea level), bundled
+    /// for a [`project_file`] capture. Everything here is part of the saved project and the dirty
+    /// check, so changing the sea level or the water toggle marks the project modified.
     fn world_settings(&self) -> project_file::WorldSettings {
         project_file::WorldSettings {
             seed: self.seed,
             world_extent: self.world_extent,
             world_height: self.world_height,
             build_res: self.build_res,
+            sea_level: self.sea_level,
+            show_water: self.show_water,
         }
     }
 
@@ -1476,6 +1491,8 @@ impl AppState {
                 self.seed = restored.seed;
                 self.world_extent = restored.world_extent;
                 self.world_height = restored.world_height;
+                self.sea_level = restored.sea_level;
+                self.show_water = restored.show_water;
                 self.selection
                     .retain(|&h| self.graph.node_id_of(h).is_some());
                 self.primary = self.primary.filter(|h| self.selection.contains(h));
@@ -1678,7 +1695,8 @@ impl AppState {
         let res = self.preview_res;
         let request = EvalRequest::new(res, res, Region::UNIT, self.seed)
             .with_world_extent(self.world_extent)
-            .with_world_height(self.world_height);
+            .with_world_height(self.world_height)
+            .with_sea_level(self.sea_level);
         let now = ctx.input(|i| i.time);
         // Inside a subgraph, bind the live input fields so the 2D preview shows real data
         // rather than the Input markers' zero stand-in (#106). `None` at the top level.
@@ -2472,6 +2490,8 @@ fn apply_default(state: &mut AppState) {
             state.world_extent = restored.world_extent;
             state.world_height = restored.world_height;
             state.build_res = restored.build_res;
+            state.sea_level = restored.sea_level;
+            state.show_water = restored.show_water;
             state.apply_restored_view(restored.camera);
             // Anchor undo and the clean point at the default, not the starter it replaced.
             state.reset_history();
@@ -2659,7 +2679,8 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
                             let res = state.build_res;
                             let request = EvalRequest::new(res, res, Region::UNIT, state.seed)
                                 .with_world_extent(state.world_extent)
-                                .with_world_height(state.world_height);
+                                .with_world_height(state.world_height)
+                                .with_sea_level(state.sea_level);
                             state.build.start(top, targets, request, ui.ctx().clone());
                         }
                     }
@@ -4233,6 +4254,23 @@ fn world_settings(ui: &mut egui::Ui, state: &mut AppState) {
     });
 
     ui.separator();
+    ui.horizontal(|ui| {
+        ui.label("Sea level");
+        ui.checkbox(&mut state.show_water, "Show water");
+    });
+    ui.horizontal(|ui| {
+        // Normalized height in [0, 1]; the 3D viewport draws a water plane here. The height in
+        // meters (sea_level × world_height) makes the level tangible against the world height.
+        ui.add(
+            egui::Slider::new(&mut state.sea_level, 0.0..=1.0)
+                .fixed_decimals(3)
+                .clamping(egui::SliderClamping::Always),
+        );
+        let meters = state.sea_level * state.world_height;
+        ui.weak(format!("≈ {meters:.0} m"));
+    });
+
+    ui.separator();
     ui.label("Build resolution");
     ui.horizontal(|ui| {
         // Custom value (UE5 landscapes need specific sizes), with presets as
@@ -4540,7 +4578,7 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
         // centres each widget against the row height known when it is placed, so the label (added
         // before the taller dial) would float up while the dial and readout centre lower.
         ui.allocate_ui_with_layout(
-            egui::vec2(ui.available_width(), preview::LIGHT_DIAL_SIZE),
+            egui::vec2(ui.available_width(), sun::DIAL_SIZE),
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
                 ui.add(egui::Label::new(
@@ -4571,6 +4609,9 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
     }
     state.preview.set_mode(mode);
     state.preview.set_scale(scale);
+    state
+        .preview
+        .set_water(state.sea_level as f32, state.show_water);
 
     // The image: the previewed node's output (evaluated each frame by `drive_preview`,
     // independent of this pane being visible), or a black placeholder when there is no
@@ -5048,7 +5089,8 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         state.seed,
     )
     .with_world_extent(state.world_extent)
-    .with_world_height(state.world_height);
+    .with_world_height(state.world_height)
+    .with_sea_level(state.sea_level);
     // The working set is culled to the last-frame view (#74): off-screen nodes and a
     // zoomed-out canvas (where a thumbnail is too small to read) are skipped, so a
     // large graph evaluates only what is on screen. Disabled entirely from the View
@@ -6552,7 +6594,8 @@ fn refresh_viewport_build(state: &mut AppState) {
         let res = state.build_res;
         let request = EvalRequest::new(res, res, Region::UNIT, state.seed)
             .with_world_extent(state.world_extent)
-            .with_world_height(state.world_height);
+            .with_world_height(state.world_height)
+            .with_sea_level(state.sea_level);
         state.graph.output_key(id, &request).ok()
     })();
     // Diagnostic (logged, so it shows headless too): report the lookup once per distinct
@@ -6625,6 +6668,11 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
     let showing_build = build_field.is_some();
     let field = build_field.or_else(|| state.preview.field());
 
+    // Sea level and the Show water toggle drive the same overlay across projections: the 3D water
+    // plane and the 2D map's water tint. Presentation only, so no re-evaluation on change (#96).
+    let sea_level = state.sea_level as f32;
+    let show_water = state.show_water;
+
     match state.viewport_mode {
         viewport2d::Mode::ThreeD => {
             // True world proportion: a height of 1.0 rises to (world_height / world_extent)
@@ -6635,6 +6683,8 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
             let settings = viewport::ViewSettings {
                 fixed_range: state.viewport_scale == shade::HeightScale::Fixed,
                 vertical_scale: true_proportion * state.viewport_exaggeration,
+                sea_level,
+                show_water,
             };
             viewport::show(
                 ui,
@@ -6646,9 +6696,14 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
             );
         }
         viewport2d::Mode::TwoD => {
-            state
-                .viewport_2d
-                .show(ui, field, display, state.viewport_scale);
+            state.viewport_2d.show(
+                ui,
+                field,
+                display,
+                state.viewport_scale,
+                sea_level,
+                show_water,
+            );
         }
     }
 
@@ -6701,6 +6756,39 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
     state.viewport_exaggeration = exaggeration;
     state.viewport_lighting = light;
     state.viewport_2d.set_shade_mode(shade_mode);
+
+    // The relief sun, anchored top-right and shown only in the 2D map's relief mode (#96): a
+    // compact dial to steer the hillshade light the flat map cannot otherwise set. Its own
+    // Foreground area, mirroring the top-left HUD, so dragging it never pans the map beneath.
+    if rect.height() >= WORKSPACE_HUD_MIN
+        && mode == viewport2d::Mode::TwoD
+        && shade_mode == shade::ShadeMode::Relief
+    {
+        egui::Area::new(ui.id().with("viewport-sun"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(rect.right_top() + egui::vec2(-8.0, 8.0))
+            .pivot(egui::Align2::RIGHT_TOP)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Label::new(
+                            egui::RichText::new("Sun").color(theme::TEXT_SECONDARY),
+                        ));
+                        state.viewport_2d.sun_dial(ui);
+                        // Read the angles after the dial so a drag this frame is reflected.
+                        // Right-pad to a fixed width (azimuth 3 digits, altitude 2) so the
+                        // monospace readout, and thus the popup, keeps a constant size as the
+                        // digit count changes instead of jittering while the dial is dragged.
+                        let (az, alt) = state.viewport_2d.light_angles();
+                        ui.label(
+                            egui::RichText::new(format!("{az:>3.0}° · {alt:>2.0}°"))
+                                .family(egui::FontFamily::Monospace)
+                                .color(theme::TEXT_TERTIARY),
+                        );
+                    });
+                });
+            });
+    }
 }
 
 /// The 3D viewport HUD controls: the Auto/Fixed height scale, the vertical exaggeration,
@@ -8801,6 +8889,8 @@ mod tests {
                 world_extent: 2048.0,
                 world_height: 640.0,
                 build_res: 4096,
+                sea_level: 0.55,
+                show_water: true,
             },
             &[],
         );
@@ -8816,6 +8906,8 @@ mod tests {
         assert_eq!(restored.world_extent, 2048.0);
         assert_eq!(restored.world_height, 640.0);
         assert_eq!(restored.build_res, 4096);
+        assert_eq!(restored.sea_level, 0.55);
+        assert!(restored.show_water);
     }
 
     #[test]

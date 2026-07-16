@@ -28,6 +28,12 @@ impl Operator for Null {
         }
     }
 
+    /// Pure of the world globals: no sea level, world height, or world extent, so those
+    /// world-setting sliders never invalidate this node.
+    fn context_deps(&self) -> ymir_core::ContextDeps {
+        ymir_core::ContextDeps::NO_WORLD
+    }
+
     fn eval(&self, inputs: Inputs, _params: &Params, _ctx: &EvalContext) -> Result<Vec<Field>> {
         // Pass the input through unchanged: every layer, untouched (the field clone is cheap,
         // its layers are `Arc`). The memo cache makes this a no-cost relay in practice.

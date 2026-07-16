@@ -77,6 +77,12 @@ impl Operator for Slope {
         }
     }
 
+    /// Slope-aware: reads the world height and extent, not the sea level, so the sea-level
+    /// slider never invalidates this node.
+    fn context_deps(&self) -> ymir_core::ContextDeps {
+        ymir_core::ContextDeps::SLOPE
+    }
+
     fn eval(&self, inputs: Inputs, params: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
         let input = inputs[0];
         let width = input.width();

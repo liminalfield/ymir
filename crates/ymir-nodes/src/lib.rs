@@ -17,8 +17,10 @@ mod category;
 mod cellular_bumps;
 mod cellular_cracks;
 mod cellular_regions;
+mod coastal;
 mod curvature;
 mod curve;
+mod distance;
 mod erosion;
 mod export;
 mod export_exr;
@@ -58,6 +60,7 @@ pub use category::{CategoryDef, NodeGroup, categories, find_category, node_group
 pub use cellular_bumps::CellularBumps;
 pub use cellular_cracks::CellularCracks;
 pub use cellular_regions::CellularRegions;
+pub use coastal::Coastal;
 pub use curvature::Curvature;
 pub use curve::CurveNode;
 pub use export::ExportPng;

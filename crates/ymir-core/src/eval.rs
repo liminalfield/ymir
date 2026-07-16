@@ -24,7 +24,7 @@ use crate::field::Field;
 use crate::field_store::FieldStore;
 use crate::graph::{Graph, NodeId};
 use crate::hash::Fnv1a64;
-use crate::operator::Inputs;
+use crate::operator::{ContextDeps, Inputs};
 use crate::param::Params;
 use crate::region::Region;
 
@@ -49,6 +49,10 @@ pub struct EvalRequest {
     /// each node's [`EvalContext`] so slope-aware nodes get a true rise-over-run. Defaults to
     /// `1.0`.
     world_height: f64,
+    /// The sea/base level as a normalized height, threaded into each node's [`EvalContext`]: a
+    /// world global several nodes agree on (coastal reshaping, stream-power base level, the
+    /// viewport water). Defaults to `0.0`.
+    sea_level: f64,
     /// Subgraph nesting depth this request evaluates at; 0 at the top level. The evaluator
     /// threads it into each node's context, and a subgraph container raises it by one for
     /// its inner evaluation. Not part of the cache key: depth never changes a node's output.
@@ -69,6 +73,7 @@ impl EvalRequest {
             seed,
             world_extent: 1.0,
             world_height: 1.0,
+            sea_level: 0.0,
             depth: 0,
             cancel: CancelToken::new(),
         }
@@ -109,6 +114,15 @@ impl EvalRequest {
     #[must_use]
     pub fn with_world_height(mut self, world_height: f64) -> Self {
         self.world_height = world_height;
+        self
+    }
+
+    /// Sets the sea/base level as a normalized height, threaded into each node's [`EvalContext`].
+    /// Defaults to `0.0`. A world global that several nodes agree on (coastal, stream-power base
+    /// level, viewport water).
+    #[must_use]
+    pub fn with_sea_level(mut self, sea_level: f64) -> Self {
+        self.sea_level = sea_level;
         self
     }
 }
@@ -453,6 +467,7 @@ impl Graph {
             &input_keys,
             request,
             seed,
+            node.operator.context_deps(),
             node.operator.content_hash(),
         );
 
@@ -504,6 +519,7 @@ impl Graph {
             .with_cancel(request.cancel.clone())
             .with_world_extent(request.world_extent)
             .with_world_height(request.world_height)
+            .with_sea_level(request.sea_level)
             .with_depth(request.depth);
         let inputs = Inputs::new(&required, &optional);
         let outputs = Arc::new(node.operator.eval(inputs, &node.params, &ctx)?);
@@ -624,6 +640,7 @@ impl Graph {
             &input_keys,
             request,
             seed,
+            node.operator.context_deps(),
             node.operator.content_hash(),
         );
         keys.insert(id, key);
@@ -687,6 +704,7 @@ fn compute_key(
     input_keys: &[Option<u64>],
     request: &EvalRequest,
     seed: u64,
+    deps: ContextDeps,
     op_content: Option<u64>,
 ) -> u64 {
     let mut h = Fnv1a64::new();
@@ -704,15 +722,31 @@ fn compute_key(
             None => h.write_u64(0),
         }
     }
+    // Resolution and region are always keyed: nearly every node's output depends on them,
+    // so they are not part of the per-node `ContextDeps` narrowing.
     h.write_usize(request.width);
     h.write_usize(request.height);
     request.region.hash_into(&mut h);
-    h.write_f64_bits(request.world_extent);
-    // Keyed unconditionally, like world_extent: changing the vertical scale invalidates every
-    // node. world_height is a world setting, changed rarely, so this is acceptable; per-node
-    // context dependence (so non-slope nodes are spared) is a future optimization for both.
-    h.write_f64_bits(request.world_height);
-    h.write_u64(seed);
+    // The world globals and the seed are keyed only when the node declares it depends on them.
+    // A node keeps the default `ContextDeps::ALL`, so this folds in exactly the same bytes as
+    // before and its key is unchanged; a node that narrows its deps drops the fields it ignores,
+    // so a change to one of those no longer invalidates it. Dropping a field never risks a stale
+    // read (a node only narrows once its independence is established), and it never collides a
+    // narrowed node with another, since `type_id`, params, and input keys already disambiguate.
+    // A change a node does depend on still reaches it transitively, since its upstream keys are
+    // folded above.
+    if deps.world_extent {
+        h.write_f64_bits(request.world_extent);
+    }
+    if deps.world_height {
+        h.write_f64_bits(request.world_height);
+    }
+    if deps.sea_level {
+        h.write_f64_bits(request.sea_level);
+    }
+    if deps.seed {
+        h.write_u64(seed);
+    }
     // Folded only when present, so an ordinary operator's key is byte-identical to before
     // this hook existed; a subgraph folds its inner-graph hash so inner edits invalidate.
     if let Some(content) = op_content {
@@ -908,6 +942,68 @@ mod tests {
                     Arc::new(Layer::filled(ctx.width, ctx.height, value)),
                 ),
             ])
+        }
+    }
+
+    /// A generator that declares it does not depend on the world sea level, so a change to
+    /// the sea level must leave its cache key untouched. Every other field keeps the default.
+    #[derive(Clone)]
+    struct SeaAgnosticGen;
+
+    impl Operator for SeaAgnosticGen {
+        fn spec(&self) -> NodeSpec {
+            NodeSpec {
+                type_id: "test.sea_agnostic_gen",
+                category: "test",
+                inputs: Vec::new(),
+                outputs: vec![PortSpec::new("out")],
+                params: Vec::new(),
+            }
+        }
+
+        fn eval(&self, _: Inputs, _: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
+            Ok(vec![
+                Field::new(ctx.width, ctx.height, ctx.region).with_layer(
+                    layers::HEIGHT,
+                    Arc::new(Layer::filled(ctx.width, ctx.height, 0.5)),
+                ),
+            ])
+        }
+
+        fn context_deps(&self) -> ContextDeps {
+            ContextDeps {
+                sea_level: false,
+                ..ContextDeps::ALL
+            }
+        }
+    }
+
+    /// A one-input pass-through that also declares independence from the sea level, for the
+    /// transitive test: excluding it locally must not let it hide an upstream node that does
+    /// depend on the sea level.
+    #[derive(Clone)]
+    struct SeaAgnosticPass;
+
+    impl Operator for SeaAgnosticPass {
+        fn spec(&self) -> NodeSpec {
+            NodeSpec {
+                type_id: "test.sea_agnostic_pass",
+                category: "test",
+                inputs: vec![PortSpec::new("in")],
+                outputs: vec![PortSpec::new("out")],
+                params: Vec::new(),
+            }
+        }
+
+        fn eval(&self, inputs: Inputs, _: &Params, _: &EvalContext) -> Result<Vec<Field>> {
+            Ok(vec![inputs[0].clone()])
+        }
+
+        fn context_deps(&self) -> ContextDeps {
+            ContextDeps {
+                sea_level: false,
+                ..ContextDeps::ALL
+            }
         }
     }
 
@@ -1178,6 +1274,108 @@ mod tests {
         assert_ne!(
             graph.output_key(probe, &a).unwrap(),
             graph.output_key(probe, &b).unwrap()
+        );
+    }
+
+    #[test]
+    fn changing_sea_level_invalidates_the_cache() {
+        let mut graph = Graph::new();
+        let probe = graph.add_op(Box::new(ProbeExtent), Params::new());
+        let a = EvalRequest::new(64, 64, Region::UNIT, 0).with_sea_level(0.2);
+        let b = EvalRequest::new(64, 64, Region::UNIT, 0).with_sea_level(0.5);
+        // Sea level is keyed like the other world settings, so a different level is a different
+        // key and threads through to each node's context.
+        assert_ne!(
+            graph.output_key(probe, &a).unwrap(),
+            graph.output_key(probe, &b).unwrap()
+        );
+    }
+
+    #[test]
+    fn context_deps_gate_the_world_fields_in_the_key() {
+        // A direct check of the key builder: which world fields (and the seed) it folds in is
+        // gated by the node's declared dependencies, and nothing else about the key changes.
+        let base = || {
+            EvalRequest::new(64, 64, Region::UNIT, 0)
+                .with_world_extent(1000.0)
+                .with_world_height(500.0)
+                .with_sea_level(0.3)
+        };
+        let k = |req: &EvalRequest, deps: ContextDeps, seed: u64| {
+            compute_key("t", &Params::new(), &[], req, seed, deps, None)
+        };
+        let all = ContextDeps::ALL;
+
+        // Default ALL keys every world field, so a change to the sea level is a different key.
+        let sea = base().with_sea_level(0.9);
+        assert_ne!(k(&base(), all, 0), k(&sea, all, 0));
+
+        // Excluding sea_level makes that same change a no-op for the key...
+        let no_sea = ContextDeps {
+            sea_level: false,
+            ..ContextDeps::ALL
+        };
+        assert_eq!(k(&base(), no_sea, 0), k(&sea, no_sea, 0));
+        // ...without spilling into world_height, which the node still depends on.
+        let taller = base().with_world_height(999.0);
+        assert_ne!(k(&base(), no_sea, 0), k(&taller, no_sea, 0));
+
+        // The seed is gated the same way: a node that ignores it is stable across a reseed,
+        // while a default node is not.
+        let no_seed = ContextDeps {
+            seed: false,
+            ..ContextDeps::ALL
+        };
+        assert_eq!(k(&base(), no_seed, 1), k(&base(), no_seed, 2));
+        assert_ne!(k(&base(), all, 1), k(&base(), all, 2));
+
+        // Excluding a field never severs the transitive path: a change reaches a narrowed node
+        // through its input keys, which are folded in unconditionally.
+        assert_ne!(
+            compute_key("t", &Params::new(), &[Some(10)], &base(), 0, no_sea, None),
+            compute_key("t", &Params::new(), &[Some(20)], &base(), 0, no_sea, None),
+        );
+    }
+
+    #[test]
+    fn a_node_that_ignores_sea_level_keeps_its_key_when_it_changes() {
+        // End-to-end: the evaluator threads the operator's declared deps into the key, so a
+        // node that excludes sea_level is not invalidated by the slider.
+        let mut graph = Graph::new();
+        let generator = graph.add_op(Box::new(SeaAgnosticGen), Params::new());
+        let a = EvalRequest::new(64, 64, Region::UNIT, 0).with_sea_level(0.2);
+        let b = EvalRequest::new(64, 64, Region::UNIT, 0).with_sea_level(0.8);
+        assert_eq!(
+            graph.output_key(generator, &a).unwrap(),
+            graph.output_key(generator, &b).unwrap(),
+            "a node declaring no sea-level dependence must not invalidate when it changes"
+        );
+        // A field it does depend on still invalidates it, so the exclusion is scoped.
+        let taller = EvalRequest::new(64, 64, Region::UNIT, 0)
+            .with_sea_level(0.2)
+            .with_world_height(2.0);
+        assert_ne!(
+            graph.output_key(generator, &a).unwrap(),
+            graph.output_key(generator, &taller).unwrap(),
+            "excluding sea_level must not spare world_height"
+        );
+    }
+
+    #[test]
+    fn an_upstream_sea_level_dependency_still_invalidates_a_downstream_that_ignores_it() {
+        // ProbeExtent keeps the default deps (so it depends on sea_level); the downstream pass
+        // declares it does not. A sea-level change must still reach the pass through its input
+        // key, so a node cannot hide an upstream dependence by excluding the field locally.
+        let mut graph = Graph::new();
+        let up = graph.add_op(Box::new(ProbeExtent), Params::new());
+        let down = graph.add_op(Box::new(SeaAgnosticPass), Params::new());
+        graph.connect(up, 0, down, 0).unwrap();
+        let a = EvalRequest::new(64, 64, Region::UNIT, 0).with_sea_level(0.2);
+        let b = EvalRequest::new(64, 64, Region::UNIT, 0).with_sea_level(0.8);
+        assert_ne!(
+            graph.output_key(down, &a).unwrap(),
+            graph.output_key(down, &b).unwrap(),
+            "an upstream sea-level dependence must invalidate the downstream through its input key"
         );
     }
 
