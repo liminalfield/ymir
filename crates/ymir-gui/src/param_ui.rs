@@ -103,15 +103,16 @@ pub(crate) fn value_text(value: &ParamValue) -> String {
     }
 }
 
-/// Height of a parameter row's reset-icon / value band.
-const DENSE_ROW_H: f32 = 22.0;
 /// Fixed width of a parameter row's value box.
 const VALUE_W: f32 = 54.0;
 
 /// A small faint revert glyph, shown when a value is off its default; clicking it resets that one
 /// parameter. Returns its response.
 fn reset_icon(ui: &mut egui::Ui) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(16.0, DENSE_ROW_H), egui::Sense::click());
+    // Allocate the same height as the value field beside it (its `add_sized` uses this same
+    // interact size), so the glyph appearing when a value goes off-default cannot grow the row.
+    let h = ui.spacing().interact_size.y;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(16.0, h), egui::Sense::click());
     let color = if resp.hovered() {
         crate::theme::TEXT_SECONDARY
     } else {
@@ -528,6 +529,24 @@ mod tests {
 
     fn spec(kind: ParamKind, default: ParamValue) -> ParamSpec {
         ParamSpec::new("p", kind, default)
+    }
+
+    #[test]
+    fn reset_glyph_matches_the_value_field_height() {
+        // The reset glyph shares a horizontal row with the value field, so if it allocated a taller
+        // box the row would grow the moment a value went off its default (#142). Both must use the
+        // same interact height.
+        let mut glyph_h = 0.0;
+        let mut field_h = 0.0;
+        egui::__run_test_ui(|ui| {
+            field_h = ui.spacing().interact_size.y;
+            glyph_h = reset_icon(ui).rect.height();
+        });
+        assert!(field_h > 0.0, "interact height should be non-zero");
+        assert_eq!(
+            glyph_h, field_h,
+            "the reset glyph must be the same height as the value field, or the row grows when it appears"
+        );
     }
 
     #[test]
