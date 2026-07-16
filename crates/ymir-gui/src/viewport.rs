@@ -67,7 +67,8 @@ struct Uniforms {
     mvp: [[f32; 4]; 4],
     light_dir: [f32; 4],
     light: [f32; 4],
-    /// Water plane: x = surface height in mesh units, y = enabled (`1.0`) or off (`0.0`); z/w unused.
+    /// Water plane: x = surface height in mesh units, y = enabled (`1.0`) or off (`0.0`),
+    /// z = sea level as a normalized `[0, 1]` height (for the depth colour); w unused.
     water: [f32; 4],
 }
 
@@ -188,6 +189,13 @@ struct ViewportResources {
     mesh_res: usize,
     uniform_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    /// Water depth (Tier 0, #140): the terrain heightfield as a texture, so the water shader can
+    /// read the seabed height under each fragment. Recreated when the mesh resolution changes and
+    /// re-written when the field changes; bound to the water pipeline as group 1.
+    height_texture: wgpu::Texture,
+    height_res: usize,
+    height_bind_group: wgpu::BindGroup,
+    height_layout: wgpu::BindGroupLayout,
     /// Offscreen fork: the color+depth targets the scene renders into, the pipeline + layout +
     /// sampler that composite them into egui's pass, and the surface format the targets match.
     offscreen: Offscreen,
@@ -195,6 +203,72 @@ struct ViewportResources {
     blit_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     target_format: wgpu::TextureFormat,
+}
+
+/// Creates the `res`x`res` R32Float terrain-height texture the water shader samples (Tier 0).
+/// Content is written separately via [`write_height_texture`].
+fn make_height_texture(device: &wgpu::Device, res: usize) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("viewport-height-texture"),
+        size: wgpu::Extent3d {
+            width: res.max(1) as u32,
+            height: res.max(1) as u32,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    })
+}
+
+/// Uploads a row-major `[0, 1]` height grid (`res`x`res`) into the height texture.
+fn write_height_texture(queue: &wgpu::Queue, texture: &wgpu::Texture, heights: &[f32], res: usize) {
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        bytemuck::cast_slice(heights),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some((res * std::mem::size_of::<f32>()) as u32),
+            rows_per_image: Some(res as u32),
+        },
+        wgpu::Extent3d {
+            width: res as u32,
+            height: res as u32,
+            depth_or_array_layers: 1,
+        },
+    );
+}
+
+/// Binds the height texture and sampler for the water pipeline's group 1.
+fn make_height_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    texture: &wgpu::Texture,
+    sampler: &wgpu::Sampler,
+) -> wgpu::BindGroup {
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("viewport-height-bind-group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    })
 }
 
 /// Builds the viewport's wgpu pipeline, fixed grid topology, and uniforms, storing them for
@@ -256,6 +330,35 @@ pub(crate) fn init(render_state: &egui_wgpu::RenderState) {
         bind_group_layouts: &[Some(&bind_group_layout)],
         immediate_size: 0,
     });
+    // Group 1 for the water pipeline: the terrain height as a texture, so the water shader reads
+    // the seabed depth per fragment (Tier 0, #140). Non-filtering because R32Float is not a
+    // filterable format without a device feature; nearest is fine for a dense height grid.
+    let height_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("viewport-height-layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                count: None,
+            },
+        ],
+    });
+    let water_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("viewport-water-layout"),
+        bind_group_layouts: &[Some(&bind_group_layout), Some(&height_layout)],
+        immediate_size: 0,
+    });
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("viewport-pipeline"),
         layout: Some(&layout),
@@ -303,7 +406,7 @@ pub(crate) fn init(render_state: &egui_wgpu::RenderState) {
     // single translucent surface needs no self-occlusion), which yields a clean waterline.
     let water_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("viewport-water-pipeline"),
-        layout: Some(&layout),
+        layout: Some(&water_pipeline_layout),
         vertex: wgpu::VertexState {
             module: &shader,
             entry_point: Some("vs_water"),
@@ -407,6 +510,18 @@ pub(crate) fn init(render_state: &egui_wgpu::RenderState) {
         &sampler,
     );
 
+    // Water depth texture (Tier 0): starts flat at MESH_RES; `prepare` re-uploads and grows it
+    // when the field or resolution changes. Reuses the (nearest) blit sampler.
+    let height_texture = make_height_texture(device, MESH_RES);
+    write_height_texture(
+        &render_state.queue,
+        &height_texture,
+        &vec![0.0_f32; MESH_RES * MESH_RES],
+        MESH_RES,
+    );
+    let height_bind_group =
+        make_height_bind_group(device, &height_layout, &height_texture, &sampler);
+
     render_state
         .renderer
         .write()
@@ -421,6 +536,10 @@ pub(crate) fn init(render_state: &egui_wgpu::RenderState) {
             mesh_res: MESH_RES,
             uniform_buffer,
             bind_group,
+            height_texture,
+            height_res: MESH_RES,
+            height_bind_group,
+            height_layout,
             offscreen,
             blit_pipeline,
             blit_layout,
@@ -442,6 +561,9 @@ struct ViewportCallback {
     mesh: Option<MeshUpload>,
     /// Water surface height in mesh units (`sea_level` mapped the same way terrain height is).
     water_y: f32,
+    /// The same sea level as a normalized `[0, 1]` height, for the water shader's depth (kept
+    /// independent of the vertical-scale slider so the depth colour looks consistent).
+    sea_norm: f32,
     /// Whether to draw the water plane this frame.
     water_enabled: bool,
     /// Physical-pixel size of the viewport rect this frame; the offscreen targets track it.
@@ -452,6 +574,9 @@ struct ViewportCallback {
 /// callback can rebuild the index topology when the resolution changes).
 struct MeshUpload {
     vertices: Vec<Vertex>,
+    /// The `[0, 1]` mapped height grid (row-major, `res`x`res`) uploaded to the water depth
+    /// texture, so the water shader reads the seabed under each fragment (Tier 0).
+    heights: Vec<f32>,
     res: usize,
 }
 
@@ -475,7 +600,7 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                 water: [
                     self.water_y,
                     if self.water_enabled { 1.0 } else { 0.0 },
-                    0.0,
+                    self.sea_norm,
                     0.0,
                 ],
             };
@@ -512,6 +637,20 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                         });
                     res.mesh_res = upload.res;
                 }
+
+                // Water depth texture: grow it when the resolution changes, then upload the
+                // heights so the water shader reads the current seabed (Tier 0).
+                if upload.res != res.height_res {
+                    res.height_texture = make_height_texture(device, upload.res);
+                    res.height_bind_group = make_height_bind_group(
+                        device,
+                        &res.height_layout,
+                        &res.height_texture,
+                        &res.sampler,
+                    );
+                    res.height_res = upload.res;
+                }
+                write_height_texture(queue, &res.height_texture, &upload.heights, upload.res);
             }
         }
 
@@ -564,10 +703,12 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
             pass.set_index_buffer(res.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..res.index_count, 0, 0..1);
 
-            // Water after the terrain, so depth testing clips it at the waterline.
+            // Water after the terrain, so depth testing clips it at the waterline. Group 1 is the
+            // height texture the water shader samples for depth.
             if self.water_enabled {
                 pass.set_pipeline(&res.water_pipeline);
                 pass.set_bind_group(0, &res.bind_group, &[]);
+                pass.set_bind_group(1, &res.height_bind_group, &[]);
                 pass.draw(0..6, 0..1);
             }
         }
@@ -677,8 +818,10 @@ pub(crate) fn show(
         } else {
             *meshed = Some(key);
             let heights = sample_field(field, res, settings.fixed_range);
+            let vertices = build_vertices(&heights, settings.vertical_scale, res);
             Some(MeshUpload {
-                vertices: build_vertices(&heights, settings.vertical_scale, res),
+                vertices,
+                heights,
                 res,
             })
         }
@@ -715,6 +858,7 @@ pub(crate) fn show(
             light: [lighting.intensity, lighting.ambient, 0.0, 0.0],
             mesh,
             water_y,
+            sea_norm: mapped_sea,
             water_enabled: settings.show_water,
             target_size,
         },
@@ -1069,23 +1213,50 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(base * shade, 1.0);
 }
 
+// Group 1: the terrain height grid (normalized [0,1]), so the water shader reads the seabed
+// depth per fragment. Only the water entry points use it; the terrain pipeline binds group 0 only.
+@group(1) @binding(0) var height_tex: texture_2d<f32>;
+@group(1) @binding(1) var height_samp: sampler;
+
+// Depth extinction in normalized-height units, and the base water tint.
+const WATER_K: f32 = 9.0;
+const WATER_TINT: vec3<f32> = vec3<f32>(0.10, 0.28, 0.42);
+
+struct WaterOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
 // Water plane: two triangles over the [0,1] x/z footprint at the sea-level height in u.water.x.
-// Generated from the vertex index, so no vertex buffer is needed.
+// Generated from the vertex index, so no vertex buffer is needed. The corner XZ doubles as the
+// height-texture UV (the footprint and the texture share the [0,1] domain).
 @vertex
-fn vs_water(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
+fn vs_water(@builtin(vertex_index) vi: u32) -> WaterOut {
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0),
         vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0),
     );
     let c = corners[vi];
-    return u.mvp * vec4<f32>(c.x, u.water.x, c.y, 1.0);
+    var out: WaterOut;
+    out.clip = u.mvp * vec4<f32>(c.x, u.water.x, c.y, 1.0);
+    out.uv = c;
+    return out;
 }
 
 @fragment
-fn fs_water() -> @location(0) vec4<f32> {
-    // A simple translucent blue: enough to read the surface and see it clip against the terrain.
-    // Depth testing (not writing) does the intersection; richer shading comes later.
-    return vec4<f32>(0.10, 0.28, 0.42, 0.6);
+fn fs_water(in: WaterOut) -> @location(0) vec4<f32> {
+    // Seabed height (normalized) under this fragment; depth is how far below the sea it sits.
+    // textureSampleLevel (explicit LOD 0) works with the non-filterable single-mip height texture.
+    let seabed = textureSampleLevel(height_tex, height_samp, in.uv, 0.0).r;
+    let depth = u.water.z - seabed;
+    if (depth <= 0.0) {
+        discard; // terrain is above the waterline here: no water
+    }
+    // Beer-Lambert: more opaque and darker with depth; shallow water is light and see-through.
+    let transmit = exp(-depth * WATER_K);
+    let alpha = clamp(1.0 - transmit, 0.12, 0.95);
+    let color = WATER_TINT * (0.35 + 0.65 * transmit);
+    return vec4<f32>(color, alpha);
 }
 ";
 
