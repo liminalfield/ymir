@@ -463,6 +463,12 @@ struct AppState {
     /// Whether the 3D viewport draws the water plane at [`sea_level`](Self::sea_level). A view
     /// aid, on by default so the sea reads on a fresh launch.
     show_water: bool,
+    /// Water effect layers (#157), stacking on plain translucent water: depth shading, the animated
+    /// surface (ripples/Fresnel/specular), and foam. Ephemeral view state. Off is cheaper and, for
+    /// the animated layers, stops the viewport's per-frame repaint so still water idles the fans.
+    water_depth: bool,
+    water_surface: bool,
+    water_foam_on: bool,
     /// Water depth falloff (Beer-Lambert extinction) for the 3D viewport water (#154). Ephemeral
     /// view state for now (not persisted); a higher value clears to opaque faster.
     water_extinction: f32,
@@ -475,6 +481,13 @@ struct AppState {
     /// Shoreline foam controls (ephemeral): amount and band width (#156).
     water_foam: f32,
     water_foam_width: f32,
+    /// Water animation speed multiplier (#157), scaling how fast the ripples and foam scroll.
+    /// Ephemeral view state; `0` freezes the surface.
+    water_speed: f32,
+    /// Accumulated water animation phase in seconds of motion. Advanced each frame by the real
+    /// frame delta times [`water_speed`](Self::water_speed), so the speed control changes future
+    /// motion without jumping the waves. Not persisted (it is a running clock, not a setting).
+    water_phase: f32,
     /// The project file the session is bound to, if any (#75). `Save` writes here;
     /// `None` until the project is first saved or opened, when `Save` falls back to
     /// `Save As`.
@@ -743,6 +756,11 @@ impl AppState {
             world_height: project_file::DEFAULT_WORLD_HEIGHT,
             sea_level: project_file::DEFAULT_SEA_LEVEL,
             show_water: true,
+            // All effect layers on by default, so a fresh launch shows the full water look; each
+            // can be switched off for performance or a plainer surface (#157).
+            water_depth: true,
+            water_surface: true,
+            water_foam_on: true,
             // Ephemeral water look; matches the shader's previous hardcoded defaults.
             water_extinction: 9.0,
             water_color: [0.10, 0.28, 0.42],
@@ -751,6 +769,9 @@ impl AppState {
             water_specular: 0.5,
             water_foam: 0.5,
             water_foam_width: 0.015,
+            // A calm default: the raw shader rates read as frantic at full speed, so start slow.
+            water_speed: 0.4,
+            water_phase: 0.0,
             project_path: None,
             recent: Vec::new(),
             // The built-in starter has no saved camera, so fit it to the screen on the first
@@ -4294,30 +4315,66 @@ fn world_settings(ui: &mut egui::Ui, state: &mut AppState) {
         ui.color_edit_button_rgb(&mut state.water_color);
     });
     ui.horizontal(|ui| {
+        // Effect layers, stacking on plain translucent water (#157). Each gates its own controls
+        // below; turning Surface and Foam off also stops the viewport's per-frame repaint, so
+        // still water is both plainer and cheaper. Depth shading tints the color set above.
+        ui.label("Effects");
+        ui.checkbox(&mut state.water_depth, "Depth");
+        ui.checkbox(&mut state.water_surface, "Surface");
+        ui.checkbox(&mut state.water_foam_on, "Foam");
+    });
+    ui.horizontal(|ui| {
+        // Animation speed for the ripples and foam (#157); 0 freezes the surface. Only relevant
+        // while an animated layer is on, so it grays out with Surface and Foam both off.
+        ui.label("Speed");
+        ui.add_enabled(
+            state.water_surface || state.water_foam_on,
+            egui::Slider::new(&mut state.water_speed, 0.0..=2.0).fixed_decimals(2),
+        );
+    });
+    ui.horizontal(|ui| {
         // Beer-Lambert depth falloff for the 3D viewport water: higher clears to opaque faster,
         // lower stays see-through deeper. Ephemeral view state (not saved with the project yet).
         ui.label("Depth falloff");
-        ui.add(egui::Slider::new(&mut state.water_extinction, 1.0..=30.0).fixed_decimals(1));
+        ui.add_enabled(
+            state.water_depth,
+            egui::Slider::new(&mut state.water_extinction, 1.0..=30.0).fixed_decimals(1),
+        );
     });
     ui.horizontal(|ui| {
         ui.label("Waves");
-        ui.add(egui::Slider::new(&mut state.water_wave, 0.0..=1.0).fixed_decimals(2));
+        ui.add_enabled(
+            state.water_surface,
+            egui::Slider::new(&mut state.water_wave, 0.0..=1.0).fixed_decimals(2),
+        );
     });
     ui.horizontal(|ui| {
         ui.label("Reflectivity");
-        ui.add(egui::Slider::new(&mut state.water_reflectivity, 0.0..=1.0).fixed_decimals(2));
+        ui.add_enabled(
+            state.water_surface,
+            egui::Slider::new(&mut state.water_reflectivity, 0.0..=1.0).fixed_decimals(2),
+        );
     });
     ui.horizontal(|ui| {
         ui.label("Specular");
-        ui.add(egui::Slider::new(&mut state.water_specular, 0.0..=1.0).fixed_decimals(2));
+        ui.add_enabled(
+            state.water_surface,
+            egui::Slider::new(&mut state.water_specular, 0.0..=1.0).fixed_decimals(2),
+        );
     });
     ui.horizontal(|ui| {
         ui.label("Foam");
-        ui.add(egui::Slider::new(&mut state.water_foam, 0.0..=1.0).fixed_decimals(2));
+        ui.add_enabled(
+            state.water_foam_on,
+            egui::Slider::new(&mut state.water_foam, 0.0..=1.0).fixed_decimals(2),
+        );
     });
     ui.horizontal(|ui| {
         ui.label("Foam width");
-        ui.add(egui::Slider::new(&mut state.water_foam_width, 0.0..=0.05).fixed_decimals(3));
+        ui.add_enabled(
+            state.water_foam_on,
+            egui::Slider::new(&mut state.water_foam_width, 0.0..=0.05).fixed_decimals(3),
+        );
     });
 
     ui.separator();
@@ -6730,11 +6787,22 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
             // proportion.
             let true_proportion =
                 (state.world_height / state.world_extent.max(f64::EPSILON)) as f32;
+            // Advance the animation phase by the real frame delta scaled by the speed control, but
+            // only while an animated layer is on, so the speed slider changes future motion without
+            // rescaling the elapsed phase (which would jump the waves) and dropped frames do not
+            // slow it (the delta is real). Frozen or hidden water leaves the phase untouched.
+            if state.show_water && (state.water_surface || state.water_foam_on) {
+                let dt = ui.input(|i| i.stable_dt);
+                state.water_phase += dt * state.water_speed;
+            }
             let settings = viewport::ViewSettings {
                 fixed_range: state.viewport_scale == shade::HeightScale::Fixed,
                 vertical_scale: true_proportion * state.viewport_exaggeration,
                 sea_level,
                 show_water,
+                water_depth: state.water_depth,
+                water_surface: state.water_surface,
+                water_foam_on: state.water_foam_on,
                 water_extinction: state.water_extinction,
                 water_color: state.water_color,
                 water_wave: state.water_wave,
@@ -6742,6 +6810,8 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 water_specular: state.water_specular,
                 water_foam: state.water_foam,
                 water_foam_width: state.water_foam_width,
+                water_time: state.water_phase,
+                water_speed: state.water_speed,
             };
             viewport::show(
                 ui,
