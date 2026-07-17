@@ -77,6 +77,9 @@ struct Uniforms {
     /// Water surface params (Tier 1): x = time (seconds), y = wave strength, z = reflectivity,
     /// w = specular intensity.
     surface: [f32; 4],
+    /// Shoreline params: x = foam amount, y = foam width (in normalized depth); z/w reserved
+    /// (wet-shore later).
+    shore: [f32; 4],
 }
 
 /// The offscreen color + depth targets the scene renders into, plus the bind group that lets
@@ -581,6 +584,9 @@ struct ViewportCallback {
     water_wave: f32,
     water_reflectivity: f32,
     water_specular: f32,
+    /// Shoreline foam controls: amount and band width (in normalized depth).
+    water_foam: f32,
+    water_foam_width: f32,
     /// Whether to draw the water plane this frame.
     water_enabled: bool,
     /// Physical-pixel size of the viewport rect this frame; the offscreen targets track it.
@@ -633,6 +639,7 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                     self.water_reflectivity,
                     self.water_specular,
                 ],
+                shore: [self.water_foam, self.water_foam_width, 0.0, 0.0],
             };
             queue.write_buffer(&res.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
@@ -787,6 +794,9 @@ pub(crate) struct ViewSettings {
     pub water_wave: f32,
     pub water_reflectivity: f32,
     pub water_specular: f32,
+    /// Shoreline foam amount and band width (normalized depth).
+    pub water_foam: f32,
+    pub water_foam_width: f32,
 }
 
 /// The viewport's directional sun: where it sits (azimuth around the compass, elevation above
@@ -905,6 +915,8 @@ pub(crate) fn show(
             water_wave: settings.water_wave,
             water_reflectivity: settings.water_reflectivity,
             water_specular: settings.water_specular,
+            water_foam: settings.water_foam,
+            water_foam_width: settings.water_foam_width,
             water_enabled: settings.show_water,
             target_size,
         },
@@ -1230,6 +1242,7 @@ struct Uniforms {
     water_color: vec4<f32>,
     eye: vec4<f32>,
     surface: vec4<f32>,
+    shore: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 
@@ -1306,6 +1319,15 @@ fn water_normal(p: vec2<f32>, t: f32, amp: f32) -> vec3<f32> {
     return normalize(vec3<f32>(-grad.x * amp, 1.0, -grad.y * amp));
 }
 
+// A cheap animated noise that breaks the foam band into moving patches (0..1), so the shore reads
+// as broken surf rather than a solid ring.
+fn foam_noise(p: vec2<f32>, t: f32) -> f32 {
+    let a = sin(p.x * 70.0 + t * 2.5) * sin(p.y * 64.0 - t * 1.7);
+    let b = sin((p.x + p.y) * 120.0 - t * 3.3);
+    let n = 0.5 + 0.5 * (a * 0.6 + b * 0.4);
+    return smoothstep(0.35, 0.85, n);
+}
+
 @fragment
 fn fs_water(in: WaterOut) -> @location(0) vec4<f32> {
     // Seabed height (normalized) under this fragment; depth is how far below the sea it sits.
@@ -1345,8 +1367,17 @@ fn fs_water(in: WaterOut) -> @location(0) vec4<f32> {
     let spec = pow(max(dot(n, h), 0.0), 80.0) * u.surface.w;
     color = color + vec3<f32>(spec);
 
-    // Reflective (grazing) water reads more opaque.
-    let alpha = clamp(max(base_alpha, fresnel), 0.12, 1.0);
+    // Foam: a broken bright band in shallow water near the shore. Depth-based, so its width varies
+    // with shore slope (a uniform-width band would need distance-to-shore, a follow-up).
+    let foam = clamp(
+        (1.0 - smoothstep(0.0, u.shore.y, depth)) * foam_noise(in.uv, u.surface.x) * u.shore.x,
+        0.0,
+        1.0,
+    );
+    color = mix(color, vec3<f32>(1.0), foam);
+
+    // Reflective (grazing) water and foam both read more opaque.
+    let alpha = clamp(max(max(base_alpha, fresnel), foam), 0.12, 1.0);
     return vec4<f32>(color, alpha);
 }
 ";

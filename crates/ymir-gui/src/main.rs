@@ -472,6 +472,9 @@ struct AppState {
     water_wave: f32,
     water_reflectivity: f32,
     water_specular: f32,
+    /// Shoreline foam controls (ephemeral): amount and band width (#156).
+    water_foam: f32,
+    water_foam_width: f32,
     /// The project file the session is bound to, if any (#75). `Save` writes here;
     /// `None` until the project is first saved or opened, when `Save` falls back to
     /// `Save As`.
@@ -746,6 +749,8 @@ impl AppState {
             water_wave: 0.5,
             water_reflectivity: 0.6,
             water_specular: 0.5,
+            water_foam: 0.5,
+            water_foam_width: 0.015,
             project_path: None,
             recent: Vec::new(),
             // The built-in starter has no saved camera, so fit it to the screen on the first
@@ -4306,6 +4311,14 @@ fn world_settings(ui: &mut egui::Ui, state: &mut AppState) {
         ui.label("Specular");
         ui.add(egui::Slider::new(&mut state.water_specular, 0.0..=1.0).fixed_decimals(2));
     });
+    ui.horizontal(|ui| {
+        ui.label("Foam");
+        ui.add(egui::Slider::new(&mut state.water_foam, 0.0..=1.0).fixed_decimals(2));
+    });
+    ui.horizontal(|ui| {
+        ui.label("Foam width");
+        ui.add(egui::Slider::new(&mut state.water_foam_width, 0.0..=0.05).fixed_decimals(3));
+    });
 
     ui.separator();
     ui.label("Build resolution");
@@ -6727,6 +6740,8 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 water_wave: state.water_wave,
                 water_reflectivity: state.water_reflectivity,
                 water_specular: state.water_specular,
+                water_foam: state.water_foam,
+                water_foam_width: state.water_foam_width,
             };
             viewport::show(
                 ui,
