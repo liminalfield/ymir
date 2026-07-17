@@ -72,6 +72,17 @@ struct Uniforms {
     water: [f32; 4],
     /// Water tint (linear RGB in xyz; w unused).
     water_color: [f32; 4],
+    /// Camera eye position in model space (xyz), for the water view vector (Tier 1); w unused.
+    eye: [f32; 4],
+    /// Water surface params (Tier 1): x = time (seconds), y = wave strength, z = reflectivity,
+    /// w = specular intensity.
+    surface: [f32; 4],
+    /// Shoreline params: x = foam amount, y = foam width (in normalized depth); z/w reserved
+    /// (wet-shore later).
+    shore: [f32; 4],
+    /// Layer toggles (1 on, 0 off): x = depth shading, y = surface (waves/Fresnel/specular),
+    /// z = foam; w unused. Off falls back toward plain translucent water.
+    flags: [f32; 4],
 }
 
 /// The offscreen color + depth targets the scene renders into, plus the bind group that lets
@@ -569,8 +580,23 @@ struct ViewportCallback {
     /// Water depth falloff (extinction) and tint, from the World-panel water controls.
     water_extinction: f32,
     water_color: [f32; 3],
+    /// Tier 1 surface: camera eye (model space), animation time, and the wave / reflectivity /
+    /// specular controls.
+    eye: [f32; 3],
+    time: f32,
+    water_wave: f32,
+    water_reflectivity: f32,
+    water_specular: f32,
+    /// Shoreline foam controls: amount and band width (in normalized depth).
+    water_foam: f32,
+    water_foam_width: f32,
     /// Whether to draw the water plane this frame.
     water_enabled: bool,
+    /// Layer toggles (#157): depth shading, the animated surface, and foam. Each stacks on the
+    /// one before; all off is plain translucent water.
+    water_depth: bool,
+    water_surface: bool,
+    water_foam_on: bool,
     /// Physical-pixel size of the viewport rect this frame; the offscreen targets track it.
     target_size: [u32; 2],
 }
@@ -612,6 +638,20 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                     self.water_color[0],
                     self.water_color[1],
                     self.water_color[2],
+                    0.0,
+                ],
+                eye: [self.eye[0], self.eye[1], self.eye[2], 0.0],
+                surface: [
+                    self.time,
+                    self.water_wave,
+                    self.water_reflectivity,
+                    self.water_specular,
+                ],
+                shore: [self.water_foam, self.water_foam_width, 0.0, 0.0],
+                flags: [
+                    if self.water_depth { 1.0 } else { 0.0 },
+                    if self.water_surface { 1.0 } else { 0.0 },
+                    if self.water_foam_on { 1.0 } else { 0.0 },
                     0.0,
                 ],
             };
@@ -759,11 +799,32 @@ pub(crate) struct ViewSettings {
     pub sea_level: f32,
     /// Whether to draw the water plane at all.
     pub show_water: bool,
+    /// Layer toggles (#157), stacking on plain translucent water: depth shading (Tier 0), the
+    /// animated surface (Tier 1: ripples, Fresnel, specular), and foam. Turning the animated
+    /// layers off also stops the per-frame repaint, so still water costs nothing.
+    pub water_depth: bool,
+    pub water_surface: bool,
+    pub water_foam_on: bool,
     /// Water depth falloff (Beer-Lambert extinction, in normalized-height units): higher clears
     /// to opaque faster, lower stays see-through deeper.
     pub water_extinction: f32,
     /// Water tint (linear RGB).
     pub water_color: [f32; 3],
+    /// Tier 1 surface controls: ripple strength, sky reflectivity, and specular intensity.
+    pub water_wave: f32,
+    pub water_reflectivity: f32,
+    pub water_specular: f32,
+    /// Shoreline foam amount and band width (normalized depth).
+    pub water_foam: f32,
+    pub water_foam_width: f32,
+    /// Accumulated water animation phase in seconds of motion. The caller advances it by real
+    /// elapsed time scaled by [`water_speed`](Self::water_speed), so changing the speed alters
+    /// future motion without retroactively rescaling the elapsed phase (which would jump the
+    /// waves), and dropped frames do not slow it.
+    pub water_time: f32,
+    /// Water animation speed multiplier. `0` freezes the surface, and the viewport then skips the
+    /// per-frame repaint entirely.
+    pub water_speed: f32,
 }
 
 /// The viewport's directional sun: where it sits (azimuth around the compass, elevation above
@@ -877,10 +938,33 @@ pub(crate) fn show(
             sea_norm: mapped_sea,
             water_extinction: settings.water_extinction,
             water_color: settings.water_color,
+            eye: camera.eye().into(),
+            time: settings.water_time,
+            water_wave: settings.water_wave,
+            water_reflectivity: settings.water_reflectivity,
+            water_specular: settings.water_specular,
+            water_foam: settings.water_foam,
+            water_foam_width: settings.water_foam_width,
             water_enabled: settings.show_water,
+            water_depth: settings.water_depth,
+            water_surface: settings.water_surface,
+            water_foam_on: settings.water_foam_on,
             target_size,
         },
     );
+    // Animate only when there is an animated layer to show and the speed is non-zero. The surface
+    // ripples and the foam both scroll with the phase; depth shading and plain translucent water
+    // are static. Throttling to ~30 fps (rather than an unbounded `request_repaint`) keeps the
+    // animation smooth without pegging the GPU, and skipping it entirely for still or frozen water
+    // lets the fans idle (#157). The phase is a real-time accumulator (see `water_time`), so a
+    // capped rate does not slow the waves.
+    let animated = settings.show_water
+        && (settings.water_surface || settings.water_foam_on)
+        && settings.water_speed > 0.0;
+    if animated {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(33));
+    }
     ui.painter().add(callback);
 }
 
@@ -1196,6 +1280,10 @@ struct Uniforms {
     light: vec4<f32>,
     water: vec4<f32>,
     water_color: vec4<f32>,
+    eye: vec4<f32>,
+    surface: vec4<f32>,
+    shore: vec4<f32>,
+    flags: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 
@@ -1258,6 +1346,29 @@ fn vs_water(@builtin(vertex_index) vi: u32) -> WaterOut {
     return out;
 }
 
+// A perturbed water normal from three scrolling directional ripples. `p` is the surface XZ, `amp`
+// scales the ripple slope (already faded at the shore by the caller). Each ripple's analytic slope
+// (dir * freq * cos(phase)) accumulates into the gradient; the normal tilts against it.
+fn water_normal(p: vec2<f32>, t: f32, amp: f32) -> vec3<f32> {
+    var grad = vec2<f32>(0.0, 0.0);
+    let d0 = normalize(vec2<f32>(1.0, 0.3));
+    grad = grad + d0 * (42.0 * cos(dot(p, d0) * 42.0 + t * 1.1));
+    let d1 = normalize(vec2<f32>(-0.4, 1.0));
+    grad = grad + d1 * (60.0 * cos(dot(p, d1) * 60.0 + t * 1.7));
+    let d2 = normalize(vec2<f32>(0.7, -0.8));
+    grad = grad + d2 * (88.0 * cos(dot(p, d2) * 88.0 + t * 2.3));
+    return normalize(vec3<f32>(-grad.x * amp, 1.0, -grad.y * amp));
+}
+
+// A cheap animated noise that breaks the foam band into moving patches (0..1), so the shore reads
+// as broken surf rather than a solid ring.
+fn foam_noise(p: vec2<f32>, t: f32) -> f32 {
+    let a = sin(p.x * 70.0 + t * 2.5) * sin(p.y * 64.0 - t * 1.7);
+    let b = sin((p.x + p.y) * 120.0 - t * 3.3);
+    let n = 0.5 + 0.5 * (a * 0.6 + b * 0.4);
+    return smoothstep(0.35, 0.85, n);
+}
+
 @fragment
 fn fs_water(in: WaterOut) -> @location(0) vec4<f32> {
     // Seabed height (normalized) under this fragment; depth is how far below the sea it sits.
@@ -1267,11 +1378,68 @@ fn fs_water(in: WaterOut) -> @location(0) vec4<f32> {
     if (depth <= 0.0) {
         discard; // terrain is above the waterline here: no water
     }
-    // Beer-Lambert: more opaque and darker with depth; shallow water is light and see-through.
-    let transmit = exp(-depth * u.water.w);
-    let alpha = clamp(1.0 - transmit, 0.12, 0.95);
-    let color = u.water_color.rgb * (0.35 + 0.65 * transmit);
-    return vec4<f32>(color, alpha);
+
+    // Layer toggles (#157). Each effect stacks on the one before: plain translucent, then depth
+    // shading, then the animated surface, then foam. Off falls back to the layer beneath. The
+    // branches are on uniform values, so this is uniform control flow (the texture read above it).
+    let depth_on = u.flags.x > 0.5;
+    let surface_on = u.flags.y > 0.5;
+    let foam_on = u.flags.z > 0.5;
+
+    // Base colour and translucency. With depth shading on, Beer-Lambert extinction darkens and
+    // opaques with depth (Tier 0); off, it is the plain flat-tint translucent water we had before.
+    var color: vec3<f32>;
+    var alpha: f32;
+    if (depth_on) {
+        let transmit = exp(-depth * u.water.w);
+        color = u.water_color.rgb * (0.35 + 0.65 * transmit);
+        alpha = clamp(1.0 - transmit, 0.12, 0.95);
+    } else {
+        color = u.water_color.rgb;
+        alpha = 0.5;
+    }
+
+    // Surface (Tier 1): animated ripple normal, sky reflection via Fresnel, and sun specular.
+    if (surface_on) {
+        // Ripple amplitude fades to zero at the shore so waves don't chew the waterline. The 0.008
+        // converts the 0..1 wave control to a plausible ripple slope given the high frequencies.
+        let shore_fade = smoothstep(0.0, 0.03, depth);
+        let n = water_normal(in.uv, u.surface.x, u.surface.y * shore_fade * 0.008);
+        let frag = vec3<f32>(in.uv.x, u.water.x, in.uv.y);
+        let v = normalize(u.eye.xyz - frag);
+        let l = normalize(-u.light_dir.xyz);
+
+        // Schlick-Fresnel: grazing angles reflect the sky, head-on keeps the colour beneath.
+        let f0 = 0.02;
+        let fresnel = (f0 + (1.0 - f0) * pow(1.0 - max(dot(n, v), 0.0), 5.0)) * u.surface.z;
+        // A cheap sky gradient along the reflected ray: paler near the horizon, bluer overhead.
+        let r = reflect(-v, n);
+        let sky =
+            mix(vec3<f32>(0.72, 0.80, 0.90), vec3<f32>(0.33, 0.48, 0.70), clamp(r.y, 0.0, 1.0));
+        color = mix(color, sky, clamp(fresnel, 0.0, 1.0));
+
+        // Blinn-Phong sun specular.
+        let h = normalize(v + l);
+        let spec = pow(max(dot(n, h), 0.0), 80.0) * u.surface.w;
+        color = color + vec3<f32>(spec);
+
+        // Reflective (grazing) water reads more opaque.
+        alpha = max(alpha, fresnel);
+    }
+
+    // Foam: a broken bright band in shallow water near the shore. Depth-based, so its width varies
+    // with shore slope (a uniform-width band would need distance-to-shore, a follow-up).
+    if (foam_on) {
+        let foam = clamp(
+            (1.0 - smoothstep(0.0, u.shore.y, depth)) * foam_noise(in.uv, u.surface.x) * u.shore.x,
+            0.0,
+            1.0,
+        );
+        color = mix(color, vec3<f32>(1.0), foam);
+        alpha = max(alpha, foam);
+    }
+
+    return vec4<f32>(color, clamp(alpha, 0.12, 1.0));
 }
 ";
 

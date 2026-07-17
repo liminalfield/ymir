@@ -202,8 +202,10 @@ fn fresh_world_settings() -> project_file::WorldSettings {
         world_extent: DEFAULT_WORLD_EXTENT,
         world_height: project_file::DEFAULT_WORLD_HEIGHT,
         build_res: project_file::DEFAULT_BUILD_RES,
+        preview_res: PREVIEW_RES,
         sea_level: project_file::DEFAULT_SEA_LEVEL,
         show_water: true,
+        water: project_file::WaterSettings::default(),
     }
 }
 
@@ -463,11 +465,31 @@ struct AppState {
     /// Whether the 3D viewport draws the water plane at [`sea_level`](Self::sea_level). A view
     /// aid, on by default so the sea reads on a fresh launch.
     show_water: bool,
+    /// Water effect layers (#157), stacking on plain translucent water: depth shading, the animated
+    /// surface (ripples/Fresnel/specular), and foam. Ephemeral view state. Off is cheaper and, for
+    /// the animated layers, stops the viewport's per-frame repaint so still water idles the fans.
+    water_depth: bool,
+    water_surface: bool,
+    water_foam_on: bool,
     /// Water depth falloff (Beer-Lambert extinction) for the 3D viewport water (#154). Ephemeral
     /// view state for now (not persisted); a higher value clears to opaque faster.
     water_extinction: f32,
     /// Water tint (linear RGB) for the 3D viewport water. Ephemeral view state.
     water_color: [f32; 3],
+    /// Tier 1 water surface controls (ephemeral): ripple strength, sky reflectivity, specular.
+    water_wave: f32,
+    water_reflectivity: f32,
+    water_specular: f32,
+    /// Shoreline foam controls (ephemeral): amount and band width (#156).
+    water_foam: f32,
+    water_foam_width: f32,
+    /// Water animation speed multiplier (#157), scaling how fast the ripples and foam scroll.
+    /// Ephemeral view state; `0` freezes the surface.
+    water_speed: f32,
+    /// Accumulated water animation phase in seconds of motion. Advanced each frame by the real
+    /// frame delta times [`water_speed`](Self::water_speed), so the speed control changes future
+    /// motion without jumping the waves. Not persisted (it is a running clock, not a setting).
+    water_phase: f32,
     /// The project file the session is bound to, if any (#75). `Save` writes here;
     /// `None` until the project is first saved or opened, when `Save` falls back to
     /// `Save As`.
@@ -690,6 +712,9 @@ impl AppState {
         let initial =
             project_file::ProjectFile::capture(&graph, &snarl, fresh_world_settings(), &[]);
         let history = EditHistory::new(initial.clone());
+        // The water look/effect defaults, taken from one source so the fresh-session fields below
+        // and the persisted `WaterSettings::default` (used for older project files) stay in step.
+        let water_defaults = project_file::WaterSettings::default();
         Self {
             graph,
             snarl,
@@ -736,9 +761,21 @@ impl AppState {
             world_height: project_file::DEFAULT_WORLD_HEIGHT,
             sea_level: project_file::DEFAULT_SEA_LEVEL,
             show_water: true,
-            // Ephemeral water look; matches the shader's previous hardcoded defaults.
-            water_extinction: 9.0,
-            water_color: [0.10, 0.28, 0.42],
+            // Water look and effect defaults, taken from the persisted form's `Default` so a fresh
+            // session and a project saved without water settings can never drift apart (#157). All
+            // layers on, a calm speed. The phase is a running clock, started at zero.
+            water_depth: water_defaults.depth,
+            water_surface: water_defaults.surface,
+            water_foam_on: water_defaults.foam_on,
+            water_extinction: water_defaults.extinction,
+            water_color: water_defaults.color,
+            water_wave: water_defaults.wave,
+            water_reflectivity: water_defaults.reflectivity,
+            water_specular: water_defaults.specular,
+            water_foam: water_defaults.foam,
+            water_foam_width: water_defaults.foam_width,
+            water_speed: water_defaults.speed,
+            water_phase: 0.0,
             project_path: None,
             recent: Vec::new(),
             // The built-in starter has no saved camera, so fit it to the screen on the first
@@ -812,8 +849,10 @@ impl AppState {
         self.world_extent = restored.world_extent;
         self.world_height = restored.world_height;
         self.build_res = restored.build_res;
+        self.preview_res = restored.preview_res;
         self.sea_level = restored.sea_level;
         self.show_water = restored.show_water;
+        self.apply_water_settings(restored.water);
         self.clear_selection();
         self.preview_pin = None;
         self.node_menu = None;
@@ -852,8 +891,10 @@ impl AppState {
         self.world_extent = world.world_extent;
         self.world_height = world.world_height;
         self.build_res = world.build_res;
+        self.preview_res = world.preview_res;
         self.sea_level = world.sea_level;
         self.show_water = world.show_water;
+        self.apply_water_settings(world.water);
         self.clear_selection();
         self.preview_pin = None;
         self.node_menu = None;
@@ -891,8 +932,10 @@ impl AppState {
                     world_extent: r.world_extent,
                     world_height: r.world_height,
                     build_res: r.build_res,
+                    preview_res: r.preview_res,
                     sea_level: r.sea_level,
                     show_water: r.show_water,
+                    water: r.water,
                 };
                 self.install_fresh(r.graph, r.snarl, world, r.subgraph_layouts);
             }
@@ -912,9 +955,45 @@ impl AppState {
             world_extent: self.world_extent,
             world_height: self.world_height,
             build_res: self.build_res,
+            preview_res: self.preview_res,
             sea_level: self.sea_level,
             show_water: self.show_water,
+            water: self.water_settings(),
         }
+    }
+
+    /// Collects the ephemeral water look and effect controls into the persisted form (#157), so
+    /// the current look travels with a saved project.
+    fn water_settings(&self) -> project_file::WaterSettings {
+        project_file::WaterSettings {
+            depth: self.water_depth,
+            surface: self.water_surface,
+            foam_on: self.water_foam_on,
+            extinction: self.water_extinction,
+            color: self.water_color,
+            wave: self.water_wave,
+            reflectivity: self.water_reflectivity,
+            specular: self.water_specular,
+            foam: self.water_foam,
+            foam_width: self.water_foam_width,
+            speed: self.water_speed,
+        }
+    }
+
+    /// Applies restored water settings back onto the ephemeral controls. The animation phase is a
+    /// running clock, not a stored setting, so it is left as-is (the surface simply carries on).
+    fn apply_water_settings(&mut self, w: project_file::WaterSettings) {
+        self.water_depth = w.depth;
+        self.water_surface = w.surface;
+        self.water_foam_on = w.foam_on;
+        self.water_extinction = w.extinction;
+        self.water_color = w.color;
+        self.water_wave = w.wave;
+        self.water_reflectivity = w.reflectivity;
+        self.water_specular = w.specular;
+        self.water_foam = w.foam;
+        self.water_foam_width = w.foam_width;
+        self.water_speed = w.speed;
     }
 
     /// A snapshot of the current session (graph, canvas positions, world settings),
@@ -1501,6 +1580,7 @@ impl AppState {
                 self.world_height = restored.world_height;
                 self.sea_level = restored.sea_level;
                 self.show_water = restored.show_water;
+                self.apply_water_settings(restored.water);
                 self.selection
                     .retain(|&h| self.graph.node_id_of(h).is_some());
                 self.primary = self.primary.filter(|h| self.selection.contains(h));
@@ -2498,8 +2578,10 @@ fn apply_default(state: &mut AppState) {
             state.world_extent = restored.world_extent;
             state.world_height = restored.world_height;
             state.build_res = restored.build_res;
+            state.preview_res = restored.preview_res;
             state.sea_level = restored.sea_level;
             state.show_water = restored.show_water;
+            state.apply_water_settings(restored.water);
             state.apply_restored_view(restored.camera);
             // Anchor undo and the clean point at the default, not the starter it replaced.
             state.reset_history();
@@ -4221,17 +4303,170 @@ fn frame_inspector(ui: &mut egui::Ui, state: &mut AppState, index: usize) {
     }
 }
 
+/// A collapsible section for the World panel (the 1c handoff): a slim header of a chevron and an
+/// uppercase label, optionally trailed by a muted `badge` (an active count), over a body that
+/// shows only when open. A faint rule sits above the header so stacked sections read as distinct
+/// bands. Open/closed state persists for the session in egui memory, keyed by `id`.
+fn section(
+    ui: &mut egui::Ui,
+    id: &str,
+    label: &str,
+    default_open: bool,
+    badge: Option<String>,
+    body: impl FnOnce(&mut egui::Ui),
+) {
+    use egui::collapsing_header::CollapsingState;
+
+    // A divider above the header separates this section from the block above it.
+    ui.add_space(6.0);
+    let top = ui.available_rect_before_wrap().top();
+    ui.painter().hline(
+        ui.max_rect().x_range(),
+        top,
+        egui::Stroke::new(1.0, theme::LINE),
+    );
+    ui.add_space(6.0);
+
+    let sid = ui.make_persistent_id(id);
+    let mut coll = CollapsingState::load_with_default_open(ui.ctx(), sid, default_open);
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), egui::Sense::click());
+    if resp.clicked() {
+        // `toggle` flips the flag but does not persist it; `store` writes it to session memory.
+        coll.toggle(ui);
+        coll.store(ui.ctx());
+    }
+    let openness = coll.openness(ui.ctx());
+    let ink = if resp.hovered() {
+        theme::TEXT_PRIMARY
+    } else {
+        theme::TEXT_SECONDARY
+    };
+    let painter = ui.painter();
+    // The chevron, drawn as a small filled triangle rather than a font glyph so it never renders as
+    // a missing-glyph box (IBM Plex has no geometric triangles): right-pointing when closed,
+    // down-pointing when open.
+    let cx = rect.left() + 10.0;
+    let cy = rect.center().y;
+    let tri = if openness > 0.5 {
+        vec![
+            egui::pos2(cx - 4.0, cy - 2.5),
+            egui::pos2(cx + 4.0, cy - 2.5),
+            egui::pos2(cx, cy + 3.0),
+        ]
+    } else {
+        vec![
+            egui::pos2(cx - 2.5, cy - 4.0),
+            egui::pos2(cx - 2.5, cy + 4.0),
+            egui::pos2(cx + 3.0, cy),
+        ]
+    };
+    painter.add(egui::Shape::convex_polygon(tri, ink, egui::Stroke::NONE));
+    painter.text(
+        egui::pos2(rect.left() + 22.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label.to_uppercase(),
+        egui::FontId::proportional(11.0),
+        ink,
+    );
+    if let Some(badge) = badge {
+        painter.text(
+            egui::pos2(rect.right() - 4.0, rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            badge,
+            egui::FontId::proportional(11.0),
+            theme::TEXT_TERTIARY,
+        );
+    }
+
+    coll.show_body_unindented(ui, |ui| {
+        ui.add_space(2.0);
+        body(ui);
+    });
+}
+
+/// A frost pill toggle bound to a bool: draws the switch (accent track when on) and flips the value
+/// on click. Returns the response.
+fn switch(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
+    let resp = param_ui::toggle(ui, *on);
+    if resp.clicked() {
+        *on = !*on;
+    }
+    resp
+}
+
+/// One labelled slider row that fits the narrow panel without overflowing: a fixed label column on
+/// the left, a fixed scrub/type value box pinned right, and the slider filling the gap between them
+/// (its own inline value suppressed, since the box is the value). `decimals` fixes the precision.
+/// A single value edited by both the box and the slider, via a local copy to avoid a double borrow.
+fn slider_row<Num: egui::emath::Numeric>(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut Num,
+    range: std::ops::RangeInclusive<Num>,
+    decimals: usize,
+) {
+    let mut x = *value;
+    let h = ui.spacing().interact_size.y;
+    let span = range.end().to_f64() - range.start().to_f64();
+    ui.horizontal(|ui| {
+        ui.add_sized([66.0, h], egui::Label::new(label).selectable(false));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add_sized(
+                [44.0, h],
+                egui::DragValue::new(&mut x)
+                    .range(range.clone())
+                    .speed(span * 0.002)
+                    .fixed_decimals(decimals),
+            );
+            // The slider takes exactly the width left between the label and the value box.
+            ui.spacing_mut().slider_width = (ui.available_width() - 4.0).max(24.0);
+            ui.add(egui::Slider::new(&mut x, range.clone()).show_value(false));
+        });
+    });
+    *value = x;
+}
+
+/// A water effect group: a header row of the group name and an enable toggle, over the params it
+/// gates. Flat (no bordered box), so nothing paints a hard right edge against the pane border. When
+/// `on` is false the params grey out and stop responding (`add_enabled_ui`) while the header toggle
+/// stays live, so the group can be switched back on.
+fn water_group(ui: &mut egui::Ui, title: &str, on: &mut bool, body: impl FnOnce(&mut egui::Ui)) {
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(title)
+                .size(11.5)
+                .strong()
+                .color(theme::TEXT_PRIMARY),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            switch(ui, on);
+        });
+    });
+    ui.add_enabled_ui(*on, body);
+}
+
 /// The world/build settings: the global eval-request inputs (seed, resolutions) that
-/// apply to the whole graph. Outputs selection and the Build action land here in
-/// later steps.
+/// apply to the whole graph. Reorganized (the 1c handoff) into a pinned World block above
+/// collapsible Build, Water, and Outputs sections.
 fn world_settings(ui: &mut egui::Ui, state: &mut AppState) {
+    // Frost accent: fill sliders up to the handle with the bright accent (the default trailing fill
+    // uses the muted selection colour). Scoped to this pane by mutating its visuals only.
+    ui.visuals_mut().selection.bg_fill = theme::ACCENT_PRIMARY;
+    ui.visuals_mut().slider_trailing_fill = true;
+
     ui.add_space(2.0);
+
+    // WORLD: the identity and most-touched settings, above the collapsible sections. Drawn flat (no
+    // filled box), so nothing paints a hard right edge that would leave the pane margin showing as a
+    // strip against the canvas.
     ui.horizontal(|ui| {
         ui.label("Seed");
         ui.add(egui::DragValue::new(&mut state.seed).speed(1.0));
     });
 
-    ui.separator();
+    ui.add_space(4.0);
     ui.label("World extent");
     ui.horizontal(|ui| {
         ui.add(
@@ -4240,13 +4475,13 @@ fn world_settings(ui: &mut egui::Ui, state: &mut AppState) {
                 .range(1.0..=1_000_000.0)
                 .suffix(" m"),
         );
-        // The meters-to-cells bridge made tangible. Cells are square, so this is the
-        // size along both axes; it follows from extent / build resolution.
+        // The meters-to-cells bridge made tangible. Cells are square, so this is the size along
+        // both axes; it follows from extent / build resolution.
         let m_per_cell = state.world_extent / state.build_res as f64;
         ui.weak(format!("≈ {m_per_cell:.3} m/cell at build"));
     });
 
-    ui.separator();
+    ui.add_space(4.0);
     ui.label("World height");
     ui.horizontal(|ui| {
         ui.add(
@@ -4261,96 +4496,151 @@ fn world_settings(ui: &mut egui::Ui, state: &mut AppState) {
         ui.weak(format!("≈ {proportion:.2}× footprint at full height"));
     });
 
-    ui.separator();
+    ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.label("Sea level");
-        ui.checkbox(&mut state.show_water, "Show water");
+        // Show water sits inline in the header, as a frost toggle at the trailing edge.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            switch(ui, &mut state.show_water);
+            ui.label(egui::RichText::new("Show water").color(theme::TEXT_SECONDARY));
+        });
     });
+    // Normalized height in [0, 1]; the 3D viewport draws a water plane here. Slider fills the row
+    // with a scrub/type value box pinned right (a local copy avoids the double borrow); the
+    // elevation in meters (sea_level × world_height) reads below it.
+    let mut sl = state.sea_level;
     ui.horizontal(|ui| {
-        // Normalized height in [0, 1]; the 3D viewport draws a water plane here. The height in
-        // meters (sea_level × world_height) makes the level tangible against the world height.
-        ui.add(
-            egui::Slider::new(&mut state.sea_level, 0.0..=1.0)
-                .fixed_decimals(3)
-                .clamping(egui::SliderClamping::Always),
-        );
-        let meters = state.sea_level * state.world_height;
-        ui.weak(format!("≈ {meters:.0} m"));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add_sized(
+                [48.0, ui.spacing().interact_size.y],
+                egui::DragValue::new(&mut sl)
+                    .range(0.0..=1.0)
+                    .speed(0.002)
+                    .fixed_decimals(3),
+            );
+            ui.spacing_mut().slider_width = (ui.available_width() - 4.0).max(24.0);
+            ui.add(
+                egui::Slider::new(&mut sl, 0.0..=1.0)
+                    .show_value(false)
+                    .clamping(egui::SliderClamping::Always),
+            );
+        });
     });
-    ui.horizontal(|ui| {
-        ui.label("Water");
-        ui.color_edit_button_rgb(&mut state.water_color);
-    });
-    ui.horizontal(|ui| {
-        // Beer-Lambert depth falloff for the 3D viewport water: higher clears to opaque faster,
-        // lower stays see-through deeper. Ephemeral view state (not saved with the project yet).
-        ui.label("Depth falloff");
-        ui.add(egui::Slider::new(&mut state.water_extinction, 1.0..=30.0).fixed_decimals(1));
-    });
+    state.sea_level = sl;
+    let meters = state.sea_level * state.world_height;
+    ui.weak(format!("≈ {meters:.0} m elevation"));
 
-    ui.separator();
-    ui.label("Build resolution");
-    ui.horizontal(|ui| {
-        // Custom value (UE5 landscapes need specific sizes), with presets as
-        // shortcuts.
-        ui.add(
-            egui::DragValue::new(&mut state.build_res)
-                .speed(8.0)
-                .range(16..=8192),
-        );
-        egui::ComboBox::from_id_salt("build-res-presets")
-            .selected_text("presets")
-            .show_ui(ui, |ui| {
-                for &preset in BUILD_RES_PRESETS {
-                    if ui.selectable_label(false, preset.to_string()).clicked() {
-                        state.build_res = preset;
-                    }
-                }
+    // BUILD AND PREVIEW: the resolutions a Build and the interactive preview evaluate at.
+    section(
+        ui,
+        "world_section_build",
+        "Build and Preview",
+        true,
+        None,
+        |ui| {
+            ui.label("Build resolution");
+            ui.horizontal(|ui| {
+                // Custom value (UE5 landscapes need specific sizes), with presets as shortcuts.
+                ui.add(
+                    egui::DragValue::new(&mut state.build_res)
+                        .speed(8.0)
+                        .range(16..=8192),
+                );
+                egui::ComboBox::from_id_salt("build-res-presets")
+                    .selected_text("presets")
+                    .show_ui(ui, |ui| {
+                        for &preset in BUILD_RES_PRESETS {
+                            if ui.selectable_label(false, preset.to_string()).clicked() {
+                                state.build_res = preset;
+                            }
+                        }
+                    });
             });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label("Preview resolution");
+                ui.add(
+                    egui::DragValue::new(&mut state.preview_res)
+                        .speed(4.0)
+                        .range(32..=1024),
+                );
+            });
+        },
+    );
+
+    // WATER: the rendering look, grouped (the 1c handoff) into Surface / Depth / Foam, each a header
+    // row with an enable toggle owning the params it gates. The effect toggles are those headers.
+    section(ui, "world_section_water", "Water", true, None, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("Water color");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.color_edit_button_rgb(&mut state.water_color);
+            });
+        });
+        water_group(ui, "Surface", &mut state.water_surface, |ui| {
+            slider_row(ui, "Speed", &mut state.water_speed, 0.0..=2.0, 2);
+            slider_row(ui, "Waves", &mut state.water_wave, 0.0..=1.0, 2);
+            slider_row(
+                ui,
+                "Reflectivity",
+                &mut state.water_reflectivity,
+                0.0..=1.0,
+                2,
+            );
+            slider_row(ui, "Specular", &mut state.water_specular, 0.0..=1.0, 2);
+        });
+        water_group(ui, "Depth", &mut state.water_depth, |ui| {
+            slider_row(ui, "Falloff", &mut state.water_extinction, 1.0..=30.0, 1);
+        });
+        water_group(ui, "Foam", &mut state.water_foam_on, |ui| {
+            slider_row(ui, "Amount", &mut state.water_foam, 0.0..=1.0, 2);
+            slider_row(ui, "Width", &mut state.water_foam_width, 0.0..=0.05, 3);
+        });
     });
 
-    ui.separator();
-    ui.horizontal(|ui| {
-        ui.label("Preview resolution");
-        ui.add(
-            egui::DragValue::new(&mut state.preview_res)
-                .speed(4.0)
-                .range(32..=1024),
-        );
-    });
-
-    ui.separator();
-    ui.label("Outputs");
-    ui.weak("Endpoints a Build will write; tick to include.");
-    // Endpoints are nodes with no outputs. Collect them first (releasing the snarl
-    // borrow) before mutating params below.
+    // OUTPUTS: endpoints a Build will write, with a badge counting how many are ticked. Endpoints
+    // are nodes with no outputs; collect them (releasing the snarl borrow) before the body mutates
+    // params, and count the active ones for the header badge.
     let endpoints: Vec<NodeId> = state
         .snarl
         .node_ids()
         .filter_map(|(_, &handle)| state.graph.node_id_of(handle))
         .filter(|&id| state.graph.spec(id).is_some_and(|s| s.outputs.is_empty()))
         .collect();
-    if endpoints.is_empty() {
-        ui.weak("No output nodes in the graph.");
-        return;
-    }
-    for id in endpoints {
-        let mut params = state.graph.params(id).cloned().unwrap_or_default();
-        let mut include = params.get_bool("build", true);
-        let name = node_display_name(&state.graph, id);
-        let path = params.get_str("path", "").to_string();
-        ui.horizontal(|ui| {
-            if ui.checkbox(&mut include, name).changed() {
-                params.insert("build".to_string(), ParamValue::Bool(include));
-                if let Err(err) = state.graph.set_params(id, params) {
-                    ui.colored_label(ui.visuals().error_fg_color, err.to_string());
+    let active = endpoints
+        .iter()
+        .filter(|&&id| {
+            state
+                .graph
+                .params(id)
+                .is_none_or(|p| p.get_bool("build", true))
+        })
+        .count();
+    let badge = (!endpoints.is_empty()).then(|| active.to_string());
+    section(ui, "world_section_outputs", "Outputs", true, badge, |ui| {
+        ui.weak("Endpoints a Build will write; tick to include.");
+        if endpoints.is_empty() {
+            ui.weak("No output nodes in the graph.");
+            return;
+        }
+        for id in endpoints {
+            let mut params = state.graph.params(id).cloned().unwrap_or_default();
+            let mut include = params.get_bool("build", true);
+            let name = node_display_name(&state.graph, id);
+            let path = params.get_str("path", "").to_string();
+            ui.horizontal(|ui| {
+                if ui.checkbox(&mut include, name).changed() {
+                    params.insert("build".to_string(), ParamValue::Bool(include));
+                    if let Err(err) = state.graph.set_params(id, params) {
+                        ui.colored_label(ui.visuals().error_fg_color, err.to_string());
+                    }
                 }
-            }
-            if !path.is_empty() {
-                ui.weak(path);
-            }
-        });
-    }
+                if !path.is_empty() {
+                    ui.weak(path);
+                }
+            });
+        }
+    });
 }
 
 /// The preview's pin toggle: a 24px square. Pinned = accent fill, accent border, light pin glyph
@@ -6698,13 +6988,31 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
             // proportion.
             let true_proportion =
                 (state.world_height / state.world_extent.max(f64::EPSILON)) as f32;
+            // Advance the animation phase by the real frame delta scaled by the speed control, but
+            // only while an animated layer is on, so the speed slider changes future motion without
+            // rescaling the elapsed phase (which would jump the waves) and dropped frames do not
+            // slow it (the delta is real). Frozen or hidden water leaves the phase untouched.
+            if state.show_water && (state.water_surface || state.water_foam_on) {
+                let dt = ui.input(|i| i.stable_dt);
+                state.water_phase += dt * state.water_speed;
+            }
             let settings = viewport::ViewSettings {
                 fixed_range: state.viewport_scale == shade::HeightScale::Fixed,
                 vertical_scale: true_proportion * state.viewport_exaggeration,
                 sea_level,
                 show_water,
+                water_depth: state.water_depth,
+                water_surface: state.water_surface,
+                water_foam_on: state.water_foam_on,
                 water_extinction: state.water_extinction,
                 water_color: state.water_color,
+                water_wave: state.water_wave,
+                water_reflectivity: state.water_reflectivity,
+                water_specular: state.water_specular,
+                water_foam: state.water_foam,
+                water_foam_width: state.water_foam_width,
+                water_time: state.water_phase,
+                water_speed: state.water_speed,
             };
             viewport::show(
                 ui,
@@ -8909,8 +9217,22 @@ mod tests {
                 world_extent: 2048.0,
                 world_height: 640.0,
                 build_res: 4096,
+                preview_res: 384,
                 sea_level: 0.55,
                 show_water: true,
+                water: project_file::WaterSettings {
+                    depth: false,
+                    surface: true,
+                    foam_on: false,
+                    extinction: 12.5,
+                    color: [0.2, 0.3, 0.4],
+                    wave: 0.25,
+                    reflectivity: 0.75,
+                    specular: 0.1,
+                    foam: 0.8,
+                    foam_width: 0.02,
+                    speed: 0.9,
+                },
             },
             &[],
         );
@@ -8926,8 +9248,16 @@ mod tests {
         assert_eq!(restored.world_extent, 2048.0);
         assert_eq!(restored.world_height, 640.0);
         assert_eq!(restored.build_res, 4096);
+        assert_eq!(restored.preview_res, 384);
         assert_eq!(restored.sea_level, 0.55);
         assert!(restored.show_water);
+        // The water look and effect layers travel with the project (#157).
+        assert!(!restored.water.depth);
+        assert!(restored.water.surface);
+        assert!(!restored.water.foam_on);
+        assert_eq!(restored.water.extinction, 12.5);
+        assert_eq!(restored.water.color, [0.2, 0.3, 0.4]);
+        assert_eq!(restored.water.speed, 0.9);
     }
 
     #[test]
