@@ -202,8 +202,10 @@ fn fresh_world_settings() -> project_file::WorldSettings {
         world_extent: DEFAULT_WORLD_EXTENT,
         world_height: project_file::DEFAULT_WORLD_HEIGHT,
         build_res: project_file::DEFAULT_BUILD_RES,
+        preview_res: PREVIEW_RES,
         sea_level: project_file::DEFAULT_SEA_LEVEL,
         show_water: true,
+        water: project_file::WaterSettings::default(),
     }
 }
 
@@ -710,6 +712,9 @@ impl AppState {
         let initial =
             project_file::ProjectFile::capture(&graph, &snarl, fresh_world_settings(), &[]);
         let history = EditHistory::new(initial.clone());
+        // The water look/effect defaults, taken from one source so the fresh-session fields below
+        // and the persisted `WaterSettings::default` (used for older project files) stay in step.
+        let water_defaults = project_file::WaterSettings::default();
         Self {
             graph,
             snarl,
@@ -756,21 +761,20 @@ impl AppState {
             world_height: project_file::DEFAULT_WORLD_HEIGHT,
             sea_level: project_file::DEFAULT_SEA_LEVEL,
             show_water: true,
-            // All effect layers on by default, so a fresh launch shows the full water look; each
-            // can be switched off for performance or a plainer surface (#157).
-            water_depth: true,
-            water_surface: true,
-            water_foam_on: true,
-            // Ephemeral water look; matches the shader's previous hardcoded defaults.
-            water_extinction: 9.0,
-            water_color: [0.10, 0.28, 0.42],
-            water_wave: 0.5,
-            water_reflectivity: 0.6,
-            water_specular: 0.5,
-            water_foam: 0.5,
-            water_foam_width: 0.015,
-            // A calm default: the raw shader rates read as frantic at full speed, so start slow.
-            water_speed: 0.4,
+            // Water look and effect defaults, taken from the persisted form's `Default` so a fresh
+            // session and a project saved without water settings can never drift apart (#157). All
+            // layers on, a calm speed. The phase is a running clock, started at zero.
+            water_depth: water_defaults.depth,
+            water_surface: water_defaults.surface,
+            water_foam_on: water_defaults.foam_on,
+            water_extinction: water_defaults.extinction,
+            water_color: water_defaults.color,
+            water_wave: water_defaults.wave,
+            water_reflectivity: water_defaults.reflectivity,
+            water_specular: water_defaults.specular,
+            water_foam: water_defaults.foam,
+            water_foam_width: water_defaults.foam_width,
+            water_speed: water_defaults.speed,
             water_phase: 0.0,
             project_path: None,
             recent: Vec::new(),
@@ -845,8 +849,10 @@ impl AppState {
         self.world_extent = restored.world_extent;
         self.world_height = restored.world_height;
         self.build_res = restored.build_res;
+        self.preview_res = restored.preview_res;
         self.sea_level = restored.sea_level;
         self.show_water = restored.show_water;
+        self.apply_water_settings(restored.water);
         self.clear_selection();
         self.preview_pin = None;
         self.node_menu = None;
@@ -885,8 +891,10 @@ impl AppState {
         self.world_extent = world.world_extent;
         self.world_height = world.world_height;
         self.build_res = world.build_res;
+        self.preview_res = world.preview_res;
         self.sea_level = world.sea_level;
         self.show_water = world.show_water;
+        self.apply_water_settings(world.water);
         self.clear_selection();
         self.preview_pin = None;
         self.node_menu = None;
@@ -924,8 +932,10 @@ impl AppState {
                     world_extent: r.world_extent,
                     world_height: r.world_height,
                     build_res: r.build_res,
+                    preview_res: r.preview_res,
                     sea_level: r.sea_level,
                     show_water: r.show_water,
+                    water: r.water,
                 };
                 self.install_fresh(r.graph, r.snarl, world, r.subgraph_layouts);
             }
@@ -945,9 +955,45 @@ impl AppState {
             world_extent: self.world_extent,
             world_height: self.world_height,
             build_res: self.build_res,
+            preview_res: self.preview_res,
             sea_level: self.sea_level,
             show_water: self.show_water,
+            water: self.water_settings(),
         }
+    }
+
+    /// Collects the ephemeral water look and effect controls into the persisted form (#157), so
+    /// the current look travels with a saved project.
+    fn water_settings(&self) -> project_file::WaterSettings {
+        project_file::WaterSettings {
+            depth: self.water_depth,
+            surface: self.water_surface,
+            foam_on: self.water_foam_on,
+            extinction: self.water_extinction,
+            color: self.water_color,
+            wave: self.water_wave,
+            reflectivity: self.water_reflectivity,
+            specular: self.water_specular,
+            foam: self.water_foam,
+            foam_width: self.water_foam_width,
+            speed: self.water_speed,
+        }
+    }
+
+    /// Applies restored water settings back onto the ephemeral controls. The animation phase is a
+    /// running clock, not a stored setting, so it is left as-is (the surface simply carries on).
+    fn apply_water_settings(&mut self, w: project_file::WaterSettings) {
+        self.water_depth = w.depth;
+        self.water_surface = w.surface;
+        self.water_foam_on = w.foam_on;
+        self.water_extinction = w.extinction;
+        self.water_color = w.color;
+        self.water_wave = w.wave;
+        self.water_reflectivity = w.reflectivity;
+        self.water_specular = w.specular;
+        self.water_foam = w.foam;
+        self.water_foam_width = w.foam_width;
+        self.water_speed = w.speed;
     }
 
     /// A snapshot of the current session (graph, canvas positions, world settings),
@@ -1534,6 +1580,7 @@ impl AppState {
                 self.world_height = restored.world_height;
                 self.sea_level = restored.sea_level;
                 self.show_water = restored.show_water;
+                self.apply_water_settings(restored.water);
                 self.selection
                     .retain(|&h| self.graph.node_id_of(h).is_some());
                 self.primary = self.primary.filter(|h| self.selection.contains(h));
@@ -2531,8 +2578,10 @@ fn apply_default(state: &mut AppState) {
             state.world_extent = restored.world_extent;
             state.world_height = restored.world_height;
             state.build_res = restored.build_res;
+            state.preview_res = restored.preview_res;
             state.sea_level = restored.sea_level;
             state.show_water = restored.show_water;
+            state.apply_water_settings(restored.water);
             state.apply_restored_view(restored.camera);
             // Anchor undo and the clean point at the default, not the starter it replaced.
             state.reset_history();
@@ -9016,8 +9065,22 @@ mod tests {
                 world_extent: 2048.0,
                 world_height: 640.0,
                 build_res: 4096,
+                preview_res: 384,
                 sea_level: 0.55,
                 show_water: true,
+                water: project_file::WaterSettings {
+                    depth: false,
+                    surface: true,
+                    foam_on: false,
+                    extinction: 12.5,
+                    color: [0.2, 0.3, 0.4],
+                    wave: 0.25,
+                    reflectivity: 0.75,
+                    specular: 0.1,
+                    foam: 0.8,
+                    foam_width: 0.02,
+                    speed: 0.9,
+                },
             },
             &[],
         );
@@ -9033,8 +9096,16 @@ mod tests {
         assert_eq!(restored.world_extent, 2048.0);
         assert_eq!(restored.world_height, 640.0);
         assert_eq!(restored.build_res, 4096);
+        assert_eq!(restored.preview_res, 384);
         assert_eq!(restored.sea_level, 0.55);
         assert!(restored.show_water);
+        // The water look and effect layers travel with the project (#157).
+        assert!(!restored.water.depth);
+        assert!(restored.water.surface);
+        assert!(!restored.water.foam_on);
+        assert_eq!(restored.water.extinction, 12.5);
+        assert_eq!(restored.water.color, [0.2, 0.3, 0.4]);
+        assert_eq!(restored.water.speed, 0.9);
     }
 
     #[test]

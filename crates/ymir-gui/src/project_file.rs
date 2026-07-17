@@ -63,6 +63,12 @@ fn default_build_res() -> usize {
     DEFAULT_BUILD_RES
 }
 
+/// The preview resolution for a project file that predates the field being persisted. Reuses the
+/// app-level default so a fresh project and an older file agree.
+fn default_preview_res() -> usize {
+    crate::PREVIEW_RES
+}
+
 /// The sea/base level (normalized height) for a fresh project, and the value assumed for a
 /// project saved before the field existed. Matches the app-level default so enabling water on an
 /// older project starts at a sensible level rather than the very base.
@@ -96,6 +102,11 @@ pub(crate) struct WorldSettings {
     /// specific size), so it travels with the project. Defaulted on load for older files.
     #[serde(default = "default_build_res")]
     pub build_res: usize,
+    /// The resolution the interactive preview evaluates at (square). A per-project working choice
+    /// like `build_res`, so it travels with the project and reopens as the user left it. Defaulted
+    /// on load for files saved before it was persisted.
+    #[serde(default = "default_preview_res")]
+    pub preview_res: usize,
     /// The sea/base level as a normalized height in `[0, 1]`: the 3D viewport draws water at it,
     /// and it feeds evaluation as base level. A world global that travels with the project.
     /// Defaulted on load for files saved before it existed.
@@ -105,6 +116,58 @@ pub(crate) struct WorldSettings {
     /// reopens showing it. Defaulted off for files that predate the toggle.
     #[serde(default = "default_show_water")]
     pub show_water: bool,
+    /// How the water is rendered: the effect layers and their look controls (#157). Grouped into
+    /// one sub-object so it stays a tidy, git-diffable block and can move as a unit. Defaulted on
+    /// load, so a project saved before it existed opens with the standard look (no format bump,
+    /// like `world_height`).
+    #[serde(default)]
+    pub water: WaterSettings,
+}
+
+/// How the 3D viewport renders the water surface: which effect layers are on and their look
+/// controls (#157). Travels with the project so a saved world reopens looking as it was tuned.
+/// The animation *phase* is a running clock, not a setting, and is deliberately not stored.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub(crate) struct WaterSettings {
+    /// Depth-shading layer (Tier 0): Beer-Lambert extinction tints and opaques with depth.
+    pub depth: bool,
+    /// Surface layer (Tier 1): animated ripple normal, sky reflection, and sun specular.
+    pub surface: bool,
+    /// Shoreline foam layer.
+    pub foam_on: bool,
+    /// Depth falloff (Beer-Lambert extinction): higher clears to opaque faster.
+    pub extinction: f32,
+    /// Water tint (linear RGB).
+    pub color: [f32; 3],
+    /// Surface ripple strength, sky reflectivity, and specular intensity (all `0..1`).
+    pub wave: f32,
+    pub reflectivity: f32,
+    pub specular: f32,
+    /// Foam amount and band width (in normalized depth).
+    pub foam: f32,
+    pub foam_width: f32,
+    /// Animation speed multiplier for the ripples and foam; `0` freezes the surface.
+    pub speed: f32,
+}
+
+impl Default for WaterSettings {
+    /// The standard water look, shared with `AppState::new` so a fresh session and a project saved
+    /// without water settings agree. A calm default speed, since the raw shader rates read frantic.
+    fn default() -> Self {
+        Self {
+            depth: true,
+            surface: true,
+            foam_on: true,
+            extinction: 9.0,
+            color: [0.10, 0.28, 0.42],
+            wave: 0.5,
+            reflectivity: 0.6,
+            specular: 0.5,
+            foam: 0.5,
+            foam_width: 0.015,
+            speed: 0.4,
+        }
+    }
 }
 
 /// The default frame label colour: the brand's light text, readable on the dark default
@@ -216,10 +279,14 @@ pub(crate) struct RestoredProject {
     pub world_height: f64,
     /// The restored full-Build resolution (square).
     pub build_res: usize,
+    /// The restored interactive preview resolution (square).
+    pub preview_res: usize,
     /// The restored sea/base level (normalized height).
     pub sea_level: f64,
     /// Whether the restored project draws the water plane.
     pub show_water: bool,
+    /// The restored water rendering look and effect layers (#157).
+    pub water: WaterSettings,
     /// The restored canvas camera (pan/zoom), if the project saved one. `None` for an older
     /// project or a graph-only file, in which case the editor fits the graph to the screen.
     pub camera: Option<TSTransform>,
@@ -346,8 +413,10 @@ impl ProjectFile {
             world_extent: self.world.world_extent,
             world_height: self.world.world_height,
             build_res: self.world.build_res,
+            preview_res: self.world.preview_res,
             sea_level: self.world.sea_level,
             show_water: self.world.show_water,
+            water: self.world.water,
             camera: self.view.camera.map(Camera::to_transform),
             frames: self.view.frames.clone(),
             subgraph_layouts,
@@ -528,8 +597,10 @@ mod tests {
                 world_extent: 4096.0,
                 world_height: 800.0,
                 build_res: 2048,
+                preview_res: 384,
                 sea_level: 0.42,
                 show_water: true,
+                water: WaterSettings::default(),
             },
             &[],
         );
@@ -548,6 +619,7 @@ mod tests {
         assert_eq!(restored.world_extent, 4096.0);
         assert_eq!(restored.world_height, 800.0);
         assert_eq!(restored.build_res, 2048);
+        assert_eq!(restored.preview_res, 384);
         assert_eq!(restored.sea_level, 0.42);
         assert!(restored.show_water);
         // No camera was saved, so the load will fit the graph to the screen.
@@ -587,8 +659,10 @@ mod tests {
                 world_extent: 1024.0,
                 world_height: 256.0,
                 build_res: DEFAULT_BUILD_RES,
+                preview_res: crate::PREVIEW_RES,
                 sea_level: DEFAULT_SEA_LEVEL,
                 show_water: false,
+                water: WaterSettings::default(),
             },
             &[],
         );
@@ -621,8 +695,10 @@ mod tests {
                 world_extent: 1024.0,
                 world_height: 256.0,
                 build_res: DEFAULT_BUILD_RES,
+                preview_res: crate::PREVIEW_RES,
                 sea_level: DEFAULT_SEA_LEVEL,
                 show_water: false,
+                water: WaterSettings::default(),
             },
             &[],
         );
@@ -652,8 +728,10 @@ mod tests {
                 world_extent: 1024.0,
                 world_height: 256.0,
                 build_res: DEFAULT_BUILD_RES,
+                preview_res: crate::PREVIEW_RES,
                 sea_level: DEFAULT_SEA_LEVEL,
                 show_water: false,
+                water: WaterSettings::default(),
             },
             &[],
         );
@@ -678,6 +756,10 @@ mod tests {
         assert_eq!(file.world.world_height, DEFAULT_WORLD_HEIGHT);
         assert_eq!(file.world.sea_level, DEFAULT_SEA_LEVEL);
         assert!(!file.world.show_water);
+        // Water settings, added later, default in on an older file that never stored them.
+        assert_eq!(file.world.water, WaterSettings::default());
+        // The preview resolution, persisted later, defaults on an older file too.
+        assert_eq!(file.world.preview_res, crate::PREVIEW_RES);
         let restored = file.restore().expect("restore legacy file");
         assert_eq!(restored.world_extent, 2048.0);
         assert_eq!(restored.world_height, DEFAULT_WORLD_HEIGHT);
@@ -707,8 +789,10 @@ mod tests {
                 world_extent: 1024.0,
                 world_height: 256.0,
                 build_res: DEFAULT_BUILD_RES,
+                preview_res: crate::PREVIEW_RES,
                 sea_level: DEFAULT_SEA_LEVEL,
                 show_water: false,
+                water: WaterSettings::default(),
             },
             &frames,
         );
