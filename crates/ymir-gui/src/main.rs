@@ -4303,17 +4303,170 @@ fn frame_inspector(ui: &mut egui::Ui, state: &mut AppState, index: usize) {
     }
 }
 
+/// A collapsible section for the World panel (the 1c handoff): a slim header of a chevron and an
+/// uppercase label, optionally trailed by a muted `badge` (an active count), over a body that
+/// shows only when open. A faint rule sits above the header so stacked sections read as distinct
+/// bands. Open/closed state persists for the session in egui memory, keyed by `id`.
+fn section(
+    ui: &mut egui::Ui,
+    id: &str,
+    label: &str,
+    default_open: bool,
+    badge: Option<String>,
+    body: impl FnOnce(&mut egui::Ui),
+) {
+    use egui::collapsing_header::CollapsingState;
+
+    // A divider above the header separates this section from the block above it.
+    ui.add_space(6.0);
+    let top = ui.available_rect_before_wrap().top();
+    ui.painter().hline(
+        ui.max_rect().x_range(),
+        top,
+        egui::Stroke::new(1.0, theme::LINE),
+    );
+    ui.add_space(6.0);
+
+    let sid = ui.make_persistent_id(id);
+    let mut coll = CollapsingState::load_with_default_open(ui.ctx(), sid, default_open);
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), egui::Sense::click());
+    if resp.clicked() {
+        // `toggle` flips the flag but does not persist it; `store` writes it to session memory.
+        coll.toggle(ui);
+        coll.store(ui.ctx());
+    }
+    let openness = coll.openness(ui.ctx());
+    let ink = if resp.hovered() {
+        theme::TEXT_PRIMARY
+    } else {
+        theme::TEXT_SECONDARY
+    };
+    let painter = ui.painter();
+    // The chevron, drawn as a small filled triangle rather than a font glyph so it never renders as
+    // a missing-glyph box (IBM Plex has no geometric triangles): right-pointing when closed,
+    // down-pointing when open.
+    let cx = rect.left() + 10.0;
+    let cy = rect.center().y;
+    let tri = if openness > 0.5 {
+        vec![
+            egui::pos2(cx - 4.0, cy - 2.5),
+            egui::pos2(cx + 4.0, cy - 2.5),
+            egui::pos2(cx, cy + 3.0),
+        ]
+    } else {
+        vec![
+            egui::pos2(cx - 2.5, cy - 4.0),
+            egui::pos2(cx - 2.5, cy + 4.0),
+            egui::pos2(cx + 3.0, cy),
+        ]
+    };
+    painter.add(egui::Shape::convex_polygon(tri, ink, egui::Stroke::NONE));
+    painter.text(
+        egui::pos2(rect.left() + 22.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label.to_uppercase(),
+        egui::FontId::proportional(11.0),
+        ink,
+    );
+    if let Some(badge) = badge {
+        painter.text(
+            egui::pos2(rect.right() - 4.0, rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            badge,
+            egui::FontId::proportional(11.0),
+            theme::TEXT_TERTIARY,
+        );
+    }
+
+    coll.show_body_unindented(ui, |ui| {
+        ui.add_space(2.0);
+        body(ui);
+    });
+}
+
+/// A frost pill toggle bound to a bool: draws the switch (accent track when on) and flips the value
+/// on click. Returns the response.
+fn switch(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
+    let resp = param_ui::toggle(ui, *on);
+    if resp.clicked() {
+        *on = !*on;
+    }
+    resp
+}
+
+/// One labelled slider row that fits the narrow panel without overflowing: a fixed label column on
+/// the left, a fixed scrub/type value box pinned right, and the slider filling the gap between them
+/// (its own inline value suppressed, since the box is the value). `decimals` fixes the precision.
+/// A single value edited by both the box and the slider, via a local copy to avoid a double borrow.
+fn slider_row<Num: egui::emath::Numeric>(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut Num,
+    range: std::ops::RangeInclusive<Num>,
+    decimals: usize,
+) {
+    let mut x = *value;
+    let h = ui.spacing().interact_size.y;
+    let span = range.end().to_f64() - range.start().to_f64();
+    ui.horizontal(|ui| {
+        ui.add_sized([66.0, h], egui::Label::new(label).selectable(false));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add_sized(
+                [44.0, h],
+                egui::DragValue::new(&mut x)
+                    .range(range.clone())
+                    .speed(span * 0.002)
+                    .fixed_decimals(decimals),
+            );
+            // The slider takes exactly the width left between the label and the value box.
+            ui.spacing_mut().slider_width = (ui.available_width() - 4.0).max(24.0);
+            ui.add(egui::Slider::new(&mut x, range.clone()).show_value(false));
+        });
+    });
+    *value = x;
+}
+
+/// A water effect group: a header row of the group name and an enable toggle, over the params it
+/// gates. Flat (no bordered box), so nothing paints a hard right edge against the pane border. When
+/// `on` is false the params grey out and stop responding (`add_enabled_ui`) while the header toggle
+/// stays live, so the group can be switched back on.
+fn water_group(ui: &mut egui::Ui, title: &str, on: &mut bool, body: impl FnOnce(&mut egui::Ui)) {
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(title)
+                .size(11.5)
+                .strong()
+                .color(theme::TEXT_PRIMARY),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            switch(ui, on);
+        });
+    });
+    ui.add_enabled_ui(*on, body);
+}
+
 /// The world/build settings: the global eval-request inputs (seed, resolutions) that
-/// apply to the whole graph. Outputs selection and the Build action land here in
-/// later steps.
+/// apply to the whole graph. Reorganized (the 1c handoff) into a pinned World block above
+/// collapsible Build, Water, and Outputs sections.
 fn world_settings(ui: &mut egui::Ui, state: &mut AppState) {
+    // Frost accent: fill sliders up to the handle with the bright accent (the default trailing fill
+    // uses the muted selection colour). Scoped to this pane by mutating its visuals only.
+    ui.visuals_mut().selection.bg_fill = theme::ACCENT_PRIMARY;
+    ui.visuals_mut().slider_trailing_fill = true;
+
     ui.add_space(2.0);
+
+    // WORLD: the identity and most-touched settings, above the collapsible sections. Drawn flat (no
+    // filled box), so nothing paints a hard right edge that would leave the pane margin showing as a
+    // strip against the canvas.
     ui.horizontal(|ui| {
         ui.label("Seed");
         ui.add(egui::DragValue::new(&mut state.seed).speed(1.0));
     });
 
-    ui.separator();
+    ui.add_space(4.0);
     ui.label("World extent");
     ui.horizontal(|ui| {
         ui.add(
@@ -4322,13 +4475,13 @@ fn world_settings(ui: &mut egui::Ui, state: &mut AppState) {
                 .range(1.0..=1_000_000.0)
                 .suffix(" m"),
         );
-        // The meters-to-cells bridge made tangible. Cells are square, so this is the
-        // size along both axes; it follows from extent / build resolution.
+        // The meters-to-cells bridge made tangible. Cells are square, so this is the size along
+        // both axes; it follows from extent / build resolution.
         let m_per_cell = state.world_extent / state.build_res as f64;
         ui.weak(format!("≈ {m_per_cell:.3} m/cell at build"));
     });
 
-    ui.separator();
+    ui.add_space(4.0);
     ui.label("World height");
     ui.horizontal(|ui| {
         ui.add(
@@ -4343,152 +4496,151 @@ fn world_settings(ui: &mut egui::Ui, state: &mut AppState) {
         ui.weak(format!("≈ {proportion:.2}× footprint at full height"));
     });
 
-    ui.separator();
+    ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.label("Sea level");
-        ui.checkbox(&mut state.show_water, "Show water");
+        // Show water sits inline in the header, as a frost toggle at the trailing edge.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            switch(ui, &mut state.show_water);
+            ui.label(egui::RichText::new("Show water").color(theme::TEXT_SECONDARY));
+        });
     });
+    // Normalized height in [0, 1]; the 3D viewport draws a water plane here. Slider fills the row
+    // with a scrub/type value box pinned right (a local copy avoids the double borrow); the
+    // elevation in meters (sea_level × world_height) reads below it.
+    let mut sl = state.sea_level;
     ui.horizontal(|ui| {
-        // Normalized height in [0, 1]; the 3D viewport draws a water plane here. The height in
-        // meters (sea_level × world_height) makes the level tangible against the world height.
-        ui.add(
-            egui::Slider::new(&mut state.sea_level, 0.0..=1.0)
-                .fixed_decimals(3)
-                .clamping(egui::SliderClamping::Always),
-        );
-        let meters = state.sea_level * state.world_height;
-        ui.weak(format!("≈ {meters:.0} m"));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add_sized(
+                [48.0, ui.spacing().interact_size.y],
+                egui::DragValue::new(&mut sl)
+                    .range(0.0..=1.0)
+                    .speed(0.002)
+                    .fixed_decimals(3),
+            );
+            ui.spacing_mut().slider_width = (ui.available_width() - 4.0).max(24.0);
+            ui.add(
+                egui::Slider::new(&mut sl, 0.0..=1.0)
+                    .show_value(false)
+                    .clamping(egui::SliderClamping::Always),
+            );
+        });
     });
-    ui.horizontal(|ui| {
-        ui.label("Water");
-        ui.color_edit_button_rgb(&mut state.water_color);
-    });
-    ui.horizontal(|ui| {
-        // Effect layers, stacking on plain translucent water (#157). Each gates its own controls
-        // below; turning Surface and Foam off also stops the viewport's per-frame repaint, so
-        // still water is both plainer and cheaper. Depth shading tints the color set above.
-        ui.label("Effects");
-        ui.checkbox(&mut state.water_depth, "Depth");
-        ui.checkbox(&mut state.water_surface, "Surface");
-        ui.checkbox(&mut state.water_foam_on, "Foam");
-    });
-    ui.horizontal(|ui| {
-        // Animation speed for the ripples and foam (#157); 0 freezes the surface. Only relevant
-        // while an animated layer is on, so it grays out with Surface and Foam both off.
-        ui.label("Speed");
-        ui.add_enabled(
-            state.water_surface || state.water_foam_on,
-            egui::Slider::new(&mut state.water_speed, 0.0..=2.0).fixed_decimals(2),
-        );
-    });
-    ui.horizontal(|ui| {
-        // Beer-Lambert depth falloff for the 3D viewport water: higher clears to opaque faster,
-        // lower stays see-through deeper. Ephemeral view state (not saved with the project yet).
-        ui.label("Depth falloff");
-        ui.add_enabled(
-            state.water_depth,
-            egui::Slider::new(&mut state.water_extinction, 1.0..=30.0).fixed_decimals(1),
-        );
-    });
-    ui.horizontal(|ui| {
-        ui.label("Waves");
-        ui.add_enabled(
-            state.water_surface,
-            egui::Slider::new(&mut state.water_wave, 0.0..=1.0).fixed_decimals(2),
-        );
-    });
-    ui.horizontal(|ui| {
-        ui.label("Reflectivity");
-        ui.add_enabled(
-            state.water_surface,
-            egui::Slider::new(&mut state.water_reflectivity, 0.0..=1.0).fixed_decimals(2),
-        );
-    });
-    ui.horizontal(|ui| {
-        ui.label("Specular");
-        ui.add_enabled(
-            state.water_surface,
-            egui::Slider::new(&mut state.water_specular, 0.0..=1.0).fixed_decimals(2),
-        );
-    });
-    ui.horizontal(|ui| {
-        ui.label("Foam");
-        ui.add_enabled(
-            state.water_foam_on,
-            egui::Slider::new(&mut state.water_foam, 0.0..=1.0).fixed_decimals(2),
-        );
-    });
-    ui.horizontal(|ui| {
-        ui.label("Foam width");
-        ui.add_enabled(
-            state.water_foam_on,
-            egui::Slider::new(&mut state.water_foam_width, 0.0..=0.05).fixed_decimals(3),
-        );
-    });
+    state.sea_level = sl;
+    let meters = state.sea_level * state.world_height;
+    ui.weak(format!("≈ {meters:.0} m elevation"));
 
-    ui.separator();
-    ui.label("Build resolution");
-    ui.horizontal(|ui| {
-        // Custom value (UE5 landscapes need specific sizes), with presets as
-        // shortcuts.
-        ui.add(
-            egui::DragValue::new(&mut state.build_res)
-                .speed(8.0)
-                .range(16..=8192),
-        );
-        egui::ComboBox::from_id_salt("build-res-presets")
-            .selected_text("presets")
-            .show_ui(ui, |ui| {
-                for &preset in BUILD_RES_PRESETS {
-                    if ui.selectable_label(false, preset.to_string()).clicked() {
-                        state.build_res = preset;
-                    }
-                }
+    // BUILD AND PREVIEW: the resolutions a Build and the interactive preview evaluate at.
+    section(
+        ui,
+        "world_section_build",
+        "Build and Preview",
+        true,
+        None,
+        |ui| {
+            ui.label("Build resolution");
+            ui.horizontal(|ui| {
+                // Custom value (UE5 landscapes need specific sizes), with presets as shortcuts.
+                ui.add(
+                    egui::DragValue::new(&mut state.build_res)
+                        .speed(8.0)
+                        .range(16..=8192),
+                );
+                egui::ComboBox::from_id_salt("build-res-presets")
+                    .selected_text("presets")
+                    .show_ui(ui, |ui| {
+                        for &preset in BUILD_RES_PRESETS {
+                            if ui.selectable_label(false, preset.to_string()).clicked() {
+                                state.build_res = preset;
+                            }
+                        }
+                    });
             });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label("Preview resolution");
+                ui.add(
+                    egui::DragValue::new(&mut state.preview_res)
+                        .speed(4.0)
+                        .range(32..=1024),
+                );
+            });
+        },
+    );
+
+    // WATER: the rendering look, grouped (the 1c handoff) into Surface / Depth / Foam, each a header
+    // row with an enable toggle owning the params it gates. The effect toggles are those headers.
+    section(ui, "world_section_water", "Water", true, None, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("Water color");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.color_edit_button_rgb(&mut state.water_color);
+            });
+        });
+        water_group(ui, "Surface", &mut state.water_surface, |ui| {
+            slider_row(ui, "Speed", &mut state.water_speed, 0.0..=2.0, 2);
+            slider_row(ui, "Waves", &mut state.water_wave, 0.0..=1.0, 2);
+            slider_row(
+                ui,
+                "Reflectivity",
+                &mut state.water_reflectivity,
+                0.0..=1.0,
+                2,
+            );
+            slider_row(ui, "Specular", &mut state.water_specular, 0.0..=1.0, 2);
+        });
+        water_group(ui, "Depth", &mut state.water_depth, |ui| {
+            slider_row(ui, "Falloff", &mut state.water_extinction, 1.0..=30.0, 1);
+        });
+        water_group(ui, "Foam", &mut state.water_foam_on, |ui| {
+            slider_row(ui, "Amount", &mut state.water_foam, 0.0..=1.0, 2);
+            slider_row(ui, "Width", &mut state.water_foam_width, 0.0..=0.05, 3);
+        });
     });
 
-    ui.separator();
-    ui.horizontal(|ui| {
-        ui.label("Preview resolution");
-        ui.add(
-            egui::DragValue::new(&mut state.preview_res)
-                .speed(4.0)
-                .range(32..=1024),
-        );
-    });
-
-    ui.separator();
-    ui.label("Outputs");
-    ui.weak("Endpoints a Build will write; tick to include.");
-    // Endpoints are nodes with no outputs. Collect them first (releasing the snarl
-    // borrow) before mutating params below.
+    // OUTPUTS: endpoints a Build will write, with a badge counting how many are ticked. Endpoints
+    // are nodes with no outputs; collect them (releasing the snarl borrow) before the body mutates
+    // params, and count the active ones for the header badge.
     let endpoints: Vec<NodeId> = state
         .snarl
         .node_ids()
         .filter_map(|(_, &handle)| state.graph.node_id_of(handle))
         .filter(|&id| state.graph.spec(id).is_some_and(|s| s.outputs.is_empty()))
         .collect();
-    if endpoints.is_empty() {
-        ui.weak("No output nodes in the graph.");
-        return;
-    }
-    for id in endpoints {
-        let mut params = state.graph.params(id).cloned().unwrap_or_default();
-        let mut include = params.get_bool("build", true);
-        let name = node_display_name(&state.graph, id);
-        let path = params.get_str("path", "").to_string();
-        ui.horizontal(|ui| {
-            if ui.checkbox(&mut include, name).changed() {
-                params.insert("build".to_string(), ParamValue::Bool(include));
-                if let Err(err) = state.graph.set_params(id, params) {
-                    ui.colored_label(ui.visuals().error_fg_color, err.to_string());
+    let active = endpoints
+        .iter()
+        .filter(|&&id| {
+            state
+                .graph
+                .params(id)
+                .is_none_or(|p| p.get_bool("build", true))
+        })
+        .count();
+    let badge = (!endpoints.is_empty()).then(|| active.to_string());
+    section(ui, "world_section_outputs", "Outputs", true, badge, |ui| {
+        ui.weak("Endpoints a Build will write; tick to include.");
+        if endpoints.is_empty() {
+            ui.weak("No output nodes in the graph.");
+            return;
+        }
+        for id in endpoints {
+            let mut params = state.graph.params(id).cloned().unwrap_or_default();
+            let mut include = params.get_bool("build", true);
+            let name = node_display_name(&state.graph, id);
+            let path = params.get_str("path", "").to_string();
+            ui.horizontal(|ui| {
+                if ui.checkbox(&mut include, name).changed() {
+                    params.insert("build".to_string(), ParamValue::Bool(include));
+                    if let Err(err) = state.graph.set_params(id, params) {
+                        ui.colored_label(ui.visuals().error_fg_color, err.to_string());
+                    }
                 }
-            }
-            if !path.is_empty() {
-                ui.weak(path);
-            }
-        });
-    }
+                if !path.is_empty() {
+                    ui.weak(path);
+                }
+            });
+        }
+    });
 }
 
 /// The preview's pin toggle: a 24px square. Pinned = accent fill, accent border, light pin glyph

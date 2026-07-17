@@ -218,7 +218,7 @@ fn prettify_param_name(name: &str) -> String {
 
 /// A 34x18 pill toggle: an accent track with the knob right when on, a raised track with the knob
 /// left when off. Returns its response (click to flip).
-fn toggle(ui: &mut egui::Ui, on: bool) -> egui::Response {
+pub(crate) fn toggle(ui: &mut egui::Ui, on: bool) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(34.0, 18.0), egui::Sense::click());
     let track = if on {
         crate::theme::ACCENT_PRIMARY
