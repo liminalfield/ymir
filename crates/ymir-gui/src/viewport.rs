@@ -89,6 +89,9 @@ struct Uniforms {
     /// Layer toggles (1 on, 0 off): x = depth shading, y = surface (waves/Fresnel/specular),
     /// z = foam; w unused. Off falls back toward plain translucent water.
     flags: [f32; 4],
+    /// Gerstner wave shaping (#155): x = steepness (crest sharpness, `[0, 1]`), y = wavelength scale
+    /// (multiplies the base wavelengths); z/w reserved.
+    waves: [f32; 4],
 }
 
 /// The offscreen color + depth targets the scene renders into, plus the bind group that lets
@@ -349,15 +352,17 @@ pub(crate) fn init(render_state: &egui_wgpu::RenderState) {
         bind_group_layouts: &[Some(&bind_group_layout)],
         immediate_size: 0,
     });
-    // Group 1 for the water pipeline: the terrain height as a texture, so the water shader reads
-    // the seabed depth per fragment (Tier 0, #140). Non-filtering because R32Float is not a
-    // filterable format without a device feature; nearest is fine for a dense height grid.
+    // Group 1 for the water pipeline: the terrain height as a texture, so the water shader reads the
+    // seabed depth (Tier 0, #140). Visible to both stages: the fragment shader reads it for depth
+    // shading and foam, and the vertex shader reads it to damp the Gerstner waves toward shore (#155).
+    // Non-filtering because R32Float is not a filterable format without a device feature; the shader
+    // filters it manually (see `sample_seabed`).
     let height_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("viewport-height-layout"),
         entries: &[
             wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Texture {
                     sample_type: wgpu::TextureSampleType::Float { filterable: false },
                     view_dimension: wgpu::TextureViewDimension::D2,
@@ -367,7 +372,7 @@ pub(crate) fn init(render_state: &egui_wgpu::RenderState) {
             },
             wgpu::BindGroupLayoutEntry {
                 binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                 count: None,
             },
@@ -593,6 +598,9 @@ struct ViewportCallback {
     water_wave: f32,
     water_reflectivity: f32,
     water_specular: f32,
+    /// Gerstner wave shaping (#155): crest steepness and wavelength scale.
+    water_steepness: f32,
+    water_wavelength: f32,
     /// Shoreline foam controls: amount and band width (in normalized depth).
     water_foam: f32,
     water_foam_width: f32,
@@ -660,6 +668,7 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                     if self.water_foam_on { 1.0 } else { 0.0 },
                     0.0,
                 ],
+                waves: [self.water_steepness, self.water_wavelength, 0.0, 0.0],
             };
             queue.write_buffer(&res.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
@@ -822,6 +831,9 @@ pub(crate) struct ViewSettings {
     pub water_wave: f32,
     pub water_reflectivity: f32,
     pub water_specular: f32,
+    /// Gerstner wave shaping (#155): crest steepness (`[0, 1]`) and wavelength scale.
+    pub water_steepness: f32,
+    pub water_wavelength: f32,
     /// Shoreline foam amount and band width (normalized depth).
     pub water_foam: f32,
     pub water_foam_width: f32,
@@ -951,6 +963,8 @@ pub(crate) fn show(
             water_wave: settings.water_wave,
             water_reflectivity: settings.water_reflectivity,
             water_specular: settings.water_specular,
+            water_steepness: settings.water_steepness,
+            water_wavelength: settings.water_wavelength,
             water_foam: settings.water_foam,
             water_foam_width: settings.water_foam_width,
             water_enabled: settings.show_water,
@@ -1292,6 +1306,7 @@ struct Uniforms {
     surface: vec4<f32>,
     shore: vec4<f32>,
     flags: vec4<f32>,
+    waves: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 
@@ -1354,16 +1369,74 @@ fn sample_seabed(uv: vec2<f32>) -> f32 {
 
 struct WaterOut {
     @builtin(position) clip: vec4<f32>,
-    @location(0) uv: vec2<f32>,
+    // The rest (undisplaced) XZ, used as the height-texture UV so depth, the waterline, and foam stay
+    // put while the surface displaces over them; plus the displaced world position and the analytic
+    // Gerstner normal.
+    @location(0) rest_uv: vec2<f32>,
+    @location(1) world_pos: vec3<f32>,
+    @location(2) normal: vec3<f32>,
 };
 
 // Grid tessellation, in cells per side. Kept in sync with the Rust `WATER_GRID` constant, which
 // drives the vertex count of the draw call.
 const WATER_GRID: u32 = 192u;
 
+struct Gerstner {
+    pos: vec3<f32>,
+    normal: vec3<f32>,
+};
+
+// Gerstner (trochoidal) waves: displaces a surface point vertically and horizontally so crests
+// sharpen and troughs broaden, and returns the analytic surface normal from the same wave sum. `p0`
+// is the rest XZ (footprint units), `y0` the sea-level height (mesh units), `t` the phase, `amp` the
+// overall amplitude (the Waves control, already damped at the shore), `steep` the crest steepness in
+// [0,1]. Each wave's steepness is clamped by 1/(w*a*n) so the summed steepness cannot exceed `steep`
+// and the surface never self-intersects (the classic Gerstner blow-up).
+fn gerstner(p0: vec2<f32>, y0: f32, t: f32, amp: f32, steep: f32, wavelen: f32) -> Gerstner {
+    var dirs = array<vec2<f32>, 3>(
+        normalize(vec2<f32>(1.0, 0.25)),
+        normalize(vec2<f32>(0.6, 0.8)),
+        normalize(vec2<f32>(-0.5, 0.9)),
+    );
+    var lens = array<f32, 3>(0.55, 0.32, 0.19);     // base wavelength, footprint units
+    var amps = array<f32, 3>(0.008, 0.005, 0.0025); // amplitude, mesh units
+    var spds = array<f32, 3>(0.8, 1.1, 1.5);
+    let n_waves = 3.0;
+
+    var pos = vec3<f32>(p0.x, y0, p0.y);
+    var nrm = vec3<f32>(0.0, 1.0, 0.0);
+    for (var k = 0; k < 3; k = k + 1) {
+        let d = dirs[k];
+        // Wavelength scale stretches every wave together; longer waves are lower frequency.
+        let w = 6.2831853 / (lens[k] * wavelen);
+        let base_a = amps[k];
+        let a = base_a * amp;
+        // Steepness is derived from the fixed BASE amplitude, not the damped `a`, so `q * a` (the
+        // horizontal slide) scales with `amp` (Waves x shore damping) instead of cancelling to a
+        // constant. Otherwise vertices slide sideways at full magnitude even where the wave height
+        // is damped to nothing (the shore), tearing the mesh and dragging water over the land.
+        let q = steep / (w * base_a * n_waves + 1e-6);
+        let phase = w * dot(d, p0) + t * spds[k];
+        let cp = cos(phase);
+        let sp = sin(phase);
+        pos.x = pos.x + q * a * d.x * cp;
+        pos.z = pos.z + q * a * d.y * cp;
+        pos.y = pos.y + a * sp;
+        let wa = w * a;
+        nrm.x = nrm.x - d.x * wa * cp;
+        nrm.z = nrm.z - d.y * wa * cp;
+        nrm.y = nrm.y - q * wa * sp;
+    }
+    var out: Gerstner;
+    out.pos = pos;
+    out.normal = normalize(nrm);
+    return out;
+}
+
 // The water plane as a procedural grid: two triangles per cell, positioned from the vertex index so
-// no vertex buffer is needed. The cell's XZ over the [0,1] footprint doubles as the height-texture
-// UV. Flat at the sea level for now; the vertices will be Gerstner-displaced here (#155).
+// no vertex buffer is needed. Each vertex is Gerstner-displaced (#155), with the amplitude damped to
+// zero toward the shore (from the sampled seabed depth) so crests never poke through the terrain, and
+// zeroed when the surface layer is off. The rest XZ rides through as the height-texture UV.
 @vertex
 fn vs_water(@builtin(vertex_index) vi: u32) -> WaterOut {
     let cell = vi / 6u;
@@ -1376,11 +1449,30 @@ fn vs_water(@builtin(vertex_index) vi: u32) -> WaterOut {
     );
     let o = offs[corner];
     let inv = 1.0 / f32(WATER_GRID);
-    let x = f32(gx + o.x) * inv;
-    let z = f32(gy + o.y) * inv;
+    let p0 = vec2<f32>(f32(gx + o.x) * inv, f32(gy + o.y) * inv);
+
+    // Shore damping: cap the wave amplitude to the local water depth so a trough never dips below the
+    // seabed (terrain poking through the water) and a crest never rises far over the land edge — the
+    // two ways the surface clips the terrain in shallow water. The depth in mesh units needs the
+    // vertical scale, recovered from the sea plane's own height (u.water.x = sea_norm * vscale,
+    // u.water.z = sea_norm). A gentle taper at the very waterline and the surface toggle finish it.
+    let depth = u.water.z - sample_seabed(p0);
+    let vscale = u.water.x / max(u.water.z, 1e-4);
+    let depth_mesh = depth * vscale;
+    let max_wave = 0.0155; // sum of the base wave amplitudes (mesh units); keep in sync with `amps`
+    let headroom = 0.7 * depth_mesh / (max_wave + 1e-6);
+    let amp = u.flags.y * min(u.surface.y * smoothstep(0.0, 0.04, depth), headroom);
+    // Fade steepness (the horizontal displacement) to zero a little further out than the amplitude,
+    // so the sideways slide dies before the shore's damping gradient and cannot shear the grid into
+    // a comb at the waterline; open water keeps the full trochoidal crest.
+    let steep = u.waves.x * smoothstep(0.0, 0.08, depth);
+    let g = gerstner(p0, u.water.x, u.surface.x, amp, steep, u.waves.y);
+
     var out: WaterOut;
-    out.clip = u.mvp * vec4<f32>(x, u.water.x, z, 1.0);
-    out.uv = vec2<f32>(x, z);
+    out.clip = u.mvp * vec4<f32>(g.pos, 1.0);
+    out.rest_uv = p0;
+    out.world_pos = g.pos;
+    out.normal = g.normal;
     return out;
 }
 
@@ -1402,21 +1494,6 @@ fn vnoise(p: vec2<f32>) -> f32 {
     let c = hash21(i + vec2<f32>(0.0, 1.0));
     let d = hash21(i + vec2<f32>(1.0, 1.0));
     return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
-}
-
-// A perturbed water normal from broad crossing swells plus a little fine chop. Low base frequencies
-// give wide, slow undulations that catch the light as moving bands (reading as waves), distinct from
-// the fine foam texture. `amp` scales the slope (already faded at the shore by the caller); each
-// term's analytic slope (dir * freq * cos(phase)) accumulates into the gradient.
-fn water_normal(p: vec2<f32>, t: f32, amp: f32) -> vec3<f32> {
-    var grad = vec2<f32>(0.0, 0.0);
-    let d0 = normalize(vec2<f32>(1.0, 0.4));
-    grad = grad + d0 * (6.0 * cos(dot(p, d0) * 6.0 + t * 0.8));
-    let d1 = normalize(vec2<f32>(-0.45, 1.0));
-    grad = grad + d1 * (0.7 * 11.0 * cos(dot(p, d1) * 11.0 + t * 1.1));
-    let d2 = normalize(vec2<f32>(0.8, -0.6));
-    grad = grad + d2 * (0.18 * 34.0 * cos(dot(p, d2) * 34.0 + t * 1.7));
-    return normalize(vec3<f32>(-grad.x * amp, 1.0, -grad.y * amp));
 }
 
 // Foam near the shore: a continuous band hugging the waterline, solid at the water's edge and
@@ -1441,8 +1518,9 @@ fn foam_amount(uv: vec2<f32>, depth: f32, width: f32, t: f32) -> f32 {
 @fragment
 fn fs_water(in: WaterOut) -> @location(0) vec4<f32> {
     // Seabed height (normalized) under this fragment; depth is how far below the sea it sits.
-    // Bilinear (shader-side) so the shoreline and foam edge stay smooth, not stair-stepped.
-    let seabed = sample_seabed(in.uv);
+    // Bilinear (shader-side) so the shoreline and foam edge stay smooth, not stair-stepped. The rest
+    // UV (not the displaced position) keeps the waterline steady while the surface moves over it.
+    let seabed = sample_seabed(in.rest_uv);
     let depth = u.water.z - seabed;
     if (depth <= 0.0) {
         discard; // terrain is above the waterline here: no water
@@ -1473,14 +1551,17 @@ fn fs_water(in: WaterOut) -> @location(0) vec4<f32> {
         alpha = 0.5;
     }
 
-    // Surface (Tier 1): animated ripple normal, sky reflection via Fresnel, and sun specular.
+    // Surface: the Gerstner-displaced geometry already gives the wave shape and its analytic normal
+    // (per-vertex, interpolated here); this branch just lights it — sky reflection via Fresnel and a
+    // sun specular. Fine chop rides on top in a later step.
     if (surface_on) {
-        // Swell amplitude fades to zero at the shore so waves don't chew the waterline. The 0.03
-        // converts the 0..1 wave control to a plausible slope given the low swell frequencies.
-        let shore_fade = smoothstep(0.0, 0.03, depth);
-        let n = water_normal(in.uv, u.surface.x, u.surface.y * shore_fade * 0.03);
-        let frag = vec3<f32>(in.uv.x, u.water.x, in.uv.y);
-        let v = normalize(u.eye.xyz - frag);
+        let to_eye = u.eye.xyz - in.world_pos;
+        let dist = length(to_eye);
+        let v = to_eye / max(dist, 1e-4);
+        // Flatten the wave normal toward vertical with distance: far waves fall below a pixel and
+        // their normals alias into a shimmering moire, so distant water reads calm instead of toothy.
+        let flatten = smoothstep(0.8, 2.6, dist);
+        let n = normalize(mix(in.normal, vec3<f32>(0.0, 1.0, 0.0), flatten));
         let l = normalize(-u.light_dir.xyz);
 
         // Schlick-Fresnel: grazing angles reflect the sky, head-on keeps the colour beneath.
@@ -1506,7 +1587,7 @@ fn fs_water(in: WaterOut) -> @location(0) vec4<f32> {
     // uniform-width band would need distance-to-shore, a follow-up).
     if (foam_on) {
         let foam = clamp(
-            foam_amount(in.uv, depth, u.shore.y, u.surface.x) * u.shore.x,
+            foam_amount(in.rest_uv, depth, u.shore.y, u.surface.x) * u.shore.x,
             0.0,
             1.0,
         );

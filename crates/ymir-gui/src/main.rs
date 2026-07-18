@@ -480,6 +480,9 @@ struct AppState {
     water_wave: f32,
     water_reflectivity: f32,
     water_specular: f32,
+    /// Gerstner wave shaping (#155): crest steepness and wavelength scale.
+    water_steepness: f32,
+    water_wavelength: f32,
     /// Shoreline foam controls (ephemeral): amount and band width (#156).
     water_foam: f32,
     water_foam_width: f32,
@@ -772,6 +775,8 @@ impl AppState {
             water_wave: water_defaults.wave,
             water_reflectivity: water_defaults.reflectivity,
             water_specular: water_defaults.specular,
+            water_steepness: water_defaults.steepness,
+            water_wavelength: water_defaults.wavelength,
             water_foam: water_defaults.foam,
             water_foam_width: water_defaults.foam_width,
             water_speed: water_defaults.speed,
@@ -974,6 +979,8 @@ impl AppState {
             wave: self.water_wave,
             reflectivity: self.water_reflectivity,
             specular: self.water_specular,
+            steepness: self.water_steepness,
+            wavelength: self.water_wavelength,
             foam: self.water_foam,
             foam_width: self.water_foam_width,
             speed: self.water_speed,
@@ -991,6 +998,8 @@ impl AppState {
         self.water_wave = w.wave;
         self.water_reflectivity = w.reflectivity;
         self.water_specular = w.specular;
+        self.water_steepness = w.steepness;
+        self.water_wavelength = w.wavelength;
         self.water_foam = w.foam;
         self.water_foam_width = w.foam_width;
         self.water_speed = w.speed;
@@ -4580,6 +4589,8 @@ fn world_settings(ui: &mut egui::Ui, state: &mut AppState) {
         water_group(ui, "Surface", &mut state.water_surface, |ui| {
             slider_row(ui, "Speed", &mut state.water_speed, 0.0..=2.0, 2);
             slider_row(ui, "Waves", &mut state.water_wave, 0.0..=1.0, 2);
+            slider_row(ui, "Steepness", &mut state.water_steepness, 0.0..=1.0, 2);
+            slider_row(ui, "Wavelength", &mut state.water_wavelength, 0.3..=3.0, 2);
             slider_row(
                 ui,
                 "Reflectivity",
@@ -7009,6 +7020,8 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 water_wave: state.water_wave,
                 water_reflectivity: state.water_reflectivity,
                 water_specular: state.water_specular,
+                water_steepness: state.water_steepness,
+                water_wavelength: state.water_wavelength,
                 water_foam: state.water_foam,
                 water_foam_width: state.water_foam_width,
                 water_time: state.water_phase,
@@ -9229,6 +9242,8 @@ mod tests {
                     wave: 0.25,
                     reflectivity: 0.75,
                     specular: 0.1,
+                    steepness: 0.4,
+                    wavelength: 1.5,
                     foam: 0.8,
                     foam_width: 0.02,
                     speed: 0.9,

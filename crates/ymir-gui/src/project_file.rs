@@ -124,6 +124,16 @@ pub(crate) struct WorldSettings {
     pub water: WaterSettings,
 }
 
+/// Gerstner crest steepness for a project saved before the control existed (#155).
+fn default_steepness() -> f32 {
+    0.6
+}
+
+/// Gerstner wavelength scale for a project saved before the control existed (#155).
+fn default_wavelength() -> f32 {
+    1.0
+}
+
 /// How the 3D viewport renders the water surface: which effect layers are on and their look
 /// controls (#157). Travels with the project so a saved world reopens looking as it was tuned.
 /// The animation *phase* is a running clock, not a setting, and is deliberately not stored.
@@ -143,6 +153,12 @@ pub(crate) struct WaterSettings {
     pub wave: f32,
     pub reflectivity: f32,
     pub specular: f32,
+    /// Gerstner wave shaping (#155): crest steepness (`0..1`) and wavelength scale (a multiplier on
+    /// the base wavelengths). Defaulted on load for projects saved before they existed.
+    #[serde(default = "default_steepness")]
+    pub steepness: f32,
+    #[serde(default = "default_wavelength")]
+    pub wavelength: f32,
     /// Foam amount and band width (in normalized depth).
     pub foam: f32,
     pub foam_width: f32,
@@ -163,6 +179,8 @@ impl Default for WaterSettings {
             wave: 0.5,
             reflectivity: 0.6,
             specular: 0.5,
+            steepness: 0.6,
+            wavelength: 1.0,
             foam: 0.5,
             foam_width: 0.015,
             speed: 0.4,
