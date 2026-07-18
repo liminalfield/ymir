@@ -24,6 +24,12 @@ const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
 /// formats. The color is resolved to a single-sample texture before the composite blit.
 const SAMPLE_COUNT: u32 = 4;
 
+/// Tessellation of the water plane, in grid cells per side (#155). The water is drawn as a
+/// procedural grid generated from the vertex index (no vertex buffer), so its vertices can be
+/// displaced by Gerstner waves. Sized for roughly 8-16 vertices per shortest wave. The `vs_water`
+/// shader hardcodes the same value; keep the two in sync.
+const WATER_GRID: u32 = 192;
+
 /// Initial mesh grid resolution (vertices per side), used for the flat startup mesh. The live
 /// mesh then follows the previewed field's own resolution (see [`mesh_res`]), so raising the
 /// preview resolution shows finer terrain instead of resampling back down to a fixed grid.
@@ -760,7 +766,9 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                 pass.set_pipeline(&res.water_pipeline);
                 pass.set_bind_group(0, &res.bind_group, &[]);
                 pass.set_bind_group(1, &res.height_bind_group, &[]);
-                pass.draw(0..6, 0..1);
+                // The water is a procedural grid (two triangles per cell), generated from the vertex
+                // index in `vs_water`, so its vertices can be Gerstner-displaced (#155).
+                pass.draw(0..(WATER_GRID * WATER_GRID * 6), 0..1);
             }
         }
         vec![encoder.finish()]
@@ -1325,24 +1333,54 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 @group(1) @binding(0) var height_tex: texture_2d<f32>;
 @group(1) @binding(1) var height_samp: sampler;
 
+// Bilinearly samples the seabed height at `uv`. The height texture is R32Float, which is not
+// GPU-filterable, so a plain sample snaps to the texel grid and the derived waterline, depth bands,
+// and foam edge stair-step. This filters the four surrounding texels in the shader instead, for a
+// smooth shore at any zoom. Uses the (nearest) sampler at texel centres, so each read is exact.
+fn sample_seabed(uv: vec2<f32>) -> f32 {
+    let dims = vec2<f32>(textureDimensions(height_tex));
+    let t = uv * dims - 0.5;
+    let i = floor(t);
+    let f = t - i;
+    let base = (i + 0.5) / dims;
+    let dx = vec2<f32>(1.0 / dims.x, 0.0);
+    let dy = vec2<f32>(0.0, 1.0 / dims.y);
+    let a = textureSampleLevel(height_tex, height_samp, base, 0.0).r;
+    let b = textureSampleLevel(height_tex, height_samp, base + dx, 0.0).r;
+    let c = textureSampleLevel(height_tex, height_samp, base + dy, 0.0).r;
+    let d = textureSampleLevel(height_tex, height_samp, base + dx + dy, 0.0).r;
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
 struct WaterOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
 };
 
-// Water plane: two triangles over the [0,1] x/z footprint at the sea-level height in u.water.x.
-// Generated from the vertex index, so no vertex buffer is needed. The corner XZ doubles as the
-// height-texture UV (the footprint and the texture share the [0,1] domain).
+// Grid tessellation, in cells per side. Kept in sync with the Rust `WATER_GRID` constant, which
+// drives the vertex count of the draw call.
+const WATER_GRID: u32 = 192u;
+
+// The water plane as a procedural grid: two triangles per cell, positioned from the vertex index so
+// no vertex buffer is needed. The cell's XZ over the [0,1] footprint doubles as the height-texture
+// UV. Flat at the sea level for now; the vertices will be Gerstner-displaced here (#155).
 @vertex
 fn vs_water(@builtin(vertex_index) vi: u32) -> WaterOut {
-    var corners = array<vec2<f32>, 6>(
-        vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0),
-        vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0),
+    let cell = vi / 6u;
+    let corner = vi % 6u;
+    let gx = cell % WATER_GRID;
+    let gy = cell / WATER_GRID;
+    var offs = array<vec2<u32>, 6>(
+        vec2<u32>(0u, 0u), vec2<u32>(1u, 0u), vec2<u32>(0u, 1u),
+        vec2<u32>(1u, 0u), vec2<u32>(1u, 1u), vec2<u32>(0u, 1u),
     );
-    let c = corners[vi];
+    let o = offs[corner];
+    let inv = 1.0 / f32(WATER_GRID);
+    let x = f32(gx + o.x) * inv;
+    let z = f32(gy + o.y) * inv;
     var out: WaterOut;
-    out.clip = u.mvp * vec4<f32>(c.x, u.water.x, c.y, 1.0);
-    out.uv = c;
+    out.clip = u.mvp * vec4<f32>(x, u.water.x, z, 1.0);
+    out.uv = vec2<f32>(x, z);
     return out;
 }
 
@@ -1403,8 +1441,8 @@ fn foam_amount(uv: vec2<f32>, depth: f32, width: f32, t: f32) -> f32 {
 @fragment
 fn fs_water(in: WaterOut) -> @location(0) vec4<f32> {
     // Seabed height (normalized) under this fragment; depth is how far below the sea it sits.
-    // textureSampleLevel (explicit LOD 0) works with the non-filterable single-mip height texture.
-    let seabed = textureSampleLevel(height_tex, height_samp, in.uv, 0.0).r;
+    // Bilinear (shader-side) so the shoreline and foam edge stay smooth, not stair-stepped.
+    let seabed = sample_seabed(in.uv);
     let depth = u.water.z - seabed;
     if (depth <= 0.0) {
         discard; // terrain is above the waterline here: no water
