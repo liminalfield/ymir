@@ -158,7 +158,7 @@ impl Default for WaterSettings {
             depth: true,
             surface: true,
             foam_on: true,
-            extinction: 9.0,
+            extinction: 5.0,
             color: [0.10, 0.28, 0.42],
             wave: 0.5,
             reflectivity: 0.6,

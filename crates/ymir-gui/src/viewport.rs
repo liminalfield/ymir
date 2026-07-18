@@ -953,17 +953,17 @@ pub(crate) fn show(
         },
     );
     // Animate only when there is an animated layer to show and the speed is non-zero. The surface
-    // ripples and the foam both scroll with the phase; depth shading and plain translucent water
-    // are static. Throttling to ~30 fps (rather than an unbounded `request_repaint`) keeps the
-    // animation smooth without pegging the GPU, and skipping it entirely for still or frozen water
-    // lets the fans idle (#157). The phase is a real-time accumulator (see `water_time`), so a
-    // capped rate does not slow the waves.
+    // swells and the foam both scroll with the phase; depth shading and plain translucent water are
+    // static. Throttling to ~22 fps (rather than an unbounded `request_repaint`) keeps the slow
+    // swells smooth while halving the per-second cost of the full-scene re-render, and skipping it
+    // entirely for still or frozen water lets the fans idle (#157). The phase is a real-time
+    // accumulator (see `water_time`), so a capped rate does not slow the waves.
     let animated = settings.show_water
         && (settings.water_surface || settings.water_foam_on)
         && settings.water_speed > 0.0;
     if animated {
         ui.ctx()
-            .request_repaint_after(std::time::Duration::from_millis(33));
+            .request_repaint_after(std::time::Duration::from_millis(45));
     }
     ui.painter().add(callback);
 }
@@ -1346,27 +1346,58 @@ fn vs_water(@builtin(vertex_index) vi: u32) -> WaterOut {
     return out;
 }
 
-// A perturbed water normal from three scrolling directional ripples. `p` is the surface XZ, `amp`
-// scales the ripple slope (already faded at the shore by the caller). Each ripple's analytic slope
-// (dir * freq * cos(phase)) accumulates into the gradient; the normal tilts against it.
+// A cheap hash and value noise for isotropic (non-directional) foam breakup, so the shore reads as
+// a band of patches rather than the diagonal stripes a crossed-sine noise gives. The hash avoids
+// sin() (which bands on some GPUs) via a fract/dot construction.
+fn hash21(p: vec2<f32>) -> f32 {
+    var p3 = fract(vec3<f32>(p.x, p.y, p.x) * 0.1031);
+    p3 = p3 + dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+fn vnoise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let a = hash21(i);
+    let b = hash21(i + vec2<f32>(1.0, 0.0));
+    let c = hash21(i + vec2<f32>(0.0, 1.0));
+    let d = hash21(i + vec2<f32>(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+// A perturbed water normal from broad crossing swells plus a little fine chop. Low base frequencies
+// give wide, slow undulations that catch the light as moving bands (reading as waves), distinct from
+// the fine foam texture. `amp` scales the slope (already faded at the shore by the caller); each
+// term's analytic slope (dir * freq * cos(phase)) accumulates into the gradient.
 fn water_normal(p: vec2<f32>, t: f32, amp: f32) -> vec3<f32> {
     var grad = vec2<f32>(0.0, 0.0);
-    let d0 = normalize(vec2<f32>(1.0, 0.3));
-    grad = grad + d0 * (42.0 * cos(dot(p, d0) * 42.0 + t * 1.1));
-    let d1 = normalize(vec2<f32>(-0.4, 1.0));
-    grad = grad + d1 * (60.0 * cos(dot(p, d1) * 60.0 + t * 1.7));
-    let d2 = normalize(vec2<f32>(0.7, -0.8));
-    grad = grad + d2 * (88.0 * cos(dot(p, d2) * 88.0 + t * 2.3));
+    let d0 = normalize(vec2<f32>(1.0, 0.4));
+    grad = grad + d0 * (6.0 * cos(dot(p, d0) * 6.0 + t * 0.8));
+    let d1 = normalize(vec2<f32>(-0.45, 1.0));
+    grad = grad + d1 * (0.7 * 11.0 * cos(dot(p, d1) * 11.0 + t * 1.1));
+    let d2 = normalize(vec2<f32>(0.8, -0.6));
+    grad = grad + d2 * (0.18 * 34.0 * cos(dot(p, d2) * 34.0 + t * 1.7));
     return normalize(vec3<f32>(-grad.x * amp, 1.0, -grad.y * amp));
 }
 
-// A cheap animated noise that breaks the foam band into moving patches (0..1), so the shore reads
-// as broken surf rather than a solid ring.
-fn foam_noise(p: vec2<f32>, t: f32) -> f32 {
-    let a = sin(p.x * 70.0 + t * 2.5) * sin(p.y * 64.0 - t * 1.7);
-    let b = sin((p.x + p.y) * 120.0 - t * 3.3);
-    let n = 0.5 + 0.5 * (a * 0.6 + b * 0.4);
-    return smoothstep(0.35, 0.85, n);
+// Foam near the shore: a continuous band hugging the waterline, solid at the water's edge and
+// breaking into isotropic patches toward its outer edge, breathing in and out with a slow wash
+// cycle. The value noise is skipped away from the band, so the cost stays on the thin shore ring.
+// Returns 0..1. `width` is the band's reach in normalized depth, `t` the animation phase.
+fn foam_amount(uv: vec2<f32>, depth: f32, width: f32, t: f32) -> f32 {
+    let wash = width * (0.8 + 0.2 * sin(t * 0.5));
+    let band = 1.0 - smoothstep(0.0, wash, depth);
+    if (band <= 0.001) {
+        return 0.0;
+    }
+    let flow = t * 0.12;
+    var n = vnoise(uv * 55.0 + vec2<f32>(flow, -flow * 0.6)) * 0.6;
+    n = n + vnoise(uv * 115.0 - vec2<f32>(flow * 0.5, flow)) * 0.4;
+    // Solid at the waterline (edge=0), patchier toward the outer edge (edge=1).
+    let edge = smoothstep(0.0, wash, depth);
+    let breakup = mix(1.0, smoothstep(0.3, 0.75, n), edge);
+    return band * breakup;
 }
 
 @fragment
@@ -1392,8 +1423,13 @@ fn fs_water(in: WaterOut) -> @location(0) vec4<f32> {
     var alpha: f32;
     if (depth_on) {
         let transmit = exp(-depth * u.water.w);
-        color = u.water_color.rgb * (0.35 + 0.65 * transmit);
-        alpha = clamp(1.0 - transmit, 0.12, 0.95);
+        // Shallow water keeps a clear, lifted tint; deep water darkens toward a deeper shade (not
+        // black), so the fade from shallow to deep is gradual rather than snapping dark. The alpha
+        // never reaches zero, so even the shallowest water still reads as water rather than clear.
+        let shallow = mix(u.water_color.rgb, vec3<f32>(1.0), 0.12);
+        let deep = u.water_color.rgb * 0.28;
+        color = mix(deep, shallow, transmit);
+        alpha = clamp(0.28 + 0.62 * (1.0 - transmit), 0.28, 0.92);
     } else {
         color = u.water_color.rgb;
         alpha = 0.5;
@@ -1401,10 +1437,10 @@ fn fs_water(in: WaterOut) -> @location(0) vec4<f32> {
 
     // Surface (Tier 1): animated ripple normal, sky reflection via Fresnel, and sun specular.
     if (surface_on) {
-        // Ripple amplitude fades to zero at the shore so waves don't chew the waterline. The 0.008
-        // converts the 0..1 wave control to a plausible ripple slope given the high frequencies.
+        // Swell amplitude fades to zero at the shore so waves don't chew the waterline. The 0.03
+        // converts the 0..1 wave control to a plausible slope given the low swell frequencies.
         let shore_fade = smoothstep(0.0, 0.03, depth);
-        let n = water_normal(in.uv, u.surface.x, u.surface.y * shore_fade * 0.008);
+        let n = water_normal(in.uv, u.surface.x, u.surface.y * shore_fade * 0.03);
         let frag = vec3<f32>(in.uv.x, u.water.x, in.uv.y);
         let v = normalize(u.eye.xyz - frag);
         let l = normalize(-u.light_dir.xyz);
@@ -1427,11 +1463,12 @@ fn fs_water(in: WaterOut) -> @location(0) vec4<f32> {
         alpha = max(alpha, fresnel);
     }
 
-    // Foam: a broken bright band in shallow water near the shore. Depth-based, so its width varies
-    // with shore slope (a uniform-width band would need distance-to-shore, a follow-up).
+    // Foam: a continuous band hugging the shore, breaking into patches outward and breathing with a
+    // slow wash (see foam_amount). Depth-based, so its width still varies with shore slope (a
+    // uniform-width band would need distance-to-shore, a follow-up).
     if (foam_on) {
         let foam = clamp(
-            (1.0 - smoothstep(0.0, u.shore.y, depth)) * foam_noise(in.uv, u.surface.x) * u.shore.x,
+            foam_amount(in.uv, depth, u.shore.y, u.surface.x) * u.shore.x,
             0.0,
             1.0,
         );
