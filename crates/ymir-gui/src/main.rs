@@ -7260,9 +7260,11 @@ fn viewport_3d_controls(
     });
     ui.horizontal(|ui| {
         ui.label("Fly speed")
-            .on_hover_text("Speed of the right-mouse + WASD fly-through (Shift boosts)");
+            .on_hover_text("Speed of the right-mouse + WASD fly-through (Shift boosts 4x)");
+        // Log scale, and a low top end (Shift still reaches ~4x this): most of the slider's travel
+        // then sits in the slow range where the fine control is wanted.
         ui.add(
-            egui::Slider::new(fly_speed, 0.05..=4.0)
+            egui::Slider::new(fly_speed, 0.05..=1.5)
                 .logarithmic(true)
                 .fixed_decimals(2),
         );
