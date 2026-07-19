@@ -4318,27 +4318,34 @@ fn frame_inspector(ui: &mut egui::Ui, state: &mut AppState, index: usize) {
 
 /// A collapsible section for the World panel (the 1c handoff): a slim header of a chevron and an
 /// uppercase label, optionally trailed by a muted `badge` (an active count), over a body that
-/// shows only when open. A faint rule sits above the header so stacked sections read as distinct
-/// bands. Open/closed state persists for the session in egui memory, keyed by `id`.
+/// shows only when open. With `divider`, a faint rule sits above the header so stacked sections read
+/// as distinct bands (off for the first section, which has nothing above it). Open/closed state
+/// persists for the session in egui memory, keyed by `id`.
 fn section(
     ui: &mut egui::Ui,
     id: &str,
     label: &str,
     default_open: bool,
+    divider: bool,
     badge: Option<String>,
     body: impl FnOnce(&mut egui::Ui),
 ) {
     use egui::collapsing_header::CollapsingState;
 
-    // A divider above the header separates this section from the block above it.
-    ui.add_space(6.0);
-    let top = ui.available_rect_before_wrap().top();
-    ui.painter().hline(
-        ui.max_rect().x_range(),
-        top,
-        egui::Stroke::new(1.0, theme::LINE),
-    );
-    ui.add_space(6.0);
+    // A divider above the header separates this section from the block above it, bracketed by a
+    // little space. The first section (no divider) skips that and sits close to the top of the pane.
+    if divider {
+        ui.add_space(6.0);
+        let top = ui.available_rect_before_wrap().top();
+        ui.painter().hline(
+            ui.max_rect().x_range(),
+            top,
+            egui::Stroke::new(1.0, theme::LINE),
+        );
+        ui.add_space(6.0);
+    } else {
+        ui.add_space(2.0);
+    }
 
     let sid = ui.make_persistent_id(id);
     let mut coll = CollapsingState::load_with_default_open(ui.ctx(), sid, default_open);
@@ -4488,95 +4495,101 @@ fn water_group(ui: &mut egui::Ui, title: &str, on: &mut bool, body: impl FnOnce(
 }
 
 /// The world/build settings: the global eval-request inputs (seed, resolutions) that
-/// apply to the whole graph. Reorganized (the 1c handoff) into a pinned World block above
-/// collapsible Build, Water, and Outputs sections.
+/// apply to the whole graph, laid out as collapsible World, Build, Water, and Outputs sections.
 fn world_settings(ui: &mut egui::Ui, state: &mut AppState) {
     // Frost accent: fill sliders up to the handle with the bright accent (the default trailing fill
     // uses the muted selection colour). Scoped to this pane by mutating its visuals only.
     ui.visuals_mut().selection.bg_fill = theme::ACCENT_PRIMARY;
     ui.visuals_mut().slider_trailing_fill = true;
 
-    ui.add_space(2.0);
+    // WORLD: the identity and most-touched settings, now a collapsible section like the rest.
+    section(
+        ui,
+        "world_section_world",
+        "World",
+        true,
+        false,
+        None,
+        |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Seed");
+                ui.add(egui::DragValue::new(&mut state.seed).speed(1.0));
+            });
 
-    // WORLD: the identity and most-touched settings, above the collapsible sections. Drawn flat (no
-    // filled box), so nothing paints a hard right edge that would leave the pane margin showing as a
-    // strip against the canvas.
-    ui.horizontal(|ui| {
-        ui.label("Seed");
-        ui.add(egui::DragValue::new(&mut state.seed).speed(1.0));
-    });
+            ui.add_space(4.0);
+            ui.label("World extent");
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::DragValue::new(&mut state.world_extent)
+                        .speed(8.0)
+                        .range(1.0..=1_000_000.0)
+                        .suffix(" m"),
+                );
+                // The meters-to-cells bridge made tangible. Cells are square, so this is the size along
+                // both axes; it follows from extent / build resolution.
+                let m_per_cell = state.world_extent / state.build_res as f64;
+                ui.weak(format!("≈ {m_per_cell:.3} m/cell at build"));
+            });
 
-    ui.add_space(4.0);
-    ui.label("World extent");
-    ui.horizontal(|ui| {
-        ui.add(
-            egui::DragValue::new(&mut state.world_extent)
-                .speed(8.0)
-                .range(1.0..=1_000_000.0)
-                .suffix(" m"),
-        );
-        // The meters-to-cells bridge made tangible. Cells are square, so this is the size along
-        // both axes; it follows from extent / build resolution.
-        let m_per_cell = state.world_extent / state.build_res as f64;
-        ui.weak(format!("≈ {m_per_cell:.3} m/cell at build"));
-    });
+            ui.add_space(4.0);
+            ui.label("World height");
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::DragValue::new(&mut state.world_height)
+                        .speed(2.0)
+                        .range(1.0..=100_000.0)
+                        .suffix(" m"),
+                );
+                // The vertical:horizontal ratio a height of 1.0 reaches over the footprint: what the
+                // viewport shows at 1x exaggeration. A value of 1.0 would be as tall as it is wide.
+                let proportion = state.world_height / state.world_extent;
+                ui.weak(format!("≈ {proportion:.2}× footprint at full height"));
+            });
 
-    ui.add_space(4.0);
-    ui.label("World height");
-    ui.horizontal(|ui| {
-        ui.add(
-            egui::DragValue::new(&mut state.world_height)
-                .speed(2.0)
-                .range(1.0..=100_000.0)
-                .suffix(" m"),
-        );
-        // The vertical:horizontal ratio a height of 1.0 reaches over the footprint: what the
-        // viewport shows at 1x exaggeration. A value of 1.0 would be as tall as it is wide.
-        let proportion = state.world_height / state.world_extent;
-        ui.weak(format!("≈ {proportion:.2}× footprint at full height"));
-    });
-
-    ui.add_space(4.0);
-    // Show water: the master toggle for the water overlay, on its own row directly above the sea
-    // level so it is easy to find (it used to hide at the right edge of the sea-level header row).
-    ui.horizontal(|ui| {
-        ui.label("Show water");
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            switch(ui, &mut state.show_water);
-        });
-    });
-    ui.add_space(2.0);
-    ui.label("Sea level");
-    // Normalized height in [0, 1]; the 3D viewport draws a water plane here. Slider fills the row
-    // with a scrub/type value box pinned right (a local copy avoids the double borrow); the
-    // elevation in meters (sea_level × world_height) reads below it.
-    let mut sl = state.sea_level;
-    ui.horizontal(|ui| {
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.add_sized(
-                [48.0, ui.spacing().interact_size.y],
-                egui::DragValue::new(&mut sl)
-                    .range(0.0..=1.0)
-                    .speed(0.002)
-                    .fixed_decimals(3),
-            );
-            ui.spacing_mut().slider_width = (ui.available_width() - 4.0).max(24.0);
-            ui.add(
-                egui::Slider::new(&mut sl, 0.0..=1.0)
-                    .show_value(false)
-                    .clamping(egui::SliderClamping::Always),
-            );
-        });
-    });
-    state.sea_level = sl;
-    let meters = state.sea_level * state.world_height;
-    ui.weak(format!("≈ {meters:.0} m elevation"));
+            ui.add_space(4.0);
+            // Show water: the master toggle for the water overlay, on its own row directly above the sea
+            // level so it is easy to find (it used to hide at the right edge of the sea-level header).
+            ui.horizontal(|ui| {
+                ui.label("Show water");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    switch(ui, &mut state.show_water);
+                });
+            });
+            ui.add_space(2.0);
+            ui.label("Sea level");
+            // Normalized height in [0, 1]; the 3D viewport draws a water plane here. Slider fills the row
+            // with a scrub/type value box pinned right (a local copy avoids the double borrow); the
+            // elevation in meters (sea_level × world_height) reads below it.
+            let mut sl = state.sea_level;
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_sized(
+                        [48.0, ui.spacing().interact_size.y],
+                        egui::DragValue::new(&mut sl)
+                            .range(0.0..=1.0)
+                            .speed(0.002)
+                            .fixed_decimals(3),
+                    );
+                    ui.spacing_mut().slider_width = (ui.available_width() - 4.0).max(24.0);
+                    ui.add(
+                        egui::Slider::new(&mut sl, 0.0..=1.0)
+                            .show_value(false)
+                            .clamping(egui::SliderClamping::Always),
+                    );
+                });
+            });
+            state.sea_level = sl;
+            let meters = state.sea_level * state.world_height;
+            ui.weak(format!("≈ {meters:.0} m elevation"));
+        },
+    );
 
     // BUILD AND PREVIEW: the resolutions a Build and the interactive preview evaluate at.
     section(
         ui,
         "world_section_build",
         "Build and Preview",
+        true,
         true,
         None,
         |ui| {
@@ -4612,7 +4625,7 @@ fn world_settings(ui: &mut egui::Ui, state: &mut AppState) {
 
     // WATER: the rendering look, grouped (the 1c handoff) into Surface / Depth / Foam, each a header
     // row with an enable toggle owning the params it gates. The effect toggles are those headers.
-    section(ui, "world_section_water", "Water", true, None, |ui| {
+    section(ui, "world_section_water", "Water", true, true, None, |ui| {
         ui.horizontal(|ui| {
             ui.label("Water colour");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -4673,30 +4686,38 @@ fn world_settings(ui: &mut egui::Ui, state: &mut AppState) {
         })
         .count();
     let badge = (!endpoints.is_empty()).then(|| active.to_string());
-    section(ui, "world_section_outputs", "Outputs", true, badge, |ui| {
-        ui.weak("Endpoints a Build will write; tick to include.");
-        if endpoints.is_empty() {
-            ui.weak("No output nodes in the graph.");
-            return;
-        }
-        for id in endpoints {
-            let mut params = state.graph.params(id).cloned().unwrap_or_default();
-            let mut include = params.get_bool("build", true);
-            let name = node_display_name(&state.graph, id);
-            let path = params.get_str("path", "").to_string();
-            ui.horizontal(|ui| {
-                if ui.checkbox(&mut include, name).changed() {
-                    params.insert("build".to_string(), ParamValue::Bool(include));
-                    if let Err(err) = state.graph.set_params(id, params) {
-                        ui.colored_label(ui.visuals().error_fg_color, err.to_string());
+    section(
+        ui,
+        "world_section_outputs",
+        "Outputs",
+        true,
+        true,
+        badge,
+        |ui| {
+            ui.weak("Endpoints a Build will write; tick to include.");
+            if endpoints.is_empty() {
+                ui.weak("No output nodes in the graph.");
+                return;
+            }
+            for id in endpoints {
+                let mut params = state.graph.params(id).cloned().unwrap_or_default();
+                let mut include = params.get_bool("build", true);
+                let name = node_display_name(&state.graph, id);
+                let path = params.get_str("path", "").to_string();
+                ui.horizontal(|ui| {
+                    if ui.checkbox(&mut include, name).changed() {
+                        params.insert("build".to_string(), ParamValue::Bool(include));
+                        if let Err(err) = state.graph.set_params(id, params) {
+                            ui.colored_label(ui.visuals().error_fg_color, err.to_string());
+                        }
                     }
-                }
-                if !path.is_empty() {
-                    ui.weak(path);
-                }
-            });
-        }
-    });
+                    if !path.is_empty() {
+                        ui.weak(path);
+                    }
+                });
+            }
+        },
+    );
 }
 
 /// The preview's pin toggle: a 24px square. Pinned = accent fill, accent border, light pin glyph
