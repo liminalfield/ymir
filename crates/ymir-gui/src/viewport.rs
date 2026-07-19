@@ -1119,7 +1119,11 @@ impl OrbitCamera {
 
     /// The combined view-projection matrix for `aspect` (wgpu clip space, z in `[0, 1]`).
     fn view_proj(&self, aspect: f32) -> Mat4 {
-        let proj = Mat4::perspective_rh(45f32.to_radians(), aspect, 0.02, 20.0);
+        // Scale the near plane with the zoom so a close-up does not clip the surface (a fixed near
+        // cut the terrain once the eye came within it) while a far view keeps its depth precision.
+        // A small fraction of the eye-to-pivot distance, floored so it never degenerates to zero.
+        let near = (self.distance * 0.05).max(0.002);
+        let proj = Mat4::perspective_rh(45f32.to_radians(), aspect, near, 20.0);
         let view = Mat4::look_at_rh(self.eye(), self.pivot, Vec3::Y);
         proj * view
     }
@@ -1179,8 +1183,11 @@ const PAN_SPEED: f32 = 0.0015;
 const DOLLY_DRAG_SPEED: f32 = 0.01;
 /// Dolly fraction per unit of scroll.
 const DOLLY_SCROLL_SPEED: f32 = 0.0015;
-/// Closest and farthest the eye may sit from the pivot, world units.
-const DISTANCE_MIN: f32 = 0.2;
+/// Closest and farthest the eye may sit from the pivot, world units. The close floor lets the
+/// camera get right down to the surface for detail (the footprint is 1.0 wide); the adaptive near
+/// plane in `view_proj` keeps that from clipping. Pan the pivot (Alt + middle-drag) onto a feature,
+/// then dolly in.
+const DISTANCE_MIN: f32 = 0.03;
 const DISTANCE_MAX: f32 = 10.0;
 
 /// Samples the field's height layer to a `MESH_RES`-resolution grid in `[0, 1]`. With
