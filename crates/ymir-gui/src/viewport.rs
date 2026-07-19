@@ -83,8 +83,8 @@ struct Uniforms {
     /// Water surface params (Tier 1): x = time (seconds), y = wave strength, z = reflectivity,
     /// w = specular intensity.
     surface: [f32; 4],
-    /// Shoreline params: x = foam amount, y = foam width (in normalized depth); z/w reserved
-    /// (wet-shore later).
+    /// Shoreline params: x = foam amount, y = foam width (in normalized depth), z = wet-shore
+    /// strength (0 = off), w = wet-shore band width (in normalized height) (#156).
     shore: [f32; 4],
     /// Layer toggles (1 on, 0 off): x = depth shading, y = Gerstner waves, z = foam,
     /// w = reflective finish (sky Fresnel + specular). Off falls back toward plain translucent water.
@@ -248,6 +248,10 @@ struct ViewportResources {
     terrain_view_proj: [[f32; 4]; 4],
     terrain_light_dir: [f32; 4],
     terrain_light: [f32; 4],
+    /// The water/wet-shore uniform values the terrain shader also reads (the wet-shore band, #156):
+    /// [sea plane Y, water shown, sea normal, wet strength, wet width]. Changing these must
+    /// re-render the terrain even though the camera and mesh are unchanged.
+    terrain_wet: [f32; 5],
 }
 
 /// Creates the `res`x`res` R32Float terrain-height texture the water shader samples (Tier 0).
@@ -605,6 +609,7 @@ pub(crate) fn init(render_state: &egui_wgpu::RenderState) {
             terrain_view_proj: [[0.0; 4]; 4],
             terrain_light_dir: [0.0; 4],
             terrain_light: [0.0; 4],
+            terrain_wet: [0.0; 5],
         });
 }
 
@@ -640,6 +645,9 @@ struct ViewportCallback {
     /// Shoreline foam controls: amount and band width (in normalized depth).
     water_foam: f32,
     water_foam_width: f32,
+    /// Wet-shore darkening (#156): strength (0 when off) and band width (normalized height).
+    water_wet: f32,
+    water_wet_width: f32,
     /// Whether to draw the water plane this frame.
     water_enabled: bool,
     /// Layer toggles (#157, #155): depth shading, Gerstner waves, reflective finish, and foam.
@@ -697,7 +705,12 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                     self.water_reflectivity,
                     self.water_specular,
                 ],
-                shore: [self.water_foam, self.water_foam_width, 0.0, 0.0],
+                shore: [
+                    self.water_foam,
+                    self.water_foam_width,
+                    self.water_wet,
+                    self.water_wet_width,
+                ],
                 flags: [
                     if self.water_depth { 1.0 } else { 0.0 },
                     if self.water_waves { 1.0 } else { 0.0 },
@@ -773,11 +786,21 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
         // a new mesh this frame, a moved camera, or changed lighting. The animated water re-renders
         // every frame regardless. This is what keeps the fans down — an idle scene with the water
         // animating redraws only the ~200K water vertices, not the up-to-1M terrain vertices (#159).
+        // The wet-shore band is drawn in the terrain pass, so the terrain also depends on the water
+        // enabled/sea-level/wet-shore uniform values; changing those re-renders the terrain (#156).
+        let terrain_wet = [
+            self.water_y,
+            if self.water_enabled { 1.0 } else { 0.0 },
+            self.sea_norm,
+            self.water_wet,
+            self.water_wet_width,
+        ];
         let terrain_dirty = self.mesh.is_some()
             || !res.terrain_valid
             || res.terrain_view_proj != self.view_proj
             || res.terrain_light_dir != self.light_dir
-            || res.terrain_light != self.light;
+            || res.terrain_light != self.light
+            || res.terrain_wet != terrain_wet;
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("viewport-offscreen-encoder"),
@@ -822,6 +845,7 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
             res.terrain_view_proj = self.view_proj;
             res.terrain_light_dir = self.light_dir;
             res.terrain_light = self.light;
+            res.terrain_wet = terrain_wet;
         }
 
         // Water pass: draw the animated water into the shared work target, resolving to the water
@@ -922,6 +946,9 @@ pub(crate) struct ViewSettings {
     /// Shoreline foam amount and band width (normalized depth).
     pub water_foam: f32,
     pub water_foam_width: f32,
+    /// Wet-shore darkening (#156): strength (0 when off) and band width (normalized height).
+    pub water_wet: f32,
+    pub water_wet_width: f32,
     /// Accumulated water animation phase in seconds of motion. The caller advances it by real
     /// elapsed time scaled by [`water_speed`](Self::water_speed), so changing the speed alters
     /// future motion without retroactively rescaling the elapsed phase (which would jump the
@@ -1055,6 +1082,8 @@ pub(crate) fn show(
             water_wavelength: settings.water_wavelength,
             water_foam: settings.water_foam,
             water_foam_width: settings.water_foam_width,
+            water_wet: settings.water_wet,
+            water_wet_width: settings.water_wet_width,
             water_enabled: settings.show_water,
             water_depth: settings.water_depth,
             water_waves: settings.water_waves,
@@ -1490,6 +1519,8 @@ struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) normal: vec3<f32>,
     @location(1) kind: f32,
+    // Mesh-space height (world Y), for the wet-shore band relative to the sea plane (#156).
+    @location(2) world_y: f32,
 };
 
 @vertex
@@ -1502,6 +1533,7 @@ fn vs_main(
     out.clip = u.mvp * vec4<f32>(position, 1.0);
     out.normal = normal;
     out.kind = kind;
+    out.world_y = position.y;
     return out;
 }
 
@@ -1515,7 +1547,18 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // cross-section. kind is constant per triangle, so this is a hard switch, not a gradient.
     let terrain = vec3<f32>(0.55, 0.56, 0.60);
     let plinth = vec3<f32>(0.36, 0.33, 0.30);
-    let base = mix(terrain, plinth, in.kind);
+    var base = mix(terrain, plinth, in.kind);
+    // Wet shore (#156): darken the terrain top just above the waterline, as recently-wet rock. Only
+    // while water is shown (u.water.y) with a non-zero strength (u.shore.z), and only the terrain top
+    // (kind 0), fading from full at the waterline up to the band width (u.shore.w, a normalized
+    // height converted to mesh units via the vertical scale recovered from the sea plane).
+    if (u.water.y > 0.5 && u.shore.z > 0.0) {
+        let vscale = u.water.x / max(u.water.z, 1e-4);
+        let above = in.world_y - u.water.x;
+        let band = max(u.shore.w * vscale, 1e-5);
+        let wet = select(0.0, (1.0 - smoothstep(0.0, band, above)) * (1.0 - in.kind), above > 0.0);
+        base = base * (1.0 - u.shore.z * wet);
+    }
     return vec4<f32>(base * shade, 1.0);
 }
 

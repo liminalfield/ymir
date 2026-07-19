@@ -487,6 +487,10 @@ struct AppState {
     /// Shoreline foam controls (ephemeral): amount and band width (#156).
     water_foam: f32,
     water_foam_width: f32,
+    /// Wet-shore darkening (#156): toggle, strength, and band width (normalized height).
+    water_wet_on: bool,
+    water_wet: f32,
+    water_wet_width: f32,
     /// Water animation speed multiplier (#157), scaling how fast the ripples and foam scroll.
     /// Ephemeral view state; `0` freezes the surface.
     water_speed: f32,
@@ -784,6 +788,9 @@ impl AppState {
             water_wavelength: water_defaults.wavelength,
             water_foam: water_defaults.foam,
             water_foam_width: water_defaults.foam_width,
+            water_wet_on: water_defaults.wet_on,
+            water_wet: water_defaults.wet,
+            water_wet_width: water_defaults.wet_width,
             water_speed: water_defaults.speed,
             water_phase: 0.0,
             project_path: None,
@@ -990,6 +997,9 @@ impl AppState {
             wavelength: self.water_wavelength,
             foam: self.water_foam,
             foam_width: self.water_foam_width,
+            wet_on: self.water_wet_on,
+            wet: self.water_wet,
+            wet_width: self.water_wet_width,
             speed: self.water_speed,
         }
     }
@@ -1010,6 +1020,9 @@ impl AppState {
         self.water_wavelength = w.wavelength;
         self.water_foam = w.foam;
         self.water_foam_width = w.foam_width;
+        self.water_wet_on = w.wet_on;
+        self.water_wet = w.wet;
+        self.water_wet_width = w.wet_width;
         self.water_speed = w.speed;
     }
 
@@ -4669,6 +4682,10 @@ fn world_settings(ui: &mut egui::Ui, state: &mut AppState) {
             slider_row(ui, "Amount", &mut state.water_foam, 0.0..=1.0, 2);
             slider_row(ui, "Width", &mut state.water_foam_width, 0.0..=0.05, 3);
         });
+        water_group(ui, "Wet shore", &mut state.water_wet_on, |ui| {
+            slider_row(ui, "Strength", &mut state.water_wet, 0.0..=1.0, 2);
+            slider_row(ui, "Width", &mut state.water_wet_width, 0.0..=0.1, 3);
+        });
     });
 
     // OUTPUTS: endpoints a Build will write, with a badge counting how many are ticked. Endpoints
@@ -7096,6 +7113,13 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 water_wavelength: state.water_wavelength,
                 water_foam: state.water_foam,
                 water_foam_width: state.water_foam_width,
+                // The wet-shore toggle gates the effect by passing zero strength when off.
+                water_wet: if state.water_wet_on {
+                    state.water_wet
+                } else {
+                    0.0
+                },
+                water_wet_width: state.water_wet_width,
                 water_time: state.water_phase,
                 water_speed: state.water_speed,
             };
@@ -9331,6 +9355,9 @@ mod tests {
                     wavelength: 1.5,
                     foam: 0.8,
                     foam_width: 0.02,
+                    wet_on: false,
+                    wet: 0.5,
+                    wet_width: 0.04,
                     speed: 0.9,
                 },
             },

@@ -139,6 +139,15 @@ fn default_wavelength() -> f32 {
     1.0
 }
 
+/// Wet-shore strength / band width for a project saved before the control existed (#156).
+fn default_wet() -> f32 {
+    0.35
+}
+
+fn default_wet_width() -> f32 {
+    0.03
+}
+
 /// How the 3D viewport renders the water surface: which effect layers are on and their look
 /// controls (#157). Travels with the project so a saved world reopens looking as it was tuned.
 /// The animation *phase* is a running clock, not a setting, and is deliberately not stored.
@@ -173,6 +182,14 @@ pub(crate) struct WaterSettings {
     /// Foam amount and band width (in normalized depth).
     pub foam: f32,
     pub foam_width: f32,
+    /// Wet-shore darkening (#156): on/off, strength, and band width (normalized height). Defaulted
+    /// for projects saved before it existed.
+    #[serde(default = "default_true")]
+    pub wet_on: bool,
+    #[serde(default = "default_wet")]
+    pub wet: f32,
+    #[serde(default = "default_wet_width")]
+    pub wet_width: f32,
     /// Animation speed multiplier for the ripples and foam; `0` freezes the surface.
     pub speed: f32,
 }
@@ -195,6 +212,9 @@ impl Default for WaterSettings {
             wavelength: 1.0,
             foam: 0.5,
             foam_width: 0.015,
+            wet_on: true,
+            wet: 0.35,
+            wet_width: 0.03,
             speed: 0.4,
         }
     }

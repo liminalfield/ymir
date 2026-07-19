@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  *{ box-sizing:border-box; }
+  body{ margin:0; background:oklch(0.17 0.018 250); font-family:'IBM Plex Sans',sans-serif; }
+  a{ color:oklch(0.70 0.13 205); text-decoration:none; }
+  a:hover{ color:oklch(0.80 0.10 205); }
+  ::-webkit-scrollbar{ width:9px; }
+  ::-webkit-scrollbar-thumb{ background:oklch(0.42 0.02 250); border-radius:6px; }
+</style>
+</helmet>
+<div style="padding:48px 56px 90px; --c0:oklch(0.255 0.019 250); --c1:oklch(0.305 0.017 250); --c2:oklch(0.345 0.017 248); --c3:oklch(0.385 0.018 248); --line:oklch(0.46 0.02 250); --line-soft:oklch(0.40 0.018 250); --ink-hi:oklch(0.94 0.012 235); --ink-mid:oklch(0.77 0.016 240); --ink-lo:oklch(0.62 0.016 240); --accent:oklch(0.70 0.13 205); --relief:linear-gradient(165deg, oklch(0.42 0.03 245) 0%, oklch(0.36 0.028 248) 45%, oklch(0.28 0.02 250) 100%); --map:linear-gradient(160deg, oklch(0.90 0.012 235) 0%, oklch(0.82 0.016 232) 55%, oklch(0.74 0.02 230) 100%);">
+
+  <!-- ===================== TURN 3 ===================== -->
+  <section style="margin-bottom:64px;">
+    <div style="max-width:980px; margin-bottom:36px;">
+      <div style="font-size:12px; letter-spacing:0.14em; color:var(--ink-lo); margin-bottom:10px;">YMIR · VIEWPORT · DISPLAY CONTROLS · REFINED</div>
+      <div style="font-size:26px; font-weight:600; color:var(--ink-hi); margin-bottom:12px; letter-spacing:-0.01em;">Refined — single Display flyout, no rail</div>
+      <div style="font-size:14px; line-height:1.65; color:var(--ink-mid); max-width:820px; text-wrap:pretty;">Two changes from <a href="#2a">2a</a>/<a href="#2b">2b</a>: the <strong style="color:var(--ink-hi); font-weight:500;">layout switcher is gone</strong> from the viewport — it's workspace chrome and belongs on the pane divider we designed in the workspace-panes work — and the <strong style="color:var(--ink-hi); font-weight:500;">left rail is dropped</strong>. With only Output, Scale, and Light to house, a persistent rail isn't justified; a single <em style="color:var(--accent); font-style:normal;">Display</em> button opening one frost flyout carries it. The flyout keeps 2a's exact content and styling, so if the toolset grows later (extra lights, masks, measurement) it promotes to a left rail with no rework — same flyout, re-anchored. <a href="#3a">3a</a> below; the earlier explorations remain beneath for reference.</div>
+    </div>
+
+    <div id="3a" style="scroll-margin:40px;">
+      <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
+        <span style="font-family:'IBM Plex Mono',monospace; font-size:12px; font-weight:500; color:var(--accent); border:1px solid color-mix(in oklab, var(--accent) 45%, transparent); border-radius:4px; padding:2px 8px;">3a</span>
+        <span style="font-size:14px; font-weight:500; color:var(--ink-hi);">Display flyout</span>
+        <span style="font-size:9.5px; letter-spacing:0.08em; font-weight:500; color:oklch(0.72 0.13 158); border:1px solid color-mix(in oklab, oklch(0.72 0.13 158) 50%, transparent); border-radius:3px; padding:1px 7px;">RECOMMENDED</span>
+      </div>
+      <div style="font-size:12.5px; line-height:1.5; color:var(--ink-lo); max-width:660px; margin-bottom:16px; text-wrap:pretty;">On-render: projection toggle · fidelity readout · one Display button — all top-left. Nothing top-right; the render breathes. Display opens the frost flyout (Output, Height scale, Exaggeration, Light) styled like World Settings 1c.</div>
+
+      <div style="position:relative; width:660px; height:440px; border-radius:8px; overflow:hidden; border:1px solid var(--line); background:var(--relief); box-shadow:0 24px 60px -24px rgba(0,0,0,0.65);">
+        <div style="position:absolute; inset:0; background:radial-gradient(120% 80% at 50% 120%, oklch(0.22 0.02 250) 0%, transparent 55%), radial-gradient(60% 45% at 42% 40%, oklch(0.52 0.03 240 / 0.5) 0%, transparent 70%);"></div>
+        <div style="position:absolute; right:12px; bottom:9px; font-size:10px; font-style:italic; color:oklch(0.72 0.02 250 / 0.6); font-family:'IBM Plex Mono',monospace;">3D relief — placeholder render</div>
+
+        <!-- TOP-LEFT cluster -->
+        <div style="position:absolute; left:10px; top:10px; display:flex; align-items:center; gap:8px;">
+          <div style="display:flex; background:oklch(0.20 0.018 250 / 0.82); backdrop-filter:blur(10px); border:1px solid oklch(0.5 0.02 250 / 0.4); border-radius:6px; padding:3px; gap:2px;">
+            <span style="padding:4px 12px; border-radius:4px; font-size:11.5px; background:var(--accent); color:oklch(0.18 0.02 250); font-weight:500;">3D</span>
+            <span style="padding:4px 12px; border-radius:4px; font-size:11.5px; color:oklch(0.85 0.02 245);">2D</span>
+          </div>
+          <span style="font-size:10.5px; color:oklch(0.78 0.02 245 / 0.85); font-family:'IBM Plex Mono',monospace; text-shadow:0 1px 3px rgba(0,0,0,0.6);">Showing: preview</span>
+          <div style="display:flex; align-items:center; gap:6px; height:30px; padding:0 11px; background:color-mix(in oklab, var(--accent) 26%, oklch(0.20 0.018 250 / 0.82)); backdrop-filter:blur(10px); border:1px solid var(--accent); border-radius:6px; color:oklch(0.97 0.02 220); cursor:pointer;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="21" x2="4" y2="14"></line><line x1="4" y1="10" x2="4" y2="3"></line><line x1="12" y1="21" x2="12" y2="12"></line><line x1="12" y1="8" x2="12" y2="3"></line><line x1="20" y1="21" x2="20" y2="16"></line><line x1="20" y1="12" x2="20" y2="3"></line><line x1="1" y1="14" x2="7" y2="14"></line><line x1="9" y1="8" x2="15" y2="8"></line><line x1="17" y1="16" x2="23" y2="16"></line></svg><span style="font-size:11px;">Display</span></div>
+        </div>
+
+        <!-- POPOVER -->
+        <div style="position:absolute; left:186px; top:50px; width:250px; background:var(--c1); border:1px solid var(--line); border-radius:8px; overflow:hidden; box-shadow:0 20px 44px -18px rgba(0,0,0,0.7);">
+          <div style="position:absolute; left:20px; top:-6px; width:11px; height:11px; background:linear-gradient(135deg, color-mix(in oklab, var(--accent) 5%, var(--c1)), color-mix(in oklab, var(--accent) 5%, var(--c1))); border-left:1px solid var(--line); border-top:1px solid var(--line); transform:rotate(45deg);"></div>
+          <div style="padding:11px 12px; border-bottom:1px solid var(--line-soft); background:linear-gradient(180deg, color-mix(in oklab, var(--accent) 5%, var(--c1)), var(--c1));">
+            <div style="display:flex; align-items:center; gap:10px;">
+              <span style="width:52px; flex:none; font-size:11px; color:var(--ink-mid);">Output</span>
+              <div style="flex:1; height:27px; display:flex; align-items:center; justify-content:space-between; padding:0 9px; background:var(--c0); border:1px solid var(--line-soft); border-radius:4px; font-size:11.5px; color:var(--ink-hi); cursor:pointer;">Height<span style="color:var(--ink-lo); font-size:9px;">▾</span></div>
+            </div>
+            <div style="font-size:9.5px; color:var(--ink-lo); margin-top:6px; display:flex; align-items:center; gap:5px;"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M17 1l4 4-4 4"></path><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><path d="M7 23l-4-4 4-4"></path><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>synced with inspector thumbnail</div>
+          </div>
+          <div style="padding:12px 12px 4px;">
+            <div style="display:flex; align-items:center; gap:10px; margin-bottom:12px;">
+              <span style="width:78px; flex:none; font-size:11px; color:var(--ink-mid);">Height scale</span>
+              <div style="flex:1; display:flex; background:var(--c0); border:1px solid var(--line-soft); border-radius:5px; padding:2px; gap:2px;">
+                <span style="flex:1; text-align:center; padding:3px 0; border-radius:3px; font-size:10.5px; background:var(--c3); color:var(--ink-hi); box-shadow:0 1px 2px rgba(0,0,0,0.3);">Fixed</span>
+                <span style="flex:1; text-align:center; padding:3px 0; border-radius:3px; font-size:10.5px; color:var(--ink-lo);">Auto</span>
+              </div>
+            </div>
+            <div style="display:flex; align-items:center; gap:10px; height:30px;"><span style="width:78px; flex:none; font-size:11px; color:var(--ink-mid);">Exaggeration</span><div style="flex:1; height:4px; border-radius:2px; background:var(--c0); position:relative;"><div style="position:absolute; left:0; top:0; bottom:0; width:33%; background:var(--accent); border-radius:2px;"></div><div style="position:absolute; left:33%; top:50%; width:11px; height:11px; border-radius:50%; background:var(--ink-hi); transform:translate(-50%,-50%); box-shadow:0 0 0 2px var(--c1);"></div></div><span style="width:40px; flex:none; text-align:right; font-size:11.5px; color:var(--ink-hi); font-family:'IBM Plex Mono',monospace;">1.00x</span></div>
+          </div>
+          <div style="display:flex; align-items:center; gap:9px; height:34px; padding:0 12px; cursor:pointer; border-top:1px solid var(--line-soft);">
+            <span style="font-size:9px; color:var(--ink-mid);">▾</span>
+            <span style="font-size:11px; letter-spacing:0.1em; color:var(--ink-hi); font-weight:500;">LIGHT</span>
+            <span style="flex:1;"></span>
+            <span style="font-size:9px; color:var(--ink-lo); font-family:'IBM Plex Mono',monospace;">3D sun</span>
+          </div>
+          <div style="padding:2px 12px 14px; display:grid; grid-template-columns:1fr 1fr; gap:9px 12px;">
+            <div><div style="font-size:10px; color:var(--ink-mid); margin-bottom:4px; display:flex; justify-content:space-between;"><span>Azimuth</span><span style="color:var(--ink-hi); font-family:'IBM Plex Mono',monospace;">35°</span></div><div style="height:4px; border-radius:2px; background:var(--c0); position:relative;"><div style="position:absolute; left:0; top:0; bottom:0; width:10%; background:var(--accent); border-radius:2px;"></div><div style="position:absolute; left:10%; top:50%; width:10px; height:10px; border-radius:50%; background:var(--ink-hi); transform:translate(-50%,-50%); box-shadow:0 0 0 2px var(--c1);"></div></div></div>
+            <div><div style="font-size:10px; color:var(--ink-mid); margin-bottom:4px; display:flex; justify-content:space-between;"><span>Elevation</span><span style="color:var(--ink-hi); font-family:'IBM Plex Mono',monospace;">55°</span></div><div style="height:4px; border-radius:2px; background:var(--c0); position:relative;"><div style="position:absolute; left:0; top:0; bottom:0; width:61%; background:var(--accent); border-radius:2px;"></div><div style="position:absolute; left:61%; top:50%; width:10px; height:10px; border-radius:50%; background:var(--ink-hi); transform:translate(-50%,-50%); box-shadow:0 0 0 2px var(--c1);"></div></div></div>
+            <div><div style="font-size:10px; color:var(--ink-mid); margin-bottom:4px; display:flex; justify-content:space-between;"><span>Intensity</span><span style="color:var(--ink-hi); font-family:'IBM Plex Mono',monospace;">0.75</span></div><div style="height:4px; border-radius:2px; background:var(--c0); position:relative;"><div style="position:absolute; left:0; top:0; bottom:0; width:37%; background:var(--accent); border-radius:2px;"></div><div style="position:absolute; left:37%; top:50%; width:10px; height:10px; border-radius:50%; background:var(--ink-hi); transform:translate(-50%,-50%); box-shadow:0 0 0 2px var(--c1);"></div></div></div>
+            <div><div style="font-size:10px; color:var(--ink-mid); margin-bottom:4px; display:flex; justify-content:space-between;"><span>Ambient</span><span style="color:var(--ink-hi); font-family:'IBM Plex Mono',monospace;">0.25</span></div><div style="height:4px; border-radius:2px; background:var(--c0); position:relative;"><div style="position:absolute; left:0; top:0; bottom:0; width:25%; background:var(--accent); border-radius:2px;"></div><div style="position:absolute; left:25%; top:50%; width:10px; height:10px; border-radius:50%; background:var(--ink-hi); transform:translate(-50%,-50%); box-shadow:0 0 0 2px var(--c1);"></div></div></div>
+          </div>
+        </div>
+      </div>
+
+      <div style="max-width:660px; margin-top:14px; font-size:12px; line-height:1.55; color:var(--ink-lo); text-wrap:pretty;"><strong style="color:var(--ink-mid); font-weight:500;">Layout switcher:</strong> removed from the viewport — it moves to the workspace pane chrome (the split/maximize control on the pane divider), consistent with scope-by-side. <strong style="color:var(--ink-mid); font-weight:500;">2D mode:</strong> top-left cluster gains a <span style="font-family:'IBM Plex Mono',monospace;">[Height|Relief]</span> toggle; in Relief the 2D sun dial appears top-right (its own state); popover swaps to the 2D set. <strong style="color:var(--ink-mid); font-weight:500;">If it grows:</strong> promote this same flyout to a left rail — no content rework.</div>
+    </div>
+  </section>
+
+  <!-- ===================== TURN 2 ===================== -->
+  <section>
+    <div style="max-width:980px; margin-bottom:36px;">
+      <div style="font-size:12px; letter-spacing:0.14em; color:var(--ink-lo); margin-bottom:10px;">YMIR · VIEWPORT · DISPLAY CONTROLS</div>
+      <div style="font-size:26px; font-weight:600; color:var(--ink-hi); margin-bottom:12px; letter-spacing:-0.01em;">Viewport controls — two directions</div>
+      <div style="font-size:14px; line-height:1.65; color:var(--ink-mid); max-width:820px; text-wrap:pretty;">Both keep the same essentials on the render — <strong style="color:var(--ink-hi); font-weight:500;">projection 3D/2D</strong>, the <strong style="color:var(--ink-hi); font-weight:500;">fidelity readout</strong>, and the <strong style="color:var(--ink-hi); font-weight:500;">layout switcher</strong> — and tuck light, exaggeration, scale, and the output picker into a flyout. 2D and 3D keep separate state; light is per-projection; the output picker mirrors the inspector's. They differ in <em style="color:var(--accent); font-style:normal;">how much lives as persistent chrome</em>: <a href="#2a">2a</a> docks a vertical toolbar to the left edge (your stated intent); <a href="#2b">2b</a> stays overlay-native — almost no chrome, one popover on demand.</div>
+    </div>
+
+    <div style="display:flex; flex-wrap:wrap; gap:48px; align-items:flex-start;">
+
+      <!-- ============ 2a — LEFT-EDGE VERTICAL TOOLBAR ============ -->
+      <div id="2a" style="scroll-margin:40px; opacity:0.62;">
+        <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
+          <span style="font-family:'IBM Plex Mono',monospace; font-size:12px; font-weight:500; color:var(--accent); border:1px solid color-mix(in oklab, var(--accent) 45%, transparent); border-radius:4px; padding:2px 8px;">2a</span>
+          <span style="font-size:14px; font-weight:500; color:var(--ink-hi);">Left-edge vertical toolbar</span>
+          <span style="font-size:9.5px; letter-spacing:0.08em; font-weight:500; color:var(--ink-lo); border:1px solid var(--line); border-radius:3px; padding:1px 7px;">SUPERSEDED BY 3A</span>
+        </div>
+        <div style="font-size:12.5px; line-height:1.5; color:var(--ink-lo); max-width:660px; margin-bottom:16px; text-wrap:pretty;">A persistent icon rail docked to the viewport's left edge — matching the left/right panel &ldquo;scope-by-side&rdquo; rule. Each icon opens a frost flyout with World-Settings-style sections. Predictable, always in the same spot, survives a short viewport (rail collapses to icons only).</div>
+
+        <!-- viewport 3D -->
+        <div style="position:relative; width:660px; height:440px; border-radius:8px; overflow:hidden; border:1px solid var(--line); background:var(--relief); box-shadow:0 24px 60px -24px rgba(0,0,0,0.65);">
+          <div style="position:absolute; inset:0; background:radial-gradient(120% 80% at 50% 120%, oklch(0.22 0.02 250) 0%, transparent 55%), radial-gradient(60% 45% at 42% 40%, oklch(0.52 0.03 240 / 0.5) 0%, transparent 70%);"></div>
+          <div style="position:absolute; right:12px; bottom:9px; font-size:10px; font-style:italic; color:oklch(0.72 0.02 250 / 0.6); font-family:'IBM Plex Mono',monospace;">3D relief — placeholder render</div>
+
+          <!-- LEFT RAIL -->
+          <div style="position:absolute; left:0; top:0; bottom:0; width:46px; background:oklch(0.20 0.018 250 / 0.82); backdrop-filter:blur(10px); border-right:1px solid oklch(0.5 0.02 250 / 0.4); display:flex; flex-direction:column; align-items:center; padding-top:10px; gap:6px;">
+            <!-- active: display -->
+            <span style="width:32px; height:32px; display:flex; align-items:center; justify-content:center; border-radius:6px; background:color-mix(in oklab, var(--accent) 32%, var(--c3)); border:1px solid var(--accent); color:oklch(0.97 0.02 220);"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="21" x2="4" y2="14"></line><line x1="4" y1="10" x2="4" y2="3"></line><line x1="12" y1="21" x2="12" y2="12"></line><line x1="12" y1="8" x2="12" y2="3"></line><line x1="20" y1="21" x2="20" y2="16"></line><line x1="20" y1="12" x2="20" y2="3"></line><line x1="1" y1="14" x2="7" y2="14"></line><line x1="9" y1="8" x2="15" y2="8"></line><line x1="17" y1="16" x2="23" y2="16"></line></svg></span>
+            <span style="width:32px; height:32px; display:flex; align-items:center; justify-content:center; border-radius:6px; color:oklch(0.82 0.02 245);"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"></circle><line x1="12" y1="1" x2="12" y2="4"></line><line x1="12" y1="20" x2="12" y2="23"></line><line x1="4.2" y1="4.2" x2="6.3" y2="6.3"></line><line x1="17.7" y1="17.7" x2="19.8" y2="19.8"></line><line x1="1" y1="12" x2="4" y2="12"></line><line x1="20" y1="12" x2="23" y2="12"></line><line x1="4.2" y1="19.8" x2="6.3" y2="17.7"></line><line x1="17.7" y1="6.3" x2="19.8" y2="4.2"></line></svg></span>
+            <span style="width:32px; height:32px; display:flex; align-items:center; justify-content:center; border-radius:6px; color:oklch(0.82 0.02 245);"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg></span>
+            <span style="width:32px; height:32px; display:flex; align-items:center; justify-content:center; border-radius:6px; color:oklch(0.82 0.02 245);"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"></path></svg></span>
+          </div>
+
+          <!-- FLYOUT (display, open) -->
+          <div style="position:absolute; left:56px; top:10px; width:250px; background:var(--c1); border:1px solid var(--line); border-radius:8px; overflow:hidden; box-shadow:0 20px 44px -18px rgba(0,0,0,0.7);">
+            <div style="display:flex; align-items:center; gap:8px; height:34px; padding:0 12px; border-bottom:1px solid var(--line-soft);">
+              <span style="font-size:11px; letter-spacing:0.1em; color:var(--ink-hi); font-weight:500;">DISPLAY</span>
+              <span style="flex:1;"></span>
+              <span style="font-size:12px; color:var(--ink-lo); cursor:pointer;">×</span>
+            </div>
+            <!-- output picker -->
+            <div style="padding:11px 12px; border-bottom:1px solid var(--line-soft); background:linear-gradient(180deg, color-mix(in oklab, var(--accent) 5%, var(--c1)), var(--c1));">
+              <div style="display:flex; align-items:center; gap:10px;">
+                <span style="width:52px; flex:none; font-size:11px; color:var(--ink-mid);">Output</span>
+                <div style="flex:1; height:27px; display:flex; align-items:center; justify-content:space-between; padding:0 9px; background:var(--c0); border:1px solid var(--line-soft); border-radius:4px; font-size:11.5px; color:var(--ink-hi); cursor:pointer;">Height<span style="color:var(--ink-lo); font-size:9px;">▾</span></div>
+              </div>
+              <div style="font-size:9.5px; color:var(--ink-lo); margin-top:6px; display:flex; align-items:center; gap:5px;"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M17 1l4 4-4 4"></path><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><path d="M7 23l-4-4 4-4"></path><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>synced with inspector thumbnail</div>
+            </div>
+            <!-- height scale -->
+            <div style="padding:12px 12px 4px;">
+              <div style="display:flex; align-items:center; gap:10px; margin-bottom:12px;">
+                <span style="width:78px; flex:none; font-size:11px; color:var(--ink-mid);">Height scale</span>
+                <div style="flex:1; display:flex; background:var(--c0); border:1px solid var(--line-soft); border-radius:5px; padding:2px; gap:2px;">
+                  <span style="flex:1; text-align:center; padding:3px 0; border-radius:3px; font-size:10.5px; background:var(--c3); color:var(--ink-hi); box-shadow:0 1px 2px rgba(0,0,0,0.3);">Fixed</span>
+                  <span style="flex:1; text-align:center; padding:3px 0; border-radius:3px; font-size:10.5px; color:var(--ink-lo);">Auto</span>
+                </div>
+              </div>
+              <div style="display:flex; align-items:center; gap:10px; height:30px;"><span style="width:78px; flex:none; font-size:11px; color:var(--ink-mid);">Exaggeration</span><div style="flex:1; height:4px; border-radius:2px; background:var(--c0); position:relative;"><div style="position:absolute; left:0; top:0; bottom:0; width:33%; background:var(--accent); border-radius:2px;"></div><div style="position:absolute; left:33%; top:50%; width:11px; height:11px; border-radius:50%; background:var(--ink-hi); transform:translate(-50%,-50%); box-shadow:0 0 0 2px var(--c1);"></div></div><span style="width:40px; flex:none; text-align:right; font-size:11.5px; color:var(--ink-hi); font-family:'IBM Plex Mono',monospace;">1.00x</span></div>
+            </div>
+            <!-- light section -->
+            <div style="display:flex; align-items:center; gap:9px; height:34px; padding:0 12px; cursor:pointer; border-top:1px solid var(--line-soft);">
+              <span style="font-size:9px; color:var(--ink-mid);">▾</span>
+              <span style="font-size:11px; letter-spacing:0.1em; color:var(--ink-hi); font-weight:500;">LIGHT</span>
+              <span style="flex:1;"></span>
+              <span style="font-size:9px; color:var(--ink-lo); font-family:'IBM Plex Mono',monospace;">3D sun</span>
+            </div>
+            <div style="padding:2px 12px 14px; display:grid; grid-template-columns:1fr 1fr; gap:9px 12px;">
+              <div><div style="font-size:10px; color:var(--ink-mid); margin-bottom:4px; display:flex; justify-content:space-between;"><span>Azimuth</span><span style="color:var(--ink-hi); font-family:'IBM Plex Mono',monospace;">35°</span></div><div style="height:4px; border-radius:2px; background:var(--c0); position:relative;"><div style="position:absolute; left:0; top:0; bottom:0; width:10%; background:var(--accent); border-radius:2px;"></div><div style="position:absolute; left:10%; top:50%; width:10px; height:10px; border-radius:50%; background:var(--ink-hi); transform:translate(-50%,-50%); box-shadow:0 0 0 2px var(--c1);"></div></div></div>
+              <div><div style="font-size:10px; color:var(--ink-mid); margin-bottom:4px; display:flex; justify-content:space-between;"><span>Elevation</span><span style="color:var(--ink-hi); font-family:'IBM Plex Mono',monospace;">55°</span></div><div style="height:4px; border-radius:2px; background:var(--c0); position:relative;"><div style="position:absolute; left:0; top:0; bottom:0; width:61%; background:var(--accent); border-radius:2px;"></div><div style="position:absolute; left:61%; top:50%; width:10px; height:10px; border-radius:50%; background:var(--ink-hi); transform:translate(-50%,-50%); box-shadow:0 0 0 2px var(--c1);"></div></div></div>
+              <div><div style="font-size:10px; color:var(--ink-mid); margin-bottom:4px; display:flex; justify-content:space-between;"><span>Intensity</span><span style="color:var(--ink-hi); font-family:'IBM Plex Mono',monospace;">0.75</span></div><div style="height:4px; border-radius:2px; background:var(--c0); position:relative;"><div style="position:absolute; left:0; top:0; bottom:0; width:37%; background:var(--accent); border-radius:2px;"></div><div style="position:absolute; left:37%; top:50%; width:10px; height:10px; border-radius:50%; background:var(--ink-hi); transform:translate(-50%,-50%); box-shadow:0 0 0 2px var(--c1);"></div></div></div>
+              <div><div style="font-size:10px; color:var(--ink-mid); margin-bottom:4px; display:flex; justify-content:space-between;"><span>Ambient</span><span style="color:var(--ink-hi); font-family:'IBM Plex Mono',monospace;">0.25</span></div><div style="height:4px; border-radius:2px; background:var(--c0); position:relative;"><div style="position:absolute; left:0; top:0; bottom:0; width:25%; background:var(--accent); border-radius:2px;"></div><div style="position:absolute; left:25%; top:50%; width:10px; height:10px; border-radius:50%; background:var(--ink-hi); transform:translate(-50%,-50%); box-shadow:0 0 0 2px var(--c1);"></div></div></div>
+            </div>
+          </div>
+
+          <!-- ON-RENDER: projection + fidelity (top, offset past rail) -->
+          <div style="position:absolute; left:320px; top:10px; display:flex; align-items:center; gap:10px;">
+            <div style="display:flex; background:oklch(0.20 0.018 250 / 0.82); backdrop-filter:blur(10px); border:1px solid oklch(0.5 0.02 250 / 0.4); border-radius:6px; padding:3px; gap:2px;">
+              <span style="padding:4px 12px; border-radius:4px; font-size:11.5px; background:var(--accent); color:oklch(0.18 0.02 250); font-weight:500;">3D</span>
+              <span style="padding:4px 12px; border-radius:4px; font-size:11.5px; color:oklch(0.85 0.02 245);">2D</span>
+            </div>
+            <span style="font-size:10.5px; color:oklch(0.78 0.02 245 / 0.85); font-family:'IBM Plex Mono',monospace; text-shadow:0 1px 3px rgba(0,0,0,0.6);">Showing: preview</span>
+          </div>
+
+        </div>
+
+        <div style="max-width:660px; margin-top:14px; font-size:12px; line-height:1.55; color:var(--ink-lo); text-wrap:pretty;"><strong style="color:var(--ink-mid); font-weight:500;">In 2D mode:</strong> the rail's Display flyout swaps Height-scale placement and adds a <span style="font-family:'IBM Plex Mono',monospace;">Shading [Height|Relief]</span> toggle; the 2D hillshade sun becomes a compass dial pinned top-right (its own state, separate from the 3D sun above).</div>
+      </div>
+
+      <!-- ============ 2b — MINIMAL FLOATING OVERLAYS ============ -->
+      <div id="2b" style="scroll-margin:40px; opacity:0.62;">
+        <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
+          <span style="font-family:'IBM Plex Mono',monospace; font-size:12px; font-weight:500; color:var(--accent); border:1px solid color-mix(in oklab, var(--accent) 45%, transparent); border-radius:4px; padding:2px 8px;">2b</span>
+          <span style="font-size:14px; font-weight:500; color:var(--ink-hi);">Minimal floating overlays</span>
+          <span style="font-size:9.5px; letter-spacing:0.08em; font-weight:500; color:var(--ink-lo); border:1px solid var(--line); border-radius:3px; padding:1px 7px;">SUPERSEDED BY 3A</span>
+        </div>
+        <div style="font-size:12.5px; line-height:1.5; color:var(--ink-lo); max-width:660px; margin-bottom:16px; text-wrap:pretty;">Maximum render, minimum chrome. A small floating cluster top-left (projection · fidelity · a Display button) and the layout switcher top-right — nothing else until you ask. The Display button opens a compact popover card with the same sections. Closest to today's HUD, but tidied and on-demand.</div>
+
+        <!-- viewport 3D -->
+        <div style="position:relative; width:660px; height:440px; border-radius:8px; overflow:hidden; border:1px solid var(--line); background:var(--relief); box-shadow:0 24px 60px -24px rgba(0,0,0,0.65);">
+          <div style="position:absolute; inset:0; background:radial-gradient(120% 80% at 50% 120%, oklch(0.22 0.02 250) 0%, transparent 55%), radial-gradient(60% 45% at 42% 40%, oklch(0.52 0.03 240 / 0.5) 0%, transparent 70%);"></div>
+          <div style="position:absolute; right:12px; bottom:9px; font-size:10px; font-style:italic; color:oklch(0.72 0.02 250 / 0.6); font-family:'IBM Plex Mono',monospace;">3D relief — placeholder render</div>
+
+          <!-- TOP-LEFT floating cluster -->
+          <div style="position:absolute; left:10px; top:10px; display:flex; align-items:center; gap:8px;">
+            <div style="display:flex; background:oklch(0.20 0.018 250 / 0.82); backdrop-filter:blur(10px); border:1px solid oklch(0.5 0.02 250 / 0.4); border-radius:6px; padding:3px; gap:2px;">
+              <span style="padding:4px 12px; border-radius:4px; font-size:11.5px; background:var(--accent); color:oklch(0.18 0.02 250); font-weight:500;">3D</span>
+              <span style="padding:4px 12px; border-radius:4px; font-size:11.5px; color:oklch(0.85 0.02 245);">2D</span>
+            </div>
+            <span style="font-size:10.5px; color:oklch(0.78 0.02 245 / 0.85); font-family:'IBM Plex Mono',monospace; text-shadow:0 1px 3px rgba(0,0,0,0.6);">preview</span>
+            <div style="display:flex; align-items:center; gap:6px; height:30px; padding:0 11px; background:color-mix(in oklab, var(--accent) 26%, oklch(0.20 0.018 250 / 0.82)); backdrop-filter:blur(10px); border:1px solid var(--accent); border-radius:6px; color:oklch(0.97 0.02 220); cursor:pointer;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="21" x2="4" y2="14"></line><line x1="4" y1="10" x2="4" y2="3"></line><line x1="12" y1="21" x2="12" y2="12"></line><line x1="12" y1="8" x2="12" y2="3"></line><line x1="20" y1="21" x2="20" y2="16"></line><line x1="20" y1="12" x2="20" y2="3"></line><line x1="1" y1="14" x2="7" y2="14"></line><line x1="9" y1="8" x2="15" y2="8"></line><line x1="17" y1="16" x2="23" y2="16"></line></svg><span style="font-size:11px;">Display</span></div>
+          </div>
+
+          <!-- POPOVER (open, anchored under Display button) -->
+          <div style="position:absolute; left:186px; top:50px; width:250px; background:var(--c1); border:1px solid var(--line); border-radius:8px; overflow:hidden; box-shadow:0 20px 44px -18px rgba(0,0,0,0.7);">
+            <!-- little pointer -->
+            <div style="position:absolute; left:20px; top:-6px; width:11px; height:11px; background:var(--c1); border-left:1px solid var(--line); border-top:1px solid var(--line); transform:rotate(45deg);"></div>
+            <div style="padding:11px 12px; border-bottom:1px solid var(--line-soft); background:linear-gradient(180deg, color-mix(in oklab, var(--accent) 5%, var(--c1)), var(--c1));">
+              <div style="display:flex; align-items:center; gap:10px;">
+                <span style="width:52px; flex:none; font-size:11px; color:var(--ink-mid);">Output</span>
+                <div style="flex:1; height:27px; display:flex; align-items:center; justify-content:space-between; padding:0 9px; background:var(--c0); border:1px solid var(--line-soft); border-radius:4px; font-size:11.5px; color:var(--ink-hi); cursor:pointer;">Height<span style="color:var(--ink-lo); font-size:9px;">▾</span></div>
+              </div>
+              <div style="font-size:9.5px; color:var(--ink-lo); margin-top:6px; display:flex; align-items:center; gap:5px;"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M17 1l4 4-4 4"></path><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><path d="M7 23l-4-4 4-4"></path><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>synced with inspector thumbnail</div>
+            </div>
+            <div style="padding:12px 12px 4px;">
+              <div style="display:flex; align-items:center; gap:10px; margin-bottom:12px;">
+                <span style="width:78px; flex:none; font-size:11px; color:var(--ink-mid);">Height scale</span>
+                <div style="flex:1; display:flex; background:var(--c0); border:1px solid var(--line-soft); border-radius:5px; padding:2px; gap:2px;">
+                  <span style="flex:1; text-align:center; padding:3px 0; border-radius:3px; font-size:10.5px; background:var(--c3); color:var(--ink-hi); box-shadow:0 1px 2px rgba(0,0,0,0.3);">Fixed</span>
+                  <span style="flex:1; text-align:center; padding:3px 0; border-radius:3px; font-size:10.5px; color:var(--ink-lo);">Auto</span>
+                </div>
+              </div>
+              <div style="display:flex; align-items:center; gap:10px; height:30px;"><span style="width:78px; flex:none; font-size:11px; color:var(--ink-mid);">Exaggeration</span><div style="flex:1; height:4px; border-radius:2px; background:var(--c0); position:relative;"><div style="position:absolute; left:0; top:0; bottom:0; width:33%; background:var(--accent); border-radius:2px;"></div><div style="position:absolute; left:33%; top:50%; width:11px; height:11px; border-radius:50%; background:var(--ink-hi); transform:translate(-50%,-50%); box-shadow:0 0 0 2px var(--c1);"></div></div><span style="width:40px; flex:none; text-align:right; font-size:11.5px; color:var(--ink-hi); font-family:'IBM Plex Mono',monospace;">1.00x</span></div>
+            </div>
+            <div style="display:flex; align-items:center; gap:9px; height:34px; padding:0 12px; cursor:pointer; border-top:1px solid var(--line-soft);">
+              <span style="font-size:9px; color:var(--ink-mid);">▾</span>
+              <span style="font-size:11px; letter-spacing:0.1em; color:var(--ink-hi); font-weight:500;">LIGHT</span>
+              <span style="flex:1;"></span>
+              <span style="font-size:9px; color:var(--ink-lo); font-family:'IBM Plex Mono',monospace;">3D sun</span>
+            </div>
+            <div style="padding:2px 12px 14px; display:grid; grid-template-columns:1fr 1fr; gap:9px 12px;">
+              <div><div style="font-size:10px; color:var(--ink-mid); margin-bottom:4px; display:flex; justify-content:space-between;"><span>Azimuth</span><span style="color:var(--ink-hi); font-family:'IBM Plex Mono',monospace;">35°</span></div><div style="height:4px; border-radius:2px; background:var(--c0); position:relative;"><div style="position:absolute; left:0; top:0; bottom:0; width:10%; background:var(--accent); border-radius:2px;"></div><div style="position:absolute; left:10%; top:50%; width:10px; height:10px; border-radius:50%; background:var(--ink-hi); transform:translate(-50%,-50%); box-shadow:0 0 0 2px var(--c1);"></div></div></div>
+              <div><div style="font-size:10px; color:var(--ink-mid); margin-bottom:4px; display:flex; justify-content:space-between;"><span>Elevation</span><span style="color:var(--ink-hi); font-family:'IBM Plex Mono',monospace;">55°</span></div><div style="height:4px; border-radius:2px; background:var(--c0); position:relative;"><div style="position:absolute; left:0; top:0; bottom:0; width:61%; background:var(--accent); border-radius:2px;"></div><div style="position:absolute; left:61%; top:50%; width:10px; height:10px; border-radius:50%; background:var(--ink-hi); transform:translate(-50%,-50%); box-shadow:0 0 0 2px var(--c1);"></div></div></div>
+              <div><div style="font-size:10px; color:var(--ink-mid); margin-bottom:4px; display:flex; justify-content:space-between;"><span>Intensity</span><span style="color:var(--ink-hi); font-family:'IBM Plex Mono',monospace;">0.75</span></div><div style="height:4px; border-radius:2px; background:var(--c0); position:relative;"><div style="position:absolute; left:0; top:0; bottom:0; width:37%; background:var(--accent); border-radius:2px;"></div><div style="position:absolute; left:37%; top:50%; width:10px; height:10px; border-radius:50%; background:var(--ink-hi); transform:translate(-50%,-50%); box-shadow:0 0 0 2px var(--c1);"></div></div></div>
+              <div><div style="font-size:10px; color:var(--ink-mid); margin-bottom:4px; display:flex; justify-content:space-between;"><span>Ambient</span><span style="color:var(--ink-hi); font-family:'IBM Plex Mono',monospace;">0.25</span></div><div style="height:4px; border-radius:2px; background:var(--c0); position:relative;"><div style="position:absolute; left:0; top:0; bottom:0; width:25%; background:var(--accent); border-radius:2px;"></div><div style="position:absolute; left:25%; top:50%; width:10px; height:10px; border-radius:50%; background:var(--ink-hi); transform:translate(-50%,-50%); box-shadow:0 0 0 2px var(--c1);"></div></div></div>
+            </div>
+          </div>
+
+        </div>
+
+        <div style="max-width:660px; margin-top:14px; font-size:12px; line-height:1.55; color:var(--ink-lo); text-wrap:pretty;"><strong style="color:var(--ink-mid); font-weight:500;">In 2D mode:</strong> the top-left cluster gains a <span style="font-family:'IBM Plex Mono',monospace;">[Height|Relief]</span> shading toggle; in Relief, the 2D sun dial appears top-right (its own state). Popover contents swap to the 2D set. <strong style="color:var(--ink-mid); font-weight:500;">Trade-off:</strong> less discoverable than a persistent rail — controls are hidden until clicked.</div>
+      </div>
+
+    </div>
+
+    <!-- contrast note on light 2D map -->
+    <div style="max-width:980px; margin-top:40px; padding:16px 18px; background:var(--c1); border:1px solid var(--line-soft); border-radius:8px;">
+      <div style="font-size:11px; letter-spacing:0.1em; color:var(--ink-lo); margin-bottom:10px;">CONTRAST ON BOTH BACKGROUNDS</div>
+      <div style="display:flex; gap:18px; align-items:center; flex-wrap:wrap;">
+        <div style="position:relative; width:190px; height:80px; border-radius:6px; overflow:hidden; border:1px solid var(--line); background:var(--map);">
+          <div style="position:absolute; left:8px; top:8px; display:flex; background:oklch(0.20 0.018 250 / 0.82); backdrop-filter:blur(10px); border:1px solid oklch(0.5 0.02 250 / 0.4); border-radius:6px; padding:3px; gap:2px;">
+            <span style="padding:3px 10px; border-radius:4px; font-size:10.5px; color:oklch(0.85 0.02 245);">3D</span>
+            <span style="padding:3px 10px; border-radius:4px; font-size:10.5px; background:var(--accent); color:oklch(0.18 0.02 250); font-weight:500;">2D</span>
+          </div>
+        </div>
+        <div style="flex:1; min-width:280px; font-size:12px; line-height:1.55; color:var(--ink-mid); text-wrap:pretty;">Both directions use the same <strong style="color:var(--ink-hi); font-weight:500;">dark frosted overlay chrome</strong> (translucent slate + blur + hairline border) for controls that float directly on the render, so they hold contrast over the <em style="font-style:normal; color:var(--ink-hi);">light 2D map</em> as well as the dark 3D relief. Flyout/popover bodies use the solid panel background. Cyan accent throughout — colourblind-safe, no red/green encoding.</div>
+      </div>
+    </div>
+  </section>
+</div>
+</x-dc>
+</body>
+</html>
