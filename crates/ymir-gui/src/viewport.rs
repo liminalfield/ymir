@@ -893,6 +893,8 @@ pub(crate) struct ViewSettings {
     pub fixed_range: bool,
     /// Height that a value of `1.0` reaches over the unit footprint.
     pub vertical_scale: f32,
+    /// Free-fly camera speed in world units per second (#161).
+    pub fly_speed: f32,
     /// Sea level as a normalized height in `[0, 1]`, where the water plane sits (mapped into the
     /// same height space as the terrain before it reaches clip space).
     pub sea_level: f32,
@@ -982,7 +984,10 @@ pub(crate) fn show(
 ) {
     let (rect, response) =
         ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
-    camera.handle_input(ui, &response);
+    // Repaint continuously while flying, so held keys keep advancing the camera between mouse moves.
+    if camera.handle_input(ui, &response, settings.fly_speed) {
+        ui.ctx().request_repaint();
+    }
     let aspect = (rect.width() / rect.height().max(1.0)).max(0.01);
 
     let mesh = field.and_then(|field| {
@@ -1089,6 +1094,9 @@ pub(crate) struct OrbitCamera {
     distance: f32,
     /// The point the camera looks at and orbits around.
     pivot: Vec3,
+    /// Whether the cursor is currently grabbed for a fly (#161). Tracked so the grab/release
+    /// viewport command is sent only on the transition, not every frame.
+    grabbed: bool,
 }
 
 impl Default for OrbitCamera {
@@ -1100,6 +1108,7 @@ impl Default for OrbitCamera {
             pitch: 0.5,
             distance: 1.85,
             pivot: Vec3::new(0.5, 0.05, 0.5),
+            grabbed: false,
         }
     }
 }
@@ -1150,10 +1159,12 @@ impl OrbitCamera {
         self.distance = (self.distance * (1.0 + amount)).clamp(DISTANCE_MIN, DISTANCE_MAX);
     }
 
-    /// Maps this frame's pointer and scroll input to camera motion. Houdini scheme: Alt plus
-    /// the left button tumbles, the middle button tracks, and the right button dollies; the
-    /// scroll wheel also dollies. A drag is honoured only when it began inside the pane.
-    fn handle_input(&mut self, ui: &egui::Ui, response: &egui::Response) {
+    /// Maps this frame's pointer and scroll input to camera motion, and returns whether the camera
+    /// is being flown (so the caller repaints continuously). Two schemes share one camera: Houdini
+    /// orbit (Alt plus left tumbles / middle tracks / right dollies, scroll dollies), and a free-fly
+    /// (#161) engaged by holding the right button *without* Alt — the mouse looks and WASD / E / Q
+    /// move through the scene. A drag is honoured only when it began inside the pane.
+    fn handle_input(&mut self, ui: &egui::Ui, response: &egui::Response, fly_speed: f32) -> bool {
         if ui.input(|i| i.modifiers.alt) {
             let delta = ui.input(|i| i.pointer.delta());
             if response.dragged_by(egui::PointerButton::Primary) {
@@ -1164,12 +1175,82 @@ impl OrbitCamera {
                 self.dolly(delta.y * DOLLY_DRAG_SPEED);
             }
         }
+        // Fly while the right button is held without Alt (Alt + right stays the orbit dolly above).
+        let flying = response.is_pointer_button_down_on()
+            && ui.input(|i| i.pointer.secondary_down() && !i.modifiers.alt);
+        if flying {
+            self.fly(ui, fly_speed);
+        }
+        // Lock and hide the cursor while flying so a look never runs out at a screen edge: the
+        // pointer keeps reporting motion while pinned in place. Restore it on release. Sent only on
+        // the transition, so it is not re-issued every frame.
+        if flying != self.grabbed {
+            self.grabbed = flying;
+            let grab = if flying {
+                egui::CursorGrab::Locked
+            } else {
+                egui::CursorGrab::None
+            };
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::CursorGrab(grab));
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::CursorVisible(!flying));
+        }
         if response.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if scroll != 0.0 {
                 self.dolly(-scroll * DOLLY_SCROLL_SPEED);
             }
         }
+        flying
+    }
+
+    /// Flies the camera while the right mouse button is held: the mouse looks (rotating the view
+    /// around the fixed eye), and WASD / E / Q move the eye through the scene at `fly_speed` world
+    /// units per second, Shift boosting. The orbit pivot is carried `distance` in front of the eye,
+    /// so switching back to orbit tumbles around whatever you flew up to. Movement scales by the real
+    /// frame delta, so it is frame-rate stable.
+    fn fly(&mut self, ui: &egui::Ui, fly_speed: f32) {
+        // Look: rotate yaw/pitch, then move the pivot so the eye stays put — a look, not an orbit.
+        // Use the raw relative-motion events, which keep coming while the cursor is locked (where the
+        // position-based `pointer.delta()` reports nothing, so the look would freeze until release).
+        let eye = self.eye();
+        let look = ui.input(|i| {
+            i.events.iter().fold(egui::Vec2::ZERO, |acc, e| match e {
+                egui::Event::MouseMoved(d) => acc + *d,
+                _ => acc,
+            })
+        });
+        self.yaw -= look.x * FLY_LOOK_SPEED;
+        self.pitch = (self.pitch + look.y * FLY_LOOK_SPEED).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+        self.pivot = eye - self.direction() * self.distance;
+        // Move: `forward` is eye -> look target (the opposite of the pivot -> eye direction).
+        let forward = -self.direction();
+        let right = forward.cross(Vec3::Y).normalize_or_zero();
+        let mut mv = Vec3::ZERO;
+        let (shift, dt) = ui.input(|i| {
+            if i.key_down(egui::Key::W) {
+                mv += forward;
+            }
+            if i.key_down(egui::Key::S) {
+                mv -= forward;
+            }
+            if i.key_down(egui::Key::A) {
+                mv -= right;
+            }
+            if i.key_down(egui::Key::D) {
+                mv += right;
+            }
+            if i.key_down(egui::Key::E) {
+                mv += Vec3::Y;
+            }
+            if i.key_down(egui::Key::Q) {
+                mv -= Vec3::Y;
+            }
+            (i.modifiers.shift, i.stable_dt)
+        });
+        let speed = fly_speed * if shift { FLY_BOOST } else { 1.0 };
+        self.pivot += mv.normalize_or_zero() * speed * dt;
     }
 }
 
@@ -1189,6 +1270,10 @@ const DOLLY_SCROLL_SPEED: f32 = 0.0015;
 /// then dolly in.
 const DISTANCE_MIN: f32 = 0.03;
 const DISTANCE_MAX: f32 = 10.0;
+/// Fly (#161) Shift-boost multiplier and mouse-look sensitivity (radians per pixel). The base fly
+/// speed is a user control (`viewport_fly_speed`), passed in per frame.
+const FLY_BOOST: f32 = 4.0;
+const FLY_LOOK_SPEED: f32 = 0.005;
 
 /// Samples the field's height layer to a `MESH_RES`-resolution grid in `[0, 1]`. With
 /// `fixed_range`, the raw height is taken directly (true amplitude, clipped to `[0, 1]`); in

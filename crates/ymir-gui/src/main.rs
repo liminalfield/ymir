@@ -524,6 +524,9 @@ struct AppState {
     /// (`world_height / world_extent`). `1.0` shows real-world proportions; higher values
     /// exaggerate relief to inspect subtle terrain. A non-persisted view aid.
     viewport_exaggeration: f32,
+    /// Free-fly camera speed (#161), in world units per second (the footprint is 1.0 wide). A
+    /// non-persisted view preference.
+    viewport_fly_speed: f32,
     /// The 3D viewport's sun direction and response (azimuth/elevation degrees, diffuse
     /// intensity, ambient fill). A non-persisted view aid; raking the sun low reads form.
     viewport_lighting: viewport::Lighting,
@@ -794,6 +797,7 @@ impl AppState {
             viewport_camera: viewport::OrbitCamera::default(),
             viewport_scale: shade::HeightScale::Fixed,
             viewport_exaggeration: 1.0,
+            viewport_fly_speed: 0.6,
             // Reproduces the previous fixed key light: high from the front-right.
             viewport_lighting: viewport::Lighting {
                 azimuth_deg: 35.0,
@@ -7076,6 +7080,7 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
             let settings = viewport::ViewSettings {
                 fixed_range: state.viewport_scale == shade::HeightScale::Fixed,
                 vertical_scale: true_proportion * state.viewport_exaggeration,
+                fly_speed: state.viewport_fly_speed,
                 sea_level,
                 show_water,
                 water_depth: state.water_depth,
@@ -7122,6 +7127,7 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
     let mut exaggeration = state.viewport_exaggeration;
     let mut light = state.viewport_lighting;
     let mut shade_mode = state.viewport_2d.shade_mode();
+    let mut fly_speed = state.viewport_fly_speed;
     // Draw the floating HUD only when the viewport is tall enough to hold it, so a short viewport
     // shows only the render rather than a HUD overflowing it.
     if rect.height() >= WORKSPACE_HUD_MIN {
@@ -7134,7 +7140,7 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 // data maps (flow, masks) the room the small preview pane can't.
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut mode, viewport2d::Mode::ThreeD, "3D")
-                        .on_hover_text("Meshed relief, orbit camera");
+                        .on_hover_text("Meshed relief; Alt+drag to orbit, hold right mouse + WASD to fly");
                     ui.selectable_value(&mut mode, viewport2d::Mode::TwoD, "2D")
                         .on_hover_text("Flat map; drag to pan, scroll to zoom, double-click to fit");
                 });
@@ -7150,7 +7156,7 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 );
                 match mode {
                     viewport2d::Mode::ThreeD => {
-                        viewport_3d_controls(ui, &mut scale, &mut exaggeration, &mut light);
+                        viewport_3d_controls(ui, &mut scale, &mut exaggeration, &mut fly_speed, &mut light);
                     }
                     viewport2d::Mode::TwoD => {
                         viewport_2d_controls(ui, &mut shade_mode, &mut scale);
@@ -7164,6 +7170,7 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
     state.viewport_exaggeration = exaggeration;
     state.viewport_lighting = light;
     state.viewport_2d.set_shade_mode(shade_mode);
+    state.viewport_fly_speed = fly_speed;
 
     // The relief sun, anchored top-right and shown only in the 2D map's relief mode (#96): a
     // compact dial to steer the hillshade light the flat map cannot otherwise set. Its own
@@ -7199,12 +7206,13 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
     }
 }
 
-/// The 3D viewport HUD controls: the Auto/Fixed height scale, the vertical exaggeration,
-/// and the sun under a collapsing header.
+/// The 3D viewport HUD controls: the Auto/Fixed height scale, the vertical exaggeration, the fly
+/// speed, and the sun under a collapsing header.
 fn viewport_3d_controls(
     ui: &mut egui::Ui,
     scale: &mut shade::HeightScale,
     exaggeration: &mut f32,
+    fly_speed: &mut f32,
     light: &mut viewport::Lighting,
 ) {
     ui.horizontal(|ui| {
@@ -7224,6 +7232,15 @@ fn viewport_3d_controls(
                 .logarithmic(true)
                 .fixed_decimals(2)
                 .custom_formatter(|v, _| format!("{v:.2}x")),
+        );
+    });
+    ui.horizontal(|ui| {
+        ui.label("Fly speed")
+            .on_hover_text("Speed of the right-mouse + WASD fly-through (Shift boosts)");
+        ui.add(
+            egui::Slider::new(fly_speed, 0.05..=4.0)
+                .logarithmic(true)
+                .fixed_decimals(2),
         );
     });
     // Lighting tucks under a collapsing header so the HUD stays compact.
