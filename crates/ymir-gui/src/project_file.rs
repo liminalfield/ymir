@@ -124,6 +124,11 @@ pub(crate) struct WorldSettings {
     pub water: WaterSettings,
 }
 
+/// Default for a bool setting added after `WaterSettings` shipped (e.g. `reflection`): on.
+fn default_true() -> bool {
+    true
+}
+
 /// Gerstner crest steepness for a project saved before the control existed (#155).
 fn default_steepness() -> f32 {
     0.6
@@ -141,8 +146,14 @@ fn default_wavelength() -> f32 {
 pub(crate) struct WaterSettings {
     /// Depth-shading layer (Tier 0): Beer-Lambert extinction tints and opaques with depth.
     pub depth: bool,
-    /// Surface layer (Tier 1): animated ripple normal, sky reflection, and sun specular.
-    pub surface: bool,
+    /// Gerstner wave layer (#155): geometric wave displacement. Aliased from the old `surface` key,
+    /// which used to gate both waves and reflection, so older projects keep their setting.
+    #[serde(alias = "surface")]
+    pub waves: bool,
+    /// Reflective surface finish: sky Fresnel reflection and sun specular. Split out from `surface`
+    /// so it toggles independently of the waves; defaulted on for projects saved before the split.
+    #[serde(default = "default_true")]
+    pub reflection: bool,
     /// Shoreline foam layer.
     pub foam_on: bool,
     /// Depth falloff (Beer-Lambert extinction): higher clears to opaque faster.
@@ -172,7 +183,8 @@ impl Default for WaterSettings {
     fn default() -> Self {
         Self {
             depth: true,
-            surface: true,
+            waves: true,
+            reflection: true,
             foam_on: true,
             extinction: 5.0,
             color: [0.10, 0.28, 0.42],
@@ -783,6 +795,30 @@ mod tests {
         assert_eq!(restored.world_height, DEFAULT_WORLD_HEIGHT);
         assert_eq!(restored.sea_level, DEFAULT_SEA_LEVEL);
         assert!(!restored.show_water);
+    }
+
+    #[test]
+    fn water_surface_key_migrates_to_waves_and_reflection_defaults_on() {
+        // Projects saved before the waves/reflection split stored a single `surface` bool. It must
+        // load with `waves` taking that value (via the serde alias) and `reflection` defaulting on,
+        // so an existing project keeps its wave setting rather than silently resetting.
+        let json = r#"{
+            "format_version": 1,
+            "world": {
+                "seed": 0, "world_extent": 2048.0,
+                "water": { "depth": true, "surface": false, "foam_on": true,
+                    "extinction": 5.0, "color": [0.1, 0.28, 0.42],
+                    "wave": 0.5, "reflectivity": 0.6, "specular": 0.5,
+                    "foam": 0.5, "foam_width": 0.015, "speed": 0.4 }
+            },
+            "graph": { "format_version": 1, "next_stable_id": 0, "nodes": [] }
+        }"#;
+        let file: ProjectFile = serde_json::from_str(json).expect("deserialize pre-split water");
+        assert!(
+            !file.world.water.waves,
+            "old `surface: false` carries to `waves`"
+        );
+        assert!(file.world.water.reflection, "`reflection` defaults on");
     }
 
     #[test]

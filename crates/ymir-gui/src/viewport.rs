@@ -86,8 +86,8 @@ struct Uniforms {
     /// Shoreline params: x = foam amount, y = foam width (in normalized depth); z/w reserved
     /// (wet-shore later).
     shore: [f32; 4],
-    /// Layer toggles (1 on, 0 off): x = depth shading, y = surface (waves/Fresnel/specular),
-    /// z = foam; w unused. Off falls back toward plain translucent water.
+    /// Layer toggles (1 on, 0 off): x = depth shading, y = Gerstner waves, z = foam,
+    /// w = reflective finish (sky Fresnel + specular). Off falls back toward plain translucent water.
     flags: [f32; 4],
     /// Gerstner wave shaping (#155): x = steepness (crest sharpness, `[0, 1]`), y = wavelength scale
     /// (multiplies the base wavelengths); z/w reserved.
@@ -642,10 +642,10 @@ struct ViewportCallback {
     water_foam_width: f32,
     /// Whether to draw the water plane this frame.
     water_enabled: bool,
-    /// Layer toggles (#157): depth shading, the animated surface, and foam. Each stacks on the
-    /// one before; all off is plain translucent water.
+    /// Layer toggles (#157, #155): depth shading, Gerstner waves, reflective finish, and foam.
     water_depth: bool,
-    water_surface: bool,
+    water_waves: bool,
+    water_reflection: bool,
     water_foam_on: bool,
     /// Physical-pixel size of the viewport rect this frame; the offscreen targets track it.
     target_size: [u32; 2],
@@ -700,9 +700,9 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                 shore: [self.water_foam, self.water_foam_width, 0.0, 0.0],
                 flags: [
                     if self.water_depth { 1.0 } else { 0.0 },
-                    if self.water_surface { 1.0 } else { 0.0 },
+                    if self.water_waves { 1.0 } else { 0.0 },
                     if self.water_foam_on { 1.0 } else { 0.0 },
-                    0.0,
+                    if self.water_reflection { 1.0 } else { 0.0 },
                 ],
                 waves: [self.water_steepness, self.water_wavelength, 0.0, 0.0],
             };
@@ -898,11 +898,12 @@ pub(crate) struct ViewSettings {
     pub sea_level: f32,
     /// Whether to draw the water plane at all.
     pub show_water: bool,
-    /// Layer toggles (#157), stacking on plain translucent water: depth shading (Tier 0), the
-    /// animated surface (Tier 1: ripples, Fresnel, specular), and foam. Turning the animated
-    /// layers off also stops the per-frame repaint, so still water costs nothing.
+    /// Layer toggles (#157, #155): depth shading (Tier 0), Gerstner waves, a reflective finish (sky
+    /// Fresnel + specular), and foam. Turning the animated layers (waves, foam) off stops the
+    /// per-frame repaint, so still water costs nothing; a reflective flat surface is static.
     pub water_depth: bool,
-    pub water_surface: bool,
+    pub water_waves: bool,
+    pub water_reflection: bool,
     pub water_foam_on: bool,
     /// Water depth falloff (Beer-Lambert extinction, in normalized-height units): higher clears
     /// to opaque faster, lower stays see-through deeper.
@@ -1051,19 +1052,20 @@ pub(crate) fn show(
             water_foam_width: settings.water_foam_width,
             water_enabled: settings.show_water,
             water_depth: settings.water_depth,
-            water_surface: settings.water_surface,
+            water_waves: settings.water_waves,
+            water_reflection: settings.water_reflection,
             water_foam_on: settings.water_foam_on,
             target_size,
         },
     );
-    // Animate only when there is an animated layer to show and the speed is non-zero. The surface
-    // swells and the foam both scroll with the phase; depth shading and plain translucent water are
-    // static. Throttling to ~22 fps (rather than an unbounded `request_repaint`) keeps the slow
-    // swells smooth while halving the per-second cost of the full-scene re-render, and skipping it
-    // entirely for still or frozen water lets the fans idle (#157). The phase is a real-time
+    // Animate only when there is an animated layer to show and the speed is non-zero. The Gerstner
+    // waves and the foam both scroll with the phase; depth shading, a reflective flat surface, and
+    // plain translucent water are static. Throttling to ~15 fps (rather than an unbounded
+    // `request_repaint`) keeps the slow swells smooth while cutting the per-second cost, and skipping
+    // it for still or frozen water lets the fans idle (#157, #159). The phase is a real-time
     // accumulator (see `water_time`), so a capped rate does not slow the waves.
     let animated = settings.show_water
-        && (settings.water_surface || settings.water_foam_on)
+        && (settings.water_waves || settings.water_foam_on)
         && settings.water_speed > 0.0;
     if animated {
         ui.ctx()
@@ -1608,11 +1610,11 @@ fn fs_water(in: WaterOut) -> @location(0) vec4<f32> {
         discard; // terrain is above the waterline here: no water
     }
 
-    // Layer toggles (#157). Each effect stacks on the one before: plain translucent, then depth
-    // shading, then the animated surface, then foam. Off falls back to the layer beneath. The
-    // branches are on uniform values, so this is uniform control flow (the texture read above it).
+    // Layer toggles (#157, #155). Depth shading, a reflective finish, and foam stack on the plain
+    // translucent water; the Gerstner waves (flags.y) are applied in the vertex shader. The branches
+    // are on uniform values, so this is uniform control flow (the texture read is above it).
     let depth_on = u.flags.x > 0.5;
-    let surface_on = u.flags.y > 0.5;
+    let reflection_on = u.flags.w > 0.5;
     let foam_on = u.flags.z > 0.5;
 
     // Base colour and translucency. With depth shading on, Beer-Lambert extinction darkens and
@@ -1633,10 +1635,11 @@ fn fs_water(in: WaterOut) -> @location(0) vec4<f32> {
         alpha = 0.5;
     }
 
-    // Surface: the Gerstner-displaced geometry already gives the wave shape and its analytic normal
-    // (per-vertex, interpolated here); this branch just lights it — sky reflection via Fresnel and a
-    // sun specular. Fine chop rides on top in a later step.
-    if (surface_on) {
+    // Reflective finish: the Gerstner-displaced geometry already gives the wave shape and its
+    // analytic normal (per-vertex, interpolated here); this branch adds the sky reflection via
+    // Fresnel and the sun specular. Independent of the waves toggle, so a flat surface can still
+    // mirror the sky, and wavy water can be left matte.
+    if (reflection_on) {
         let to_eye = u.eye.xyz - in.world_pos;
         let dist = length(to_eye);
         let v = to_eye / max(dist, 1e-4);

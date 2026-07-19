@@ -465,11 +465,12 @@ struct AppState {
     /// Whether the 3D viewport draws the water plane at [`sea_level`](Self::sea_level). A view
     /// aid, on by default so the sea reads on a fresh launch.
     show_water: bool,
-    /// Water effect layers (#157), stacking on plain translucent water: depth shading, the animated
-    /// surface (ripples/Fresnel/specular), and foam. Ephemeral view state. Off is cheaper and, for
-    /// the animated layers, stops the viewport's per-frame repaint so still water idles the fans.
+    /// Water effect layers (#157, #155): depth shading, Gerstner waves, a reflective finish (sky
+    /// Fresnel + specular), and foam. Ephemeral view state. Off is cheaper and, for the animated
+    /// layers (waves, foam), stops the viewport's per-frame repaint so still water idles the fans.
     water_depth: bool,
-    water_surface: bool,
+    water_waves: bool,
+    water_reflection: bool,
     water_foam_on: bool,
     /// Water depth falloff (Beer-Lambert extinction) for the 3D viewport water (#154). Ephemeral
     /// view state for now (not persisted); a higher value clears to opaque faster.
@@ -768,7 +769,8 @@ impl AppState {
             // session and a project saved without water settings can never drift apart (#157). All
             // layers on, a calm speed. The phase is a running clock, started at zero.
             water_depth: water_defaults.depth,
-            water_surface: water_defaults.surface,
+            water_waves: water_defaults.waves,
+            water_reflection: water_defaults.reflection,
             water_foam_on: water_defaults.foam_on,
             water_extinction: water_defaults.extinction,
             water_color: water_defaults.color,
@@ -972,7 +974,8 @@ impl AppState {
     fn water_settings(&self) -> project_file::WaterSettings {
         project_file::WaterSettings {
             depth: self.water_depth,
-            surface: self.water_surface,
+            waves: self.water_waves,
+            reflection: self.water_reflection,
             foam_on: self.water_foam_on,
             extinction: self.water_extinction,
             color: self.water_color,
@@ -991,7 +994,8 @@ impl AppState {
     /// running clock, not a stored setting, so it is left as-is (the surface simply carries on).
     fn apply_water_settings(&mut self, w: project_file::WaterSettings) {
         self.water_depth = w.depth;
-        self.water_surface = w.surface;
+        self.water_waves = w.waves;
+        self.water_reflection = w.reflection;
         self.water_foam_on = w.foam_on;
         self.water_extinction = w.extinction;
         self.water_color = w.color;
@@ -4419,7 +4423,22 @@ fn slider_row<Num: egui::emath::Numeric>(
     let h = ui.spacing().interact_size.y;
     let span = range.end().to_f64() - range.start().to_f64();
     ui.horizontal(|ui| {
-        ui.add_sized([66.0, h], egui::Label::new(label).selectable(false));
+        // Left-aligned label in a column reserved at an exact width (drawn via the painter, so the
+        // column never grows or shrinks with the label's length). This keeps every slider starting
+        // at the same x and coming out the same width. Dimmed when the group is disabled.
+        let (label_rect, _) = ui.allocate_exact_size(egui::vec2(76.0, h), egui::Sense::hover());
+        let label_colour = if ui.is_enabled() {
+            theme::TEXT_SECONDARY
+        } else {
+            theme::TEXT_SECONDARY.gamma_multiply(0.5)
+        };
+        ui.painter().text(
+            egui::pos2(label_rect.left(), label_rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            label,
+            egui::FontId::proportional(11.5),
+            label_colour,
+        );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_sized(
                 [44.0, h],
@@ -4436,16 +4455,28 @@ fn slider_row<Num: egui::emath::Numeric>(
     *value = x;
 }
 
-/// A water effect group: a header row of the group name and an enable toggle, over the params it
-/// gates. Flat (no bordered box), so nothing paints a hard right edge against the pane border. When
-/// `on` is false the params grey out and stop responding (`add_enabled_ui`) while the header toggle
-/// stays live, so the group can be switched back on.
-fn water_group(ui: &mut egui::Ui, title: &str, on: &mut bool, body: impl FnOnce(&mut egui::Ui)) {
+/// A subtle full-width divider between water setting groups, so the groups read as distinct bands.
+fn group_separator(ui: &mut egui::Ui) {
     ui.add_space(6.0);
+    let top = ui.available_rect_before_wrap().top();
+    ui.painter().hline(
+        ui.max_rect().x_range(),
+        top,
+        egui::Stroke::new(1.0, theme::LINE),
+    );
+    ui.add_space(6.0);
+}
+
+/// A water effect group: a divider, a header row of the group name (a step larger than the param
+/// labels) and an enable toggle, over the params it gates. Flat (no bordered box), so nothing paints
+/// a hard right edge against the pane border. When `on` is false the params grey out and stop
+/// responding (`add_enabled_ui`) while the header toggle stays live, so the group can be reenabled.
+fn water_group(ui: &mut egui::Ui, title: &str, on: &mut bool, body: impl FnOnce(&mut egui::Ui)) {
+    group_separator(ui);
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new(title)
-                .size(11.5)
+                .size(13.0)
                 .strong()
                 .color(theme::TEXT_PRIMARY),
         );
@@ -4506,14 +4537,16 @@ fn world_settings(ui: &mut egui::Ui, state: &mut AppState) {
     });
 
     ui.add_space(4.0);
+    // Show water: the master toggle for the water overlay, on its own row directly above the sea
+    // level so it is easy to find (it used to hide at the right edge of the sea-level header row).
     ui.horizontal(|ui| {
-        ui.label("Sea level");
-        // Show water sits inline in the header, as a frost toggle at the trailing edge.
+        ui.label("Show water");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             switch(ui, &mut state.show_water);
-            ui.label(egui::RichText::new("Show water").color(theme::TEXT_SECONDARY));
         });
     });
+    ui.add_space(2.0);
+    ui.label("Sea level");
     // Normalized height in [0, 1]; the 3D viewport draws a water plane here. Slider fills the row
     // with a scrub/type value box pinned right (a local copy avoids the double borrow); the
     // elevation in meters (sea_level × world_height) reads below it.
@@ -4581,23 +4614,31 @@ fn world_settings(ui: &mut egui::Ui, state: &mut AppState) {
     // row with an enable toggle owning the params it gates. The effect toggles are those headers.
     section(ui, "world_section_water", "Water", true, None, |ui| {
         ui.horizontal(|ui| {
-            ui.label("Water color");
+            ui.label("Water colour");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // egui's colour button round-trips rgb -> Hsva -> rgb every frame, which drifts the
                 // floats (0.1 -> 0.10000002) even with no interaction; committing that back would
                 // mark the project modified on the first frame (#160). Edit a copy and only store it
                 // on a real change, so the silent round-trip never dirties the persisted colour.
-                let mut color = state.water_color;
-                if ui.color_edit_button_rgb(&mut color).changed() {
-                    state.water_color = color;
+                let mut colour = state.water_color;
+                if ui.color_edit_button_rgb(&mut colour).changed() {
+                    state.water_color = colour;
                 }
             });
         });
-        water_group(ui, "Surface", &mut state.water_surface, |ui| {
+        // Depth sits directly below the colour it tints.
+        water_group(ui, "Depth", &mut state.water_depth, |ui| {
+            slider_row(ui, "Falloff", &mut state.water_extinction, 1.0..=30.0, 1);
+        });
+        // Gerstner waves (the geometric wave surface) and the reflective finish toggle separately, so
+        // you can have flat mirror water or matte chop.
+        water_group(ui, "Gerstner waves", &mut state.water_waves, |ui| {
             slider_row(ui, "Speed", &mut state.water_speed, 0.0..=2.0, 2);
-            slider_row(ui, "Waves", &mut state.water_wave, 0.0..=1.0, 2);
+            slider_row(ui, "Amplitude", &mut state.water_wave, 0.0..=1.0, 2);
             slider_row(ui, "Steepness", &mut state.water_steepness, 0.0..=1.0, 2);
             slider_row(ui, "Wavelength", &mut state.water_wavelength, 0.3..=3.0, 2);
+        });
+        water_group(ui, "Reflection", &mut state.water_reflection, |ui| {
             slider_row(
                 ui,
                 "Reflectivity",
@@ -4606,9 +4647,6 @@ fn world_settings(ui: &mut egui::Ui, state: &mut AppState) {
                 2,
             );
             slider_row(ui, "Specular", &mut state.water_specular, 0.0..=1.0, 2);
-        });
-        water_group(ui, "Depth", &mut state.water_depth, |ui| {
-            slider_row(ui, "Falloff", &mut state.water_extinction, 1.0..=30.0, 1);
         });
         water_group(ui, "Foam", &mut state.water_foam_on, |ui| {
             slider_row(ui, "Amount", &mut state.water_foam, 0.0..=1.0, 2);
@@ -7010,7 +7048,7 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
             // only while an animated layer is on, so the speed slider changes future motion without
             // rescaling the elapsed phase (which would jump the waves) and dropped frames do not
             // slow it (the delta is real). Frozen or hidden water leaves the phase untouched.
-            if state.show_water && (state.water_surface || state.water_foam_on) {
+            if state.show_water && (state.water_waves || state.water_foam_on) {
                 let dt = ui.input(|i| i.stable_dt);
                 state.water_phase += dt * state.water_speed;
             }
@@ -7020,7 +7058,8 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 sea_level,
                 show_water,
                 water_depth: state.water_depth,
-                water_surface: state.water_surface,
+                water_waves: state.water_waves,
+                water_reflection: state.water_reflection,
                 water_foam_on: state.water_foam_on,
                 water_extinction: state.water_extinction,
                 water_color: state.water_color,
@@ -9242,7 +9281,8 @@ mod tests {
                 show_water: true,
                 water: project_file::WaterSettings {
                     depth: false,
-                    surface: true,
+                    waves: true,
+                    reflection: false,
                     foam_on: false,
                     extinction: 12.5,
                     color: [0.2, 0.3, 0.4],
@@ -9275,7 +9315,8 @@ mod tests {
         assert!(restored.show_water);
         // The water look and effect layers travel with the project (#157).
         assert!(!restored.water.depth);
-        assert!(restored.water.surface);
+        assert!(restored.water.waves);
+        assert!(!restored.water.reflection);
         assert!(!restored.water.foam_on);
         assert_eq!(restored.water.extinction, 12.5);
         assert_eq!(restored.water.color, [0.2, 0.3, 0.4]);
