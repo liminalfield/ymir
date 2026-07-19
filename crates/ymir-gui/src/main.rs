@@ -4583,7 +4583,14 @@ fn world_settings(ui: &mut egui::Ui, state: &mut AppState) {
         ui.horizontal(|ui| {
             ui.label("Water color");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.color_edit_button_rgb(&mut state.water_color);
+                // egui's colour button round-trips rgb -> Hsva -> rgb every frame, which drifts the
+                // floats (0.1 -> 0.10000002) even with no interaction; committing that back would
+                // mark the project modified on the first frame (#160). Edit a copy and only store it
+                // on a real change, so the silent round-trip never dirties the persisted colour.
+                let mut color = state.water_color;
+                if ui.color_edit_button_rgb(&mut color).changed() {
+                    state.water_color = color;
+                }
             });
         });
         water_group(ui, "Surface", &mut state.water_surface, |ui| {
