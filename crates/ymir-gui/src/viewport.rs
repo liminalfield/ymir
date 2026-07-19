@@ -94,30 +94,37 @@ struct Uniforms {
     waves: [f32; 4],
 }
 
-/// The offscreen color + depth targets the scene renders into, plus the bind group that lets
-/// the blit sample the color. Owning our own attachments (rather than egui's shared pass) is
-/// the whole point of the fork: controlled depth now, and MSAA / multi-pass / refraction later
-/// (see `docs/design/viewport-water.md`). Recreated whenever the viewport rect changes size.
+/// The offscreen targets the scene renders into, plus the bind group that lets the blit composite
+/// them. Owning our own attachments (rather than egui's shared pass) is the whole point of the fork
+/// (see `docs/design/viewport-water.md`). The terrain and the animated water are drawn as two passes
+/// resolved to their own single-sample textures, so the static terrain can be rendered once and
+/// reused across animation frames while only the water re-renders (#159). One shared multisampled
+/// work target feeds both resolves (the passes are sequential); the depth is shared too, written by
+/// the terrain and read (not written) by the water. Recreated whenever the viewport rect resizes.
 struct Offscreen {
-    /// The multisampled color target the scene draws into.
-    color_view: wgpu::TextureView,
-    /// The single-sample texture the multisampled color resolves into; the blit samples this.
-    resolve_view: wgpu::TextureView,
-    /// The multisampled depth target (not resolved: depth is never sampled).
+    /// The multisampled work target both passes draw into, each resolving to its own texture below.
+    scene_color_view: wgpu::TextureView,
+    /// Single-sample resolve of the terrain pass; persists across frames while the terrain is cached.
+    terrain_resolve_view: wgpu::TextureView,
+    /// Single-sample resolve of the water pass; re-rendered every animated frame.
+    water_resolve_view: wgpu::TextureView,
+    /// Multisampled depth: the terrain pass writes it, the water pass depth-tests against it without
+    /// writing, so it stays valid for reuse while the terrain is cached.
     depth_view: wgpu::TextureView,
-    /// Binds `resolve_view` and the shared sampler for the blit; recreated with the textures.
+    /// Binds the two resolves and the shared sampler for the compositing blit.
     blit_bind_group: wgpu::BindGroup,
     /// Physical-pixel size of the current targets.
     size: [u32; 2],
     // Kept alive because the views above borrow them.
-    _color: wgpu::Texture,
-    _resolve: wgpu::Texture,
+    _scene_color: wgpu::Texture,
+    _terrain_resolve: wgpu::Texture,
+    _water_resolve: wgpu::Texture,
     _depth: wgpu::Texture,
 }
 
 impl Offscreen {
-    /// Creates the multisampled color + depth targets and the single-sample resolve target at
-    /// `size` (physical pixels, clamped non-zero), plus the blit bind group over the resolve.
+    /// Creates the shared multisampled work + depth targets, the two single-sample resolves, and the
+    /// blit bind group over them, at `size` (physical pixels, clamped non-zero).
     fn new(
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
@@ -130,9 +137,9 @@ impl Offscreen {
             height: size[1].max(1),
             depth_or_array_layers: 1,
         };
-        // Multisampled color: a render target only (a multisampled texture cannot be sampled).
-        let color = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("viewport-offscreen-color"),
+        // Multisampled work target: a render target only (a multisampled texture cannot be sampled).
+        let scene_color = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("viewport-scene-color"),
             size: extent,
             mip_level_count: 1,
             sample_count: SAMPLE_COUNT,
@@ -141,9 +148,8 @@ impl Offscreen {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
-        // Single-sample resolve target: the color the blit samples.
-        let resolve = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("viewport-offscreen-resolve"),
+        let resolve_desc = wgpu::TextureDescriptor {
+            label: Some("viewport-resolve"),
             size: extent,
             mip_level_count: 1,
             sample_count: 1,
@@ -151,9 +157,11 @@ impl Offscreen {
             format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
-        });
+        };
+        let terrain_resolve = device.create_texture(&resolve_desc);
+        let water_resolve = device.create_texture(&resolve_desc);
         let depth = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("viewport-offscreen-depth"),
+            label: Some("viewport-scene-depth"),
             size: extent,
             mip_level_count: 1,
             sample_count: SAMPLE_COUNT,
@@ -162,8 +170,10 @@ impl Offscreen {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
-        let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
-        let resolve_view = resolve.create_view(&wgpu::TextureViewDescriptor::default());
+        let scene_color_view = scene_color.create_view(&wgpu::TextureViewDescriptor::default());
+        let terrain_resolve_view =
+            terrain_resolve.create_view(&wgpu::TextureViewDescriptor::default());
+        let water_resolve_view = water_resolve.create_view(&wgpu::TextureViewDescriptor::default());
         let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
         let blit_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("viewport-blit-bind-group"),
@@ -171,22 +181,28 @@ impl Offscreen {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&resolve_view),
+                    resource: wgpu::BindingResource::TextureView(&terrain_resolve_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&water_resolve_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
                     resource: wgpu::BindingResource::Sampler(sampler),
                 },
             ],
         });
         Self {
-            color_view,
-            resolve_view,
+            scene_color_view,
+            terrain_resolve_view,
+            water_resolve_view,
             depth_view,
             blit_bind_group,
             size,
-            _color: color,
-            _resolve: resolve,
+            _scene_color: scene_color,
+            _terrain_resolve: terrain_resolve,
+            _water_resolve: water_resolve,
             _depth: depth,
         }
     }
@@ -225,6 +241,13 @@ struct ViewportResources {
     blit_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     target_format: wgpu::TextureFormat,
+    /// Terrain-cache state (#159): the terrain pass re-runs only when its inputs change. `false`
+    /// forces a re-render (startup and after the targets are recreated on resize); the stored
+    /// camera/light inputs detect a change frame to frame. The animated water re-renders regardless.
+    terrain_valid: bool,
+    terrain_view_proj: [[f32; 4]; 4],
+    terrain_light_dir: [f32; 4],
+    terrain_light: [f32; 4],
 }
 
 /// Creates the `res`x`res` R32Float terrain-height texture the water shader samples (Tier 0).
@@ -470,21 +493,30 @@ pub(crate) fn init(render_state: &egui_wgpu::RenderState) {
         label: Some("viewport-blit-sampler"),
         ..Default::default()
     });
+    let blit_tex = wgpu::BindingType::Texture {
+        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+        view_dimension: wgpu::TextureViewDimension::D2,
+        multisampled: false,
+    };
     let blit_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("viewport-blit-layout"),
         entries: &[
+            // 0: the terrain resolve, 1: the water resolve, 2: the sampler. The blit composites the
+            // water over the terrain (#159).
             wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
+                ty: blit_tex,
                 count: None,
             },
             wgpu::BindGroupLayoutEntry {
                 binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: blit_tex,
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
@@ -569,6 +601,10 @@ pub(crate) fn init(render_state: &egui_wgpu::RenderState) {
             blit_layout,
             sampler,
             target_format: render_state.target_format,
+            terrain_valid: false,
+            terrain_view_proj: [[0.0; 4]; 4],
+            terrain_light_dir: [0.0; 4],
+            terrain_light: [0.0; 4],
         });
 }
 
@@ -720,7 +756,8 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
             }
         }
 
-        // Recreate the offscreen targets when the viewport size changes.
+        // Recreate the offscreen targets when the viewport size changes; the new textures start
+        // blank, so the terrain must re-render into them.
         if res.offscreen.size != self.target_size {
             res.offscreen = Offscreen::new(
                 device,
@@ -729,23 +766,76 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                 &res.blit_layout,
                 &res.sampler,
             );
+            res.terrain_valid = false;
         }
 
-        // Render the whole scene into our own color + depth. Clear the color to transparent so the
-        // blit composites over egui's existing viewport background exactly as drawing the terrain
-        // into egui's pass did: the terrain writes opaque, the water alpha-blends over it, and any
-        // area the mesh does not cover stays transparent and shows egui's background through.
+        // The terrain is static across animation frames, so re-render it only when its inputs change:
+        // a new mesh this frame, a moved camera, or changed lighting. The animated water re-renders
+        // every frame regardless. This is what keeps the fans down — an idle scene with the water
+        // animating redraws only the ~200K water vertices, not the up-to-1M terrain vertices (#159).
+        let terrain_dirty = self.mesh.is_some()
+            || !res.terrain_valid
+            || res.terrain_view_proj != self.view_proj
+            || res.terrain_light_dir != self.light_dir
+            || res.terrain_light != self.light;
+
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("viewport-offscreen-encoder"),
         });
+
+        // Terrain pass: clear the shared work target and depth, draw the terrain, resolve to the
+        // terrain resolve. Skipped when the terrain is unchanged, leaving the previous resolve and
+        // depth in place for the water pass to reuse. Colour clears transparent so any area the mesh
+        // does not cover stays see-through and shows egui's viewport background.
+        if terrain_dirty {
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("viewport-terrain-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &res.offscreen.scene_color_view,
+                        depth_slice: None,
+                        resolve_target: Some(&res.offscreen.terrain_resolve_view),
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &res.offscreen.depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&res.pipeline);
+                pass.set_bind_group(0, &res.bind_group, &[]);
+                pass.set_vertex_buffer(0, res.vertex_buffer.slice(..));
+                pass.set_index_buffer(res.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..res.index_count, 0, 0..1);
+            }
+            res.terrain_valid = true;
+            res.terrain_view_proj = self.view_proj;
+            res.terrain_light_dir = self.light_dir;
+            res.terrain_light = self.light;
+        }
+
+        // Water pass: draw the animated water into the shared work target, resolving to the water
+        // resolve. Depth is loaded (not cleared) so the water depth-tests against the terrain it was
+        // rendered against, and the water pipeline never writes depth, so that depth survives for the
+        // next frame's reuse. Colour clears transparent, so with water disabled the resolve is empty
+        // and the composite shows terrain only.
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("viewport-offscreen-pass"),
+                label: Some("viewport-water-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &res.offscreen.color_view,
+                    view: &res.offscreen.scene_color_view,
                     depth_slice: None,
-                    // Resolve the multisampled color into the single-sample target the blit samples.
-                    resolve_target: Some(&res.offscreen.resolve_view),
+                    resolve_target: Some(&res.offscreen.water_resolve_view),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
@@ -754,7 +844,7 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &res.offscreen.depth_view,
                     depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
+                        load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     }),
                     stencil_ops: None,
@@ -763,14 +853,6 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&res.pipeline);
-            pass.set_bind_group(0, &res.bind_group, &[]);
-            pass.set_vertex_buffer(0, res.vertex_buffer.slice(..));
-            pass.set_index_buffer(res.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..res.index_count, 0, 0..1);
-
-            // Water after the terrain, so depth testing clips it at the waterline. Group 1 is the
-            // height texture the water shader samples for depth.
             if self.water_enabled {
                 pass.set_pipeline(&res.water_pipeline);
                 pass.set_bind_group(0, &res.bind_group, &[]);
@@ -985,7 +1067,7 @@ pub(crate) fn show(
         && settings.water_speed > 0.0;
     if animated {
         ui.ctx()
-            .request_repaint_after(std::time::Duration::from_millis(45));
+            .request_repaint_after(std::time::Duration::from_millis(66));
     }
     ui.painter().add(callback);
 }
@@ -1603,8 +1685,9 @@ fn fs_water(in: WaterOut) -> @location(0) vec4<f32> {
 /// egui's pass. The UVs flip Y so the rendered image is upright, and at 1:1 size the sample is an
 /// exact copy, keeping the result pixel-identical to drawing the scene into egui's pass directly.
 const BLIT_SHADER: &str = r"
-@group(0) @binding(0) var src: texture_2d<f32>;
-@group(0) @binding(1) var samp: sampler;
+@group(0) @binding(0) var terrain_tex: texture_2d<f32>;
+@group(0) @binding(1) var water_tex: texture_2d<f32>;
+@group(0) @binding(2) var samp: sampler;
 
 struct BlitOut {
     @builtin(position) clip: vec4<f32>,
@@ -1627,6 +1710,12 @@ fn vs_blit(@builtin(vertex_index) vi: u32) -> BlitOut {
 
 @fragment
 fn fs_blit(in: BlitOut) -> @location(0) vec4<f32> {
-    return textureSample(src, samp, in.uv);
+    let terrain = textureSample(terrain_tex, samp, in.uv);
+    let water = textureSample(water_tex, samp, in.uv);
+    // The water resolve is premultiplied (drawn over transparent with alpha blending), so composite
+    // it over the opaque terrain and keep the terrain's coverage as the output alpha (transparent
+    // where no mesh, so egui's viewport background shows through).
+    let rgb = terrain.rgb * (1.0 - water.a) + water.rgb;
+    return vec4<f32>(rgb, terrain.a);
 }
 ";
