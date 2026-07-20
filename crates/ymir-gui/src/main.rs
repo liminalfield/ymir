@@ -7153,6 +7153,17 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
     let mut light = state.viewport_lighting;
     let mut shade_mode = state.viewport_2d.shade_mode();
     let mut fly_speed = state.viewport_fly_speed;
+    // The tapped outputs of the previewed node and the index the viewport shows (#165). The flyout's
+    // Output picker and the inspector thumbnail's picker both read and write this one index, so the
+    // two stay in sync. Names come from the node's spec, matching the inspector.
+    let output_names: Vec<String> = state
+        .preview_target()
+        .and_then(|t| state.graph.node_id_of(t))
+        .and_then(|id| state.graph.spec(id))
+        .map(|spec| spec.outputs.iter().map(|p| p.name.clone()).collect())
+        .unwrap_or_default();
+    let mut display_output = state.preview.display_output();
+    let display_output_before = display_output;
     // Draw the cluster only when the viewport is tall enough to hold it, so a short viewport shows
     // only the render rather than chrome overflowing it.
     if rect.height() >= WORKSPACE_HUD_MIN {
@@ -7212,26 +7223,144 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
                             display_button(ui)
                         })
                         .inner;
-                    // The Display flyout: opens under the button and closes on a click outside its
-                    // body, so dragging its sliders does not dismiss it. Holds the mode-specific
-                    // controls (2D's set is refined in #166).
-                    egui::Popup::from_toggle_button_response(&display_btn)
-                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                        .gap(6.0)
-                        .frame(egui::Frame::popup(ui.style()))
-                        .show(|ui| {
-                            ui.set_max_width(250.0);
-                            match mode {
-                                viewport2d::Mode::ThreeD => {
-                                    viewport_3d_controls(ui, &mut scale, &mut exaggeration, &mut light);
+                    // The Display flyout, its open state managed by hand so the Output list can float
+                    // as its own overlay (below) without the list's clicks tripping a close: a nested
+                    // menu popup renders in its own layer and would dismiss a click-outside flyout on
+                    // selection. So the flyout ignores clicks (dragging its sliders never dismisses
+                    // it); the Display button toggles it, and a click outside it and the list, or
+                    // Escape, closes it.
+                    let flyout_open_id = ui.make_persistent_id("viewport-flyout-open");
+                    let outputs_open_id = ui.make_persistent_id("viewport-outputs-open");
+                    let mut flyout_open = ui.data(|d| d.get_temp(flyout_open_id).unwrap_or(false));
+                    let mut outputs_open = ui.data(|d| d.get_temp(outputs_open_id).unwrap_or(false));
+                    let has_outputs = output_names.len() > 1;
+                    let cur = display_output.min(output_names.len().saturating_sub(1));
+                    if display_btn.clicked() {
+                        flyout_open = !flyout_open;
+                        outputs_open = false;
+                    }
+                    let mut flyout_rect = None;
+                    let mut output_btn_rect = None;
+                    if flyout_open {
+                        let inner = egui::Popup::from_response(&display_btn)
+                            .open(true)
+                            .close_behavior(egui::PopupCloseBehavior::IgnoreClicks)
+                            .gap(6.0)
+                            .frame(egui::Frame::popup(ui.style()))
+                            .show(|ui| {
+                                ui.set_max_width(250.0);
+                                // The Output row (multi-output nodes only) tops the flyout; its button
+                                // toggles the floating list, and its rect anchors that list.
+                                if has_outputs {
+                                    ui.horizontal(|ui| {
+                                        flyout_label(ui, "Output");
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                let caret = if outputs_open {
+                                                    egui_phosphor::regular::CARET_UP
+                                                } else {
+                                                    egui_phosphor::regular::CARET_DOWN
+                                                };
+                                                let b = ui
+                                                    .button(format!("{}   {caret}", output_names[cur]));
+                                                output_btn_rect = Some(b.rect);
+                                                if b.clicked() {
+                                                    outputs_open = !outputs_open;
+                                                }
+                                            },
+                                        );
+                                    });
+                                    group_separator(ui);
                                 }
-                                viewport2d::Mode::TwoD => {
-                                    viewport_2d_controls(ui, &mut shade_mode, &mut scale);
+                                match mode {
+                                    viewport2d::Mode::ThreeD => {
+                                        viewport_3d_controls(ui, &mut scale, &mut exaggeration, &mut light);
+                                    }
+                                    viewport2d::Mode::TwoD => {
+                                        viewport_2d_controls(ui, &mut shade_mode, &mut scale);
+                                    }
                                 }
+                            });
+                        flyout_rect = inner.map(|r| r.response.rect);
+                    }
+                    // The Output list: its own foreground overlay, so revealing it never grows the
+                    // flyout. Anchored under the Output button and raised above the flyout; picking one
+                    // sets the shared index and closes the list (the click lands inside the list, so it
+                    // never closes the flyout).
+                    let mut list_rect = None;
+                    if flyout_open
+                        && outputs_open
+                        && let Some(anchor) = output_btn_rect
+                    {
+                        let list = egui::Area::new(ui.id().with("viewport-outputs-list"))
+                            .order(egui::Order::Foreground)
+                            .fixed_pos(anchor.left_bottom() + egui::vec2(0.0, 4.0))
+                            .show(ui.ctx(), |ui| {
+                                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                                    // Size to the widest option (plus the label padding), not the
+                                    // anchor button, whose width tracks the *selected* name; otherwise
+                                    // a short selection shrinks the list and wraps the longer options.
+                                    let font = egui::TextStyle::Button.resolve(ui.style());
+                                    let widest = output_names
+                                        .iter()
+                                        .map(|n| {
+                                            ui.painter()
+                                                .layout_no_wrap(
+                                                    n.clone(),
+                                                    font.clone(),
+                                                    theme::TEXT_PRIMARY,
+                                                )
+                                                .size()
+                                                .x
+                                        })
+                                        .fold(0.0_f32, f32::max);
+                                    let pad = ui.spacing().button_padding.x * 2.0 + 6.0;
+                                    ui.set_min_width((widest + pad).max(anchor.width()));
+                                    for (i, name) in output_names.iter().enumerate() {
+                                        if ui.selectable_label(i == cur, name).clicked() {
+                                            display_output = i;
+                                            outputs_open = false;
+                                        }
+                                    }
+                                });
+                            });
+                        // Raise above the flyout (both Foreground) so the list is never occluded.
+                        ui.ctx().move_to_top(list.response.layer_id);
+                        list_rect = Some(list.response.rect);
+                    }
+                    // Manual dismissal: Escape backs out (list first, then flyout); a click outside the
+                    // Display button, the flyout, and the list closes everything.
+                    if flyout_open {
+                        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            if outputs_open {
+                                outputs_open = false;
+                            } else {
+                                flyout_open = false;
                             }
-                        });
+                        } else if ui.input(|i| i.pointer.any_click()) {
+                            let pos = ui.input(|i| i.pointer.interact_pos());
+                            let inside_flyout =
+                                flyout_rect.zip(pos).is_some_and(|(r, p)| r.contains(p));
+                            let inside_list = list_rect.zip(pos).is_some_and(|(r, p)| r.contains(p));
+                            let on_btn = pos.is_some_and(|p| display_btn.rect.contains(p));
+                            if !on_btn && !inside_flyout && !inside_list {
+                                flyout_open = false;
+                                outputs_open = false;
+                            }
+                        }
+                    }
+                    ui.data_mut(|d| {
+                        d.insert_temp(flyout_open_id, flyout_open);
+                        d.insert_temp(outputs_open_id, outputs_open);
+                    });
                 });
             });
+    }
+    // Write the picked output back only when the flyout changed it, so this never clobbers a change
+    // the inspector's picker made the same frame.
+    if display_output != display_output_before {
+        state.preview.set_display_output(display_output);
     }
     state.viewport_mode = mode;
     state.viewport_scale = scale;
