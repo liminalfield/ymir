@@ -7144,50 +7144,83 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
         }
     }
 
-    // A small control HUD overlaid at the top-left of the viewport. A temporary home: the
-    // design calls for a vertical toolbar down the left edge, not yet built.
+    // The on-render control cluster overlaid at the top-left of the viewport (#164): a compact row
+    // of the projection toggle, the fidelity readout, the fly speed (3D only), and a Display button
+    // that opens a flyout holding the rest (height scale, exaggeration, light).
     let mut mode = state.viewport_mode;
     let mut scale = state.viewport_scale;
     let mut exaggeration = state.viewport_exaggeration;
     let mut light = state.viewport_lighting;
     let mut shade_mode = state.viewport_2d.shade_mode();
     let mut fly_speed = state.viewport_fly_speed;
-    // Draw the floating HUD only when the viewport is tall enough to hold it, so a short viewport
-    // shows only the render rather than a HUD overflowing it.
+    // Draw the cluster only when the viewport is tall enough to hold it, so a short viewport shows
+    // only the render rather than chrome overflowing it.
     if rect.height() >= WORKSPACE_HUD_MIN {
-        egui::Area::new(ui.id().with("viewport-hud"))
-        .order(egui::Order::Foreground)
-        .fixed_pos(rect.left_top() + egui::vec2(8.0, 8.0))
-        .show(ui.ctx(), |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| {
-                // The projection: the 3D relief or the flat 2D map (#134). The 2D view gives
-                // data maps (flow, masks) the room the small preview pane can't.
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut mode, viewport2d::Mode::ThreeD, "3D")
-                        .on_hover_text("Meshed relief; Alt+drag to orbit, hold right mouse + WASD to fly");
-                    ui.selectable_value(&mut mode, viewport2d::Mode::TwoD, "2D")
-                        .on_hover_text("Flat map; drag to pan, scroll to zoom, double-click to fit");
+        egui::Area::new(ui.id().with("viewport-cluster"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(rect.left_top() + egui::vec2(8.0, 8.0))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    // The cluster row. The Display button's response is returned so the flyout can
+                    // anchor beneath it and toggle on its click.
+                    let display_btn = ui
+                        .horizontal(|ui| {
+                            // The projection: the 3D relief or the flat 2D map (#134). The 2D view
+                            // gives data maps (flow, masks) the room the small preview pane can't.
+                            ui.selectable_value(&mut mode, viewport2d::Mode::ThreeD, "3D")
+                                .on_hover_text("Meshed relief; Alt+drag to orbit, hold right mouse + WASD to fly");
+                            ui.selectable_value(&mut mode, viewport2d::Mode::TwoD, "2D")
+                                .on_hover_text("Flat map; drag to pan, scroll to zoom, double-click to fit");
+                            ui.separator();
+                            // Whether the viewport shows the full build result or the coarse
+                            // preview, so it is clear which fidelity is on screen while tuning.
+                            ui.weak(if showing_build {
+                                "Showing: build"
+                            } else {
+                                "Showing: preview"
+                            })
+                            .on_hover_text(
+                                "Build quality appears after a Build, until the graph changes; otherwise the live preview",
+                            );
+                            // Fly speed rides the cluster (always accessible), only in 3D where the
+                            // fly camera exists. Shift boosts 4x over this.
+                            if mode == viewport2d::Mode::ThreeD {
+                                ui.separator();
+                                ui.label("Fly speed").on_hover_text(
+                                    "Speed of the right-mouse + WASD fly-through (Shift boosts 4x)",
+                                );
+                                ui.spacing_mut().slider_width = 90.0;
+                                ui.add(
+                                    egui::Slider::new(&mut fly_speed, 0.05..=1.5)
+                                        .logarithmic(true)
+                                        .fixed_decimals(2),
+                                );
+                            }
+                            ui.separator();
+                            ui.button("Display")
+                                .on_hover_text("Height scale, exaggeration, and light")
+                        })
+                        .inner;
+                    // The Display flyout: opens under the button and closes on a click outside its
+                    // body, so dragging its sliders does not dismiss it. Holds the mode-specific
+                    // controls (2D's set is refined in #166).
+                    egui::Popup::from_toggle_button_response(&display_btn)
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                        .gap(6.0)
+                        .frame(egui::Frame::popup(ui.style()))
+                        .show(|ui| {
+                            ui.set_max_width(250.0);
+                            match mode {
+                                viewport2d::Mode::ThreeD => {
+                                    viewport_3d_controls(ui, &mut scale, &mut exaggeration, &mut light);
+                                }
+                                viewport2d::Mode::TwoD => {
+                                    viewport_2d_controls(ui, &mut shade_mode, &mut scale);
+                                }
+                            }
+                        });
                 });
-                // Whether the viewport shows the full build result or the coarse preview,
-                // so it is clear which fidelity is on screen while tuning.
-                ui.weak(if showing_build {
-                    "Showing: build"
-                } else {
-                    "Showing: preview"
-                })
-                .on_hover_text(
-                    "Build quality appears after a Build, until the graph changes; otherwise the live preview",
-                );
-                match mode {
-                    viewport2d::Mode::ThreeD => {
-                        viewport_3d_controls(ui, &mut scale, &mut exaggeration, &mut fly_speed, &mut light);
-                    }
-                    viewport2d::Mode::TwoD => {
-                        viewport_2d_controls(ui, &mut shade_mode, &mut scale);
-                    }
-                }
             });
-        });
     }
     state.viewport_mode = mode;
     state.viewport_scale = scale;
@@ -7230,13 +7263,13 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
     }
 }
 
-/// The 3D viewport HUD controls: the Auto/Fixed height scale, the vertical exaggeration, the fly
-/// speed, and the sun under a collapsing header.
+/// The 3D display-flyout controls: the Auto/Fixed height scale, the vertical exaggeration, and the
+/// sun under a collapsing header. Fly speed is not here: it rides the always-visible cluster, since
+/// it is adjusted often enough that burying it in the flyout would be a nuisance.
 fn viewport_3d_controls(
     ui: &mut egui::Ui,
     scale: &mut shade::HeightScale,
     exaggeration: &mut f32,
-    fly_speed: &mut f32,
     light: &mut viewport::Lighting,
 ) {
     ui.horizontal(|ui| {
@@ -7258,18 +7291,7 @@ fn viewport_3d_controls(
                 .custom_formatter(|v, _| format!("{v:.2}x")),
         );
     });
-    ui.horizontal(|ui| {
-        ui.label("Fly speed")
-            .on_hover_text("Speed of the right-mouse + WASD fly-through (Shift boosts 4x)");
-        // Log scale, and a low top end (Shift still reaches ~4x this): most of the slider's travel
-        // then sits in the slow range where the fine control is wanted.
-        ui.add(
-            egui::Slider::new(fly_speed, 0.05..=1.5)
-                .logarithmic(true)
-                .fixed_decimals(2),
-        );
-    });
-    // Lighting tucks under a collapsing header so the HUD stays compact.
+    // Lighting tucks under a collapsing header so the flyout stays compact.
     ui.collapsing("Light", |ui| {
         egui::Grid::new("viewport-light")
             .num_columns(2)
