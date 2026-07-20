@@ -7165,28 +7165,41 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
                     // anchor beneath it and toggle on its click.
                     let display_btn = ui
                         .horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
                             // The projection: the 3D relief or the flat 2D map (#134). The 2D view
                             // gives data maps (flow, masks) the room the small preview pane can't.
-                            ui.selectable_value(&mut mode, viewport2d::Mode::ThreeD, "3D")
-                                .on_hover_text("Meshed relief; Alt+drag to orbit, hold right mouse + WASD to fly");
-                            ui.selectable_value(&mut mode, viewport2d::Mode::TwoD, "2D")
-                                .on_hover_text("Flat map; drag to pan, scroll to zoom, double-click to fit");
-                            ui.separator();
+                            let mode_i = usize::from(mode == viewport2d::Mode::TwoD);
+                            if let Some(i) = segmented(ui, &["3D", "2D"], mode_i) {
+                                mode = if i == 0 {
+                                    viewport2d::Mode::ThreeD
+                                } else {
+                                    viewport2d::Mode::TwoD
+                                };
+                            }
                             // Whether the viewport shows the full build result or the coarse
                             // preview, so it is clear which fidelity is on screen while tuning.
-                            ui.weak(if showing_build {
-                                "Showing: build"
-                            } else {
-                                "Showing: preview"
-                            })
+                            ui.label(
+                                egui::RichText::new(if showing_build {
+                                    "Showing: build"
+                                } else {
+                                    "Showing: preview"
+                                })
+                                .family(egui::FontFamily::Monospace)
+                                .size(11.5)
+                                .color(theme::TEXT_TERTIARY),
+                            )
                             .on_hover_text(
                                 "Build quality appears after a Build, until the graph changes; otherwise the live preview",
                             );
                             // Fly speed rides the cluster (always accessible), only in 3D where the
                             // fly camera exists. Shift boosts 4x over this.
                             if mode == viewport2d::Mode::ThreeD {
-                                ui.separator();
-                                ui.label("Fly speed").on_hover_text(
+                                ui.label(
+                                    egui::RichText::new("Fly speed")
+                                        .size(11.5)
+                                        .color(theme::TEXT_SECONDARY),
+                                )
+                                .on_hover_text(
                                     "Speed of the right-mouse + WASD fly-through (Shift boosts 4x)",
                                 );
                                 ui.spacing_mut().slider_width = 90.0;
@@ -7196,9 +7209,7 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
                                         .fixed_decimals(2),
                                 );
                             }
-                            ui.separator();
-                            ui.button("Display")
-                                .on_hover_text("Height scale, exaggeration, and light")
+                            display_button(ui)
                         })
                         .inner;
                     // The Display flyout: opens under the button and closes on a click outside its
@@ -7263,63 +7274,161 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
     }
 }
 
+/// A left label for a flyout row that reserves its own measured width plus a small gap, so the
+/// control to its right never overlaps it however long the label is (a fixed column was narrower than
+/// "Exaggeration" renders). Painted rather than a widget so it sits flush with the row's baseline.
+fn flyout_label(ui: &mut egui::Ui, text: &str) {
+    let font = egui::FontId::proportional(11.5);
+    let text_w = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), font.clone(), theme::TEXT_SECONDARY)
+        .size()
+        .x;
+    let h = ui.spacing().interact_size.y;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(text_w + 10.0, h), egui::Sense::hover());
+    ui.painter().text(
+        egui::pos2(rect.left(), rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        text,
+        font,
+        theme::TEXT_SECONDARY,
+    );
+}
+
+/// The cluster's Display button: accent-outlined with a sliders glyph, the only cluster control that
+/// opens a panel. Returned so the flyout can anchor to it and toggle on its click.
+fn display_button(ui: &mut egui::Ui) -> egui::Response {
+    let label = format!("{}  Display", egui_phosphor::regular::SLIDERS_HORIZONTAL);
+    ui.add(
+        egui::Button::new(
+            egui::RichText::new(label)
+                .size(13.0)
+                .color(theme::TEXT_PRIMARY),
+        )
+        .fill(theme::ACCENT_PRIMARY.gamma_multiply(0.22))
+        .stroke(egui::Stroke::new(1.0, theme::ACCENT_PRIMARY)),
+    )
+    .on_hover_text("Height scale, exaggeration, and light")
+}
+
+/// Fixed width of one light-grid cell, so the two columns line up and their sliders match width.
+const LIGHT_CELL_W: f32 = 100.0;
+
+/// One cell of the flyout's 2-column light grid: a `label ........ value` header over a full-cell
+/// slider (its inline value suppressed, since the header carries it). `suffix` (e.g. "°") is shown on
+/// the readout only.
+fn light_cell(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    decimals: usize,
+    suffix: &str,
+) {
+    ui.vertical(|ui| {
+        ui.set_width(LIGHT_CELL_W);
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(label)
+                    .size(11.5)
+                    .color(theme::TEXT_SECONDARY),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new(format!("{value:.decimals$}{suffix}"))
+                        .family(egui::FontFamily::Monospace)
+                        .size(11.5)
+                        .color(theme::TEXT_PRIMARY),
+                );
+            });
+        });
+        ui.spacing_mut().slider_width = LIGHT_CELL_W;
+        ui.add(egui::Slider::new(value, range).show_value(false));
+    });
+}
+
 /// The 3D display-flyout controls: the Auto/Fixed height scale, the vertical exaggeration, and the
-/// sun under a collapsing header. Fly speed is not here: it rides the always-visible cluster, since
-/// it is adjusted often enough that burying it in the flyout would be a nuisance.
+/// sun under the collapsing LIGHT section. Fly speed is not here: it rides the always-visible
+/// cluster, since it is adjusted often enough that burying it in the flyout would be a nuisance.
 fn viewport_3d_controls(
     ui: &mut egui::Ui,
     scale: &mut shade::HeightScale,
     exaggeration: &mut f32,
     light: &mut viewport::Lighting,
 ) {
+    ui.spacing_mut().item_spacing.y = 6.0;
+    // Height scale: Fixed shows true amplitude; Auto normalizes to fill the relief (and so hides
+    // amplitude). Mirrors the 2D preview's Auto/Fixed toggle.
     ui.horizontal(|ui| {
-        // Fixed shows true amplitude; Auto normalizes to fill the relief (and so hides
-        // amplitude). Mirrors the 2D preview's Auto/Fixed toggle.
-        ui.selectable_value(scale, shade::HeightScale::Fixed, "Fixed")
-            .on_hover_text("Show true height (clips out of range)");
-        ui.selectable_value(scale, shade::HeightScale::Auto, "Auto")
-            .on_hover_text("Stretch the field's actual range to fill the relief");
+        flyout_label(ui, "Height scale");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let active = usize::from(*scale == shade::HeightScale::Auto);
+            if let Some(i) = segmented(ui, &["Fixed", "Auto"], active) {
+                *scale = if i == 0 {
+                    shade::HeightScale::Fixed
+                } else {
+                    shade::HeightScale::Auto
+                };
+            }
+        })
+        .response
+        .on_hover_text(
+            "Fixed shows true height (clips out of range); Auto stretches to fill the relief",
+        );
     });
+    // Exaggeration: a right-pinned "1.00x" scrub/type box, the log slider filling the gap with its
+    // own inline value suppressed (the box is the value), mirroring the panel slider rows.
     ui.horizontal(|ui| {
-        ui.label("Exaggeration").on_hover_text(
-            "Vertical exaggeration; 1x is real-world proportion (set by World height)",
-        );
-        ui.add(
-            egui::Slider::new(exaggeration, 0.25..=8.0)
-                .logarithmic(true)
-                .fixed_decimals(2)
-                .custom_formatter(|v, _| format!("{v:.2}x")),
-        );
+        flyout_label(ui, "Exaggeration");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let h = ui.spacing().interact_size.y;
+            ui.add_sized(
+                [48.0, h],
+                egui::DragValue::new(exaggeration)
+                    .range(0.25..=8.0)
+                    .speed(0.01)
+                    .fixed_decimals(2)
+                    .suffix("x"),
+            )
+            .on_hover_text("1x is real-world proportion (set by World height)");
+            ui.spacing_mut().slider_width = (ui.available_width() - 4.0).max(24.0);
+            ui.add(
+                egui::Slider::new(exaggeration, 0.25..=8.0)
+                    .logarithmic(true)
+                    .show_value(false),
+            );
+        });
     });
-    // Lighting tucks under a collapsing header so the flyout stays compact.
-    ui.collapsing("Light", |ui| {
-        egui::Grid::new("viewport-light")
-            .num_columns(2)
-            .show(ui, |ui| {
-                ui.label("Azimuth")
-                    .on_hover_text("Compass direction the sun comes from");
-                ui.add(
-                    egui::Slider::new(&mut light.azimuth_deg, 0.0..=360.0)
-                        .fixed_decimals(0)
-                        .suffix("°"),
-                );
-                ui.end_row();
-                ui.label("Elevation")
-                    .on_hover_text("Sun height above the horizon; low rakes the form");
-                ui.add(
-                    egui::Slider::new(&mut light.elevation_deg, 0.0..=90.0)
-                        .fixed_decimals(0)
-                        .suffix("°"),
-                );
-                ui.end_row();
-                ui.label("Intensity");
-                ui.add(egui::Slider::new(&mut light.intensity, 0.0..=2.0).fixed_decimals(2));
-                ui.end_row();
-                ui.label("Ambient");
-                ui.add(egui::Slider::new(&mut light.ambient, 0.0..=1.0).fixed_decimals(2));
-                ui.end_row();
-            });
-    });
+    // The sun, under a LIGHT section tagged with the projection it edits, collapsed by default to
+    // keep the flyout compact. A 2-column grid: azimuth/elevation, then intensity/ambient.
+    section(
+        ui,
+        "viewport-light-3d",
+        "Light",
+        false,
+        true,
+        Some("3D sun".to_string()),
+        |ui| {
+            egui::Grid::new("viewport-light-3d-grid")
+                .num_columns(2)
+                .spacing([14.0, 8.0])
+                .show(ui, |ui| {
+                    light_cell(ui, "Azimuth", &mut light.azimuth_deg, 0.0..=360.0, 0, "°");
+                    light_cell(
+                        ui,
+                        "Elevation",
+                        &mut light.elevation_deg,
+                        0.0..=90.0,
+                        0,
+                        "°",
+                    );
+                    ui.end_row();
+                    light_cell(ui, "Intensity", &mut light.intensity, 0.0..=2.0, 2, "");
+                    light_cell(ui, "Ambient", &mut light.ambient, 0.0..=1.0, 2, "");
+                    ui.end_row();
+                });
+        },
+    );
 }
 
 /// The 2D map HUD controls: the Height/Relief shading toggle, and (in Height) the shared
