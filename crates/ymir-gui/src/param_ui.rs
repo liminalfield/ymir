@@ -196,7 +196,13 @@ fn scrub_drag(
 /// A custom horizontal slider filling the available width: a 4px deep track, an accent fill up to
 /// the handle, and a white handle with a ring. Drag or click anywhere on it to set. Marks its
 /// response changed only when the value actually moves.
-fn slider(ui: &mut egui::Ui, value: &mut f64, min: f64, max: f64, log: bool) -> egui::Response {
+pub(crate) fn slider(
+    ui: &mut egui::Ui,
+    value: &mut f64,
+    min: f64,
+    max: f64,
+    log: bool,
+) -> egui::Response {
     let w = ui.available_width().max(24.0);
     let (rect, mut resp) =
         ui.allocate_exact_size(egui::vec2(w, 14.0), egui::Sense::click_and_drag());
