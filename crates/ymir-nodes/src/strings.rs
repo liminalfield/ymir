@@ -185,6 +185,16 @@ pub fn tr(key: &str) -> &str {
              the large forms and re-add the fine detail."
         }
 
+        // Terrace (quantize into stepped bands).
+        "node-modifier.terrace" => "Terrace",
+        "node-modifier.terrace-desc" => {
+            "Quantizes the height into stepped bands: flat treads joined by risers, for strata, \
+             benches, and mesa forms. Band count sets the number of terraces; sharpness rounds \
+             the steps (soft) or squares them off (hard). Range Auto spreads the terraces across \
+             the terrain's actual height (so the count is what you see); Fixed places them at \
+             absolute elevations."
+        }
+
         // Levels (range rescaling).
         "node-modifier.levels" => "Levels",
         "node-modifier.levels-desc" => {

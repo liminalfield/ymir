@@ -51,6 +51,7 @@ mod slope;
 mod stream;
 mod strings;
 mod talus;
+mod terrace;
 mod thermal;
 mod warp;
 
@@ -86,5 +87,6 @@ pub use ring::Ring;
 pub use slope::Slope;
 pub use stream::StreamErosion;
 pub use strings::tr;
+pub use terrace::Terrace;
 pub use thermal::ThermalErosion;
 pub use warp::Warp;
