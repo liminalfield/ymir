@@ -8,7 +8,7 @@
 //! node set so a drop fails fast in CI.
 //!
 //! This test links `ymir-nodes` the way a real front-end does (the `use ymir_nodes
-//! as _` anchor below) and pins the full production registry: the 35 operators from
+//! as _` anchor below) and pins the full production registry: the 36 operators from
 //! `ymir-nodes` plus the three subgraph operators from `ymir-core`. Adding, removing,
 //! or renaming an operator is a deliberate act, so it must be reflected here in the
 //! same change. A mismatch reports exactly which `type_id`s drifted.
@@ -50,6 +50,7 @@ const EXPECTED: &[&str] = &[
     "generator.ridged",
     "generator.ring",
     // ymir-nodes: modifiers
+    "modifier.aspect",
     "modifier.blend",
     "modifier.blur",
     "modifier.coastal",
