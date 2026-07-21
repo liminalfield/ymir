@@ -3,14 +3,32 @@
 //! preview pane cannot afford.
 //!
 //! It shades the same field the 3D view meshes (build-quality when a Build is loaded,
-//! else the live preview) through the shared [`shade::field_to_image`], so 2D and 3D
-//! show the same data and differ only in projection. The texture is rebuilt only when
-//! the field, output, or shading changes, so panning and zooming are free.
+//! else the live preview), on the GPU (see [`crate::viewport2d_gpu`]), so 2D and 3D show
+//! the same data and differ only in projection. The field is uploaded only when it
+//! changes; light, mode, scale, and water are uniforms, so steering the sun re-shades a
+//! resident texture rather than recomputing the whole field on the CPU each frame (#167).
+//! Panning and zooming reuse the shaded texture and cost nothing.
 
 use eframe::egui;
-use ymir_core::{Field, layers};
+use eframe::egui_wgpu;
+use ymir_core::Field;
 
-use crate::shade::{self, DEFAULT_LIGHT, HeightScale, ShadeMode};
+use crate::shade::{DEFAULT_LIGHT, HeightScale, ShadeMode};
+use crate::viewport2d_gpu::{Gpu2d, ShadeParams};
+
+/// What the caller asks the 2D map to draw: which output, the Auto/Fixed scale, and the water
+/// overlay (sea level plus whether it is shown). The shading mode and light are the view's own
+/// state. Bundled so [`View2d::show`] takes one parameter for these, not four.
+pub(crate) struct MapDisplay {
+    /// Which tapped output is shown.
+    pub output: usize,
+    /// The shared Auto/Fixed Height scale.
+    pub scale: HeightScale,
+    /// Sea level as a raw layer value.
+    pub sea_level: f32,
+    /// Whether to draw the water overlay.
+    pub show_water: bool,
+}
 
 /// Which projection the main viewport draws.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -30,21 +48,15 @@ const ZOOM_SPEED: f32 = 0.0015;
 const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 64.0;
 
-/// The identity a 2D-map texture was built from: field hash, output index, shading mode and scale,
-/// relief light bits, sea-level bits, and whether water is shown. The texture is rebuilt when any
-/// of these change.
-type TextureKey = (u64, usize, ShadeMode, HeightScale, [u32; 3], u32, bool);
-
-/// The 2D view's own state: the uploaded texture and the key it was built for (so it is
-/// rebuilt only when the field or shading changes), the relief light, and the pan/zoom transform.
+/// The 2D view's own state: the GPU shading resources (created lazily once the wgpu render state is
+/// available), the relief light, and the pan/zoom transform.
 ///
 /// `zoom` is a multiplier over the fit-to-pane scale (`1.0` = the whole map fits), and
 /// `pan` is the screen-space offset of the image centre from the pane centre, in points.
 /// Both reset to fit on a double-click. `light` is this view's own relief sun (independent of the
 /// preview pane and the 3D light), ephemeral like the camera and not persisted.
 pub(crate) struct View2d {
-    texture: Option<egui::TextureHandle>,
-    texture_key: Option<TextureKey>,
+    gpu: Option<Gpu2d>,
     mode: ShadeMode,
     light: [f32; 3],
     zoom: f32,
@@ -54,8 +66,7 @@ pub(crate) struct View2d {
 impl Default for View2d {
     fn default() -> Self {
         Self {
-            texture: None,
-            texture_key: None,
+            gpu: None,
             mode: ShadeMode::Height,
             light: DEFAULT_LIGHT,
             zoom: 1.0,
@@ -94,21 +105,18 @@ impl View2d {
     }
 
     /// Draws the field flat over the pane, handling pan (drag), zoom (scroll about the
-    /// cursor), and reset (double-click). `field` is the field the 3D view would mesh;
-    /// `output` names which output it is (part of the texture key); `scale` is the shared
-    /// Auto/Fixed Height scale; `sea_level`/`show_water` mirror the World settings to draw the
-    /// same water overlay the 3D plane shows. A black fill stands in when there is no field.
+    /// cursor), and reset (double-click). `field` is the field the 3D view would mesh; `output`
+    /// names which output it is; `scale` is the shared Auto/Fixed Height scale; `sea_level`/
+    /// `show_water` mirror the World settings to draw the same water overlay the 3D plane shows.
+    /// The field is shaded on the GPU via `render_state`; a black fill stands in when there is no
+    /// field (or no GPU, in a headless build).
     pub(crate) fn show(
         &mut self,
         ui: &mut egui::Ui,
+        render_state: Option<&egui_wgpu::RenderState>,
         field: Option<&Field>,
-        output: usize,
-        scale: HeightScale,
-        sea_level: f32,
-        show_water: bool,
+        display: MapDisplay,
     ) {
-        self.refresh_texture(ui.ctx(), field, output, scale, sea_level, show_water);
-
         let rect = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
 
@@ -126,16 +134,37 @@ impl View2d {
             self.zoom_about(cursor, rect.center(), scroll);
         }
 
+        // Shade the field on the GPU (a no-op re-shade when nothing but pan/zoom changed) and take
+        // its egui texture id and pixel size, or nothing when there is no field or no GPU backend.
+        let params = ShadeParams {
+            output: display.output,
+            mode: self.mode,
+            scale: display.scale,
+            light: self.light,
+            sea_level: display.sea_level,
+            show_water: display.show_water,
+        };
+        let shaded = match (render_state, field) {
+            (Some(rs), Some(field)) if field.width() > 0 && field.height() > 0 => {
+                let id = self
+                    .gpu
+                    .get_or_insert_with(|| Gpu2d::new(rs))
+                    .shade(rs, field, params);
+                Some((id, egui::vec2(field.width() as f32, field.height() as f32)))
+            }
+            _ => None,
+        };
+
         // Clip to the pane so a panned or zoomed image never spills over the HUD or
         // neighbouring panes.
         let painter = ui.painter_at(rect);
-        match self.texture.as_ref() {
-            Some(texture) => {
-                let fit = fit_scale(texture.size_vec2(), rect.size());
-                let draw = texture.size_vec2() * (fit * self.zoom);
+        match shaded {
+            Some((id, size)) => {
+                let fit = fit_scale(size, rect.size());
+                let draw = size * (fit * self.zoom);
                 let image_rect = egui::Rect::from_center_size(rect.center() + self.pan, draw);
                 painter.image(
-                    texture.id(),
+                    id,
                     image_rect,
                     egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                     egui::Color32::WHITE,
@@ -157,58 +186,6 @@ impl View2d {
         let new_center = cursor - (cursor - old_center) * applied;
         self.pan = new_center - pane_center;
         self.zoom = new_zoom;
-    }
-
-    /// Rebuilds the texture when the field, output, or shading changed since it was last
-    /// uploaded; a no-op otherwise, so it is cheap every frame. Magnify with nearest so
-    /// zoomed-in cells stay crisp for artifact spotting, minify with linear so the fit
-    /// view does not alias.
-    fn refresh_texture(
-        &mut self,
-        ctx: &egui::Context,
-        field: Option<&Field>,
-        output: usize,
-        scale: HeightScale,
-        sea_level: f32,
-        show_water: bool,
-    ) {
-        let Some(field) = field else {
-            self.texture = None;
-            self.texture_key = None;
-            return;
-        };
-        // Sea level enters the key only while water is shown, so moving the slider with water off
-        // costs no rebuild.
-        let water_bits = if show_water { sea_level.to_bits() } else { 0 };
-        let key = (
-            field.content_hash().to_u64(),
-            output,
-            self.mode,
-            scale,
-            self.light.map(f32::to_bits),
-            water_bits,
-            show_water,
-        );
-        if self.texture_key == Some(key) {
-            return;
-        }
-        let mut image = shade::field_to_image(field, layers::HEIGHT, self.mode, scale, self.light);
-        if show_water {
-            shade::apply_water(
-                &mut image,
-                field,
-                layers::HEIGHT,
-                sea_level,
-                &shade::WaterStyle::default(),
-            );
-        }
-        let options = egui::TextureOptions {
-            magnification: egui::TextureFilter::Nearest,
-            minification: egui::TextureFilter::Linear,
-            ..Default::default()
-        };
-        self.texture = Some(ctx.load_texture("viewport-2d", image, options));
-        self.texture_key = Some(key);
     }
 }
 

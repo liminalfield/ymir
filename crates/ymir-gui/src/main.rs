@@ -56,6 +56,7 @@ mod theme;
 // The 3D viewport: custom wgpu rendering inside an egui pane (#7).
 mod viewport;
 mod viewport2d;
+mod viewport2d_gpu;
 // Snapshot-based undo/redo over the session (#82).
 mod history;
 use build::BuildRunner;
@@ -521,6 +522,10 @@ struct AppState {
     /// The 3D viewport's orbit camera, persisted across frames so the view holds as the
     /// previewed node changes.
     viewport_camera: viewport::OrbitCamera,
+    /// eframe's wgpu render state (device, queue, renderer), stashed for the 2D map's GPU shading
+    /// (#167). `None` in a headless/test build with no wgpu backend, where the map falls back to a
+    /// black fill. Set by the app shell once the device exists, never by `AppState::new`.
+    render_state: Option<eframe::egui_wgpu::RenderState>,
     /// Whether the 3D viewport shows true amplitude (Fixed) or normalizes to fill the relief
     /// (Auto). Fixed by default so terrain reads at its real height.
     viewport_scale: shade::HeightScale,
@@ -802,6 +807,7 @@ impl AppState {
             viewport_mode: viewport2d::Mode::default(),
             viewport_2d: viewport2d::View2d::default(),
             viewport_camera: viewport::OrbitCamera::default(),
+            render_state: None,
             viewport_scale: shade::HeightScale::Fixed,
             viewport_exaggeration: 1.0,
             viewport_fly_speed: 0.6,
@@ -7135,11 +7141,14 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
         viewport2d::Mode::TwoD => {
             state.viewport_2d.show(
                 ui,
+                state.render_state.as_ref(),
                 field,
-                display,
-                state.viewport_scale,
-                sea_level,
-                show_water,
+                viewport2d::MapDisplay {
+                    output: display,
+                    scale: state.viewport_scale,
+                    sea_level,
+                    show_water,
+                },
             );
         }
     }
@@ -8245,9 +8254,11 @@ impl YmirApp {
         // Open the build cache's disk store (read view) for the viewport, in the app shell so
         // the test-constructed state never touches the filesystem.
         state.field_store = build::open_store();
-        // Set up the 3D viewport's wgpu pipeline once, now that the wgpu device exists.
+        // Set up the 3D viewport's wgpu pipeline once, now that the wgpu device exists, and stash
+        // the render state so the 2D map can shade on the GPU too (#167).
         if let Some(render_state) = cc.wgpu_render_state.as_ref() {
             viewport::init(render_state);
+            state.render_state = Some(render_state.clone());
         }
         // Empty so the first frame always pushes the real title to the OS bar.
         Self {
