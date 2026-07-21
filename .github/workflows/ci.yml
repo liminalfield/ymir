@@ -33,6 +33,11 @@ jobs:
           sh scripts/check-shortcuts.sh --range "$base...HEAD"
       # rustup on the runner honors rust-toolchain.toml and fetches the pinned version.
       - run: rustup component add rustfmt clippy
+      # Cache the cargo registry and target dir keyed on Cargo.lock + the toolchain, so
+      # the heavy dependency tree (wgpu, egui, naga, …) compiles once and later runs only
+      # rebuild the changed crates. Without it every run is a full clean build.
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
       # --workspace on every step so CI always covers all crates, regardless of
       # any future default-members.
       - name: Format
