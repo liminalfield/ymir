@@ -7152,6 +7152,7 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
     let mut exaggeration = state.viewport_exaggeration;
     let mut light = state.viewport_lighting;
     let mut shade_mode = state.viewport_2d.shade_mode();
+    let mut light2d = state.viewport_2d.relief_light();
     let mut fly_speed = state.viewport_fly_speed;
     // The tapped outputs of the previewed node and the index the viewport shows (#165). The flyout's
     // Output picker and the inspector thumbnail's picker both read and write this one index, so the
@@ -7186,6 +7187,19 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
                                 } else {
                                     viewport2d::Mode::TwoD
                                 };
+                            }
+                            // 2D: the Height/Relief shading toggle rides the cluster (its scale and
+                            // 2D sun live in the flyout). Height is the greyscale field, best for data
+                            // maps; Relief is the hillshade, best for reading shape.
+                            if mode == viewport2d::Mode::TwoD {
+                                let shade_i = usize::from(shade_mode == shade::ShadeMode::Relief);
+                                if let Some(i) = segmented(ui, &["Height", "Relief"], shade_i) {
+                                    shade_mode = if i == 0 {
+                                        shade::ShadeMode::Height
+                                    } else {
+                                        shade::ShadeMode::Relief
+                                    };
+                                }
                             }
                             // Whether the viewport shows the full build result or the coarse
                             // preview, so it is clear which fidelity is on screen while tuning.
@@ -7278,7 +7292,7 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
                                         viewport_3d_controls(ui, &mut scale, &mut exaggeration, &mut light);
                                     }
                                     viewport2d::Mode::TwoD => {
-                                        viewport_2d_controls(ui, &mut shade_mode, &mut scale);
+                                        viewport_2d_controls(ui, shade_mode, &mut scale, &mut light2d);
                                     }
                                 }
                             });
@@ -7367,40 +7381,8 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
     state.viewport_exaggeration = exaggeration;
     state.viewport_lighting = light;
     state.viewport_2d.set_shade_mode(shade_mode);
+    state.viewport_2d.set_relief_light(light2d);
     state.viewport_fly_speed = fly_speed;
-
-    // The relief sun, anchored top-right and shown only in the 2D map's relief mode (#96): a
-    // compact dial to steer the hillshade light the flat map cannot otherwise set. Its own
-    // Foreground area, mirroring the top-left HUD, so dragging it never pans the map beneath.
-    if rect.height() >= WORKSPACE_HUD_MIN
-        && mode == viewport2d::Mode::TwoD
-        && shade_mode == shade::ShadeMode::Relief
-    {
-        egui::Area::new(ui.id().with("viewport-sun"))
-            .order(egui::Order::Foreground)
-            .fixed_pos(rect.right_top() + egui::vec2(-8.0, 8.0))
-            .pivot(egui::Align2::RIGHT_TOP)
-            .show(ui.ctx(), |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.add(egui::Label::new(
-                            egui::RichText::new("Sun").color(theme::TEXT_SECONDARY),
-                        ));
-                        state.viewport_2d.sun_dial(ui);
-                        // Read the angles after the dial so a drag this frame is reflected.
-                        // Right-pad to a fixed width (azimuth 3 digits, altitude 2) so the
-                        // monospace readout, and thus the popup, keeps a constant size as the
-                        // digit count changes instead of jittering while the dial is dragged.
-                        let (az, alt) = state.viewport_2d.light_angles();
-                        ui.label(
-                            egui::RichText::new(format!("{az:>3.0}° · {alt:>2.0}°"))
-                                .family(egui::FontFamily::Monospace)
-                                .color(theme::TEXT_TERTIARY),
-                        );
-                    });
-                });
-            });
-    }
 }
 
 /// A left label for a flyout row that reserves its own measured width plus a small gap, so the
@@ -7560,27 +7542,63 @@ fn viewport_3d_controls(
     );
 }
 
-/// The 2D map HUD controls: the Height/Relief shading toggle, and (in Height) the shared
-/// Auto/Fixed scale. Relief uses a fixed light here; the small preview pane is where the
-/// light is steered.
+/// The 2D map's flyout controls. The Height/Relief toggle now rides the cluster, so this shows the
+/// set for the active shading: in Height, the Auto/Fixed scale; in Relief, the 2D sun dial (a single
+/// drag sets azimuth and altitude together), which the map steers from here rather than an on-map
+/// overlay dial.
 fn viewport_2d_controls(
     ui: &mut egui::Ui,
-    shade_mode: &mut shade::ShadeMode,
+    shade_mode: shade::ShadeMode,
     scale: &mut shade::HeightScale,
+    light: &mut [f32; 3],
 ) {
-    ui.horizontal(|ui| {
-        ui.selectable_value(shade_mode, shade::ShadeMode::Height, "Height")
-            .on_hover_text("Grayscale value, best for data maps (flow, masks)");
-        ui.selectable_value(shade_mode, shade::ShadeMode::Relief, "Relief")
-            .on_hover_text("Hillshade, best for terrain shape");
-    });
-    if *shade_mode == shade::ShadeMode::Height {
-        ui.horizontal(|ui| {
-            ui.selectable_value(scale, shade::HeightScale::Fixed, "Fixed")
-                .on_hover_text("Map a fixed [0, 1]: true amplitude, clips out of range");
-            ui.selectable_value(scale, shade::HeightScale::Auto, "Auto")
-                .on_hover_text("Stretch the field's actual range to black/white");
-        });
+    ui.spacing_mut().item_spacing.y = 6.0;
+    match shade_mode {
+        // Height shading: the Auto/Fixed scale (which does not apply to the hillshade).
+        shade::ShadeMode::Height => {
+            ui.horizontal(|ui| {
+                flyout_label(ui, "Height scale");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let active = usize::from(*scale == shade::HeightScale::Auto);
+                    if let Some(i) = segmented(ui, &["Fixed", "Auto"], active) {
+                        *scale = if i == 0 {
+                            shade::HeightScale::Fixed
+                        } else {
+                            shade::HeightScale::Auto
+                        };
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "Fixed maps a true [0, 1] (clips out of range); Auto stretches the actual range",
+                );
+            });
+        }
+        // Relief shading: the 2D sun, its own light independent of the 3D sun. The dial is a single
+        // draggable disk (azimuth from angle, altitude from distance), far more direct than two
+        // sliders; it only writes on a drag, so idle frames never rebuild the CPU-shaded map (#167).
+        shade::ShadeMode::Relief => {
+            section(
+                ui,
+                "viewport-light-2d",
+                "Light",
+                false,
+                true,
+                Some("2D sun".to_string()),
+                |ui| {
+                    ui.horizontal(|ui| {
+                        crate::sun::dial(ui, light);
+                        // Read the angles after the dial so a drag this frame shows immediately.
+                        let (az, alt) = crate::sun::light_angles(*light);
+                        ui.label(
+                            egui::RichText::new(format!("{az:>3.0}° · {alt:>2.0}°"))
+                                .family(egui::FontFamily::Monospace)
+                                .color(theme::TEXT_TERTIARY),
+                        );
+                    });
+                },
+            );
+        }
     }
 }
 inventory::submit! { PaneKind { id: "viewport-3d", draw: viewport_pane } }

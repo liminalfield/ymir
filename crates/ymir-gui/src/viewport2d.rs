@@ -75,15 +75,16 @@ impl View2d {
         self.mode = mode;
     }
 
-    /// Draws the relief sun dial and steers this view's light on drag; the texture rebuilds on the
-    /// next `show` if it moved. Only meaningful in relief mode.
-    pub(crate) fn sun_dial(&mut self, ui: &mut egui::Ui) {
-        crate::sun::dial(ui, &mut self.light);
+    /// This view's relief light as a unit image-space vector; the flyout's 2D-sun sliders read and
+    /// write it through [`crate::sun::light_angles`] / [`crate::sun::light_from_angles`], now that
+    /// the map steers its light from the Display flyout rather than an on-map dial.
+    pub(crate) fn relief_light(&self) -> [f32; 3] {
+        self.light
     }
 
-    /// This view's relief light azimuth and altitude in degrees, for the dial readout.
-    pub(crate) fn light_angles(&self) -> (f32, f32) {
-        crate::sun::light_angles(self.light)
+    /// Sets the relief light; the texture rebuilds on the next `show` if it changed.
+    pub(crate) fn set_relief_light(&mut self, light: [f32; 3]) {
+        self.light = light;
     }
 
     /// Resets to fit-to-view (the whole map centred in the pane).
