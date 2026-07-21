@@ -151,6 +151,14 @@ pub fn tr(key: &str) -> &str {
              min..max degrees, softening over the falloff. Scale it with an upstream Blur."
         }
 
+        // Occlusion selector.
+        "node-modifier.occlusion" => "Occlusion",
+        "node-modifier.occlusion-desc" => {
+            "Ambient-occlusion / sky-view measure: high in crevices and valley floors hemmed in \
+             by higher ground, low on open peaks and flats. Ray count and world-unit radius set \
+             the sampling. Picks sheltered terrain (catchment, moisture, shadow)."
+        }
+
         // Aspect selector.
         "node-modifier.aspect" => "Aspect",
         "node-modifier.aspect-desc" => {
