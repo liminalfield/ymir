@@ -48,6 +48,7 @@ mod radial;
 mod rect;
 mod ridged;
 mod ring;
+mod selector;
 mod shape;
 mod slope;
 mod stream;

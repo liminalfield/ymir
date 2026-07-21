@@ -19,6 +19,9 @@
 //! The gradient direction is independent of the vertical:horizontal scale (a uniform scale cancels),
 //! so the *aspect* is resolution- and world-independent; the scale enters only the slope-angle used
 //! for `slope_weight`. `SLOPE` context-deps accordingly.
+//!
+//! The `output` param switches between the selection and the raw **measure** — the compass aspect in
+//! degrees `[0, 360)` — for probing or a downstream Histogram-Scan.
 
 use std::sync::Arc;
 
@@ -76,6 +79,7 @@ impl Operator for Aspect {
                     ParamKind::Float { min: 0.0, max: 1.0 },
                     ParamValue::Float(DEFAULT_SLOPE_WEIGHT),
                 ),
+                crate::selector::output_param(),
             ],
         }
     }
@@ -107,6 +111,7 @@ impl Operator for Aspect {
         // cancels out of the aspect *direction* (a uniform scale on both axes), which is why aspect is
         // world-independent.
         let scale = ctx.real_slope_scale() as f32;
+        let measure = crate::selector::is_measure(params);
 
         let selection = Layer::from_fn(width, height, |x, y| {
             let xm = x.saturating_sub(1);
@@ -126,6 +131,10 @@ impl Operator for Aspect {
             // Aspect is the downhill direction (the negated gradient); its angular deviation from the
             // target drives the selection, softening to zero over `falloff` degrees.
             let (fx, fy) = (-gx / mag, -gy / mag);
+            // Measure mode emits the raw aspect: the compass direction faced, in degrees [0, 360).
+            if measure {
+                return fy.atan2(fx).to_degrees().rem_euclid(360.0);
+            }
             let cos_dev = (fx * tx + fy * ty).clamp(-1.0, 1.0);
             let dev = cos_dev.acos().to_degrees();
             let directional = 1.0 - smoothstep(0.0, falloff, dev);
@@ -213,6 +222,23 @@ mod tests {
             .flat_map(|x| (0..layer.height()).map(move |y| (x, y)))
             .map(|(x, y)| at(field, x, y))
             .sum()
+    }
+
+    #[test]
+    fn measure_mode_emits_the_aspect_angle() {
+        // Measure mode outputs the raw compass aspect in degrees. A west-facing slope (height rising
+        // toward +x) faces -x, which is 180 degrees.
+        let input = slopes_west(16);
+        let params = Params::new().with("output", ParamValue::Text("measure".into()));
+        let out = Aspect
+            .eval(Inputs::required_only(&[&input]), &params, &ctx(16))
+            .unwrap()
+            .remove(0);
+        let a = at(&out, 8, 8);
+        assert!(
+            (a - 180.0).abs() < 2.0,
+            "west-facing aspect should be ~180 degrees: {a}"
+        );
     }
 
     #[test]
