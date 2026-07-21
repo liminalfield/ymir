@@ -439,6 +439,8 @@ struct AppState {
     /// The Settings dialog's editable draft, `Some` while it is open. Committed to
     /// `preferences` (and written to disk) on Save, discarded on Cancel.
     settings_edit: Option<preferences::Preferences>,
+    /// Whether the About window (Help -> About Ymir) is open. Transient UI state only.
+    about_open: bool,
     /// The popped-out curve editor: a larger, draggable window for shaping a curve
     /// param with room to be precise and a coordinate readout. `None` when closed.
     curve_popout: Option<CurvePopout>,
@@ -769,6 +771,7 @@ impl AppState {
             // the test-constructed state never touches the filesystem, matching apply_default.
             preferences: preferences::Preferences::default(),
             settings_edit: None,
+            about_open: false,
             curve_popout: None,
             pending_view: None,
             build_res: project_file::DEFAULT_BUILD_RES,
@@ -2196,7 +2199,10 @@ fn menu_bar_pane(ui: &mut egui::Ui, state: &mut AppState) {
             ui.weak("(empty)");
         });
         ui.menu_button("Help", |ui| {
-            ui.weak("(empty)");
+            if ui.button("About Ymir").clicked() {
+                state.about_open = true;
+                ui.close();
+            }
         });
         // The project name and unsaved-changes marker live in the OS title bar now (#83, #87);
         // the menu bar carries only the transient status, pushed to the right.
@@ -6980,6 +6986,50 @@ fn settings_dialog(ctx: &egui::Context, state: &mut AppState) {
     }
 }
 
+/// The About window (Help -> About Ymir): the app name, the build-stamped version, the
+/// license, and a link to the repository, so a bug report can name the exact build. Opened
+/// from the Help menu, closed by its own close control.
+fn about_dialog(ctx: &egui::Context, state: &mut AppState) {
+    if !state.about_open {
+        return;
+    }
+    let mut open = true;
+    egui::Window::new("About Ymir")
+        .collapsible(false)
+        .resizable(false)
+        .open(&mut open)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.add_space(2.0);
+            ui.heading("Ymir");
+            ui.label(
+                egui::RichText::new("Node-based procedural terrain generator.")
+                    .color(theme::TEXT_SECONDARY),
+            );
+            ui.add_space(8.0);
+            egui::Grid::new("about-facts")
+                .num_columns(2)
+                .spacing([10.0, 6.0])
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new("Version").color(theme::TEXT_TERTIARY));
+                    ui.label(
+                        egui::RichText::new(ymir_build_info::version_string())
+                            .family(egui::FontFamily::Monospace),
+                    );
+                    ui.end_row();
+                    ui.label(egui::RichText::new("License").color(theme::TEXT_TERTIARY));
+                    ui.label(env!("CARGO_PKG_LICENSE"));
+                    ui.end_row();
+                    ui.label(egui::RichText::new("Repository").color(theme::TEXT_TERTIARY));
+                    ui.hyperlink(env!("CARGO_PKG_REPOSITORY"));
+                    ui.end_row();
+                });
+        });
+    if !open {
+        state.about_open = false;
+    }
+}
+
 /// The author-identity fields (name, email, website, documentation) as a two-column grid,
 /// shared by the Settings dialog and the Save-to-library dialog. `id` names the grid so two
 /// instances never collide.
@@ -8521,6 +8571,7 @@ impl eframe::App for YmirApp {
         // The "Save to library" dialog floats over the panes when open (#106).
         library_save_dialog(ui.ctx(), &mut self.state);
         settings_dialog(ui.ctx(), &mut self.state);
+        about_dialog(ui.ctx(), &mut self.state);
         // Intercept a window close with unsaved changes: cancel it and raise the prompt
         // (#83). An already-confirmed close (allow_close) or a clean session goes through.
         if ui.ctx().input(|i| i.viewport().close_requested())

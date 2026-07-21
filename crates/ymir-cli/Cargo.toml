@@ -1,6 +1,6 @@
 [package]
 name = "ymir-cli"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -13,6 +13,8 @@ workspace = true
 
 [dependencies]
 ymir-core = { path = "../ymir-core" }
+# Compile-time version and git provenance, for `--version`.
+ymir-build-info = { path = "../ymir-build-info" }
 # The logging facade, so a headless run records load degradations to stderr. The backend
 # is installed in `main` via `ymir_core::logging`.
 log = "0.4"

@@ -6,6 +6,12 @@ members = ["crates/*"]
 # ambiguous: use `cargo run -p ymir-cli` or `cargo run -p ymir-gui`.
 
 [workspace.package]
+# The single source of truth for Ymir's version, inherited by every crate via
+# `version.workspace = true`. Bump this one line to release; the SemVer policy and
+# release steps are in docs/design/versioning.md. This is the app version, distinct
+# from the save-format versions (project::FORMAT_VERSION and the GUI's PROJECT_ /
+# SUBGRAPH_FORMAT_VERSION), which bump only when the serialized schema changes.
+version = "0.2.0"
 edition = "2024"
 license = "GPL-3.0-only"
 authors = ["Oluf Andrews <oluf@oandrews.com>"]
