@@ -177,6 +177,14 @@ pub fn tr(key: &str) -> &str {
              derived selectors, and feathers masks)."
         }
 
+        // Frequency Split (scale separation).
+        "node-modifier.frequency_split" => "Frequency Split",
+        "node-modifier.frequency_split-desc" => {
+            "Splits the height into a low-frequency band (a blur at a world-unit cut radius) \
+             and the high-frequency residual. The two recombine to the input, so you can work \
+             the large forms and re-add the fine detail."
+        }
+
         // Levels (range rescaling).
         "node-modifier.levels" => "Levels",
         "node-modifier.levels-desc" => {
