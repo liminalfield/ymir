@@ -4080,17 +4080,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ae8337f8a065cfc972643663ea4279e04e7256de865aa66fe25cec5fb912d3f"
 
 [[package]]
+name = "ymir-build-info"
+version = "0.2.0"
+
+[[package]]
 name = "ymir-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "log",
+ "ymir-build-info",
  "ymir-core",
  "ymir-nodes",
 ]
 
 [[package]]
 name = "ymir-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "exr",
  "humantime",
@@ -4107,7 +4112,7 @@ dependencies = [
 
 [[package]]
 name = "ymir-gui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "eframe",
@@ -4120,13 +4125,14 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "ymir-build-info",
  "ymir-core",
  "ymir-nodes",
 ]
 
 [[package]]
 name = "ymir-nodes"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "inventory",
  "rayon",

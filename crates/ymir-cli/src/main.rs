@@ -19,6 +19,16 @@ fn make_op(type_id: &str) -> Result<Box<dyn ymir_core::Operator>, Box<dyn Error>
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    // `--version`/`-V` prints the build-stamped version and exits before any work, so it
+    // stays usable for provenance even if a render would fail.
+    if std::env::args()
+        .skip(1)
+        .any(|a| a == "--version" || a == "-V")
+    {
+        println!("ymir {}", ymir_build_info::version_string());
+        return Ok(());
+    }
+
     // Headless diagnostics go to stderr (a toolchain captures it); load degradations are logged
     // rather than swallowed.
     ymir_core::logging::init(None, log::LevelFilter::Info);

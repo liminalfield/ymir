@@ -1,0 +1,11 @@
+[package]
+name = "ymir-build-info"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Compile-time version and git provenance for Ymir's binaries."
+
+[lints]
+workspace = true
