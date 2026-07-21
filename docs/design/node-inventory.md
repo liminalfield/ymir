@@ -171,7 +171,7 @@ doc; "proposed" = floated, not worked out; "speculative" = research-gated.
 
 | Proposed node | Status | Category | What it would do |
 |---|---|---|---|
-| **Coastal shaper** | confirmed wanted | modifier | *Geometric* (not simulated) beach-and-bluff reshaping keyed to a water level + local slope; emits water-depth. The World Machine coastline effect. |
+| **Coastal shaper** | built (lean v0) as `modifier.coastal` | modifier | *Geometric* (not simulated) beach-and-bluff reshaping keyed to a water level + local slope. The shipped node is the lean artist-first bevel (sea level is a World setting, no Sea node or exposure). The fuller exposure-driven model (Sea node, wave exposure, eikonal distance) is a separate, unbuilt plan in `coastal-erosion.md`. |
 | **Strata / bedrock hardness field** | designed, highest value | input layer/field | Depth-varying erodibility consumed by every erosion model via `layer_or(RESISTANCE, 1.0)`. Exposes rock structure: mesas, buttes, hoodoos, cliff bands. Framed as a layer/hook more than a standalone node. |
 | **Precipitation** | designed (later) | generator/modifier | Writes the `water` layer with orographic / rain-shadow support; makes rainfall a directable input. The erosion water-input seam already exists. |
 | **LookDev / fake-erosion** | proposed | filter/geology | Slope-aware diffusion + procedural "eroded look" as a fast preview tier (HighMap/Gaea style). Overlaps Slope Blur. |

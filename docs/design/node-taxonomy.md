@@ -187,6 +187,8 @@ Not a node. A library function in `ymir-nodes`, with three callers already:
    falloff. Ranges, rivers, faults as linear features.
 3. **A Distance selector.** Distance from any `[0,1]` mask, in world metres. Distance to
    coast (which the Coastal shaper wants), to river (which texturing wants), to ridge.
+   (Built as `modifier.distance`, #137, on an eikonal solve. The remaining substrate work is
+   generalizing that solve so the flow-map fix and Spline guide reuse it.)
 
 Three consumers is not speculative abstraction; it is the threshold at which building it
 once and properly is obviously correct. Right now it sits buried inside the flow-map issue
@@ -313,9 +315,10 @@ accessor. Sequence with the `NodeSpec` category and i18n change.
 **G. Slope Blur.** Absorbs the LookDev proposal.
 
 **H. Eikonal solve (substrate).** Diagnostic first, then fast sweeping. Unblocks the
-flow-map fix, the Spline guide, and the Distance selector.
+flow-map fix, the Spline guide, and the Distance selector. (First landed with the Distance
+selector, #137; the remaining work is lifting it into a shared primitive.)
 
-**I. Distance selector**, on H.
+**I. Distance selector.** Built as `modifier.distance` (#137).
 
 **J. Occlusion selector.**
 
