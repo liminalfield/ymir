@@ -10,6 +10,9 @@
 //! The pointwise sibling of the Slope selector and the small-node successor to the old
 //! Mask's `height` mode: it selects a range, leaving freeform shaping to a downstream
 //! Curve and application to an effect's mask input.
+//!
+//! The `output` param switches between the selection and the raw **measure** — the elevation itself —
+//! for numeric probing or a downstream Histogram-Scan.
 
 use std::sync::Arc;
 
@@ -55,6 +58,7 @@ impl Operator for Height {
                     ParamKind::Float { min: 0.0, max: 1.0 },
                     ParamValue::Float(DEFAULT_FALLOFF),
                 ),
+                crate::selector::output_param(),
             ],
         }
     }
@@ -75,8 +79,13 @@ impl Operator for Height {
         let max = params.get_f64("max", DEFAULT_MAX) as f32;
         let falloff = params.get_f64("falloff", DEFAULT_FALLOFF).max(0.0) as f32;
 
+        let measure = crate::selector::is_measure(params);
         let selection = Layer::from_fn(width, height, |x, y| {
             let elevation = h.get(x, y).unwrap_or(0.0);
+            // Measure mode emits the raw elevation; selection maps it to a band.
+            if measure {
+                return elevation;
+            }
             // Fully selected in [min, max], softening to zero over `falloff` beyond each
             // edge. The product of a rising lower edge and a falling upper edge gives the
             // band; min > max simply yields an empty selection.
@@ -143,6 +152,21 @@ mod tests {
 
     fn at(field: &Field, x: usize, y: usize) -> f32 {
         field.layer(layers::HEIGHT).unwrap().get(x, y).unwrap()
+    }
+
+    #[test]
+    fn measure_mode_emits_the_elevation() {
+        // Measure mode passes the raw elevation through: a 0->1 ramp reads its own values.
+        let input = ramp(16);
+        let params = Params::new().with("output", ParamValue::Text("measure".into()));
+        let out = Height
+            .eval(Inputs::required_only(&[&input]), &params, &ctx())
+            .unwrap()
+            .remove(0);
+        for x in 0..16 {
+            let expected = x as f32 / 15.0;
+            assert!((at(&out, x, 8) - expected).abs() < 1e-6);
+        }
     }
 
     #[test]

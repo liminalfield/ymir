@@ -16,6 +16,10 @@
 //! measured still comes from a Blur placed upstream: blur first to read large landforms,
 //! leave it sharp to read fine detail.
 //!
+//! The `output` param switches between the selection and the raw **measure** — the signed convexity
+//! in RMS units (positive convex, negative concave, independent of `mode`) — for probing or a
+//! downstream Histogram-Scan.
+//!
 //! The second difference is taken in world units (scaled by the region span and
 //! resolution), so the measure is stable across resolutions for a given feature scale
 //! rather than drifting with cell size. Like the other selectors it is not mask-aware: it
@@ -65,6 +69,7 @@ impl Operator for Curvature {
                     ParamKind::Float { min: 0.0, max: 8.0 },
                     ParamValue::Float(DEFAULT_STRENGTH),
                 ),
+                crate::selector::output_param(),
             ],
         }
     }
@@ -138,10 +143,17 @@ impl Operator for Curvature {
         let scale = if rms > noise_floor { 1.0 / rms } else { 0.0 };
 
         // Second pass: map the normalized convexity into the selection. `strength` is the
-        // gain in RMS units, so 1.0 selects ground curved more than typical.
+        // gain in RMS units, so 1.0 selects ground curved more than typical. Measure mode emits
+        // the raw signed convexity in those RMS units instead (positive convex, negative concave),
+        // independent of `mode` and `strength` — pure data for probing or a downstream Histogram-Scan.
+        let measure = crate::selector::is_measure(params);
         let selection = Layer::from_fn(width, height, |x, y| {
-            let v = convexity[y * width + x];
-            smoothstep(0.0, 1.0, sign * v * scale * strength)
+            let v = convexity[y * width + x] * scale;
+            if measure {
+                v
+            } else {
+                smoothstep(0.0, 1.0, sign * v * strength)
+            }
         });
 
         let mut out = input.clone();
@@ -209,6 +221,41 @@ mod tests {
 
     fn at(field: &Field, x: usize, y: usize) -> f32 {
         field.layer(layers::HEIGHT).unwrap().get(x, y).unwrap()
+    }
+
+    #[test]
+    fn measure_mode_emits_signed_curvature() {
+        // Measure mode outputs the signed convexity in RMS units, independent of `mode` and
+        // `strength`: a convex hill reads positive, a concave bowl negative, and switching `mode`
+        // (which only shapes the selection) does not change the measure. A paraboloid has constant
+        // curvature, so its normalized convexity is ~1.
+        let measure = |field: &Field, mode: &str| {
+            let params = Params::new()
+                .with("mode", ParamValue::Text(mode.to_string()))
+                .with("output", ParamValue::Text("measure".into()));
+            Curvature
+                .eval(Inputs::required_only(&[field]), &params, &ctx())
+                .unwrap()
+                .remove(0)
+        };
+        let hill = dome(32, 1.0);
+        let bowl = dome(32, -1.0);
+        assert!(
+            at(&measure(&hill, MODE_CONVEX), 16, 16) > 0.5,
+            "convex hill reads positive"
+        );
+        assert!(
+            at(&measure(&bowl, MODE_CONVEX), 16, 16) < -0.5,
+            "concave bowl reads negative"
+        );
+        let (a, b) = (
+            at(&measure(&hill, MODE_CONVEX), 16, 16),
+            at(&measure(&hill, MODE_CONCAVE), 16, 16),
+        );
+        assert!(
+            (a - b).abs() < 1e-6,
+            "measure is independent of mode: {a} vs {b}"
+        );
     }
 
     #[test]

@@ -16,6 +16,9 @@
 //! so the angle is a real terrain angle (resolution-stable, and set by the world's vertical and
 //! horizontal extents). At a unit world (the default) this matches the prior normalized slope,
 //! where a gradient magnitude of 1 reads as 45 degrees.
+//!
+//! The `output` param switches between the selection and the raw **measure** — the slope angle in
+//! degrees — for numeric probing or a downstream Histogram-Scan.
 
 use std::sync::Arc;
 
@@ -73,6 +76,7 @@ impl Operator for Slope {
                     ParamValue::Float(DEFAULT_FALLOFF),
                 )
                 .with_unit(Unit::Degrees),
+                crate::selector::output_param(),
             ],
         }
     }
@@ -97,6 +101,7 @@ impl Operator for Slope {
         // slope (rise over run), so the angle is a real terrain angle and resolution-stable.
         // Cells are square, so x and y share the one scale.
         let scale = ctx.real_slope_scale() as f32;
+        let measure = crate::selector::is_measure(params);
 
         let selection = Layer::from_fn(width, height, |x, y| {
             // Central difference over clamped neighbours (one-sided at the edges),
@@ -110,6 +115,11 @@ impl Operator for Slope {
             let gy = (h.get(x, yp).unwrap_or(0.0) - h.get(x, ym).unwrap_or(0.0)) * scale
                 / (yp - ym) as f32;
             let angle = (gx * gx + gy * gy).sqrt().atan().to_degrees();
+
+            // Measure mode emits the raw slope angle in degrees; selection maps it to a band.
+            if measure {
+                return angle;
+            }
 
             // Fully selected in [min, max], softening to zero over `falloff` degrees
             // beyond each edge. The product of a rising lower edge and a falling upper
@@ -177,6 +187,23 @@ mod tests {
 
     fn at(field: &Field, x: usize, y: usize) -> f32 {
         field.layer(layers::HEIGHT).unwrap().get(x, y).unwrap()
+    }
+
+    #[test]
+    fn measure_mode_emits_the_slope_angle() {
+        // Measure mode outputs the raw angle in degrees, not a band: a ~35 degree ramp reads ~35.
+        let input = at_angle(16, 35.0);
+        let params = Params::new().with("output", ParamValue::Text("measure".into()));
+        let ctx = EvalContext::new(input.width(), input.height(), input.region(), 0);
+        let out = Slope
+            .eval(Inputs::required_only(&[&input]), &params, &ctx)
+            .unwrap()
+            .remove(0);
+        assert!(
+            (at(&out, 8, 8) - 35.0).abs() < 2.0,
+            "measure should be ~35 degrees: {}",
+            at(&out, 8, 8)
+        );
     }
 
     #[test]
