@@ -7181,67 +7181,92 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
             .order(egui::Order::Foreground)
             .fixed_pos(rect.left_top() + egui::vec2(8.0, 8.0))
             .show(ui.ctx(), |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    // The cluster row. The Display button's response is returned so the flyout can
-                    // anchor beneath it and toggle on its click.
+                egui::Frame::NONE.show(ui, |ui| {
+                    // The cluster row: each control floats on the render in its own subtle chip
+                    // (an integrated-overlay look, not one raised popup box). The Display button's
+                    // response is returned so the flyout can anchor beneath it and toggle on its click.
                     let display_btn = ui
                         .horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 8.0;
+                            ui.spacing_mut().item_spacing.x = 6.0;
                             // The projection: the 3D relief or the flat 2D map (#134). The 2D view
                             // gives data maps (flow, masks) the room the small preview pane can't.
-                            let mode_i = usize::from(mode == viewport2d::Mode::TwoD);
-                            if let Some(i) = segmented(ui, &["3D", "2D"], mode_i) {
-                                mode = if i == 0 {
-                                    viewport2d::Mode::ThreeD
-                                } else {
-                                    viewport2d::Mode::TwoD
-                                };
-                            }
+                            overlay_chip(ui, |ui| {
+                                let mode_i = usize::from(mode == viewport2d::Mode::TwoD);
+                                if let Some(i) = segmented(ui, &["3D", "2D"], mode_i) {
+                                    mode = if i == 0 {
+                                        viewport2d::Mode::ThreeD
+                                    } else {
+                                        viewport2d::Mode::TwoD
+                                    };
+                                }
+                            });
                             // 2D: the Height/Relief shading toggle rides the cluster (its scale and
                             // 2D sun live in the flyout). Height is the greyscale field, best for data
                             // maps; Relief is the hillshade, best for reading shape.
                             if mode == viewport2d::Mode::TwoD {
-                                let shade_i = usize::from(shade_mode == shade::ShadeMode::Relief);
-                                if let Some(i) = segmented(ui, &["Height", "Relief"], shade_i) {
-                                    shade_mode = if i == 0 {
-                                        shade::ShadeMode::Height
-                                    } else {
-                                        shade::ShadeMode::Relief
-                                    };
-                                }
+                                overlay_chip(ui, |ui| {
+                                    let shade_i =
+                                        usize::from(shade_mode == shade::ShadeMode::Relief);
+                                    if let Some(i) = segmented(ui, &["Height", "Relief"], shade_i) {
+                                        shade_mode = if i == 0 {
+                                            shade::ShadeMode::Height
+                                        } else {
+                                            shade::ShadeMode::Relief
+                                        };
+                                    }
+                                });
                             }
                             // Whether the viewport shows the full build result or the coarse
                             // preview, so it is clear which fidelity is on screen while tuning.
-                            ui.label(
-                                egui::RichText::new(if showing_build {
-                                    "Showing: build"
-                                } else {
-                                    "Showing: preview"
-                                })
-                                .family(egui::FontFamily::Monospace)
-                                .size(11.5)
-                                .color(theme::TEXT_TERTIARY),
-                            )
-                            .on_hover_text(
-                                "Build quality appears after a Build, until the graph changes; otherwise the live preview",
-                            );
+                            overlay_chip(ui, |ui| {
+                                ui.label(
+                                    egui::RichText::new(if showing_build {
+                                        "Showing: build"
+                                    } else {
+                                        "Showing: preview"
+                                    })
+                                    .family(egui::FontFamily::Monospace)
+                                    .size(11.5)
+                                    .color(theme::TEXT_TERTIARY),
+                                )
+                                .on_hover_text(
+                                    "Build quality appears after a Build, until the graph changes; otherwise the live preview",
+                                );
+                            });
                             // Fly speed rides the cluster (always accessible), only in 3D where the
                             // fly camera exists. Shift boosts 4x over this.
                             if mode == viewport2d::Mode::ThreeD {
-                                ui.label(
-                                    egui::RichText::new("Fly speed")
-                                        .size(11.5)
-                                        .color(theme::TEXT_SECONDARY),
-                                )
-                                .on_hover_text(
-                                    "Speed of the right-mouse + WASD fly-through (Shift boosts 4x)",
-                                );
-                                ui.spacing_mut().slider_width = 90.0;
-                                ui.add(
-                                    egui::Slider::new(&mut fly_speed, 0.05..=1.5)
-                                        .logarithmic(true)
-                                        .fixed_decimals(2),
-                                );
+                                overlay_chip(ui, |ui| {
+                                    ui.label(
+                                        egui::RichText::new("Fly speed")
+                                            .size(11.5)
+                                            .color(theme::TEXT_SECONDARY),
+                                    )
+                                    .on_hover_text(
+                                        "Speed of the right-mouse + WASD fly-through (Shift boosts 4x)",
+                                    );
+                                    // The styled slider (visible trough + accent fill), matching the
+                                    // flyout sliders. It fills available width, so pin it to a fixed
+                                    // region, and show the value beside it since the styled slider has
+                                    // no inline readout.
+                                    let mut v = f64::from(fly_speed);
+                                    ui.allocate_ui_with_layout(
+                                        egui::vec2(90.0, 18.0),
+                                        egui::Layout::left_to_right(egui::Align::Center),
+                                        |ui| {
+                                            if param_ui::slider(ui, &mut v, 0.05, 1.5, true).changed()
+                                            {
+                                                fly_speed = v as f32;
+                                            }
+                                        },
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(format!("{fly_speed:.2}"))
+                                            .family(egui::FontFamily::Monospace)
+                                            .size(11.5)
+                                            .color(theme::TEXT_PRIMARY),
+                                    );
+                                });
                             }
                             display_button(ui)
                         })
@@ -7272,28 +7297,46 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
                             .frame(egui::Frame::popup(ui.style()))
                             .show(|ui| {
                                 ui.set_max_width(250.0);
-                                // The Output row (multi-output nodes only) tops the flyout; its button
-                                // toggles the floating list, and its rect anchors that list.
-                                if has_outputs {
-                                    ui.horizontal(|ui| {
-                                        flyout_label(ui, "Output");
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                let caret = if outputs_open {
-                                                    egui_phosphor::regular::CARET_UP
+                                // The Output header block tops the flyout: the picked output on a faint
+                                // accent-tinted block (the "what", not the "how"), with a note that it
+                                // mirrors the inspector thumbnail's picker. Always shown; a single-output
+                                // node has no choice, so its name is static rather than a dropdown.
+                                if !output_names.is_empty() {
+                                    egui::Frame::new()
+                                        .fill(theme::ACCENT_PRIMARY.gamma_multiply(0.12))
+                                        .corner_radius(6)
+                                        .inner_margin(egui::Margin::symmetric(8, 6))
+                                        .show(ui, |ui| {
+                                            ui.horizontal(|ui| {
+                                                flyout_label(ui, "Output");
+                                                if has_outputs {
+                                                    let field = output_field(
+                                                        ui,
+                                                        &output_names[cur],
+                                                        outputs_open,
+                                                    );
+                                                    output_btn_rect = Some(field.rect);
+                                                    if field.clicked() {
+                                                        outputs_open = !outputs_open;
+                                                    }
                                                 } else {
-                                                    egui_phosphor::regular::CARET_DOWN
-                                                };
-                                                let b = ui
-                                                    .button(format!("{}   {caret}", output_names[cur]));
-                                                output_btn_rect = Some(b.rect);
-                                                if b.clicked() {
-                                                    outputs_open = !outputs_open;
+                                                    ui.label(
+                                                        egui::RichText::new(&output_names[cur])
+                                                            .color(theme::TEXT_PRIMARY),
+                                                    );
                                                 }
-                                            },
-                                        );
-                                    });
+                                            });
+                                            ui.horizontal(|ui| {
+                                                ui.label(
+                                                    egui::RichText::new(format!(
+                                                        "{}  synced with inspector thumbnail",
+                                                        egui_phosphor::regular::ARROWS_CLOCKWISE
+                                                    ))
+                                                    .size(10.5)
+                                                    .color(theme::TEXT_TERTIARY),
+                                                );
+                                            });
+                                        });
                                     group_separator(ui);
                                 }
                                 match mode {
@@ -7423,12 +7466,79 @@ fn display_button(ui: &mut egui::Ui) -> egui::Response {
         egui::Button::new(
             egui::RichText::new(label)
                 .size(13.0)
-                .color(theme::TEXT_PRIMARY),
+                .color(theme::ACCENT_PRIMARY),
         )
-        .fill(theme::ACCENT_PRIMARY.gamma_multiply(0.22))
-        .stroke(egui::Stroke::new(1.0, theme::ACCENT_PRIMARY)),
+        .fill(chip_fill())
+        .stroke(egui::Stroke::new(1.0, theme::ACCENT_PRIMARY))
+        .corner_radius(6)
+        // Match the chip row height (the segmented control's 26px content + the chips' 4px top and
+        // bottom margins), so the button's top and bottom borders line up with the other controls.
+        .min_size(egui::vec2(0.0, 34.0)),
     )
     .on_hover_text("Height scale, exaggeration, and light")
+}
+
+/// Wraps a cluster control in subtle translucent-dark chrome, so it floats directly on the render and
+/// stays legible over both the dark 3D relief and the light 2D map while reading as embedded, not as
+/// a raised popup box. Each cluster control gets its own chip rather than one wrapping frame.
+fn overlay_chip<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    egui::Frame::new()
+        .fill(chip_fill())
+        .stroke(egui::Stroke::new(1.0, chip_border()))
+        .corner_radius(6)
+        .inner_margin(egui::Margin::symmetric(8, 4))
+        .show(ui, add)
+        .inner
+}
+
+/// Frosted chrome for the on-render cluster chips (shared by the Display button, for consistency): a
+/// translucent slate at low opacity, so the render shows through and the chip reads as a subtle,
+/// unobtrusive frost rather than a solid dark box, while light text stays readable over both the dark
+/// 3D relief and the lighter 2D map. egui cannot blur, so this approximates frosted glass with alpha.
+fn chip_fill() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(34, 39, 47, 105)
+}
+
+/// The chip's hairline edge: a faint light stroke that gives the frost a defined border without
+/// weight.
+fn chip_border() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(150, 160, 175, 55)
+}
+
+/// The flyout's Output dropdown field: a dark rounded field spanning the available width, the current
+/// output name on the left and a caret on the right. Returns its click response, so the caller anchors
+/// the floating option list under it.
+fn output_field(ui: &mut egui::Ui, name: &str, open: bool) -> egui::Response {
+    let w = ui.available_width().max(48.0);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 24.0), egui::Sense::click());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 4.0, theme::BG_ABYSS);
+    painter.rect_stroke(
+        rect,
+        4.0,
+        egui::Stroke::new(1.0, theme::LINE),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        egui::pos2(rect.left() + 8.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        name,
+        egui::FontId::proportional(12.5),
+        theme::TEXT_PRIMARY,
+    );
+    let caret = if open {
+        egui_phosphor::regular::CARET_UP
+    } else {
+        egui_phosphor::regular::CARET_DOWN
+    };
+    painter.text(
+        egui::pos2(rect.right() - 8.0, rect.center().y),
+        egui::Align2::RIGHT_CENTER,
+        caret,
+        egui::FontId::proportional(12.0),
+        theme::TEXT_SECONDARY,
+    );
+    resp
 }
 
 /// Fixed width of one light-grid cell, so the two columns line up and their sliders match width.
@@ -7462,8 +7572,20 @@ fn light_cell(
                 );
             });
         });
-        ui.spacing_mut().slider_width = LIGHT_CELL_W;
-        ui.add(egui::Slider::new(value, range).show_value(false));
+        // The app's styled slider (visible dark trough, accent fill, ringed knob), so the track reads
+        // on the dark flyout where egui's default rail blends in — and it matches the mockup.
+        let mut v = f64::from(*value);
+        if param_ui::slider(
+            ui,
+            &mut v,
+            f64::from(*range.start()),
+            f64::from(*range.end()),
+            false,
+        )
+        .changed()
+        {
+            *value = v as f32;
+        }
     });
 }
 
@@ -7511,12 +7633,11 @@ fn viewport_3d_controls(
                     .suffix("x"),
             )
             .on_hover_text("1x is real-world proportion (set by World height)");
-            ui.spacing_mut().slider_width = (ui.available_width() - 4.0).max(24.0);
-            ui.add(
-                egui::Slider::new(exaggeration, 0.25..=8.0)
-                    .logarithmic(true)
-                    .show_value(false),
-            );
+            // The styled slider (visible trough, accent fill), so the track reads on the dark flyout.
+            let mut v = f64::from(*exaggeration);
+            if param_ui::slider(ui, &mut v, 0.25, 8.0, true).changed() {
+                *exaggeration = v as f32;
+            }
         });
     });
     // The sun, under a LIGHT section tagged with the projection it edits, collapsed by default to
