@@ -5180,13 +5180,18 @@ fn node_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
             // scroll area is the deliberate addition for when a category can overflow
             // the screen.
             ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
-                // The blue selection is the only row highlight; suppress egui's grey
-                // hover fill so it never competes with the blue when the content
-                // changes under a stationary pointer (e.g. just after drilling into a
-                // category). Hover still drives the blue highlight (below) on movement.
+                // The blue selection is the only row highlight; suppress egui's own hover box
+                // (fill and stroke) so it never competes with the blue. egui styles whichever
+                // row the pointer is physically over, so mid-transit the entering row would draw
+                // its own hover box a frame before `menu.highlight` catches up to it, flashing a
+                // second highlight next to the leaving row's blue one. Suppressing both leaves a
+                // single highlight, the blue selection, which already tracks the pointer. (The
+                // row height is pinned in `menu_row`, so this is only about the visible box, not
+                // the layout.)
                 let hovered_vis = &mut ui.visuals_mut().widgets.hovered;
                 hovered_vis.weak_bg_fill = egui::Color32::TRANSPARENT;
                 hovered_vis.bg_fill = egui::Color32::TRANSPARENT;
+                hovered_vis.bg_stroke = egui::Stroke::NONE;
                 if rows.is_empty() {
                     ui.weak("no matches");
                 }
@@ -5325,10 +5330,20 @@ fn node_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
 /// align in a column instead of trailing each name at a different x (#93). `selected`
 /// draws the keyboard/hover highlight.
 fn menu_row(ui: &mut egui::Ui, row: MenuRow, selected: bool, enabled: bool) -> egui::Response {
+    // Pin the row to the boxed height so a state change can never reflow the column. egui's
+    // selectable button draws a plain row (inactive, unselected) with no frame stroke but a
+    // boxed row (hovered or selected) with one, and `Frame::total_margin` counts the stroke
+    // width, so a boxed row is 2px taller than a plain one. Normally one row is boxed (the
+    // selection) and it is stable, but mid-transit the leaving row is still selected while the
+    // entering row is hovered: two boxed rows at once grow the menu 2px, then it shrinks when
+    // the highlight catches up, a visible jitter. A floor equal to the boxed height (text plus
+    // both button-padding edges) makes every row that height, so the box only ever recolours a
+    // fixed-size row.
+    let row_h = ui.text_style_height(&egui::TextStyle::Body) + 2.0 * ui.spacing().button_padding.y;
     let resp = ui
         .add_enabled(
             enabled,
-            egui::Button::selectable(selected, menu_row_text(row)),
+            egui::Button::selectable(selected, menu_row_text(row)).min_size(egui::vec2(0.0, row_h)),
         )
         .on_disabled_hover_text("Only available inside a subgraph");
     if matches!(row, MenuRow::Category(_)) {
