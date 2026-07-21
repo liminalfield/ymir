@@ -98,7 +98,10 @@ inventory::submit! {
 /// successive box blurs (central-limit theorem), run separably as rows then
 /// columns. Clamp-to-edge at the boundary, so a constant field is preserved and no
 /// mass leaks off the edge. Returns the blurred buffer; `src` is read-only.
-fn gaussian_blur(src: &[f32], width: usize, height: usize, sigma: f64) -> Vec<f32> {
+///
+/// Shared within the crate: the Frequency Split node reuses it as its low-pass, so the
+/// two nodes cut at exactly the same scale.
+pub(crate) fn gaussian_blur(src: &[f32], width: usize, height: usize, sigma: f64) -> Vec<f32> {
     // A box blur of radius r has variance (r^2 + r) / 3; three passes sum to
     // r^2 + r, so r = (sqrt(1 + 4 sigma^2) - 1) / 2 matches the target sigma. The
     // radius is bounded by the grid: past the extent it is, under clamp-to-edge,
