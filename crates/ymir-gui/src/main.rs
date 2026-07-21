@@ -4477,9 +4477,13 @@ fn slider_row<Num: egui::emath::Numeric>(
                     .speed(span * 0.002)
                     .fixed_decimals(decimals),
             );
-            // The slider takes exactly the width left between the label and the value box.
-            ui.spacing_mut().slider_width = (ui.available_width() - 4.0).max(24.0);
-            ui.add(egui::Slider::new(&mut x, range.clone()).show_value(false));
+            // The app's one styled slider (visible trough, accent fill, ringed knob) fills the width
+            // left between the value box and the label, so the left panel matches the node params.
+            let (min, max) = (range.start().to_f64(), range.end().to_f64());
+            let mut v = x.to_f64();
+            if param_ui::slider(ui, &mut v, min, max, false).changed() {
+                x = Num::from_f64(v);
+            }
         });
     });
     *value = x;
@@ -4593,12 +4597,8 @@ fn world_settings(ui: &mut egui::Ui, state: &mut AppState) {
                             .speed(0.002)
                             .fixed_decimals(3),
                     );
-                    ui.spacing_mut().slider_width = (ui.available_width() - 4.0).max(24.0);
-                    ui.add(
-                        egui::Slider::new(&mut sl, 0.0..=1.0)
-                            .show_value(false)
-                            .clamping(egui::SliderClamping::Always),
-                    );
+                    // The styled slider (clamps to [0, 1] by construction), matching the rest.
+                    param_ui::slider(ui, &mut sl, 0.0, 1.0, false);
                 });
             });
             state.sea_level = sl;
