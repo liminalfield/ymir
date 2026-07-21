@@ -151,6 +151,16 @@ pub fn tr(key: &str) -> &str {
              min..max degrees, softening over the falloff. Scale it with an upstream Blur."
         }
 
+        // Aspect selector.
+        "node-modifier.aspect" => "Aspect",
+        "node-modifier.aspect-desc" => {
+            "Selects slopes facing a compass direction: high where the terrain faces the \
+             direction, softening over the falloff. Slope weight suppresses flats. Being a \
+             gradient, it amplifies sharp input (crease noise, thin ridges), so scale it with \
+             an upstream Blur. For sun/wind-facing effects, poleward snow, and directional \
+             weathering."
+        }
+
         // Distance selector.
         "node-modifier.distance" => "Distance",
         "node-modifier.distance-desc" => {
