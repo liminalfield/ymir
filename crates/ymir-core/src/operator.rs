@@ -203,6 +203,15 @@ pub trait Operator: OperatorClone + Send + Sync {
         ContextDeps::ALL
     }
 
+    /// Whether this node is experimental: fully functional, but rough or artifact-prone enough
+    /// that it is offered with a caveat rather than as a settled tool. `false` (the default) for
+    /// ordinary nodes. The engine does not treat these differently; it is presentation only, so the
+    /// editor can badge them and a user knows what they are reaching for. A node opts in by
+    /// overriding this, exactly as it narrows [`context_deps`](Self::context_deps).
+    fn experimental(&self) -> bool {
+        false
+    }
+
     /// The inner graph this operator contains, if it is a container (a subgraph), so the
     /// document writer can capture it and the editor can recurse into it. `None` (the
     /// default) for an ordinary operator. A structural distinction, not semantic dispatch:

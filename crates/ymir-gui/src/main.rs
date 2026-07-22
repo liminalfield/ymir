@@ -1884,6 +1884,13 @@ fn node_entries() -> Vec<NodeEntry> {
         .collect()
 }
 
+/// Whether a node type is flagged experimental (functional but rough or artifact-prone), read from
+/// its operator's [`experimental`](ymir_core::Operator::experimental). Constructs the operator (a
+/// zero-cost unit struct) to read the flag, cheap enough to call per palette row.
+fn is_experimental(type_id: &str) -> bool {
+    registry::make(type_id).is_some_and(|op| op.experimental())
+}
+
 /// The registered categories, sorted by `sort` then `id` for a stable palette.
 fn categories_sorted() -> Vec<&'static CategoryDef> {
     let mut cats: Vec<_> = categories().collect();
@@ -4799,24 +4806,33 @@ fn pin_toggle(ui: &mut egui::Ui, pinned: bool, enabled: bool) -> egui::Response 
 
 /// The small `PINNED` pill shown beside the pinned node's name: accent text in an accent outline.
 fn pinned_pill(ui: &mut egui::Ui) {
+    name_pill(ui, "PINNED", theme::ACCENT_PRIMARY);
+}
+
+/// The small `EXPERIMENTAL` pill shown beside an experimental node's name: warning-amber, distinct
+/// from the accent `PINNED` pill and colourblind-safe against it.
+fn experimental_pill(ui: &mut egui::Ui) {
+    name_pill(ui, "EXPERIMENTAL", theme::WARNING).on_hover_text(
+        "Functional but rough: expect artifacts. A stylistic effect, not a settled tool.",
+    );
+}
+
+/// A small outlined text pill in `color`, shared by the node-name badges. Returns its response so a
+/// caller can attach a tooltip.
+fn name_pill(ui: &mut egui::Ui, text: &str, color: egui::Color32) -> egui::Response {
     let font = egui::FontId::proportional(9.5);
-    let galley = ui
-        .painter()
-        .layout_no_wrap("PINNED".to_string(), font, theme::ACCENT_PRIMARY);
+    let galley = ui.painter().layout_no_wrap(text.to_string(), font, color);
     let pad = egui::vec2(6.0, 3.0);
-    let (rect, _) = ui.allocate_exact_size(galley.size() + pad * 2.0, egui::Sense::hover());
+    let (rect, resp) = ui.allocate_exact_size(galley.size() + pad * 2.0, egui::Sense::hover());
     let painter = ui.painter();
     painter.rect_stroke(
         rect,
         3.0,
-        egui::Stroke::new(1.0, theme::ACCENT_PRIMARY),
+        egui::Stroke::new(1.0, color),
         egui::StrokeKind::Inside,
     );
-    painter.galley(
-        rect.center() - galley.size() * 0.5,
-        galley,
-        theme::ACCENT_PRIMARY,
-    );
+    painter.galley(rect.center() - galley.size() * 0.5, galley, color);
+    resp
 }
 
 /// A segmented control: `labels` shown as one pill in a deep `c0` container, the active segment
@@ -4924,6 +4940,13 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 .on_hover_text(state.preview.status_label());
                 if is_pinned {
                     pinned_pill(ui);
+                }
+                if state
+                    .graph
+                    .spec(id)
+                    .is_some_and(|s| is_experimental(s.type_id))
+                {
+                    experimental_pill(ui);
                 }
                 // A bypassed node shows its input, not its own output (#105).
                 if state.graph.is_bypassed(id) {
@@ -5363,6 +5386,19 @@ fn menu_row(ui: &mut egui::Ui, row: MenuRow, selected: bool, enabled: bool) -> e
             egui_phosphor::regular::CARET_RIGHT,
             egui::TextStyle::Button.resolve(ui.style()),
             color,
+        );
+    }
+    if let MenuRow::Node(type_id) = row
+        && is_experimental(type_id)
+    {
+        // A small amber marker at the right edge flags the node as experimental before it is added.
+        let x = resp.rect.right() - ui.spacing().button_padding.x;
+        ui.painter().text(
+            egui::pos2(x, resp.rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            "exp",
+            egui::FontId::proportional(9.5),
+            theme::WARNING,
         );
     }
     resp
