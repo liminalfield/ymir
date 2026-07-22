@@ -100,6 +100,7 @@ pub(crate) fn value_text(value: &ParamValue) -> String {
         ParamValue::Bool(v) => format!("{v}"),
         ParamValue::Text(v) => v.clone(),
         ParamValue::Curve(c) => format!("curve ({} points)", c.points().len()),
+        ParamValue::Strokes(s) => format!("painted ({} strokes)", s.len()),
     }
 }
 
