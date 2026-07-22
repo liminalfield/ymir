@@ -1008,7 +1008,8 @@ pub(crate) fn show(
     settings: ViewSettings,
     lighting: Lighting,
     meshed: &mut Option<MeshKey>,
-) {
+    paint_active: bool,
+) -> Option<crate::viewport2d::PaintSample> {
     let (rect, response) =
         ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
     // Repaint continuously while flying, so held keys keep advancing the camera between mouse moves.
@@ -1061,7 +1062,35 @@ pub(crate) fn show(
         (rect.height() * ppp).round().max(1.0) as u32,
     ];
 
-    let view_proj = camera.view_proj(aspect).to_cols_array_2d();
+    let vp_mat = camera.view_proj(aspect);
+
+    // Paint sample: with paint mode on, a plain primary drag (Alt drives orbit, right drives fly, so
+    // neither is us) ray-casts the cursor onto the terrain surface and returns its normalized
+    // position. The height grid is re-sampled here, which only runs while actively brushing.
+    let paint_sample = if paint_active
+        && let Some(field) = field
+        && !ui.input(|i| i.modifiers.alt)
+        && ui.input(|i| i.pointer.primary_down())
+        && let Some(cursor) = response.interact_pointer_pos()
+    {
+        let res = mesh_res(field);
+        let heights = sample_field(field, res, settings.fixed_range);
+        let ndc = glam::Vec2::new(
+            2.0 * (cursor.x - rect.min.x) / rect.width() - 1.0,
+            1.0 - 2.0 * (cursor.y - rect.min.y) / rect.height(),
+        );
+        crate::pick::raycast_heightfield(vp_mat, ndc, &heights, res, settings.vertical_scale).map(
+            |(x, y)| crate::viewport2d::PaintSample {
+                x,
+                y,
+                begin: ui.input(|i| i.pointer.primary_pressed()),
+            },
+        )
+    } else {
+        None
+    };
+
+    let view_proj = vp_mat.to_cols_array_2d();
     let callback = egui_wgpu::Callback::new_paint_callback(
         rect,
         ViewportCallback {
@@ -1106,6 +1135,7 @@ pub(crate) fn show(
             .request_repaint_after(std::time::Duration::from_millis(66));
     }
     ui.painter().add(callback);
+    paint_sample
 }
 
 /// An orbit camera: it looks at `pivot` from a `yaw`/`pitch` direction at `distance`, the

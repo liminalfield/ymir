@@ -54,6 +54,7 @@ mod starter;
 // The Ymir Dark brand palette and egui Visuals built from it (#104).
 mod theme;
 // The 3D viewport: custom wgpu rendering inside an egui pane (#7).
+mod pick;
 mod viewport;
 mod viewport2d;
 mod viewport2d_gpu;
@@ -3921,8 +3922,8 @@ fn paint_controls(
         if active {
             state.paint_target = None;
         } else {
+            // Pin the preview to this node so the viewport (2D or 3D) shows the mask you paint.
             state.paint_target = Some(handle);
-            state.viewport_mode = viewport2d::Mode::TwoD;
             state.preview_pin = Some(handle);
         }
     }
@@ -7389,14 +7390,22 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 water_time: state.water_phase,
                 water_speed: state.water_speed,
             };
-            viewport::show(
+            // Paint mode: with a Paint node targeted and previewed, a plain drag on the 3D surface
+            // brushes onto it (ray-cast pick). Orbit stays on Alt-drag, fly on right-drag.
+            let paint_active =
+                state.paint_target.is_some() && state.preview_target() == state.paint_target;
+            let sample = viewport::show(
                 ui,
                 &mut state.viewport_camera,
                 field,
                 settings,
                 state.viewport_lighting,
                 &mut state.viewport_mesh,
+                paint_active,
             );
+            if let Some(sample) = sample {
+                apply_paint_sample(state, sample);
+            }
         }
         viewport2d::Mode::TwoD => {
             // Paint mode is on when a Paint node is the target and it is the node the map previews,
