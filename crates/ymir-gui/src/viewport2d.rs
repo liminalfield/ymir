@@ -30,6 +30,18 @@ pub(crate) struct MapDisplay {
     pub show_water: bool,
 }
 
+/// A paint sample from the 2D map while paint mode is active: a normalized `[0, 1]` position in the
+/// field, and whether it begins a new stroke (the primary button was pressed this frame) or extends
+/// the current one (held and dragging).
+pub(crate) struct PaintSample {
+    /// Normalized x in `[0, 1]`.
+    pub x: f32,
+    /// Normalized y in `[0, 1]`.
+    pub y: f32,
+    /// True on the frame the stroke began; false while dragging it.
+    pub begin: bool,
+}
+
 /// Which projection the main viewport draws.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum Mode {
@@ -116,14 +128,19 @@ impl View2d {
         render_state: Option<&egui_wgpu::RenderState>,
         field: Option<&Field>,
         display: MapDisplay,
-    ) {
+        paint_active: bool,
+    ) -> Option<PaintSample> {
         let rect = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
 
-        if response.double_clicked() {
+        // Double-click resets the view, except while painting (where it would be a stray dab).
+        if response.double_clicked() && !paint_active {
             self.reset_view();
         }
-        if response.dragged() {
+        // Pan with the middle button always, or the primary button when not painting; painting takes
+        // the primary drag on the map.
+        let pan_primary = !paint_active && response.dragged_by(egui::PointerButton::Primary);
+        if pan_primary || response.dragged_by(egui::PointerButton::Middle) {
             self.pan += response.drag_delta();
         }
         let scroll = ui.input(|i| i.smooth_scroll_delta.y);
@@ -134,8 +151,34 @@ impl View2d {
             self.zoom_about(cursor, rect.center(), scroll);
         }
 
-        // Shade the field on the GPU (a no-op re-shade when nothing but pan/zoom changed) and take
-        // its egui texture id and pixel size, or nothing when there is no field or no GPU backend.
+        // The field's pixel size and the image transform, computed before shading so the paint
+        // mapping and the image draw share one rect.
+        let size = field
+            .filter(|f| f.width() > 0 && f.height() > 0)
+            .map(|f| egui::vec2(f.width() as f32, f.height() as f32));
+        let image_rect = size.map(|s| {
+            let fit = fit_scale(s, rect.size());
+            egui::Rect::from_center_size(rect.center() + self.pan, s * (fit * self.zoom))
+        });
+
+        // A paint sample: the primary button held over the map, mapped to normalized coordinates.
+        let sample = if paint_active
+            && let Some(ir) = image_rect
+            && response.is_pointer_button_down_on()
+            && ui.input(|i| i.pointer.primary_down())
+            && let Some(pos) = response.interact_pointer_pos()
+        {
+            Some(PaintSample {
+                x: ((pos.x - ir.min.x) / ir.width()).clamp(0.0, 1.0),
+                y: ((pos.y - ir.min.y) / ir.height()).clamp(0.0, 1.0),
+                begin: ui.input(|i| i.pointer.primary_pressed()),
+            })
+        } else {
+            None
+        };
+
+        // Shade the field on the GPU (a no-op re-shade when nothing but pan/zoom changed), then draw
+        // it at the image transform, clipped to the pane; a black fill stands in with no field or GPU.
         let params = ShadeParams {
             output: display.output,
             mode: self.mode,
@@ -145,35 +188,24 @@ impl View2d {
             show_water: display.show_water,
         };
         let shaded = match (render_state, field) {
-            (Some(rs), Some(field)) if field.width() > 0 && field.height() > 0 => {
-                let id = self
-                    .gpu
+            (Some(rs), Some(field)) if field.width() > 0 && field.height() > 0 => Some(
+                self.gpu
                     .get_or_insert_with(|| Gpu2d::new(rs))
-                    .shade(rs, field, params);
-                Some((id, egui::vec2(field.width() as f32, field.height() as f32)))
-            }
+                    .shade(rs, field, params),
+            ),
             _ => None,
         };
-
-        // Clip to the pane so a panned or zoomed image never spills over the HUD or
-        // neighbouring panes.
         let painter = ui.painter_at(rect);
-        match shaded {
-            Some((id, size)) => {
-                let fit = fit_scale(size, rect.size());
-                let draw = size * (fit * self.zoom);
-                let image_rect = egui::Rect::from_center_size(rect.center() + self.pan, draw);
-                painter.image(
-                    id,
-                    image_rect,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    egui::Color32::WHITE,
-                );
-            }
-            None => {
-                painter.rect_filled(rect, 0.0, egui::Color32::BLACK);
-            }
-        }
+        match (shaded, image_rect) {
+            (Some(id), Some(ir)) => painter.image(
+                id,
+                ir,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            ),
+            _ => painter.rect_filled(rect, 0.0, egui::Color32::BLACK),
+        };
+        sample
     }
 
     /// Zooms toward/away so the map point under `cursor` stays fixed: the offset of the
