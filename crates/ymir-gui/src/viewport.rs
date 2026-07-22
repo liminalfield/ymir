@@ -2,9 +2,11 @@
 //! callback. egui hands the callback a region of its own render pass (viewport + scissor set
 //! to the pane), so our draw commands land inside the pane and clip to it.
 //!
-//! The previewed node's `Field` is meshed: the height layer is sampled to a fixed grid and
-//! displaced into a lit surface, either at true amplitude (Fixed) or normalized to fill the
-//! relief (Auto), scaled by an adjustable vertical exaggeration. Side walls and a bottom
+//! The previewed node's `Field` is meshed: the height layer (or the backdrop layer when one is
+//! present — paint mode, #145, where the height layer is a painted mask shown as a colour tint
+//! over the backdrop terrain) is sampled to a fixed grid and displaced into a lit surface,
+//! either at true amplitude (Fixed) or normalized to fill the relief (Auto), scaled by an
+//! adjustable vertical exaggeration. Side walls and a bottom
 //! close it into a solid block, so orbiting underneath shows a plinth, not a hollow shell.
 //! Only the vertex buffer is re-uploaded, and only when the field or those settings change;
 //! the grid topology is fixed. An orbit camera (Houdini-style Alt + mouse) frames the
@@ -52,6 +54,13 @@ fn mesh_res(field: &Field) -> usize {
 /// plinth rather than the hollow underside (#117).
 const BASE_DEPTH: f32 = 0.06;
 
+/// Overlay tint for the painted mask (#145), linear RGB. Red, the convention for painted
+/// masks, leaned toward vermilion: a pure deep red loses most of its brightness under
+/// red-green colour-vision deficiency, while a hot red-orange keeps its luminance against the
+/// neutral terrain grey. The mix strength per mask value lives in the shader
+/// (`PAINT_TINT_MAX`).
+const PAINT_TINT: [f32; 3] = [0.90, 0.18, 0.05];
+
 /// One mesh vertex: world position and surface normal.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -92,6 +101,10 @@ struct Uniforms {
     /// Gerstner wave shaping (#155): x = steepness (crest sharpness, `[0, 1]`), y = wavelength scale
     /// (multiplies the base wavelengths); z/w reserved.
     waves: [f32; 4],
+    /// Painted-mask overlay (#145): xyz = the tint colour (linear RGB), w = enabled (`1.0`)
+    /// or off (`0.0`). On, the terrain fragment shader mixes the surface colour toward the
+    /// tint by the mask texture's value, so a painted selection reads as colour, not shape.
+    paint: [f32; 4],
 }
 
 /// The offscreen targets the scene renders into, plus the bind group that lets the blit composite
@@ -234,6 +247,14 @@ struct ViewportResources {
     height_res: usize,
     height_bind_group: wgpu::BindGroup,
     height_layout: wgpu::BindGroupLayout,
+    /// Painted-mask overlay (#145): the mask as a texture, sampled by the terrain fragment
+    /// shader as a colour tint over the surface. Same R32Float + manual-bilinear pattern as the
+    /// height texture; bound to the terrain pipeline as group 1 (bindings 2/3). Always bound
+    /// (the shader statically reads it); the `paint` uniform gates whether it shows.
+    mask_texture: wgpu::Texture,
+    mask_res: usize,
+    mask_bind_group: wgpu::BindGroup,
+    mask_layout: wgpu::BindGroupLayout,
     /// Offscreen fork: the color+depth targets the scene renders into, the pipeline + layout +
     /// sampler that composite them into egui's pass, and the surface format the targets match.
     offscreen: Offscreen,
@@ -252,13 +273,18 @@ struct ViewportResources {
     /// [sea plane Y, water shown, sea normal, wet strength, wet width]. Changing these must
     /// re-render the terrain even though the camera and mesh are unchanged.
     terrain_wet: [f32; 5],
+    /// The paint-overlay uniform the terrain shader reads (#145): toggling the overlay or
+    /// changing the tint must re-render the terrain. A mask *content* change re-renders via
+    /// the mask upload itself (see `prepare`), so it is not tracked here.
+    terrain_paint: [f32; 4],
 }
 
-/// Creates the `res`x`res` R32Float terrain-height texture the water shader samples (Tier 0).
-/// Content is written separately via [`write_height_texture`].
-fn make_height_texture(device: &wgpu::Device, res: usize) -> wgpu::Texture {
+/// Creates a `res`x`res` R32Float grid texture: the terrain height the water shader samples
+/// (Tier 0) and the painted mask the terrain shader tints by (#145) both use it. Content is
+/// written separately via [`write_height_texture`].
+fn make_grid_texture(device: &wgpu::Device, label: &str, res: usize) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("viewport-height-texture"),
+        label: Some(label),
         size: wgpu::Extent3d {
             width: res.max(1) as u32,
             height: res.max(1) as u32,
@@ -320,6 +346,32 @@ fn make_height_bind_group(
     })
 }
 
+/// Binds the painted-mask texture and sampler for the terrain pipeline's group 1 (#145). The
+/// bindings sit at 2/3 so every resource in the shader module keeps a unique group/binding
+/// pair (the water's seabed texture owns group 1's bindings 0/1).
+fn make_mask_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    texture: &wgpu::Texture,
+    sampler: &wgpu::Sampler,
+) -> wgpu::BindGroup {
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("viewport-mask-bind-group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    })
+}
+
 /// Builds the viewport's wgpu pipeline, fixed grid topology, and uniforms, storing them for
 /// the paint callback. Call once at startup with eframe's wgpu render state. The mesh starts
 /// flat; the previewed field is uploaded into the vertex buffer as it changes.
@@ -374,9 +426,34 @@ pub(crate) fn init(render_state: &egui_wgpu::RenderState) {
         label: Some("viewport-shader"),
         source: wgpu::ShaderSource::Wgsl(SHADER.into()),
     });
+    // Group 1 for the terrain pipeline: the painted mask as a texture (#145), so the fragment
+    // shader can tint the surface by the painted selection. Bindings 2/3 (not 0/1) keep every
+    // group/binding pair in the shader module unique alongside the water's seabed texture below.
+    // Same non-filterable R32Float + manual bilinear pattern (see `sample_mask` in the shader).
+    let mask_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("viewport-mask-layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                count: None,
+            },
+        ],
+    });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("viewport-layout"),
-        bind_group_layouts: &[Some(&bind_group_layout)],
+        bind_group_layouts: &[Some(&bind_group_layout), Some(&mask_layout)],
         immediate_size: 0,
     });
     // Group 1 for the water pipeline: the terrain height as a texture, so the water shader reads the
@@ -572,7 +649,7 @@ pub(crate) fn init(render_state: &egui_wgpu::RenderState) {
 
     // Water depth texture (Tier 0): starts flat at MESH_RES; `prepare` re-uploads and grows it
     // when the field or resolution changes. Reuses the (nearest) blit sampler.
-    let height_texture = make_height_texture(device, MESH_RES);
+    let height_texture = make_grid_texture(device, "viewport-height-texture", MESH_RES);
     write_height_texture(
         &render_state.queue,
         &height_texture,
@@ -581,6 +658,17 @@ pub(crate) fn init(render_state: &egui_wgpu::RenderState) {
     );
     let height_bind_group =
         make_height_bind_group(device, &height_layout, &height_texture, &sampler);
+
+    // Painted-mask texture (#145): starts empty. The terrain shader statically reads it, so it
+    // must always be bound; the `paint` uniform keeps the tint off until a mask arrives.
+    let mask_texture = make_grid_texture(device, "viewport-mask-texture", MESH_RES);
+    write_height_texture(
+        &render_state.queue,
+        &mask_texture,
+        &vec![0.0_f32; MESH_RES * MESH_RES],
+        MESH_RES,
+    );
+    let mask_bind_group = make_mask_bind_group(device, &mask_layout, &mask_texture, &sampler);
 
     render_state
         .renderer
@@ -600,6 +688,10 @@ pub(crate) fn init(render_state: &egui_wgpu::RenderState) {
             height_res: MESH_RES,
             height_bind_group,
             height_layout,
+            mask_texture,
+            mask_res: MESH_RES,
+            mask_bind_group,
+            mask_layout,
             offscreen,
             blit_pipeline,
             blit_layout,
@@ -610,6 +702,7 @@ pub(crate) fn init(render_state: &egui_wgpu::RenderState) {
             terrain_light_dir: [0.0; 4],
             terrain_light: [0.0; 4],
             terrain_wet: [0.0; 5],
+            terrain_paint: [0.0; 4],
         });
 }
 
@@ -624,6 +717,12 @@ struct ViewportCallback {
     light: [f32; 4],
     /// New mesh to upload this frame (the field changed), or `None` to keep the current mesh.
     mesh: Option<MeshUpload>,
+    /// New painted mask to upload this frame (#145), or `None` to keep the current one. Kept
+    /// separate from `mesh` so a brush stroke re-uploads only the mask texture, never the
+    /// vertices (the backdrop terrain under the stroke is unchanged).
+    mask: Option<MaskUpload>,
+    /// Paint-overlay uniform: tint colour (xyz) and enabled flag (w). See [`Uniforms::paint`].
+    paint: [f32; 4],
     /// Water surface height in mesh units (`sea_level` mapped the same way terrain height is).
     water_y: f32,
     /// The same sea level as a normalized `[0, 1]` height, for the water shader's depth (kept
@@ -666,6 +765,14 @@ struct MeshUpload {
     /// The `[0, 1]` mapped height grid (row-major, `res`x`res`) uploaded to the water depth
     /// texture, so the water shader reads the seabed under each fragment (Tier 0).
     heights: Vec<f32>,
+    res: usize,
+}
+
+/// A painted mask ready to upload to the mask texture (#145): raw `[0, 1]` mask values
+/// (row-major, `res`x`res`), sampled from the previewed field's height layer while a backdrop
+/// carries the terrain.
+struct MaskUpload {
+    values: Vec<f32>,
     res: usize,
 }
 
@@ -718,6 +825,7 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                     if self.water_reflection { 1.0 } else { 0.0 },
                 ],
                 waves: [self.water_steepness, self.water_wavelength, 0.0, 0.0],
+                paint: self.paint,
             };
             queue.write_buffer(&res.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
@@ -756,7 +864,8 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                 // Water depth texture: grow it when the resolution changes, then upload the
                 // heights so the water shader reads the current seabed (Tier 0).
                 if upload.res != res.height_res {
-                    res.height_texture = make_height_texture(device, upload.res);
+                    res.height_texture =
+                        make_grid_texture(device, "viewport-height-texture", upload.res);
                     res.height_bind_group = make_height_bind_group(
                         device,
                         &res.height_layout,
@@ -766,6 +875,23 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                     res.height_res = upload.res;
                 }
                 write_height_texture(queue, &res.height_texture, &upload.heights, upload.res);
+            }
+
+            // Painted-mask texture (#145): grow it when the resolution changes, then upload the
+            // mask so the terrain shader tints by the current strokes.
+            if let Some(upload) = &self.mask {
+                if upload.res != res.mask_res {
+                    res.mask_texture =
+                        make_grid_texture(device, "viewport-mask-texture", upload.res);
+                    res.mask_bind_group = make_mask_bind_group(
+                        device,
+                        &res.mask_layout,
+                        &res.mask_texture,
+                        &res.sampler,
+                    );
+                    res.mask_res = upload.res;
+                }
+                write_height_texture(queue, &res.mask_texture, &upload.values, upload.res);
             }
         }
 
@@ -795,12 +921,16 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
             self.water_wet,
             self.water_wet_width,
         ];
+        // The paint overlay is drawn in the terrain pass too (#145): a new mask upload this frame
+        // or a changed paint uniform (overlay toggled, tint changed) re-renders the terrain.
         let terrain_dirty = self.mesh.is_some()
+            || self.mask.is_some()
             || !res.terrain_valid
             || res.terrain_view_proj != self.view_proj
             || res.terrain_light_dir != self.light_dir
             || res.terrain_light != self.light
-            || res.terrain_wet != terrain_wet;
+            || res.terrain_wet != terrain_wet
+            || res.terrain_paint != self.paint;
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("viewport-offscreen-encoder"),
@@ -837,6 +967,7 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                 });
                 pass.set_pipeline(&res.pipeline);
                 pass.set_bind_group(0, &res.bind_group, &[]);
+                pass.set_bind_group(1, &res.mask_bind_group, &[]);
                 pass.set_vertex_buffer(0, res.vertex_buffer.slice(..));
                 pass.set_index_buffer(res.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..res.index_count, 0, 0..1);
@@ -846,6 +977,7 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
             res.terrain_light_dir = self.light_dir;
             res.terrain_light = self.light;
             res.terrain_wet = terrain_wet;
+            res.terrain_paint = self.paint;
         }
 
         // Water pass: draw the animated water into the shared work target, resolving to the water
@@ -987,12 +1119,17 @@ impl Lighting {
     }
 }
 
-/// Identifies the mesh currently in the vertex buffer: the field's content plus the settings
-/// that shape it. The mesh is rebuilt only when this changes, so a still field and unchanged
-/// settings upload nothing.
+/// Identifies the mesh and mask currently on the GPU: the meshed layer's content plus the
+/// settings that shape it, and the painted mask's content when the overlay is active (#145).
+/// The vertices are rebuilt only when the mesh part changes and the mask texture re-uploaded
+/// only when the mask part changes, so a still field uploads nothing and a brush stroke
+/// re-uploads only the mask.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct MeshKey {
     content: u64,
+    /// The mask layer's content hash while a backdrop carries the terrain (paint mode), or
+    /// `None` when there is no overlay.
+    mask_content: Option<u64>,
     fixed_range: bool,
     vertical_scale_bits: u32,
     res: usize,
@@ -1018,27 +1155,52 @@ pub(crate) fn show(
     }
     let aspect = (rect.width() / rect.height().max(1.0)).max(0.01);
 
-    let mesh = field.and_then(|field| {
-        let res = mesh_res(field);
-        let key = MeshKey {
-            content: field.layer_or(layers::HEIGHT, 0.0).content_hash().to_u64(),
-            fixed_range: settings.fixed_range,
-            vertical_scale_bits: settings.vertical_scale.to_bits(),
-            res,
-        };
-        if *meshed == Some(key) {
-            None
-        } else {
-            *meshed = Some(key);
-            let heights = sample_field(field, res, settings.fixed_range);
-            let vertices = build_vertices(&heights, settings.vertical_scale, res);
-            Some(MeshUpload {
-                vertices,
-                heights,
+    // With a backdrop layer present (paint mode, #145) the terrain meshed is the backdrop and
+    // the painted mask overlays it as a colour tint; without one, the height layer is meshed
+    // as always and there is no overlay.
+    let (mesh, mask, overlay) = match field {
+        Some(field) => {
+            let res = mesh_res(field);
+            let surface = surface_layer(field);
+            let overlay = surface == layers::BACKDROP;
+            let key = MeshKey {
+                content: field.layer_or(surface, 0.0).content_hash().to_u64(),
+                mask_content: overlay
+                    .then(|| field.layer_or(layers::HEIGHT, 0.0).content_hash().to_u64()),
+                fixed_range: settings.fixed_range,
+                vertical_scale_bits: settings.vertical_scale.to_bits(),
                 res,
-            })
+            };
+            let prev = meshed.replace(key);
+            let mesh_changed = prev.is_none_or(|p| {
+                MeshKey {
+                    mask_content: None,
+                    ..p
+                } != MeshKey {
+                    mask_content: None,
+                    ..key
+                }
+            });
+            let mask_changed = prev.is_none_or(|p| p.mask_content != key.mask_content);
+            let mesh = mesh_changed.then(|| {
+                let heights = sample_field(field, surface, res, settings.fixed_range);
+                let vertices = build_vertices(&heights, settings.vertical_scale, res);
+                MeshUpload {
+                    vertices,
+                    heights,
+                    res,
+                }
+            });
+            // The mask is sampled raw (the fixed-range path): it already lives in [0, 1], and
+            // auto-normalizing would stretch a half-strength stroke to a full tint.
+            let mask = (overlay && mask_changed).then(|| MaskUpload {
+                values: sample_field(field, layers::HEIGHT, res, true),
+                res,
+            });
+            (mesh, mask, overlay)
         }
-    });
+        None => (None, None, false),
+    };
 
     // Place the water surface in the same height space the terrain uses, so the plane meets the
     // terrain exactly where the terrain's height equals the sea level. In Fixed mode height is
@@ -1046,7 +1208,7 @@ pub(crate) fn show(
     // its own value range, so the sea level must ride that same remap.
     let mapped_sea = match field {
         Some(f) if !settings.fixed_range => {
-            let (lo, hi) = f.layer_or(layers::HEIGHT, 0.0).value_range();
+            let (lo, hi) = f.layer_or(surface_layer(f), 0.0).value_range();
             let range = (hi - lo).max(1e-6);
             ((settings.sea_level - lo) / range).clamp(0.0, 1.0)
         }
@@ -1074,7 +1236,7 @@ pub(crate) fn show(
         && let Some(cursor) = response.interact_pointer_pos()
     {
         let res = mesh_res(field);
-        let heights = sample_field(field, res, settings.fixed_range);
+        let heights = sample_field(field, surface_layer(field), res, settings.fixed_range);
         let ndc = glam::Vec2::new(
             2.0 * (cursor.x - rect.min.x) / rect.width() - 1.0,
             1.0 - 2.0 * (cursor.y - rect.min.y) / rect.height(),
@@ -1098,6 +1260,13 @@ pub(crate) fn show(
             light_dir: lighting.travel_dir(),
             light: [lighting.intensity, lighting.ambient, 0.0, 0.0],
             mesh,
+            mask,
+            paint: [
+                PAINT_TINT[0],
+                PAINT_TINT[1],
+                PAINT_TINT[2],
+                if overlay { 1.0 } else { 0.0 },
+            ],
             water_y,
             sea_norm: mapped_sea,
             water_extinction: settings.water_extinction,
@@ -1334,12 +1503,23 @@ const DISTANCE_MAX: f32 = 10.0;
 const FLY_BOOST: f32 = 4.0;
 const FLY_LOOK_SPEED: f32 = 0.005;
 
-/// Samples the field's height layer to a `MESH_RES`-resolution grid in `[0, 1]`. With
-/// `fixed_range`, the raw height is taken directly (true amplitude, clipped to `[0, 1]`); in
+/// The layer the viewport treats as the terrain surface: the backdrop when the field carries
+/// one (paint mode, #145 — the terrain to paint over, with the mask overlaid as a tint), the
+/// height layer otherwise.
+fn surface_layer(field: &Field) -> &'static str {
+    if field.layer(layers::BACKDROP).is_some() {
+        layers::BACKDROP
+    } else {
+        layers::HEIGHT
+    }
+}
+
+/// Samples the field's named `layer` to a `res`-resolution grid in `[0, 1]`. With
+/// `fixed_range`, the raw value is taken directly (true amplitude, clipped to `[0, 1]`); in
 /// auto mode it is normalized to the layer's own value range, which fills the relief but
 /// hides amplitude (the same Auto/Fixed distinction as the 2D preview).
-fn sample_field(field: &Field, res: usize, fixed_range: bool) -> Vec<f32> {
-    let layer = field.layer_or(layers::HEIGHT, 0.0);
+fn sample_field(field: &Field, layer: &str, res: usize, fixed_range: bool) -> Vec<f32> {
+    let layer = field.layer_or(layer, 0.0);
     let (lo, hi) = layer.value_range();
     let range = (hi - lo).max(1e-6);
     let last = (res.max(2) - 1) as f32;
@@ -1542,6 +1722,7 @@ struct Uniforms {
     shore: vec4<f32>,
     flags: vec4<f32>,
     waves: vec4<f32>,
+    paint: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 
@@ -1551,6 +1732,8 @@ struct VsOut {
     @location(1) kind: f32,
     // Mesh-space height (world Y), for the wet-shore band relative to the sea plane (#156).
     @location(2) world_y: f32,
+    // Mesh-space XZ, which over the unit footprint is directly the mask-texture UV (#145).
+    @location(3) uv: vec2<f32>,
 };
 
 @vertex
@@ -1564,6 +1747,7 @@ fn vs_main(
     out.normal = normal;
     out.kind = kind;
     out.world_y = position.y;
+    out.uv = position.xz;
     return out;
 }
 
@@ -1589,11 +1773,45 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let wet = select(0.0, (1.0 - smoothstep(0.0, band, above)) * (1.0 - in.kind), above > 0.0);
         base = base * (1.0 - u.shore.z * wet);
     }
+    // Painted-mask overlay (#145): mix the surface colour toward the paint tint by the mask
+    // value, terrain top only (kind 0). Applied before the light so the tinted surface still
+    // shades, keeping the relief readable under the paint.
+    if (u.paint.w > 0.5) {
+        let m = clamp(sample_mask(in.uv), 0.0, 1.0);
+        base = mix(base, u.paint.xyz, m * PAINT_TINT_MAX * (1.0 - in.kind));
+    }
     return vec4<f32>(base * shade, 1.0);
 }
 
-// Group 1: the terrain height grid (normalized [0,1]), so the water shader reads the seabed
-// depth per fragment. Only the water entry points use it; the terrain pipeline binds group 0 only.
+// Group 1 for the terrain pipeline: the painted mask (#145), read only by fs_main. Bindings 2/3
+// so every group/binding pair in this module stays unique next to the water's seabed texture.
+@group(1) @binding(2) var mask_tex: texture_2d<f32>;
+@group(1) @binding(3) var mask_samp: sampler;
+
+// Strongest tint a full-value mask applies; short of 1.0 so the base colour (and the plain
+// unpainted grey between strokes) stays legible under the paint.
+const PAINT_TINT_MAX: f32 = 0.65;
+
+// Bilinearly samples the painted mask at `uv` — the same manual filter as `sample_seabed`,
+// for the same reason (R32Float is not GPU-filterable), so brush edges stay smooth.
+fn sample_mask(uv: vec2<f32>) -> f32 {
+    let dims = vec2<f32>(textureDimensions(mask_tex));
+    let t = uv * dims - 0.5;
+    let i = floor(t);
+    let f = t - i;
+    let base = (i + 0.5) / dims;
+    let dx = vec2<f32>(1.0 / dims.x, 0.0);
+    let dy = vec2<f32>(0.0, 1.0 / dims.y);
+    let a = textureSampleLevel(mask_tex, mask_samp, base, 0.0).r;
+    let b = textureSampleLevel(mask_tex, mask_samp, base + dx, 0.0).r;
+    let c = textureSampleLevel(mask_tex, mask_samp, base + dy, 0.0).r;
+    let d = textureSampleLevel(mask_tex, mask_samp, base + dx + dy, 0.0).r;
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+// Group 1 for the water pipeline: the terrain height grid (normalized [0,1]), so the water
+// shader reads the seabed depth per fragment. Only the water entry points use it; the terrain
+// pipeline's own group 1 is the painted mask above (bindings 2/3).
 @group(1) @binding(0) var height_tex: texture_2d<f32>;
 @group(1) @binding(1) var height_samp: sampler;
 
@@ -1887,3 +2105,50 @@ fn fs_blit(in: BlitOut) -> @location(0) vec4<f32> {
     return vec4<f32>(rgb, terrain.a);
 }
 ";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use ymir_core::Region;
+
+    /// A field whose height layer (the painted mask in paint mode) and backdrop layer hold
+    /// distinct constant values, so a read of the wrong layer is visible.
+    fn paint_field() -> Field {
+        Field::new(8, 8, Region::UNIT)
+            .with_layer(layers::HEIGHT, Arc::new(Layer::filled(8, 8, 0.25)))
+            .with_layer(layers::BACKDROP, Arc::new(Layer::filled(8, 8, 0.75)))
+    }
+
+    #[test]
+    fn surface_layer_prefers_the_backdrop_when_present() {
+        assert_eq!(surface_layer(&paint_field()), layers::BACKDROP);
+        let plain = Field::new(8, 8, Region::UNIT)
+            .with_layer(layers::HEIGHT, Arc::new(Layer::filled(8, 8, 0.25)));
+        assert_eq!(surface_layer(&plain), layers::HEIGHT);
+    }
+
+    #[test]
+    fn sample_field_reads_the_named_layer() {
+        let field = paint_field();
+        let backdrop = sample_field(&field, layers::BACKDROP, 4, true);
+        let mask = sample_field(&field, layers::HEIGHT, 4, true);
+        assert!(backdrop.iter().all(|&v| (v - 0.75).abs() < 1e-6));
+        assert!(mask.iter().all(|&v| (v - 0.25).abs() < 1e-6));
+    }
+
+    #[test]
+    fn fixed_range_sampling_keeps_mask_values_raw() {
+        // A partially painted mask must not be stretched to full strength: the raw (fixed-range)
+        // path the overlay uses returns the stroke's own value, where auto mode would normalize
+        // the layer's range up to [0, 1].
+        let field = Field::new(8, 8, Region::UNIT).with_layer(
+            layers::HEIGHT,
+            Arc::new(Layer::from_fn(8, 8, |x, _| if x < 4 { 0.0 } else { 0.4 })),
+        );
+        let raw = sample_field(&field, layers::HEIGHT, 8, true);
+        assert!((raw[7] - 0.4).abs() < 1e-6);
+        let normalized = sample_field(&field, layers::HEIGHT, 8, false);
+        assert!((normalized[7] - 1.0).abs() < 1e-6);
+    }
+}
