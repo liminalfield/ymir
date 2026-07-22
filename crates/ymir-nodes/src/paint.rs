@@ -1,7 +1,8 @@
 //! Paint: a hand-painted `[0, 1]` mask, rasterized from brush strokes.
 //!
-//! A generator by arity (no inputs, one output). Its one param is a [`Strokes`] set authored by
-//! brushing on the 2D map (see the GUI); `eval` rasterizes those strokes to the `height` layer at
+//! A source with one optional `backdrop` input and one output. Its one param is a [`Strokes`] set
+//! authored by brushing on the 2D map or the 3D surface (see the GUI); `eval` rasterizes those
+//! strokes to the `height` layer at
 //! the requested resolution, so the mask is **resolution-independent** — the same strokes fill the
 //! same normalized region at any build resolution. The output plugs into the `mask` inputs the
 //! effect nodes already honor (Directional Blur, erosion, coastal, blend), so painting scopes an
@@ -32,7 +33,10 @@ impl Operator for Paint {
         NodeSpec {
             type_id: TYPE_ID,
             category: "generator",
-            inputs: vec![],
+            // An optional backdrop: the terrain to paint over. It does not affect the mask; the node
+            // carries it on the `backdrop` layer so the 3D view can mesh the real surface while the
+            // mask rides the height layer as a texture. Unwired, Paint is a plain source.
+            inputs: vec![PortSpec::optional("backdrop")],
             outputs: vec![PortSpec::new("out")],
             params: vec![ParamSpec::new(
                 "strokes",
@@ -48,7 +52,7 @@ impl Operator for Paint {
         ContextDeps::NO_WORLD
     }
 
-    fn eval(&self, _inputs: Inputs, params: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
+    fn eval(&self, inputs: Inputs, params: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
         let width = ctx.width;
         let height = ctx.height;
         let empty = Strokes::new();
@@ -76,8 +80,14 @@ impl Operator for Paint {
             v.clamp(0.0, 1.0)
         });
 
-        let field =
+        let mut field =
             Field::new(width, height, ctx.region).with_layer(layers::HEIGHT, Arc::new(layer));
+
+        // Carry the backdrop terrain (display only) so the viewport can mesh the real surface under
+        // the painted mask. The mask stays on the height layer, so the mask ports are unaffected.
+        if let Some(backdrop) = inputs.optional(0) {
+            field.set_layer(layers::BACKDROP, backdrop.layer_or(layers::HEIGHT, 0.0));
+        }
         Ok(vec![field])
     }
 }
@@ -267,6 +277,37 @@ mod tests {
         assert_eq!(
             eval(strokes.clone(), 32).content_hash(),
             eval(strokes, 32).content_hash()
+        );
+    }
+
+    #[test]
+    fn a_wired_backdrop_is_carried_for_display() {
+        // The backdrop terrain rides the backdrop layer while the mask stays on height, so the mask
+        // ports (which read height) are unaffected and the viewport can mesh the real surface.
+        let strokes = Strokes::from_strokes(vec![dot(0.5, 0.5, 0.25, 1.0, 1.0, StrokeMode::Paint)]);
+        let params = Params::new().with("strokes", ParamValue::Strokes(strokes));
+        let terrain = Field::new(16, 16, Region::UNIT)
+            .with_layer(layers::HEIGHT, Arc::new(Layer::filled(16, 16, 0.7)));
+        let required: [&Field; 0] = [];
+        let optional = [Some(&terrain)];
+        let out = Paint
+            .eval(Inputs::new(&required, &optional), &params, &ctx(16))
+            .unwrap()
+            .remove(0);
+        assert!(at(&out, 8, 8) > 0.99, "the mask stays on the height layer");
+        assert_eq!(
+            out.layer(layers::BACKDROP).unwrap().get(0, 0).unwrap(),
+            0.7,
+            "the backdrop terrain is carried on the backdrop layer"
+        );
+    }
+
+    #[test]
+    fn no_backdrop_layer_when_unwired() {
+        let out = eval(Strokes::new(), 16);
+        assert!(
+            out.layer(layers::BACKDROP).is_none(),
+            "an unwired Paint carries no backdrop layer"
         );
     }
 }

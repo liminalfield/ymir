@@ -65,6 +65,11 @@ pub const ERODIBILITY: &str = "erodibility";
 /// below.
 pub const BEDROCK: &str = "bedrock";
 
+/// Backdrop terrain height, carried for display only: the terrain a Paint node is painted over, so
+/// the viewport can mesh the real surface (geometry) while the painted mask rides the height layer
+/// as a texture (not displacement). Never consumed by an operator; a pass-through for the editor.
+pub const BACKDROP: &str = "backdrop";
+
 #[cfg(test)]
 mod tests {
     use super::*;
