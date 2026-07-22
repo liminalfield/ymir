@@ -194,6 +194,13 @@ pub fn tr(key: &str) -> &str {
             "Gaussian-blurs the height layer by a world-unit radius (the scale knob for \
              derived selectors, and feathers masks)."
         }
+        "node-modifier.directional_blur" => "Directional Blur",
+        "node-modifier.directional_blur-desc" => {
+            "Smooths the height layer along (or across) a guide direction, not isotropically: \
+             steer by the slope (fall line, or a distance field's shore normal) or a flow field. \
+             Along combs valleys and smears downslope; across softens a cross-profile while keeping \
+             the guide crest crisp. Optional guide input; degrades gracefully."
+        }
 
         // Frequency Split (scale separation).
         "node-modifier.frequency_split" => "Frequency Split",
