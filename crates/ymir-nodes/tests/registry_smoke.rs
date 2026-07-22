@@ -60,6 +60,7 @@ const EXPECTED: &[&str] = &[
     "modifier.expression",
     "modifier.frequency_split",
     "modifier.height",
+    "modifier.histogram_scan",
     "modifier.hydraulic_erosion",
     "modifier.invert",
     "modifier.levels",
