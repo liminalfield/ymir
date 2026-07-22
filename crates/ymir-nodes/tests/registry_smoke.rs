@@ -38,6 +38,7 @@ const EXPECTED: &[&str] = &[
     "generator.cellular_bumps",
     "generator.cellular_cracks",
     "generator.cellular_regions",
+    "generator.constant",
     "generator.falloff",
     "generator.fbm",
     "generator.flow",

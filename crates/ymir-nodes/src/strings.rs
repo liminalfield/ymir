@@ -58,6 +58,11 @@ pub fn tr(key: &str) -> &str {
             "Worley cells as flat, discrete regions (plates, zones): a control field to \
              shape or scatter per region. Frequency sets the region count, jitter shape."
         }
+        "node-generator.constant" => "Constant",
+        "node-generator.constant-desc" => {
+            "A flat field at a chosen [0, 1] greyscale value: a fixed level to blend against, \
+             offset or scale with, threshold, or use as a uniform control field."
+        }
 
         // Billow generator.
         "node-generator.billow" => "Billow Noise",
