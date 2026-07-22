@@ -15,9 +15,9 @@ use egui_snarl::ui::SnarlWidget;
 use egui_snarl::{NodeId as SnarlNodeId, Snarl};
 use ymir_core::registry;
 use ymir_core::{
-    EvalCache, EvalRequest, Extraction, Field, FieldStore, Graph, INPUT_TYPE_ID, NodeId,
-    OUTPUT_TYPE_ID, ParamValue, Params, ProjectDocument, Region, SUBGRAPH_TYPE_ID,
-    marker_port_label,
+    BrushShape, EvalCache, EvalRequest, Extraction, Field, FieldStore, Graph, INPUT_TYPE_ID,
+    NodeId, OUTPUT_TYPE_ID, ParamKind, ParamValue, Params, ProjectDocument, Region,
+    SUBGRAPH_TYPE_ID, Stroke, StrokeMode, StrokePoint, Strokes, marker_port_label,
 };
 use ymir_nodes::{CategoryDef, categories, find_category, node_group, tr};
 
@@ -54,6 +54,7 @@ mod starter;
 // The Ymir Dark brand palette and egui Visuals built from it (#104).
 mod theme;
 // The 3D viewport: custom wgpu rendering inside an egui pane (#7).
+mod pick;
 mod viewport;
 mod viewport2d;
 mod viewport2d_gpu;
@@ -444,6 +445,11 @@ struct AppState {
     /// The popped-out curve editor: a larger, draggable window for shaping a curve
     /// param with room to be precise and a coordinate readout. `None` when closed.
     curve_popout: Option<CurvePopout>,
+    /// The current paint brush, edited in a Paint node's inspector.
+    paint_brush: PaintBrush,
+    /// The Paint node currently in paint mode (`stable_id`), so a drag on the 2D map brushes into
+    /// its strokes. `None` when not painting.
+    paint_target: Option<Handle>,
     /// A one-shot "zoom to graph" transform to apply on the next frame (#65). The
     /// fit is computed from this frame's node rects (collected during rendering) and
     /// applied via the canvas's `current_transform` override next frame.
@@ -718,6 +724,26 @@ struct CurvePopout {
     param: String,
 }
 
+/// The current paint brush, shared across paint sessions. Radius is a fraction of the region width
+/// (canvas-relative), matching the Paint node's stroke model; strength is opacity, hardness the edge.
+struct PaintBrush {
+    radius: f32,
+    strength: f32,
+    hardness: f32,
+    mode: StrokeMode,
+}
+
+impl Default for PaintBrush {
+    fn default() -> Self {
+        Self {
+            radius: 0.08,
+            strength: 1.0,
+            hardness: 0.5,
+            mode: StrokeMode::Paint,
+        }
+    }
+}
+
 impl AppState {
     fn new() -> Self {
         // Open with the built-in starter chain (#76), so a fresh session has a real
@@ -773,6 +799,8 @@ impl AppState {
             settings_edit: None,
             about_open: false,
             curve_popout: None,
+            paint_brush: PaintBrush::default(),
+            paint_target: None,
             pending_view: None,
             build_res: project_file::DEFAULT_BUILD_RES,
             preview_res: PREVIEW_RES,
@@ -3866,6 +3894,132 @@ fn library_entry_tooltip(ui: &mut egui::Ui, file: &library::SubgraphFile) {
 }
 
 /// The selected node's inspector: its display-name override and parameter widgets.
+/// The inspector controls for a Paint node's stroke param: the brush, the paint-on-map toggle, the
+/// stroke count, and undo/clear. The strokes themselves are authored by brushing on the 2D map;
+/// these set the brush and the paint target, and undo/clear rewrite the node's strokes.
+fn paint_controls(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    handle: Handle,
+    current: &ParamValue,
+    params: &mut Params,
+    changed: &mut bool,
+) {
+    let count = match current {
+        ParamValue::Strokes(s) => s.len(),
+        _ => 0,
+    };
+    let active = state.paint_target == Some(handle);
+
+    // Paint toggle: turning it on switches the viewport to the 2D map and pins the preview to this
+    // node, so the mask is what you paint on and watch.
+    let label = if active {
+        "Painting on the 2D map — click to stop"
+    } else {
+        "Paint on the 2D map"
+    };
+    if ui.selectable_label(active, label).clicked() {
+        if active {
+            state.paint_target = None;
+        } else {
+            // Pin the preview to this node so the viewport (2D or 3D) shows the mask you paint.
+            state.paint_target = Some(handle);
+            state.preview_pin = Some(handle);
+        }
+    }
+
+    ui.add_space(4.0);
+    brush_slider(ui, "Size", &mut state.paint_brush.radius, 0.005, 0.5);
+    brush_slider(ui, "Strength", &mut state.paint_brush.strength, 0.0, 1.0);
+    brush_slider(ui, "Hardness", &mut state.paint_brush.hardness, 0.0, 1.0);
+
+    let mode_i = usize::from(matches!(state.paint_brush.mode, StrokeMode::Erase));
+    if let Some(i) = segmented(ui, &["Paint", "Erase"], mode_i) {
+        state.paint_brush.mode = if i == 0 {
+            StrokeMode::Paint
+        } else {
+            StrokeMode::Erase
+        };
+    }
+
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(format!(
+                "{count} stroke{}",
+                if count == 1 { "" } else { "s" }
+            ))
+            .color(theme::TEXT_TERTIARY),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add_enabled(count > 0, egui::Button::new("Clear"))
+                .clicked()
+            {
+                let mut strokes = params.get_strokes("strokes", &Strokes::new()).clone();
+                strokes.clear();
+                params.insert("strokes", ParamValue::Strokes(strokes));
+                *changed = true;
+            }
+            if ui
+                .add_enabled(count > 0, egui::Button::new("Undo"))
+                .clicked()
+            {
+                let mut strokes = params.get_strokes("strokes", &Strokes::new()).clone();
+                strokes.pop();
+                params.insert("strokes", ParamValue::Strokes(strokes));
+                *changed = true;
+            }
+        });
+    });
+}
+
+/// A labelled brush slider bound to an `f32`, over the shared styled slider.
+fn brush_slider(ui: &mut egui::Ui, label: &str, value: &mut f32, min: f64, max: f64) {
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [60.0, ui.spacing().interact_size.y],
+            egui::Label::new(egui::RichText::new(label).color(theme::TEXT_TERTIARY)),
+        );
+        let mut v = f64::from(*value);
+        if param_ui::slider(ui, &mut v, min, max, false).changed() {
+            *value = v as f32;
+        }
+    });
+}
+
+/// Applies a paint sample from the 2D map to the active Paint node: begin a new stroke with the
+/// current brush, or extend the last one, then write the strokes back so the mask updates live.
+fn apply_paint_sample(state: &mut AppState, sample: viewport2d::PaintSample) {
+    let Some(target) = state.paint_target else {
+        return;
+    };
+    let Some(id) = state.graph.node_id_of(target) else {
+        return;
+    };
+    let mut params = state.graph.params(id).cloned().unwrap_or_default();
+    let mut strokes = params.get_strokes("strokes", &Strokes::new()).clone();
+    let point = StrokePoint::new(sample.x, sample.y);
+    if sample.begin || strokes.is_empty() {
+        strokes.push(Stroke {
+            radius: state.paint_brush.radius,
+            strength: state.paint_brush.strength,
+            hardness: state.paint_brush.hardness,
+            mode: state.paint_brush.mode,
+            shape: BrushShape::Round,
+            path: vec![point],
+        });
+    } else if let Some(mut last) = strokes.pop() {
+        last.path.push(point);
+        strokes.push(last);
+    }
+    params.insert("strokes", ParamValue::Strokes(strokes));
+    if state.graph.set_params(id, params).is_err() {
+        // The node vanished mid-frame; stop painting it rather than error every frame.
+        state.paint_target = None;
+    }
+}
+
 fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
     // The SETTINGS half edits the selected node (distinct from the PREVIEW half above, which
     // follows the pinned node). Nothing selected shows the eyebrow and a hint.
@@ -3994,6 +4148,12 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
             ui.add_space(6.0);
         }
         let current = param_ui::current_value(&params, pspec);
+        // A painted-mask param is authored by brushing on the 2D map, not by a value widget, so it
+        // gets its own controls (brush + paint toggle + undo/clear) instead of `edit`.
+        if matches!(pspec.kind, ParamKind::Strokes) {
+            paint_controls(ui, state, handle, &current, &mut params, &mut changed);
+            continue;
+        }
         // The curve editor's corner pop-out icon (#70-style) reports through this flag,
         // opening the larger, draggable window for this node's curve param.
         let mut popout = false;
@@ -7230,17 +7390,29 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 water_time: state.water_phase,
                 water_speed: state.water_speed,
             };
-            viewport::show(
+            // Paint mode: with a Paint node targeted and previewed, a plain drag on the 3D surface
+            // brushes onto it (ray-cast pick). Orbit stays on Alt-drag, fly on right-drag.
+            let paint_active =
+                state.paint_target.is_some() && state.preview_target() == state.paint_target;
+            let sample = viewport::show(
                 ui,
                 &mut state.viewport_camera,
                 field,
                 settings,
                 state.viewport_lighting,
                 &mut state.viewport_mesh,
+                paint_active,
             );
+            if let Some(sample) = sample {
+                apply_paint_sample(state, sample);
+            }
         }
         viewport2d::Mode::TwoD => {
-            state.viewport_2d.show(
+            // Paint mode is on when a Paint node is the target and it is the node the map previews,
+            // so brushing lands on the mask you are looking at.
+            let paint_active =
+                state.paint_target.is_some() && state.preview_target() == state.paint_target;
+            let sample = state.viewport_2d.show(
                 ui,
                 state.render_state.as_ref(),
                 field,
@@ -7250,7 +7422,11 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
                     sea_level,
                     show_water,
                 },
+                paint_active,
             );
+            if let Some(sample) = sample {
+                apply_paint_sample(state, sample);
+            }
         }
     }
 
