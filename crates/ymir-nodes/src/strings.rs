@@ -34,6 +34,12 @@ pub fn tr(key: &str) -> &str {
              by offset, rotation, and scale. Set the file path; an empty path is a flat \
              field. The edge policy fills where the placement maps outside the image."
         }
+        "node-generator.paint" => "Paint",
+        "node-generator.paint-desc" => {
+            "A hand-painted [0, 1] mask: brush strokes on the 2D map, rasterized at build \
+             resolution. Wire it into an effect's mask input to scope the effect to a region you \
+             paint. Resolution-independent; stored as editable vector strokes."
+        }
 
         // Flow (curl-warped) generator.
         "node-generator.flow" => "Flow Noise",
