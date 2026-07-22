@@ -45,6 +45,7 @@ const EXPECTED: &[&str] = &[
     "generator.gradient",
     "generator.hybrid",
     "generator.import",
+    "generator.paint",
     "generator.polygon",
     "generator.radial",
     "generator.rect",
