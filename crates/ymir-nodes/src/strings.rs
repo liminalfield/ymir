@@ -185,6 +185,17 @@ pub fn tr(key: &str) -> &str {
         // Invert.
         "node-modifier.invert" => "Invert",
         "node-modifier.invert-desc" => "Flips the height layer (1 - height).",
+        "node-modifier.normalize" => "Normalize",
+        "node-modifier.normalize-desc" => {
+            "Fits the height layer's actual min-max to [0, 1] (the one-click companion to Levels): \
+             pulls a raw measure or out-of-range height back into the working greyscale. A flat \
+             field passes through. Mask-aware."
+        }
+        "node-modifier.clamp" => "Clamp",
+        "node-modifier.clamp-desc" => {
+            "Hard-clamps the height layer into [min, max]: caps overshoots, floors basins, or bounds \
+             a value before it feeds something range-sensitive. Mask-aware."
+        }
 
         // Domain Warp (spatial displacement).
         "node-modifier.warp" => "Warp",
