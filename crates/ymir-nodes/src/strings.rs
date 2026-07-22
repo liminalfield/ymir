@@ -223,6 +223,12 @@ pub fn tr(key: &str) -> &str {
         // Curve (height shaping).
         "node-modifier.curve" => "Curve",
         "node-modifier.curve-desc" => "Reshapes height through an editable transfer curve.",
+        "node-modifier.histogram_scan" => "Histogram-Scan",
+        "node-modifier.histogram_scan-desc" => {
+            "Windows a range of input values into a crisp [0, 1] mask: position, width, and a soft \
+             falloff. Auto range scans the input's actual min-max, so it reshapes a selector's raw \
+             measure (slope degrees, curvature) directly; fixed range uses absolute [0, 1]."
+        }
 
         // Expression (per-cell formula).
         "node-modifier.expression" => "Expression",
