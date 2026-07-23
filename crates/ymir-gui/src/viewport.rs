@@ -1236,6 +1236,9 @@ pub(crate) fn show(
         && !ui.input(|i| i.pointer.button_down(egui::PointerButton::Secondary))
         && let Some(cursor) = ui.ctx().pointer_latest_pos()
         && rect.contains(cursor)
+        // Only when the viewport is the top layer here: a dialog or popup over it must keep its own
+        // pointer, not the suppressed brush cursor.
+        && ui.ctx().layer_id_at(cursor) == Some(ui.layer_id())
     {
         let res = mesh_res(field);
         let heights = sample_field(field, surface_layer(field), res, settings.fixed_range);

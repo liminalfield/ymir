@@ -7408,10 +7408,11 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
         const SIZE_WHEEL: f32 = 0.0015;
         const HARDNESS_WHEEL: f32 = 0.002;
         let pane = ui.available_rect_before_wrap();
+        let layer = ui.layer_id();
         let over = ui
             .ctx()
             .pointer_latest_pos()
-            .is_some_and(|p| pane.contains(p));
+            .is_some_and(|p| pane.contains(p) && ui.ctx().layer_id_at(p) == Some(layer));
         let (wheel, ctrl, shift) = ui.input(|i| {
             let mut wheel = 0.0_f32;
             let mut modifiers = egui::Modifiers::default();

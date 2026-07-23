@@ -265,6 +265,8 @@ impl View2d {
             && let Some(ir) = image_rect
             && let Some(pos) = ui.ctx().pointer_latest_pos()
             && rect.contains(pos)
+            // Only when the map is the top layer here, so a dialog over it keeps its own pointer.
+            && ui.ctx().layer_id_at(pos) == Some(ui.layer_id())
         {
             ui.ctx().set_cursor_icon(egui::CursorIcon::None);
             let r = brush.radius * ir.width();
