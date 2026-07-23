@@ -419,7 +419,7 @@ impl Graph {
                 None => Arc::new(Vec::new()),
             };
             let key = resolved
-                .and_then(|(src, _)| computed.get(&src).map(|(key, _)| *key))
+                .and_then(|(src, out)| computed.get(&src).map(|(key, _)| port_key(*key, out)))
                 .unwrap_or(0);
             computed.insert(id, (key, Arc::clone(&outputs)));
             in_progress.remove(&id);
@@ -445,7 +445,7 @@ impl Graph {
                     let outputs = self.pull(src, request, cache, computed, in_progress)?;
                     let upstream_key = computed.get(&src).map_or(0, |(key, _)| *key);
                     upstream.push(Some((outputs, out)));
-                    input_keys.push(Some(upstream_key));
+                    input_keys.push(Some(port_key(upstream_key, out)));
                 }
                 None if port < required_count => {
                     return Err(Error::DisconnectedInput {
@@ -601,7 +601,7 @@ impl Graph {
         // source's key (0 for a dead bypass), mirroring `pull`.
         if node.bypassed {
             let key = match self.resolve_source(id, 0)? {
-                Some((src, _)) => self.node_key(src, request, keys, in_progress)?,
+                Some((src, out)) => port_key(self.node_key(src, request, keys, in_progress)?, out),
                 None => 0,
             };
             keys.insert(id, key);
@@ -620,8 +620,9 @@ impl Graph {
                 None => None,
             };
             match resolved {
-                Some((src, _)) => {
-                    input_keys.push(Some(self.node_key(src, request, keys, in_progress)?));
+                Some((src, out)) => {
+                    let key = self.node_key(src, request, keys, in_progress)?;
+                    input_keys.push(Some(port_key(key, out)));
                 }
                 None if port < required_count => {
                     return Err(Error::DisconnectedInput {
@@ -698,6 +699,18 @@ fn derive_seed(global_seed: u64, stable_id: u64) -> u64 {
 /// `None` from [`Operator::content_hash`](crate::Operator::content_hash)) produces
 /// exactly the same key as before this existed; a subgraph container passes its inner
 /// graph's hash so editing the inside invalidates the cached output.
+/// Folds the consumed output-port index into an upstream node's cache key. A multi-output node (e.g.
+/// erosion's heightfield/flow/wear/deposition) evaluates once and caches all its outputs under one
+/// key, so consuming a different output must yield a different *input* key downstream. Without this, a
+/// node whose input is switched between two outputs of the same node keeps the same key and returns
+/// its stale cached result.
+fn port_key(node_key: u64, output: usize) -> u64 {
+    let mut h = Fnv1a64::new();
+    h.write_u64(node_key);
+    h.write_usize(output);
+    h.finish().to_u64()
+}
+
 fn compute_key(
     type_id: &str,
     params: &Params,
@@ -881,6 +894,35 @@ mod tests {
             let mut out = inputs[0].clone();
             out.set_layer(layers::HEIGHT, Arc::new(layer));
             Ok(vec![out])
+        }
+    }
+
+    /// A generator with two outputs carrying distinct constant fields (0.2 on output `a`, 0.8 on
+    /// `b`), to exercise keying on which output a downstream node consumes.
+    #[derive(Clone)]
+    struct TwoOut;
+
+    impl Operator for TwoOut {
+        fn spec(&self) -> NodeSpec {
+            NodeSpec {
+                type_id: "test.twoout",
+                category: "test",
+                inputs: Vec::new(),
+                outputs: vec![PortSpec::new("a"), PortSpec::new("b")],
+                params: Vec::new(),
+            }
+        }
+
+        fn eval(&self, _: Inputs, _: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
+            let a = Field::new(ctx.width, ctx.height, ctx.region).with_layer(
+                layers::HEIGHT,
+                Arc::new(Layer::filled(ctx.width, ctx.height, 0.2)),
+            );
+            let b = Field::new(ctx.width, ctx.height, ctx.region).with_layer(
+                layers::HEIGHT,
+                Arc::new(Layer::filled(ctx.width, ctx.height, 0.8)),
+            );
+            Ok(vec![a, b])
         }
     }
 
@@ -1881,6 +1923,40 @@ mod tests {
     /// First height-layer cell of an evaluated output, for terse assertions.
     fn first_height(out: &[Field]) -> f32 {
         out[0].layer(layers::HEIGHT).unwrap().as_slice()[0]
+    }
+
+    #[test]
+    fn switching_the_consumed_output_invalidates_the_cache() {
+        // A node whose input is switched between two outputs of the same multi-output node must
+        // recompute: the outputs carry different fields, so the first output's cached result must not
+        // be reused for the second. Regression for a cache key that folded in the upstream node's key
+        // but not which output port it consumed.
+        let mut graph = Graph::new();
+        let multi = graph.add_op(Box::new(TwoOut), Params::new());
+        let add = graph.add_op(
+            Box::new(CountingAdd {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new().with("delta", ParamValue::Float(0.0)),
+        );
+        graph.connect(multi, 0, add, 0).unwrap();
+
+        let req = request();
+        let mut cache = EvalCache::new(8);
+        let first = first_height(&graph.evaluate(add, &req, &mut cache).unwrap());
+        assert!(
+            (first - 0.2).abs() < 1e-6,
+            "output `a` carries 0.2: {first}"
+        );
+
+        // Rewire the same node's input to the other output, reusing the cache.
+        graph.disconnect(add, 0).unwrap();
+        graph.connect(multi, 1, add, 0).unwrap();
+        let second = first_height(&graph.evaluate(add, &req, &mut cache).unwrap());
+        assert!(
+            (second - 0.8).abs() < 1e-6,
+            "output `b` carries 0.8, not the stale 0.2: {second}"
+        );
     }
 
     #[test]
