@@ -1,17 +1,21 @@
 //! Paint: a hand-painted `[0, 1]` mask, rasterized from brush strokes.
 //!
-//! A source with one optional `backdrop` input and one output. Its one param is a [`Strokes`] set
-//! authored by brushing on the 2D map or the 3D surface (see the GUI); `eval` rasterizes those
-//! strokes to the `height` layer at
-//! the requested resolution, so the mask is **resolution-independent** — the same strokes fill the
-//! same normalized region at any build resolution. The output plugs into the `mask` inputs the
-//! effect nodes already honor (Directional Blur, erosion, coastal, blend), so painting scopes an
-//! effect to a hand-chosen region.
+//! A source with two optional inputs and one output. The `backdrop` input is the terrain to display,
+//! carried on the backdrop layer so the 3D view meshes the real surface while the mask rides the
+//! height layer as a tint. The `mask` input is an existing `[0, 1]` selection to **modify**: the
+//! strokes composite onto it (paint adds, erase removes), so a procedural selection (Slope, Curvature)
+//! can be hand-corrected; unwired, the composite starts from a blank field and Paint paints a fresh
+//! mask. Its one param is a [`Strokes`] set authored by brushing on the 2D map or the 3D surface (see
+//! the GUI); `eval` rasterizes those strokes to the `height` layer at the requested resolution, so the
+//! mask is **resolution-independent** — the same strokes fill the same normalized region at any build
+//! resolution. The output plugs into the `mask` inputs the effect nodes already honor (Directional
+//! Blur, erosion, coastal, blend), so painting scopes an effect to a hand-chosen region.
 //!
-//! Strokes are composited in paint order per cell: paint moves the value toward 1 with opacity
-//! `strength`, erase toward 0, each weighted by the brush's spatial falloff and the point's weight.
-//! Radius is a fraction of the region width (canvas-relative), so the node reads no world global
-//! (`NO_WORLD`). Per-cell and pure, so `from_par_fn` is byte-identical at any thread count.
+//! Strokes are composited in paint order per cell onto the base mask: paint moves the value toward 1
+//! with opacity `strength`, erase toward 0, each weighted by the brush's spatial falloff and the
+//! point's weight. Radius is a fraction of the region width (canvas-relative), so the node reads no
+//! world global (`NO_WORLD`). Per-cell and pure, so `from_par_fn` is byte-identical at any thread
+//! count.
 
 use std::sync::Arc;
 
@@ -33,10 +37,12 @@ impl Operator for Paint {
         NodeSpec {
             type_id: TYPE_ID,
             category: "generator",
-            // An optional backdrop: the terrain to paint over. It does not affect the mask; the node
-            // carries it on the `backdrop` layer so the 3D view can mesh the real surface while the
-            // mask rides the height layer as a texture. Unwired, Paint is a plain source.
-            inputs: vec![PortSpec::optional("backdrop")],
+            // Two optional inputs. `backdrop` is the terrain to display: carried on the backdrop layer
+            // so the 3D view meshes the real surface while the mask rides the height layer as a tint.
+            // `mask` is an existing selection to modify: the strokes composite onto it (paint adds,
+            // erase removes), so a procedural selection can be hand-corrected. Both unwired, Paint is a
+            // plain source that paints a fresh mask.
+            inputs: vec![PortSpec::optional("backdrop"), PortSpec::optional("mask")],
             outputs: vec![PortSpec::new("out")],
             params: vec![ParamSpec::new(
                 "strokes",
@@ -58,12 +64,20 @@ impl Operator for Paint {
         let empty = Strokes::new();
         let strokes = params.get_strokes("strokes", &empty);
 
-        // Per cell, composite the strokes in paint order. Cell centres map to normalized region
-        // coordinates in [0, 1], the same space the strokes are stored in.
+        // The optional base mask to modify: its [0, 1] selection rides the height layer (the selector
+        // convention). The strokes composite onto it; unwired, the composite starts from a blank (0)
+        // field, so Paint paints a fresh mask.
+        let base = inputs.optional(1).map(|f| f.layer_or(layers::HEIGHT, 0.0));
+
+        // Per cell, composite the strokes in paint order onto the base mask. Cell centres map to
+        // normalized region coordinates in [0, 1], the same space the strokes are stored in.
         let layer = Layer::from_par_fn(width, height, |x, y| {
             let px = (x as f32 + 0.5) / width as f32;
             let py = (y as f32 + 0.5) / height as f32;
-            let mut v = 0.0_f32;
+            let mut v = base
+                .as_ref()
+                .map_or(0.0, |b| b.get(x, y).unwrap_or(0.0))
+                .clamp(0.0, 1.0);
             for stroke in strokes.strokes() {
                 let alpha = stroke.coverage(px, py);
                 if alpha <= 0.0 {
@@ -233,6 +247,72 @@ mod tests {
             0.7,
             "the backdrop terrain is carried on the backdrop layer"
         );
+    }
+
+    /// A flat base mask at `value` on the height layer (the selector convention).
+    fn mask_field(size: usize, value: f32) -> Field {
+        Field::new(size, size, Region::UNIT)
+            .with_layer(layers::HEIGHT, Arc::new(Layer::filled(size, size, value)))
+    }
+
+    /// Evaluate Paint with a base mask wired into the `mask` input (index 1), the backdrop unwired.
+    fn eval_with_mask(base: &Field, strokes: Strokes, size: usize) -> Field {
+        let params = Params::new().with("strokes", ParamValue::Strokes(strokes));
+        let required: [&Field; 0] = [];
+        let optional = [None, Some(base)];
+        Paint
+            .eval(Inputs::new(&required, &optional), &params, &ctx(size))
+            .unwrap()
+            .remove(0)
+    }
+
+    #[test]
+    fn a_wired_mask_seeds_the_composite() {
+        // With a base mask and no strokes, the output is the base mask unchanged.
+        let out = eval_with_mask(&mask_field(16, 0.5), Strokes::new(), 16);
+        assert!(
+            out.layer(layers::HEIGHT)
+                .unwrap()
+                .as_slice()
+                .iter()
+                .all(|&v| (v - 0.5).abs() < 1e-6),
+            "no strokes leaves the base mask untouched"
+        );
+    }
+
+    #[test]
+    fn paint_adds_to_the_base_mask() {
+        // A paint dot over a partial base drives the centre toward 1; a far corner keeps the base.
+        let out = eval_with_mask(
+            &mask_field(32, 0.3),
+            Strokes::from_strokes(vec![dot(0.5, 0.5, 0.25, 1.0, 1.0, StrokeMode::Paint)]),
+            32,
+        );
+        assert!(
+            at(&out, 16, 16) > 0.99,
+            "paint builds the centre toward 1: {}",
+            at(&out, 16, 16)
+        );
+        assert!(
+            (at(&out, 0, 0) - 0.3).abs() < 1e-6,
+            "a far corner keeps the base mask"
+        );
+    }
+
+    #[test]
+    fn erase_removes_from_the_base_mask() {
+        // An erase dot over a fully-selected base clears the centre toward 0; a corner stays selected.
+        let out = eval_with_mask(
+            &mask_field(32, 1.0),
+            Strokes::from_strokes(vec![dot(0.5, 0.5, 0.25, 1.0, 1.0, StrokeMode::Erase)]),
+            32,
+        );
+        assert_eq!(
+            at(&out, 16, 16),
+            0.0,
+            "erase clears the centre of the base mask"
+        );
+        assert_eq!(at(&out, 0, 0), 1.0, "a far corner stays selected");
     }
 
     #[test]
