@@ -191,6 +191,23 @@ pub fn tr(key: &str) -> &str {
         // Invert.
         "node-modifier.invert" => "Invert",
         "node-modifier.invert-desc" => "Flips the height layer (1 - height).",
+        "node-modifier.sculpt" => "Sculpt",
+        "node-modifier.sculpt-desc" => {
+            "Sculpt terrain by brushing height onto it: paint raises, erase lowers, and overlapping \
+             strokes build up pass by pass. Wire a terrain in to sculpt it, or leave the input empty \
+             to build form from scratch. Strength sets how hard each pass bites; the height is not \
+             clamped. Stored as editable vector strokes."
+        }
+
+        // Per-node labels for the shared brush UI (the enable button's verb and the two mode names),
+        // resolved by convention from the node's type_id so a sculpt reads Sculpt/Raise/Lower while the
+        // mask reads Paint/Paint/Erase.
+        "paint-verb-modifier.sculpt" => "Sculpt",
+        "paint-mode-pos-modifier.sculpt" => "Raise",
+        "paint-mode-neg-modifier.sculpt" => "Lower",
+        "paint-verb-generator.paint" => "Paint",
+        "paint-mode-pos-generator.paint" => "Paint",
+        "paint-mode-neg-generator.paint" => "Erase",
         "node-modifier.normalize" => "Normalize",
         "node-modifier.normalize-desc" => {
             "Fits the height layer's actual min-max to [0, 1] (the one-click companion to Levels): \

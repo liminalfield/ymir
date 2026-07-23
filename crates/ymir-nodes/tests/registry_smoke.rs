@@ -71,6 +71,7 @@ const EXPECTED: &[&str] = &[
     "modifier.normalize",
     "modifier.null",
     "modifier.occlusion",
+    "modifier.sculpt",
     "modifier.slope",
     "modifier.stream_erosion",
     "modifier.terrace",

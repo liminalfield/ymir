@@ -109,6 +109,76 @@ impl Stroke {
             h.write_u32(canonical_f32_bits(p.weight));
         }
     }
+
+    /// The stroke's brush coverage at the normalized point `(px, py)`: the spatial falloff at the
+    /// distance to the stroke's path, scaled by the interpolated per-point weight, in `[0, 1]`, and
+    /// `0` outside the brush footprint. This is the spatial footprint only; a node applies `strength`
+    /// and `mode` on top, so the mask and edit workflows share one rasterization.
+    #[must_use]
+    pub fn coverage(&self, px: f32, py: f32) -> f32 {
+        let r = self.radius.max(1e-6);
+        let (best_d2, best_w) = match self.path.as_slice() {
+            [] => return 0.0,
+            [p] => ((px - p.x) * (px - p.x) + (py - p.y) * (py - p.y), p.weight),
+            points => {
+                let mut best = (f32::INFINITY, 1.0_f32);
+                for seg in points.windows(2) {
+                    let (d2, w) = point_segment(px, py, seg[0].x, seg[0].y, seg[1].x, seg[1].y)
+                        .apply_weight(seg[0].weight, seg[1].weight);
+                    if d2 < best.0 {
+                        best = (d2, w);
+                    }
+                }
+                best
+            }
+        };
+        falloff(best_d2.sqrt(), r, self.hardness) * best_w.clamp(0.0, 1.0)
+    }
+}
+
+/// The squared distance from a point to a segment, with the projection parameter `t` in `[0, 1]`
+/// along the segment (used to interpolate the per-endpoint weight).
+struct SegmentHit {
+    dist2: f32,
+    t: f32,
+}
+
+impl SegmentHit {
+    /// Folds the endpoint weights into `(dist2, weight)` by interpolating at the projection.
+    fn apply_weight(self, wa: f32, wb: f32) -> (f32, f32) {
+        (self.dist2, wa + (wb - wa) * self.t)
+    }
+}
+
+/// Squared distance from `(px, py)` to segment `(ax, ay)-(bx, by)` and the clamped projection `t`.
+fn point_segment(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> SegmentHit {
+    let (dx, dy) = (bx - ax, by - ay);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 <= f32::EPSILON {
+        0.0
+    } else {
+        (((px - ax) * dx + (py - ay) * dy) / len2).clamp(0.0, 1.0)
+    };
+    let (cx, cy) = (ax + dx * t, ay + dy * t);
+    SegmentHit {
+        dist2: (px - cx) * (px - cx) + (py - cy) * (py - cy),
+        t,
+    }
+}
+
+/// Brush falloff at distance `d` for radius `r` and `hardness` in `[0, 1]`: full inside a core of
+/// `r * hardness`, smoothstepping to 0 at `r`, and 0 beyond. `hardness = 1` is a hard-edged disc.
+fn falloff(d: f32, r: f32, hardness: f32) -> f32 {
+    if d >= r {
+        return 0.0;
+    }
+    let core = r * hardness.clamp(0.0, 1.0);
+    if d <= core {
+        return 1.0;
+    }
+    // core < d < r, so r - core > 0: no division by zero.
+    let t = (r - d) / (r - core);
+    t * t * (3.0 - 2.0 * t)
 }
 
 impl PartialEq for Stroke {
@@ -289,5 +359,33 @@ mod tests {
         assert_eq!(strokes.len(), 1);
         strokes.clear();
         assert!(strokes.is_empty());
+    }
+
+    #[test]
+    fn coverage_is_full_at_the_centre_and_zero_beyond_the_radius() {
+        let hard = Stroke {
+            radius: 0.2,
+            strength: 1.0,
+            hardness: 1.0,
+            mode: StrokeMode::Paint,
+            shape: BrushShape::Round,
+            path: vec![StrokePoint::new(0.5, 0.5)],
+        };
+        assert_eq!(
+            hard.coverage(0.5, 0.5),
+            1.0,
+            "a hard brush is full at the centre"
+        );
+        assert_eq!(hard.coverage(0.9, 0.5), 0.0, "and zero past the radius");
+
+        let soft = Stroke {
+            hardness: 0.0,
+            ..hard.clone()
+        };
+        let mid = soft.coverage(0.6, 0.5); // 0.1 out along a 0.2 radius
+        assert!(
+            mid > 0.0 && mid < 1.0,
+            "a soft brush falls off toward the edge: {mid}"
+        );
     }
 }

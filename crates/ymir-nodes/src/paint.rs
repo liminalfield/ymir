@@ -18,7 +18,7 @@ use std::sync::Arc;
 use ymir_core::registry::OperatorEntry;
 use ymir_core::{
     ContextDeps, EvalContext, Field, Inputs, Layer, NodeSpec, Operator, ParamKind, ParamSpec,
-    ParamValue, Params, PortSpec, Result, Stroke, StrokeMode, Strokes, layers,
+    ParamValue, Params, PortSpec, Result, StrokeMode, Strokes, layers,
 };
 
 /// Stable type identifier and registry key.
@@ -65,7 +65,7 @@ impl Operator for Paint {
             let py = (y as f32 + 0.5) / height as f32;
             let mut v = 0.0_f32;
             for stroke in strokes.strokes() {
-                let alpha = stroke_coverage(stroke, px, py);
+                let alpha = stroke.coverage(px, py);
                 if alpha <= 0.0 {
                     continue;
                 }
@@ -92,73 +92,6 @@ impl Operator for Paint {
     }
 }
 
-/// The stroke's brush coverage at normalized point `(px, py)`: the spatial falloff at the distance
-/// to the stroke's path, scaled by the interpolated per-point weight. `0` outside the brush.
-fn stroke_coverage(stroke: &Stroke, px: f32, py: f32) -> f32 {
-    let r = stroke.radius.max(1e-6);
-    let (best_d2, best_w) = match stroke.path.as_slice() {
-        [] => return 0.0,
-        [p] => ((px - p.x) * (px - p.x) + (py - p.y) * (py - p.y), p.weight),
-        points => {
-            let mut best = (f32::INFINITY, 1.0_f32);
-            for seg in points.windows(2) {
-                let (d2, w) = point_segment(px, py, seg[0].x, seg[0].y, seg[1].x, seg[1].y)
-                    .apply_weight(seg[0].weight, seg[1].weight);
-                if d2 < best.0 {
-                    best = (d2, w);
-                }
-            }
-            best
-        }
-    };
-    falloff(best_d2.sqrt(), r, stroke.hardness) * best_w.clamp(0.0, 1.0)
-}
-
-/// The squared distance from `(px, py)` to the segment `a-b`, and the projection parameter `t` in
-/// `[0, 1]` along the segment (for interpolating the per-endpoint weight).
-struct SegmentHit {
-    dist2: f32,
-    t: f32,
-}
-
-impl SegmentHit {
-    /// Folds the endpoint weights into `(dist2, weight)` by interpolating at the projection.
-    fn apply_weight(self, wa: f32, wb: f32) -> (f32, f32) {
-        (self.dist2, wa + (wb - wa) * self.t)
-    }
-}
-
-/// Squared distance from `(px, py)` to segment `(ax, ay)-(bx, by)` and the clamped projection.
-fn point_segment(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> SegmentHit {
-    let (dx, dy) = (bx - ax, by - ay);
-    let len2 = dx * dx + dy * dy;
-    let t = if len2 <= f32::EPSILON {
-        0.0
-    } else {
-        (((px - ax) * dx + (py - ay) * dy) / len2).clamp(0.0, 1.0)
-    };
-    let (cx, cy) = (ax + dx * t, ay + dy * t);
-    SegmentHit {
-        dist2: (px - cx) * (px - cx) + (py - cy) * (py - cy),
-        t,
-    }
-}
-
-/// Brush falloff at distance `d` for radius `r` and `hardness` in `[0, 1]`: full inside a core of
-/// `r * hardness`, smoothstepping to 0 at `r`, and 0 beyond. `hardness = 1` is a hard-edged disc.
-fn falloff(d: f32, r: f32, hardness: f32) -> f32 {
-    if d >= r {
-        return 0.0;
-    }
-    let core = r * hardness.clamp(0.0, 1.0);
-    if d <= core {
-        return 1.0;
-    }
-    // core < d < r, so r - core > 0: no division by zero.
-    let t = (r - d) / (r - core);
-    t * t * (3.0 - 2.0 * t)
-}
-
 inventory::submit! {
     OperatorEntry { type_id: TYPE_ID, make: || Box::new(Paint) }
 }
@@ -170,7 +103,7 @@ inventory::submit! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ymir_core::{BrushShape, Region, StrokePoint};
+    use ymir_core::{BrushShape, Region, Stroke, StrokePoint};
 
     fn ctx(size: usize) -> EvalContext {
         EvalContext::new(size, size, Region::UNIT, 0)
