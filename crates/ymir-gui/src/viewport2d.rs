@@ -42,6 +42,57 @@ pub(crate) struct PaintSample {
     pub begin: bool,
 }
 
+/// The active brush, for the on-surface cursor drawn while painting: two rings (the brush radius and
+/// its `radius * hardness` full-strength core) plus a small raise/lower mark. `Some` exactly when a
+/// paint node is the target, so `is_some()` is "paint mode on".
+#[derive(Clone, Copy)]
+pub(crate) struct BrushCursor {
+    /// Brush radius as a fraction of the region width (the stroke model's unit).
+    pub radius: f32,
+    /// Edge hardness in `[0, 1]`: the inner ring sits at `radius * hardness`.
+    pub hardness: f32,
+    /// True in Raise mode (mark `+`), false in Lower (`−`).
+    pub raise: bool,
+}
+
+/// The dark-halo + light-core stroke pair that keeps the brush cursor legible over any terrain, light
+/// or dark. Drawn dark-under-light so the ring reads on any background without relying on colour.
+pub(crate) fn cursor_strokes() -> (egui::Stroke, egui::Stroke) {
+    (
+        egui::Stroke::new(2.6, egui::Color32::from_black_alpha(150)),
+        egui::Stroke::new(1.2, egui::Color32::from_white_alpha(235)),
+    )
+}
+
+/// Draws the small raise (`+`) / lower (`−`) mark just outside the top-right of a cursor of screen
+/// radius `screen_r` centred at `center`. Shape-based (not colour), so it reads under red/green
+/// colour vision.
+pub(crate) fn draw_mode_badge(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    screen_r: f32,
+    raise: bool,
+) {
+    let diag = std::f32::consts::FRAC_1_SQRT_2;
+    let pos = center + egui::vec2(diag, -diag) * (screen_r + 7.0);
+    let mark = if raise { "+" } else { "−" };
+    let font = egui::FontId::proportional(15.0);
+    painter.text(
+        pos + egui::vec2(0.6, 0.6),
+        egui::Align2::CENTER_CENTER,
+        mark,
+        font.clone(),
+        egui::Color32::from_black_alpha(170),
+    );
+    painter.text(
+        pos,
+        egui::Align2::CENTER_CENTER,
+        mark,
+        font,
+        egui::Color32::from_white_alpha(240),
+    );
+}
+
 /// Which projection the main viewport draws.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum Mode {
@@ -128,10 +179,11 @@ impl View2d {
         render_state: Option<&egui_wgpu::RenderState>,
         field: Option<&Field>,
         display: MapDisplay,
-        paint_active: bool,
+        brush: Option<BrushCursor>,
     ) -> Option<PaintSample> {
         let rect = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+        let paint_active = brush.is_some();
 
         // Double-click resets the view, except while painting (where it would be a stray dab).
         if response.double_clicked() && !paint_active {
@@ -205,6 +257,26 @@ impl View2d {
             ),
             _ => painter.rect_filled(rect, 0.0, egui::Color32::BLACK),
         };
+
+        // The brush cursor: rings sized to the brush (and its hardness core) plus the raise/lower
+        // mark, with the OS pointer hidden so only the ring shows where the stroke lands. The 2D map is
+        // flat, so the rings are plain circles scaled by the field's on-screen width.
+        if let Some(brush) = brush
+            && let Some(ir) = image_rect
+            && let Some(pos) = ui.ctx().pointer_latest_pos()
+            && rect.contains(pos)
+        {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+            let r = brush.radius * ir.width();
+            let (dark, light) = cursor_strokes();
+            painter.circle_stroke(pos, r, dark);
+            painter.circle_stroke(pos, r, light);
+            if brush.hardness > 0.02 {
+                painter.circle_stroke(pos, r * brush.hardness, dark);
+                painter.circle_stroke(pos, r * brush.hardness, light);
+            }
+            draw_mode_badge(&painter, pos, r, brush.raise);
+        }
         sample
     }
 

@@ -88,6 +88,20 @@ pub(crate) fn raycast_heightfield(
     None
 }
 
+/// The world position of the heightfield surface under normalized `(nx, nz)`: the unit-square XZ
+/// footprint with `Y = sampled height * vertical_scale`. Used to drape the brush cursor's rings on
+/// the surface by projecting points around the brush circle.
+#[must_use]
+pub(crate) fn surface_point(
+    heights: &[f32],
+    res: usize,
+    nx: f32,
+    nz: f32,
+    vertical_scale: f32,
+) -> Vec3 {
+    Vec3::new(nx, bilinear_grid(heights, res, nx, nz) * vertical_scale, nz)
+}
+
 /// Refines the ray parameter of a surface crossing bracketed by `[t0, t1]` by bisection.
 fn bisect(
     origin: Vec3,

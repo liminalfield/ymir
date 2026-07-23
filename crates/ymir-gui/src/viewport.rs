@@ -1145,7 +1145,7 @@ pub(crate) fn show(
     settings: ViewSettings,
     lighting: Lighting,
     meshed: &mut Option<MeshKey>,
-    paint_active: bool,
+    brush: Option<crate::viewport2d::BrushCursor>,
 ) -> Option<crate::viewport2d::PaintSample> {
     let (rect, response) =
         ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -1226,14 +1226,16 @@ pub(crate) fn show(
 
     let vp_mat = camera.view_proj(aspect);
 
-    // Paint sample: with paint mode on, a plain primary drag (Alt drives orbit, right drives fly, so
-    // neither is us) ray-casts the cursor onto the terrain surface and returns its normalized
-    // position. The height grid is re-sampled here, which only runs while actively brushing.
-    let paint_sample = if paint_active
+    // Paint mode: ray-cast the cursor onto the surface for the brush cursor and, while the primary
+    // button is down, the paint sample. Alt (orbit) and the right button (fly) are navigation, so both
+    // suppress it. The height grid is re-sampled per frame while the pointer is over the terrain, the
+    // same cost active brushing already pays.
+    let brush_hit = if let Some(brush) = brush
         && let Some(field) = field
         && !ui.input(|i| i.modifiers.alt)
-        && ui.input(|i| i.pointer.primary_down())
-        && let Some(cursor) = response.interact_pointer_pos()
+        && !ui.input(|i| i.pointer.button_down(egui::PointerButton::Secondary))
+        && let Some(cursor) = ui.ctx().pointer_latest_pos()
+        && rect.contains(cursor)
     {
         let res = mesh_res(field);
         let heights = sample_field(field, surface_layer(field), res, settings.fixed_range);
@@ -1241,16 +1243,20 @@ pub(crate) fn show(
             2.0 * (cursor.x - rect.min.x) / rect.width() - 1.0,
             1.0 - 2.0 * (cursor.y - rect.min.y) / rect.height(),
         );
-        crate::pick::raycast_heightfield(vp_mat, ndc, &heights, res, settings.vertical_scale).map(
-            |(x, y)| crate::viewport2d::PaintSample {
-                x,
-                y,
-                begin: ui.input(|i| i.pointer.primary_pressed()),
-            },
-        )
+        crate::pick::raycast_heightfield(vp_mat, ndc, &heights, res, settings.vertical_scale)
+            .map(|(x, y)| (brush, x, y, heights, res))
     } else {
         None
     };
+    // The paint sample rides the same hit, emitted only while the primary button is down.
+    let paint_sample = brush_hit.as_ref().and_then(|&(_, x, y, _, _)| {
+        ui.input(|i| i.pointer.primary_down())
+            .then(|| crate::viewport2d::PaintSample {
+                x,
+                y,
+                begin: ui.input(|i| i.pointer.primary_pressed()),
+            })
+    });
 
     let view_proj = vp_mat.to_cols_array_2d();
     let callback = egui_wgpu::Callback::new_paint_callback(
@@ -1304,7 +1310,109 @@ pub(crate) fn show(
             .request_repaint_after(std::time::Duration::from_millis(66));
     }
     ui.painter().add(callback);
+
+    // The brush cursor, drawn on top of the rendered terrain: two rings draped on the surface (the
+    // brush radius, and the hardness core) plus the raise/lower mark, with the OS pointer hidden so
+    // only the ring shows where the stroke will land.
+    if let Some((brush, hx, hz, heights, res)) = brush_hit {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+        let projector = SurfaceProjector {
+            heights: &heights,
+            res,
+            vertical_scale: settings.vertical_scale,
+            view_proj: vp_mat,
+            rect,
+        };
+        draw_surface_brush_cursor(&ui.painter_at(rect), brush, hx, hz, &projector);
+    }
     paint_sample
+}
+
+/// Projects a point on the previewed heightfield surface to screen space, bundling the sampled height
+/// grid and the view transform so the brush-cursor drawing stays a small call. Draping the ring on the
+/// surface is just `project` around the brush circle.
+struct SurfaceProjector<'a> {
+    /// The `res * res` row-major sampled heights the mesh is built from.
+    heights: &'a [f32],
+    /// Grid resolution.
+    res: usize,
+    /// Height exaggeration (matches the mesh).
+    vertical_scale: f32,
+    /// The camera's combined view-projection.
+    view_proj: Mat4,
+    /// The pane rectangle, for the clip-to-screen map.
+    rect: egui::Rect,
+}
+
+impl SurfaceProjector<'_> {
+    /// The screen position of the surface point under normalized `(nx, nz)`, or `None` when it falls
+    /// behind the camera.
+    fn project(&self, nx: f32, nz: f32) -> Option<egui::Pos2> {
+        let world = crate::pick::surface_point(self.heights, self.res, nx, nz, self.vertical_scale);
+        let clip = self.view_proj * world.extend(1.0);
+        if clip.w <= 1e-4 {
+            return None;
+        }
+        let ndc = Vec3::new(clip.x, clip.y, clip.z) / clip.w;
+        Some(egui::pos2(
+            self.rect.min.x + (ndc.x * 0.5 + 0.5) * self.rect.width(),
+            self.rect.min.y + (0.5 - ndc.y * 0.5) * self.rect.height(),
+        ))
+    }
+}
+
+/// Draws the 3D brush cursor: two rings draped over the terrain surface (the brush radius, and the
+/// `radius * hardness` core) and the raise/lower mark. Each ring is a closed polyline of points on the
+/// surface circle projected through the view-projection, so it follows the terrain and its on-screen
+/// size tracks perspective.
+fn draw_surface_brush_cursor(
+    painter: &egui::Painter,
+    brush: crate::viewport2d::BrushCursor,
+    cx: f32,
+    cz: f32,
+    projector: &SurfaceProjector,
+) {
+    const SEGMENTS: usize = 64;
+    let ring = |radius: f32| -> Vec<Option<egui::Pos2>> {
+        (0..SEGMENTS)
+            .map(|i| {
+                let a = i as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
+                projector.project(cx + radius * a.cos(), cz + radius * a.sin())
+            })
+            .collect()
+    };
+    let (dark, light) = crate::viewport2d::cursor_strokes();
+    let outer = ring(brush.radius);
+    draw_ring_polyline(painter, &outer, dark, light);
+    if brush.hardness > 0.02 {
+        draw_ring_polyline(painter, &ring(brush.radius * brush.hardness), dark, light);
+    }
+    if let Some(center) = projector.project(cx, cz) {
+        let screen_r = outer
+            .iter()
+            .flatten()
+            .map(|p| p.distance(center))
+            .fold(0.0_f32, f32::max);
+        crate::viewport2d::draw_mode_badge(painter, center, screen_r, brush.raise);
+    }
+}
+
+/// Draws a closed ring from projected points (some `None` where they fall behind the camera), a dark
+/// halo under a light core so it reads on any terrain without relying on colour.
+fn draw_ring_polyline(
+    painter: &egui::Painter,
+    pts: &[Option<egui::Pos2>],
+    dark: egui::Stroke,
+    light: egui::Stroke,
+) {
+    let n = pts.len();
+    for stroke in [dark, light] {
+        for i in 0..n {
+            if let (Some(a), Some(b)) = (pts[i], pts[(i + 1) % n]) {
+                painter.line_segment([a, b], stroke);
+            }
+        }
+    }
 }
 
 /// An orbit camera: it looks at `pivot` from a `yaw`/`pitch` direction at `distance`, the

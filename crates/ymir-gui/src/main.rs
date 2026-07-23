@@ -3893,9 +3893,23 @@ fn library_entry_tooltip(ui: &mut egui::Ui, file: &library::SubgraphFile) {
     }
 }
 
+/// A per-node brush-UI label resolved by convention from the node's `type_id`
+/// (`paint-<suffix>-<type_id>`), falling back to `default` when the node declares none. Mirrors how
+/// node names resolve through `tr`, so a new paint node relabels itself by adding string entries.
+fn paint_label(type_id: &str, suffix: &str, default: &str) -> String {
+    let key = format!("paint-{suffix}-{type_id}");
+    let value = tr(&key);
+    // `tr` echoes an unknown key; fall back to the default rather than show the raw key.
+    if value == key {
+        default.to_string()
+    } else {
+        value.to_string()
+    }
+}
+
 /// The selected node's inspector: its display-name override and parameter widgets.
-/// The inspector controls for a Paint node's stroke param: the brush, the paint-on-map toggle, the
-/// stroke count, and undo/clear. The strokes themselves are authored by brushing on the 2D map;
+/// The inspector controls for a paint node's stroke param: the brush, the enable toggle, the stroke
+/// count, and undo/clear. The strokes themselves are authored by brushing on the 2D map or 3D surface;
 /// these set the brush and the paint target, and undo/clear rewrite the node's strokes.
 fn paint_controls(
     ui: &mut egui::Ui,
@@ -3911,30 +3925,66 @@ fn paint_controls(
     };
     let active = state.paint_target == Some(handle);
 
-    // Paint toggle: turning it on switches the viewport to the 2D map and pins the preview to this
-    // node, so the mask is what you paint on and watch.
+    // Per-node verb for the enable button (Sculpt vs Paint), resolved by convention from the node's
+    // type_id, defaulting to Paint for any paint node without its own label.
+    let type_id = state
+        .graph
+        .node_id_of(handle)
+        .and_then(|id| state.graph.spec(id))
+        .map_or("", |spec| spec.type_id);
+    let verb = paint_label(type_id, "verb", "Paint");
+
+    // Enable toggle: turning it on pins the preview to this node so the viewport keeps showing what
+    // you paint or sculpt; the highlight and the "click to stop" copy show the on/off state.
     let label = if active {
-        "Painting on the 2D map — click to stop"
+        format!("{verb} — click to stop")
     } else {
-        "Paint on the 2D map"
+        verb.clone()
     };
     if ui.selectable_label(active, label).clicked() {
         if active {
             state.paint_target = None;
+            // Release the pin that was set when painting began, so stopping returns the preview to
+            // following the selection. A manual pin the user placed on another node is left alone.
+            if state.preview_pin == Some(handle) {
+                state.preview_pin = None;
+            }
         } else {
-            // Pin the preview to this node so the viewport (2D or 3D) shows the mask you paint.
+            // Pin the preview to this node so the viewport keeps showing what you paint even if the
+            // selection changes mid-session; released above when painting stops.
             state.paint_target = Some(handle);
             state.preview_pin = Some(handle);
         }
     }
 
     ui.add_space(4.0);
-    brush_slider(ui, "Size", &mut state.paint_brush.radius, 0.005, 0.5);
-    brush_slider(ui, "Strength", &mut state.paint_brush.strength, 0.0, 1.0);
-    brush_slider(ui, "Hardness", &mut state.paint_brush.hardness, 0.0, 1.0);
+    // Size and Strength are log-scaled so the low end (small brushes, subtle strokes) gets real
+    // slider travel instead of being crammed into the first few pixels. Hardness stays linear over
+    // its full [0, 1]. A log slider needs a positive floor, so Strength starts just above 0.
+    brush_slider(ui, "Size", &mut state.paint_brush.radius, 0.005, 0.5, true);
+    brush_slider(
+        ui,
+        "Strength",
+        &mut state.paint_brush.strength,
+        0.005,
+        1.0,
+        true,
+    );
+    brush_slider(
+        ui,
+        "Hardness",
+        &mut state.paint_brush.hardness,
+        0.0,
+        1.0,
+        false,
+    );
 
+    // Mode names are per-node: Raise/Lower for a sculpt, Paint/Erase for a mask. The positive mode
+    // (index 0) maps to StrokeMode::Paint, the negative to Erase, whatever they are called.
+    let pos = paint_label(type_id, "mode-pos", "Paint");
+    let neg = paint_label(type_id, "mode-neg", "Erase");
     let mode_i = usize::from(matches!(state.paint_brush.mode, StrokeMode::Erase));
-    if let Some(i) = segmented(ui, &["Paint", "Erase"], mode_i) {
+    if let Some(i) = segmented(ui, &[pos.as_str(), neg.as_str()], mode_i) {
         state.paint_brush.mode = if i == 0 {
             StrokeMode::Paint
         } else {
@@ -3975,14 +4025,14 @@ fn paint_controls(
 }
 
 /// A labelled brush slider bound to an `f32`, over the shared styled slider.
-fn brush_slider(ui: &mut egui::Ui, label: &str, value: &mut f32, min: f64, max: f64) {
+fn brush_slider(ui: &mut egui::Ui, label: &str, value: &mut f32, min: f64, max: f64, log: bool) {
     ui.horizontal(|ui| {
         ui.add_sized(
             [60.0, ui.spacing().interact_size.y],
             egui::Label::new(egui::RichText::new(label).color(theme::TEXT_TERTIARY)),
         );
         let mut v = f64::from(*value);
-        if param_ui::slider(ui, &mut v, min, max, false).changed() {
+        if param_ui::slider(ui, &mut v, min, max, log).changed() {
             *value = v as f32;
         }
     });
@@ -3990,7 +4040,7 @@ fn brush_slider(ui: &mut egui::Ui, label: &str, value: &mut f32, min: f64, max: 
 
 /// Applies a paint sample from the 2D map to the active Paint node: begin a new stroke with the
 /// current brush, or extend the last one, then write the strokes back so the mask updates live.
-fn apply_paint_sample(state: &mut AppState, sample: viewport2d::PaintSample) {
+fn apply_paint_sample(state: &mut AppState, sample: viewport2d::PaintSample, mode: StrokeMode) {
     let Some(target) = state.paint_target else {
         return;
     };
@@ -4005,7 +4055,7 @@ fn apply_paint_sample(state: &mut AppState, sample: viewport2d::PaintSample) {
             radius: state.paint_brush.radius,
             strength: state.paint_brush.strength,
             hardness: state.paint_brush.hardness,
-            mode: state.paint_brush.mode,
+            mode,
             shape: BrushShape::Round,
             path: vec![point],
         });
@@ -7346,6 +7396,73 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
     let sea_level = state.sea_level as f32;
     let show_water = state.show_water;
 
+    // Paint mode is on when a paint node is the target and is the previewed node.
+    let paint_active = state.paint_target.is_some() && state.preview_target() == state.paint_target;
+
+    // Ctrl + wheel resizes the brush, Shift + wheel changes its hardness. Read from the raw wheel
+    // events rather than `smooth_scroll_delta`: egui reroutes a modified scroll before it lands there
+    // (Ctrl becomes a zoom delta, Shift moves to the x axis), so the smoothed value reads zero under
+    // either modifier. Normalize the raw delta to points so the step is consistent across mice. Size is
+    // exponential (matching its log slider), hardness linear. Only while the pointer is over the pane.
+    if paint_active {
+        const SIZE_WHEEL: f32 = 0.0015;
+        const HARDNESS_WHEEL: f32 = 0.002;
+        let pane = ui.available_rect_before_wrap();
+        let over = ui
+            .ctx()
+            .pointer_latest_pos()
+            .is_some_and(|p| pane.contains(p));
+        let (wheel, ctrl, shift) = ui.input(|i| {
+            let mut wheel = 0.0_f32;
+            let mut modifiers = egui::Modifiers::default();
+            for event in &i.events {
+                if let egui::Event::MouseWheel {
+                    unit,
+                    delta,
+                    modifiers: mods,
+                    ..
+                } = event
+                {
+                    let to_points = match unit {
+                        egui::MouseWheelUnit::Point => 1.0,
+                        egui::MouseWheelUnit::Line => 50.0,
+                        egui::MouseWheelUnit::Page => 400.0,
+                    };
+                    wheel += delta.y * to_points;
+                    modifiers = *mods;
+                }
+            }
+            (wheel, modifiers.ctrl, modifiers.shift)
+        });
+        if over && wheel != 0.0 && (ctrl || shift) {
+            if ctrl {
+                state.paint_brush.radius =
+                    (state.paint_brush.radius * (wheel * SIZE_WHEEL).exp()).clamp(0.005, 0.5);
+            } else {
+                state.paint_brush.hardness =
+                    (state.paint_brush.hardness + wheel * HARDNESS_WHEEL).clamp(0.0, 1.0);
+            }
+        }
+    }
+
+    // Ctrl held inverts Raise <-> Lower for the stroke and the cursor's mark, without touching the
+    // stored mode, so you can carve a quick pit without leaving the brush.
+    let effective_mode = if paint_active && ui.input(|i| i.modifiers.ctrl) {
+        match state.paint_brush.mode {
+            StrokeMode::Paint => StrokeMode::Erase,
+            StrokeMode::Erase => StrokeMode::Paint,
+        }
+    } else {
+        state.paint_brush.mode
+    };
+
+    // The brush cursor, shown in whichever projection is active; its mark reflects the effective mode.
+    let brush = paint_active.then_some(viewport2d::BrushCursor {
+        radius: state.paint_brush.radius,
+        hardness: state.paint_brush.hardness,
+        raise: matches!(effective_mode, StrokeMode::Paint),
+    });
+
     match state.viewport_mode {
         viewport2d::Mode::ThreeD => {
             // True world proportion: a height of 1.0 rises to (world_height / world_extent)
@@ -7392,8 +7509,6 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
             };
             // Paint mode: with a Paint node targeted and previewed, a plain drag on the 3D surface
             // brushes onto it (ray-cast pick). Orbit stays on Alt-drag, fly on right-drag.
-            let paint_active =
-                state.paint_target.is_some() && state.preview_target() == state.paint_target;
             let sample = viewport::show(
                 ui,
                 &mut state.viewport_camera,
@@ -7401,17 +7516,15 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 settings,
                 state.viewport_lighting,
                 &mut state.viewport_mesh,
-                paint_active,
+                brush,
             );
             if let Some(sample) = sample {
-                apply_paint_sample(state, sample);
+                apply_paint_sample(state, sample, effective_mode);
             }
         }
         viewport2d::Mode::TwoD => {
             // Paint mode is on when a Paint node is the target and it is the node the map previews,
             // so brushing lands on the mask you are looking at.
-            let paint_active =
-                state.paint_target.is_some() && state.preview_target() == state.paint_target;
             let sample = state.viewport_2d.show(
                 ui,
                 state.render_state.as_ref(),
@@ -7422,10 +7535,10 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
                     sea_level,
                     show_water,
                 },
-                paint_active,
+                brush,
             );
             if let Some(sample) = sample {
-                apply_paint_sample(state, sample);
+                apply_paint_sample(state, sample, effective_mode);
             }
         }
     }
