@@ -13,7 +13,7 @@ Writes the height layer to a raw 16-bit little-endian .r16 file, Unreal's other 
 
 ## Purpose
 
-*Not yet written.*
+Writes the terrain to a raw 16-bit `.r16` file, Unreal Engine's other native heightmap format. Reach for it when your target wants R16 rather than a PNG.
 
 ## Inputs
 

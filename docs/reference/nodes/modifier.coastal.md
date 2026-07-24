@@ -13,7 +13,7 @@ Reshapes the shore into a beach-and-bluff bevel: cuts the land down and lifts th
 
 ## Purpose
 
-*Not yet written.*
+Reshapes the shore into a beach-and-bluff bevel, cutting the land down and lifting the seabed toward a gentle wedge at sea level. Reach for it to turn a hard waterline into a believable coast.
 
 ## Inputs
 
@@ -39,3 +39,7 @@ Reshapes the shore into a beach-and-bluff bevel: cuts the land down and lifts th
 Honours a mask on its input, applying everywhere the mask is absent.
 
 Emits `shore` alongside the height layer.
+
+## Behaviour
+
+It bevels by true distance from the shoreline, so the beach is even all around, fading over a width in metres. It reads the world sea level and taps the shore band as a layer.

@@ -13,7 +13,7 @@ Writes the height layer to a 16-bit grayscale PNG.
 
 ## Purpose
 
-*Not yet written.*
+Writes the terrain to a 16-bit grayscale PNG, the common heightmap format for game engines. Place it at the end of a graph to export the height.
 
 ## Inputs
 
@@ -34,3 +34,8 @@ This node produces no outputs.
 ## Layer contract
 
 Reads and writes the height layer.
+
+## See also
+
+- [Export R16](endpoint.export_r16.md)
+- [Export EXR](endpoint.export_exr.md)
