@@ -9,7 +9,7 @@ status: draft
 
 `modifier.aspect` · Selectors
 
-Selects slopes facing a compass direction: high where the terrain faces the direction, softening over the falloff. Slope weight suppresses flats. Being a gradient, it amplifies sharp input (crease noise, thin ridges), so scale it with an upstream Blur. For sun/wind-facing effects, poleward snow, and directional weathering.
+Selects slopes facing a compass direction: high where the terrain faces the direction, softening over the falloff.
 
 ## Purpose
 

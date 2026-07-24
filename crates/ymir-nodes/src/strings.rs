@@ -38,41 +38,31 @@ fn lookup(key: &str) -> Option<&'static str> {
         // Import generator.
         "node-generator.import" => "Import",
         "node-generator.import-desc" => {
-            "Loads a heightmap PNG as a field, resampled to the build resolution and placed \
-             by offset, rotation, and scale. Set the file path; an empty path is a flat \
-             field. The edge policy fills where the placement maps outside the image."
+            "Loads a heightmap image as a field, placed by offset, rotation, and scale."
         }
         "node-generator.paint" => "Paint",
         "node-generator.paint-desc" => {
-            "A hand-painted [0, 1] mask: brush strokes on the 2D map or 3D surface, rasterized at \
-             build resolution. Feed an existing selection into the mask input to hand-correct it \
-             (paint adds, erase removes), or leave it empty to paint a fresh mask. Wire the output \
-             into an effect's mask input to scope the effect to a region you paint. \
-             Resolution-independent; stored as editable vector strokes."
+            "A hand-painted [0, 1] selection, brushed on the 2D map or 3D surface."
         }
 
         // Flow (curl-warped) generator.
         "node-generator.flow" => "Flow Noise",
         "node-generator.flow-desc" => {
-            "Noise warped along divergence-free curl streamlines: a swirly, marbled, \
-             fluid look. Also carries the flow direction on its flow_x / flow_y layers."
+            "Noise warped along divergence-free curl streamlines, for a swirly, marbled, fluid look."
         }
 
         // Cellular (Worley) generators.
         "node-generator.cellular_bumps" => "Cellular Bumps",
         "node-generator.cellular_bumps-desc" => {
-            "Worley noise as cones peaking at scattered feature points: rock piles, \
-             bumps, scales. Frequency sets cell density, jitter how organic the placement."
+            "Worley noise as cones peaking at scattered points: rock piles, bumps, and scales."
         }
         "node-generator.cellular_cracks" => "Cellular Cracks",
         "node-generator.cellular_cracks-desc" => {
-            "Worley cell-edge network: cracks, fractures, dried mud, rocky cell walls. \
-             Frequency sets the network density, jitter how organic the cells."
+            "Worley cell-edge network: cracks, fractures, dried mud, and rocky cell walls."
         }
         "node-generator.cellular_regions" => "Cellular Regions",
         "node-generator.cellular_regions-desc" => {
-            "Worley cells as flat, discrete regions (plates, zones): a control field to \
-             shape or scatter per region. Frequency sets the region count, jitter shape."
+            "Worley cells as flat, discrete regions (plates, zones) to shape or scatter."
         }
         "node-generator.constant" => "Constant",
         "node-generator.constant-desc" => {
@@ -83,8 +73,7 @@ fn lookup(key: &str) -> Option<&'static str> {
         // Billow generator.
         "node-generator.billow" => "Billow Noise",
         "node-generator.billow-desc" => {
-            "Puffy, rounded mounds and dunes: the rounded inverse of ridged noise. \
-             Multiply with a Shape envelope to place rolling hills or a dune field."
+            "Puffy, rounded mounds and dunes, the rounded inverse of ridged noise."
         }
 
         // Hybrid-multifractal generator.
@@ -97,8 +86,7 @@ fn lookup(key: &str) -> Option<&'static str> {
         // Ridged-multifractal generator.
         "node-generator.ridged" => "Ridged Noise",
         "node-generator.ridged-desc" => {
-            "Ridged multifractal noise: sharp mountain ridgelines instead of fBm's rolling \
-             hills. Multiply with a Shape envelope to place a massif."
+            "Ridged multifractal noise, with sharp mountain ridgelines."
         }
 
         // Radial gradient generator.
@@ -132,16 +120,12 @@ fn lookup(key: &str) -> Option<&'static str> {
         // Rectangle generator.
         "node-generator.rect" => "Rectangle",
         "node-generator.rect-desc" => {
-            "A flat-topped rectangular footprint with soft, rounded flanks: the envelope \
-             for a plateau, mesa, or rectangular landmass. Turn it with rotation."
+            "A flat-topped rectangular footprint with soft, rounded flanks."
         }
 
         // Polygon (regular n-gon) generator.
         "node-generator.polygon" => "Polygon",
-        "node-generator.polygon-desc" => {
-            "A flat-topped regular polygon with soft flanks: the envelope for an angular \
-             plateau or faceted mesa. Set the number of sides and turn it with rotation."
-        }
+        "node-generator.polygon-desc" => "A flat-topped regular polygon with soft flanks.",
 
         // Blend.
         "node-modifier.blend" => "Blend",
@@ -160,42 +144,31 @@ fn lookup(key: &str) -> Option<&'static str> {
         // Curvature selector.
         "node-modifier.curvature" => "Curvature",
         "node-modifier.curvature-desc" => {
-            "Selects convex (ridges, outcrops) or concave (valleys, hollows) ground from \
-             the surface curvature. Measures curvature, not slope, so a plain ramp reads \
-             zero. Set the scale with an upstream Blur."
+            "Selects convex (ridges, outcrops) or concave (valleys, hollows) ground from the surface curvature."
         }
 
         // Slope selector.
         "node-modifier.slope" => "Slope",
         "node-modifier.slope-desc" => {
-            "Selects a band of steepness: high where the slope angle is within \
-             min..max degrees, softening over the falloff. Scale it with an upstream Blur."
+            "Selects a band of steepness: high where the slope angle is within min..max degrees, softening over the falloff."
         }
 
         // Occlusion selector.
         "node-modifier.occlusion" => "Occlusion",
         "node-modifier.occlusion-desc" => {
-            "Ambient-occlusion / sky-view measure: high in crevices and valley floors hemmed in \
-             by higher ground, low on open peaks and flats. Ray count and world-unit radius set \
-             the sampling. Picks sheltered terrain (catchment, moisture, shadow)."
+            "Ambient-occlusion / sky-view measure: high in crevices and valley floors hemmed in by higher ground, low on open peaks and flats."
         }
 
         // Aspect selector.
         "node-modifier.aspect" => "Aspect",
         "node-modifier.aspect-desc" => {
-            "Selects slopes facing a compass direction: high where the terrain faces the \
-             direction, softening over the falloff. Slope weight suppresses flats. Being a \
-             gradient, it amplifies sharp input (crease noise, thin ridges), so scale it with \
-             an upstream Blur. For sun/wind-facing effects, poleward snow, and directional \
-             weathering."
+            "Selects slopes facing a compass direction: high where the terrain faces the direction, softening over the falloff."
         }
 
         // Distance selector.
         "node-modifier.distance" => "Distance",
         "node-modifier.distance-desc" => {
-            "Selects a band around a height contour by true distance: one near the level, \
-             fading over the range (in metres), optionally on just one side. The distance is \
-             an isotropic eikonal solve, so the band width does not vary with direction."
+            "Selects a band around a height contour by true distance, fading over a range in metres."
         }
 
         // Invert.
@@ -203,10 +176,7 @@ fn lookup(key: &str) -> Option<&'static str> {
         "node-modifier.invert-desc" => "Flips the height layer (1 - height).",
         "node-modifier.sculpt" => "Sculpt",
         "node-modifier.sculpt-desc" => {
-            "Sculpt terrain by brushing height onto it: paint raises, erase lowers, and overlapping \
-             strokes build up pass by pass. Wire a terrain in to sculpt it, or leave the input empty \
-             to build form from scratch. Strength sets how hard each pass bites; the height is not \
-             clamped. Stored as editable vector strokes."
+            "Sculpt terrain by brushing height onto it: paint raises, erase lowers, and overlapping strokes build up."
         }
 
         // Per-node labels for the shared brush UI (the enable button's verb and the two mode names),
@@ -220,21 +190,17 @@ fn lookup(key: &str) -> Option<&'static str> {
         "paint-mode-neg-generator.paint" => "Erase",
         "node-modifier.normalize" => "Normalize",
         "node-modifier.normalize-desc" => {
-            "Fits the height layer's actual min-max to [0, 1] (the one-click companion to Levels): \
-             pulls a raw measure or out-of-range height back into the working greyscale. A flat \
-             field passes through. Mask-aware."
+            "Fits the height layer's actual min-max to [0, 1], pulling a raw or out-of-range field back into the working range."
         }
         "node-modifier.clamp" => "Clamp",
         "node-modifier.clamp-desc" => {
-            "Hard-clamps the height layer into [min, max]: caps overshoots, floors basins, or bounds \
-             a value before it feeds something range-sensitive. Mask-aware."
+            "Hard-clamps the height layer into [min, max]: caps overshoots, floors basins, or bounds a value."
         }
 
         // Domain Warp (spatial displacement).
         "node-modifier.warp" => "Warp",
         "node-modifier.warp-desc" => {
-            "Domain warp: pushes the height layer sideways by a noise field so straight \
-             features wander and regular shapes turn natural. Amount is in world units."
+            "Domain warp: pushes the height layer sideways by a noise field so straight features wander and regular shapes turn natural."
         }
 
         // Blur (spatial smoothing).
@@ -245,35 +211,25 @@ fn lookup(key: &str) -> Option<&'static str> {
         }
         "node-modifier.directional_blur" => "Directional Blur",
         "node-modifier.directional_blur-desc" => {
-            "Smooths the height layer along (or across) a guide direction, not isotropically: \
-             steer by the slope (fall line, or a distance field's shore normal) or a flow field. \
-             Along combs valleys and smears downslope; across softens a cross-profile while keeping \
-             the guide crest crisp. Optional guide input; degrades gracefully."
+            "Smooths the height layer along or across a guide direction, steered by the slope or a flow field."
         }
 
         // Frequency Split (scale separation).
         "node-modifier.frequency_split" => "Frequency Split",
         "node-modifier.frequency_split-desc" => {
-            "Splits the height into a low-frequency band (a blur at a world-unit cut radius) \
-             and the high-frequency residual. The two recombine to the input, so you can work \
-             the large forms and re-add the fine detail."
+            "Splits the height into a low-frequency band and the high-frequency residual."
         }
 
         // Terrace (quantize into stepped bands).
         "node-modifier.terrace" => "Terrace",
         "node-modifier.terrace-desc" => {
-            "Quantizes the height into stepped bands: flat treads joined by risers, for strata, \
-             benches, and mesa forms. Band count sets the number of terraces; sharpness rounds \
-             the steps (soft) or squares them off (hard). Range Auto spreads the terraces across \
-             the terrain's actual height (so the count is what you see); Fixed places them at \
-             absolute elevations."
+            "Quantizes the height into stepped bands: flat treads joined by risers, for strata, benches, and mesa forms."
         }
 
         // Levels (range rescaling).
         "node-modifier.levels" => "Levels",
         "node-modifier.levels-desc" => {
-            "Rescales the height range: stretch an input window to full, bias the midtones \
-             with gamma, map into an output window. Normalize, set amplitude, or clamp."
+            "Rescales the height range: stretch an input window to full, bias the midtones with gamma, and map into an output window."
         }
 
         // Curve (height shaping).
@@ -281,16 +237,13 @@ fn lookup(key: &str) -> Option<&'static str> {
         "node-modifier.curve-desc" => "Reshapes height through an editable transfer curve.",
         "node-modifier.histogram_scan" => "Histogram-Scan",
         "node-modifier.histogram_scan-desc" => {
-            "Windows a range of input values into a crisp [0, 1] mask: position, width, and a soft \
-             falloff. Auto range scans the input's actual min-max, so it reshapes a selector's raw \
-             measure (slope degrees, curvature) directly; fixed range uses absolute [0, 1]."
+            "Windows a range of input values into a crisp [0, 1] mask, set by position, width, and a soft falloff."
         }
 
         // Expression (per-cell formula).
         "node-modifier.expression" => "Expression",
         "node-modifier.expression-desc" => {
-            "A per-cell math formula over x, y, and the input layers (height, mask, …): \
-             the escape hatch for custom math. Runs wired or as a coordinate formula."
+            "A per-cell math formula over x, y, and the input layers: the escape hatch for custom math."
         }
 
         // Thermal erosion.
@@ -302,9 +255,7 @@ fn lookup(key: &str) -> Option<&'static str> {
         // Hydraulic erosion.
         "node-modifier.hydraulic_erosion" => "Hydraulic Erosion",
         "node-modifier.hydraulic_erosion-desc" => {
-            "Water carving the terrain, simulated as rain droplets that run downhill, pick up and \
-             drop sediment, and cut rills while depositing fans and filling hollows. The \
-             deposition is what reads as weathered. Taps wear, deposition, and flow."
+            "Water carving the terrain, simulated as rain droplets that cut rills and deposit sediment."
         }
 
         // Stream erosion.
@@ -316,10 +267,7 @@ fn lookup(key: &str) -> Option<&'static str> {
         // Coastal bevel.
         "node-modifier.coastal" => "Coastal",
         "node-modifier.coastal-desc" => {
-            "Reshapes the shore into a beach-and-bluff bevel: cuts the land down and lifts the \
-             seabed toward a gentle wedge at the world sea level, fading over a width in metres. \
-             Bevels by true distance from the shoreline, so the beach is even all around. Taps the \
-             shore band."
+            "Reshapes the shore into a beach-and-bluff bevel at the world sea level, fading over a width in metres."
         }
 
         // Null (pass-through utility).

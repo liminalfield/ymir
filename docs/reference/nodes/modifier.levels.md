@@ -9,7 +9,7 @@ status: draft
 
 `modifier.levels` · Adjust · Mask-aware
 
-Rescales the height range: stretch an input window to full, bias the midtones with gamma, map into an output window. Normalize, set amplitude, or clamp.
+Rescales the height range: stretch an input window to full, bias the midtones with gamma, and map into an output window.
 
 ## Purpose
 

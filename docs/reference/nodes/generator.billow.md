@@ -9,7 +9,7 @@ status: draft
 
 `generator.billow` · Generators
 
-Puffy, rounded mounds and dunes: the rounded inverse of ridged noise. Multiply with a Shape envelope to place rolling hills or a dune field.
+Puffy, rounded mounds and dunes, the rounded inverse of ridged noise.
 
 ## Purpose
 

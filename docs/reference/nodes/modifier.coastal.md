@@ -9,7 +9,7 @@ status: draft
 
 `modifier.coastal` · Geology · Mask-aware
 
-Reshapes the shore into a beach-and-bluff bevel: cuts the land down and lifts the seabed toward a gentle wedge at the world sea level, fading over a width in metres. Bevels by true distance from the shoreline, so the beach is even all around. Taps the shore band.
+Reshapes the shore into a beach-and-bluff bevel at the world sea level, fading over a width in metres.
 
 ## Purpose
 

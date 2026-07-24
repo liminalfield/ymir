@@ -9,7 +9,7 @@ status: draft
 
 `modifier.warp` · Filters
 
-Domain warp: pushes the height layer sideways by a noise field so straight features wander and regular shapes turn natural. Amount is in world units.
+Domain warp: pushes the height layer sideways by a noise field so straight features wander and regular shapes turn natural.
 
 ## Purpose
 

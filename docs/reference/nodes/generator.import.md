@@ -9,7 +9,7 @@ status: draft
 
 `generator.import` · Generators
 
-Loads a heightmap PNG as a field, resampled to the build resolution and placed by offset, rotation, and scale. Set the file path; an empty path is a flat field. The edge policy fills where the placement maps outside the image.
+Loads a heightmap image as a field, placed by offset, rotation, and scale.
 
 ## Purpose
 
