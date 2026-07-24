@@ -11,7 +11,7 @@
 //!
 //! This is why named landforms are not nodes in Ymir (a crater node would be one
 //! opinionated crater): the project ships this primitive and the Curve, plus example
-//! subgraphs, rather than a node per landform. See `docs/design/shape-generators.md`.
+//! subgraphs, rather than a node per landform. See `design/shape-generators.md`.
 //!
 //! `radius` is a world-unit length (meters), converted to cells through the world extent,
 //! so the cone keeps the same physical reach at any resolution. The `center` is a

@@ -145,4 +145,4 @@ coordinate math here is the lossless home for it. If you find yourself rebuildin
 generator in a formula, that behaviour probably wants its own node. And to rotate a
 *baked* field (a Blend output, an imported map), this node cannot help: that is a resample,
 which the Import node's placement params or a future Transform node handle. See
-`docs/design/transform-and-placement.md` for the full picture.
+`design/transform-and-placement.md` for the full picture.

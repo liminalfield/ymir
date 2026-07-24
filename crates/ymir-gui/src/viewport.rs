@@ -109,7 +109,7 @@ struct Uniforms {
 
 /// The offscreen targets the scene renders into, plus the bind group that lets the blit composite
 /// them. Owning our own attachments (rather than egui's shared pass) is the whole point of the fork
-/// (see `docs/design/viewport-water.md`). The terrain and the animated water are drawn as two passes
+/// (see `design/viewport-water.md`). The terrain and the animated water are drawn as two passes
 /// resolved to their own single-sample textures, so the static terrain can be rendered once and
 /// reused across animation frames while only the water re-renders (#159). One shared multisampled
 /// work target feeds both resolves (the passes are sequential); the depth is shared too, written by
@@ -572,7 +572,7 @@ pub(crate) fn init(render_state: &egui_wgpu::RenderState) {
 
     // The offscreen fork: a sampler, bind-group layout, and pipeline that composite the offscreen
     // color into egui's pass with a fullscreen triangle. The scene renders into the offscreen
-    // targets in `prepare`; `paint` runs this blit. See docs/design/viewport-water.md.
+    // targets in `prepare`; `paint` runs this blit. See design/viewport-water.md.
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
         label: Some("viewport-blit-sampler"),
         ..Default::default()

@@ -34,7 +34,7 @@ structure is visible in its wiring. There are generators (fBm, ridged, billow, h
 flow, cellular, and shape primitives), selectors that read height, slope, and curvature,
 shapers for curve, levels, invert, blend, warp, and blur, and three erosion models:
 thermal, hydraulic, and stream. The full list, with what each node does, is in
-[`docs/design/node-inventory.md`](docs/design/node-inventory.md).
+[`design/node-inventory.md`](design/node-inventory.md).
 
 The erosion models write out their byproducts as layers rather than discarding them.
 `flow`, `water`, `wear`, and `deposition` all come back on the field, where downstream
@@ -78,10 +78,10 @@ vary between them.
 ## Documentation
 
 [`ARCHITECTURE.md`](ARCHITECTURE.md) explains how the engine and the editor fit
-together, and [`docs/design/`](docs/design/) holds the design notes behind the data
+together, and [`design/`](design/) holds the design notes behind the data
 model, the node taxonomy, erosion, and subgraphs. For the Expression node there is a
 set of worked recipes in
-[`docs/expression-cookbook.md`](docs/expression-cookbook.md). [`CLAUDE.md`](CLAUDE.md)
+[`design/expression-cookbook.md`](design/expression-cookbook.md). [`CLAUDE.md`](CLAUDE.md)
 records the working brief and the quality bar the project is held to.
 
 ## Contributing

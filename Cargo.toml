@@ -8,7 +8,7 @@ members = ["crates/*"]
 [workspace.package]
 # The single source of truth for Ymir's version, inherited by every crate via
 # `version.workspace = true`. Bump this one line to release; the SemVer policy and
-# release steps are in docs/design/versioning.md. This is the app version, distinct
+# release steps are in design/versioning.md. This is the app version, distinct
 # from the save-format versions (project::FORMAT_VERSION and the GUI's PROJECT_ /
 # SUBGRAPH_FORMAT_VERSION), which bump only when the serialized schema changes.
 version = "0.2.0"

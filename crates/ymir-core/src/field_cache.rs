@@ -1,7 +1,7 @@
 //! Binary serialization of a node's output fields for the evaluation cache.
 //!
 //! This is the on-disk format for the cache's warm tier (see
-//! `docs/design/evaluation-cache.md`), not the project format: it carries its own version,
+//! `design/evaluation-cache.md`), not the project format: it carries its own version,
 //! evolves freely, and a malformed blob is a recoverable miss (an error), never a panic.
 //!
 //! The layout is raw little-endian: a small header, then each [`Field`] as its dimensions,
