@@ -63,6 +63,7 @@ mod strings;
 mod talus;
 mod terrace;
 mod thermal;
+mod thermal_gpu;
 mod warp;
 
 pub use aspect::Aspect;

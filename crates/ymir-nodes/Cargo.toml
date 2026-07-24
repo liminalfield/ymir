@@ -21,3 +21,13 @@ inventory = "0.3"
 # each cell computes its own outputs from neighbour reads, so the parallel result is
 # byte-identical regardless of thread count.
 rayon = "1"
+# GPU-accelerated erosion, behind the same operator (the CPU path stays the reference and the
+# headless/CI path). ymir-gpu holds the headless device and the Field<->buffer marshalling; the
+# thermal kernel (thermal.wgsl and its runner) lives here beside the operator, per the "terrain
+# math lives with the nodes" rule, so wgpu and bytemuck are needed to build the compute pipelines
+# and lay out the uniform. Pinned to the same wgpu the GUI stack resolves (single wgpu in the tree).
+ymir-gpu = { path = "../ymir-gpu" }
+wgpu = "29"
+bytemuck = { version = "1", features = ["derive"] }
+# A warning when the GPU erosion path fails and falls back to CPU, so a silent degrade is visible.
+log = "0.4"

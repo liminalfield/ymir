@@ -4155,9 +4155,13 @@ dependencies = [
 name = "ymir-nodes"
 version = "0.2.0"
 dependencies = [
+ "bytemuck",
  "inventory",
+ "log",
  "rayon",
+ "wgpu",
  "ymir-core",
+ "ymir-gpu",
 ]
 
 [[package]]

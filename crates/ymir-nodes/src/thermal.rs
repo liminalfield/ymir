@@ -21,9 +21,11 @@ use ymir_core::{
     Error, EvalContext, Field, Inputs, Layer, NodeSpec, Operator, ParamKind, ParamSpec, ParamValue,
     Params, PortSpec, Result, Unit, layers,
 };
+use ymir_gpu::GpuContext;
 
 use crate::erosion;
 use crate::talus;
+use crate::thermal_gpu;
 
 /// Stable type identifier and registry key.
 const TYPE_ID: &str = "modifier.thermal_erosion";
@@ -127,13 +129,6 @@ impl Operator for ThermalErosion {
             None => input.layer_or(layers::MASK, 1.0),
         };
 
-        let mut heights = source.as_slice().to_vec();
-        let mut delta = vec![0.0_f32; heights.len()];
-        // Reused per-cell scratch for the two-phase pass: how much each cell sheds and its
-        // downhill excess sum (which splits the shed among lower neighbours). Allocated once
-        // and overwritten each pass rather than reallocated.
-        let mut moved = vec![0.0_f32; heights.len()];
-        let mut total_excess = vec![0.0_f32; heights.len()];
         let pass = talus::Pass {
             width,
             height,
@@ -141,20 +136,25 @@ impl Operator for ThermalErosion {
             strength,
         };
 
-        for _ in 0..iterations {
-            // Erosion is the slow node; poll cancellation each pass so a
-            // superseded preview aborts instead of running to completion.
-            if ctx.is_cancelled() {
-                return Err(Error::Cancelled);
+        // The eroded (unmasked) heights: on the GPU when a compute device rode in on the context,
+        // else on the CPU. The GPU path is a faithful port of the CPU pass, so its result is
+        // visually equivalent and cache-interchangeable; the CPU path stays the reference and the
+        // headless/CI path. A GPU failure falls back to the CPU rather than failing the node.
+        let heights = match ctx
+            .compute()
+            .and_then(|c| c.as_any().downcast_ref::<GpuContext>())
+        {
+            Some(gpu) => {
+                match thermal_gpu::erode(gpu, &source, talus_per_cell, strength, iterations) {
+                    Ok(heights) => heights,
+                    Err(err) => {
+                        log::warn!("thermal GPU path failed, falling back to CPU: {err}");
+                        cpu_erode(&source, &pass, iterations, ctx)?
+                    }
+                }
             }
-            talus::relax_pass(&heights, &mut moved, &mut total_excess, &mut delta, &pass);
-            // Apply the pass. Each cell is independent, so the parallel add is
-            // byte-identical to a sequential one.
-            heights
-                .par_iter_mut()
-                .zip(delta.par_iter())
-                .for_each(|(h, d)| *h += *d);
-        }
+            None => cpu_erode(&source, &pass, iterations, ctx)?,
+        };
 
         // Composite the eroded result over the original through the mask: a fully
         // masked-out cell (mask 0) keeps its original height exactly, a fully
@@ -183,6 +183,34 @@ impl Operator for ThermalErosion {
         let debris_field = erosion::byproduct_field(debris, width, height, region);
         Ok(vec![heightfield, wear_field, debris_field])
     }
+}
+
+/// Runs the thermal relaxation on the CPU: the reference implementation and the headless/CI path.
+/// Returns the eroded, unmasked heights, or [`Error::Cancelled`] when a superseded preview aborts.
+fn cpu_erode(
+    source: &Layer,
+    pass: &talus::Pass,
+    iterations: usize,
+    ctx: &EvalContext,
+) -> Result<Vec<f32>> {
+    let mut heights = source.as_slice().to_vec();
+    let mut delta = vec![0.0_f32; heights.len()];
+    // Reused per-cell scratch for the two-phase pass, overwritten each pass rather than reallocated.
+    let mut moved = vec![0.0_f32; heights.len()];
+    let mut total_excess = vec![0.0_f32; heights.len()];
+    for _ in 0..iterations {
+        // Erosion is the slow node; poll cancellation each pass so a superseded preview aborts.
+        if ctx.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        talus::relax_pass(&heights, &mut moved, &mut total_excess, &mut delta, pass);
+        // Each cell is independent, so the parallel add is byte-identical to a sequential one.
+        heights
+            .par_iter_mut()
+            .zip(delta.par_iter())
+            .for_each(|(h, d)| *h += *d);
+    }
+    Ok(heights)
 }
 
 inventory::submit! {
