@@ -1,3 +1,5 @@
+> **Design record, not user documentation.** A design or decision note captured at a point in time; it may lag the current build. To learn how to use Ymir, see the documentation site (linked from the [README](../README.md)).
+
 # Ymir erosion strategy and design
 
 This is the design brief for Ymir's erosion subsystem. It is to erosion what

@@ -1,3 +1,5 @@
+> **Design record, not user documentation.** A design or decision note captured at a point in time; it may lag the current build. To learn how to use Ymir, see the documentation site (linked from the [README](../README.md)).
+
 # Ymir node taxonomy design (Revision 2)
 
 Revised against the node inventory of 2026-07-14. Revision 1 was written without

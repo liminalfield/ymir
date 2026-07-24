@@ -1,3 +1,5 @@
+> **Design record, not user documentation.** A design or decision note captured at a point in time; it may lag the current build. To learn how to use Ymir, see the documentation site (linked from the [README](../README.md)).
+
 # Design note: the noise generator family
 
 The noise generators are the procedural *material* of a terrain graph: no-input

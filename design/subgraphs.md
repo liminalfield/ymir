@@ -1,3 +1,5 @@
+> **Design record, not user documentation.** A design or decision note captured at a point in time; it may lag the current build. To learn how to use Ymir, see the documentation site (linked from the [README](../README.md)).
+
 # Design note: subgraphs (container nodes)
 
 Status: **design agreed, not yet built (#106, mechanism from #79).** This supersedes the
