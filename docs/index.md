@@ -1,4 +1,5 @@
 ---
+title: Ymir
 status: draft
 ---
 
@@ -14,10 +15,10 @@ build order.
 
 ## Get started
 
-- **[Install](install.md)** — build Ymir from source.
-- **[Tutorial](tutorial/index.md)** — make your first terrain, start to finish.
-- **[Reference](reference/index.md)** — every node, world setting, export format, and keyboard shortcut.
-- **[Concepts](concepts/index.md)** — the ideas behind the tool: fields, masks, erosion, preview versus build.
+- **[Install](install.md)**. Build Ymir from source.
+- **[Tutorial](tutorial/index.md)**. Make your first terrain, start to finish.
+- **[Reference](reference/index.md)**. Every node, world setting, export format, and keyboard shortcut.
+- **[Concepts](concepts/index.md)**. The ideas behind the tool: fields, masks, erosion, preview versus build.
 
 Ymir is free software under the GPL-3.0. The source lives at
 [github.com/liminalfield/ymir](https://github.com/liminalfield/ymir).

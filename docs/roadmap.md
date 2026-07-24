@@ -1,11 +1,9 @@
 ---
+title: Roadmap
 status: draft
 ---
 
 # Roadmap
-
-!!! warning "Draft"
-    This page is a draft.
 
 Planned and in-progress work is tracked in the repository's
 [issues and project board](https://github.com/liminalfield/ymir/issues). This page will summarise
