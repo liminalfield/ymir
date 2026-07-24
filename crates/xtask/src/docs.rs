@@ -89,15 +89,21 @@ pub(crate) fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
         }
     }
 
-    let docs = match json_path {
-        Some(path) => load_from_file(&path)?,
-        None => load_from_cli()?,
-    };
+    let docs = load(json_path.as_deref())?;
     let root = workspace_root();
     let written = generate(&docs, &root)?;
     report(&docs);
     println!("wrote {written} node pages + index to docs/reference/nodes/");
     Ok(())
+}
+
+/// Loads the reference document: from a saved JSON file when a path is given, otherwise by running
+/// the CLI. Shared by `docs-gen` and `docs-lint`.
+pub(crate) fn load(json_path: Option<&Path>) -> Result<Docs, Box<dyn Error>> {
+    match json_path {
+        Some(path) => load_from_file(path),
+        None => load_from_cli(),
+    }
 }
 
 /// Renders every node page and the category index into `docs/reference/nodes/`, merging each node's
@@ -184,7 +190,7 @@ fn load_from_cli() -> Result<Docs, Box<dyn Error>> {
 /// The workspace root, derived from this crate's manifest location so the task works regardless of
 /// the shell's current directory. `CARGO_MANIFEST_DIR` is `<root>/crates/xtask` at build time; the
 /// two `..` components resolve when the path is used to read or write files.
-fn workspace_root() -> PathBuf {
+pub(crate) fn workspace_root() -> PathBuf {
     PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
 }
 
