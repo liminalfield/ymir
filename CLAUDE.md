@@ -62,6 +62,25 @@ commit time; the conceptual shortcuts are caught by the per-step review and the 
 A deliberate, justified exception is annotated inline with `// shortcut-ok: <reason>`,
 which should be rare and visible in review.
 
+## Documentation is part of done
+
+A change that alters user-visible behavior is not done until its documentation is updated in
+the same step. For a node, that is its prose fragment in `crates/ymir-nodes/docs/<type_id>.md`:
+the mechanical reference (ports, parameters, defaults, layer contract) regenerates from the
+`NodeSpec` via `cargo xtask docs-gen`, so it needs no hand edit, but the Purpose and behaviour
+prose does. For a new capability, that is the relevant how-to or concepts page under `docs/`.
+The writing follows `DOCS.md`.
+
+The keyboard and interaction reference (`docs/reference/shortcuts.md`) is the exception that
+needs naming, because it is hand-maintained and no lint can guard it. The bindings live in code
+(the viewport camera in `OrbitCamera`, the GUI's `main.rs`, canvas click handling), and nothing
+mechanically ties them to the page. A change to input handling, a new shortcut, or a changed one
+is not done until that page reflects it.
+
+The docs lint (`cargo xtask docs-lint`, run in CI) catches missing fragments, broken links, and
+generated-page drift, but it cannot tell whether a claim is true or whether a shortcut is
+documented at all. Those are on you.
+
 ## Core philosophy
 
 Everything is data. One universal type flows on every edge of the node graph, so the
