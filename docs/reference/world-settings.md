@@ -29,4 +29,4 @@ A display control for the 3D viewport. It exaggerates vertical relief so subtle 
 
 ## Resolution
 
-Two square resolutions travel with the project: the resolution the interactive preview evaluates at, and the resolution a full build evaluates at. Iterative simulations such as erosion are resolution-dependent, so a preview is a representative approximation of the build. See [Preview and build](../concepts/index.md).
+Two square resolutions travel with the project: the resolution the interactive preview evaluates at, and the resolution a full build evaluates at. Iterative simulations such as erosion are resolution-dependent, so a preview is a representative approximation of the build. See [Preview and build](../concepts/preview-and-build.md).
