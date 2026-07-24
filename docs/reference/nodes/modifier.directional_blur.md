@@ -13,7 +13,7 @@ Smooths the height layer along (or across) a guide direction, not isotropically:
 
 ## Purpose
 
-*Not yet written.*
+Smooths along a direction instead of evenly, guided by the slope or a flow field. Reach for it to comb valleys down their fall line, or to soften a cross-profile while keeping the crest crisp.
 
 ## Inputs
 
@@ -36,3 +36,7 @@ Smooths the height layer along (or across) a guide direction, not isotropically:
 ## Layer contract
 
 Honours a mask on its input, applying everywhere the mask is absent.
+
+## Behaviour
+
+The optional guide input steers the direction; with none, it follows the terrain's own slope. Along the guide it combs and smears downslope; across it softens the cross-profile while leaving the guide crest sharp.
