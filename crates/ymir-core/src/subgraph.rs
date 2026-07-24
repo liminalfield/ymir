@@ -75,6 +75,8 @@ impl Operator for InputNode {
             inputs: Vec::new(),
             outputs: vec![PortSpec::new("out")],
             params: Vec::new(),
+            emitted_layers: Vec::new(),
+            mask_aware: false,
         }
     }
 
@@ -104,6 +106,8 @@ impl Operator for OutputNode {
             inputs: vec![PortSpec::new("in")],
             outputs: Vec::new(),
             params: Vec::new(),
+            emitted_layers: Vec::new(),
+            mask_aware: false,
         }
     }
 
@@ -186,6 +190,8 @@ impl Operator for SubgraphNode {
                 },
                 ParamValue::Int(0),
             )],
+            emitted_layers: Vec::new(),
+            mask_aware: false,
         }
     }
 
@@ -326,6 +332,8 @@ mod tests {
                 inputs: Vec::new(),
                 outputs: vec![PortSpec::new("out")],
                 params: Vec::new(),
+                emitted_layers: Vec::new(),
+                mask_aware: false,
             }
         }
 
@@ -352,6 +360,8 @@ mod tests {
                 inputs: Vec::new(),
                 outputs: vec![PortSpec::new("out")],
                 params: Vec::new(),
+                emitted_layers: Vec::new(),
+                mask_aware: false,
             }
         }
 

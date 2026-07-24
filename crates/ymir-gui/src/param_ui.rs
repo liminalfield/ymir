@@ -259,33 +259,33 @@ fn from_t(t: f64, min: f64, max: f64, log: bool) -> f64 {
     }
 }
 
-/// A parameter row's label: muted, in a friendly Title-Case form. Shared with the frame inspector
-/// so its rows read in the same grammar as the node parameters.
-pub(crate) fn param_label(ui: &mut egui::Ui, name: &str) {
+/// A node parameter's row label: the resolved display name in muted mono, with the parameter's
+/// one-line description shown as a hover tooltip when the catalog has one. Label and description
+/// come from [`ymir_nodes::resolve_param`], so the inspector, the tooltip, and the generated
+/// reference all read the same strings.
+pub(crate) fn param_label(ui: &mut egui::Ui, type_id: &str, name: &str) {
+    let resolved = ymir_nodes::resolve_param(type_id, name);
+    let resp = render_label(ui, &resolved.label);
+    if let Some(desc) = resolved.description {
+        resp.on_hover_text(desc);
+    }
+}
+
+/// Renders an already-display label (the frame and colour-picker rows) in the same muted mono
+/// style as a parameter label, without catalog resolution or a tooltip.
+pub(crate) fn plain_label(ui: &mut egui::Ui, text: &str) {
+    render_label(ui, text);
+}
+
+/// Draws a row label in the shared muted-mono style and returns its response, so a caller can
+/// attach a hover tooltip.
+fn render_label(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.label(
-        egui::RichText::new(prettify_param_name(name))
+        egui::RichText::new(text)
             .family(egui::FontFamily::Monospace)
             .size(12.0)
             .color(crate::theme::TEXT_SECONDARY),
-    );
-}
-
-/// Turns a snake_case parameter id into a friendly display label: underscores become spaces and
-/// each word is capitalised (`erode_inland_basins` -> `Erode Inland Basins`), matching the
-/// Title-Case of node names. A pure presentation transform; the underlying param id is unchanged,
-/// so lookups, hashing, and save/load still use the raw name.
-fn prettify_param_name(name: &str) -> String {
-    name.split('_')
-        .filter(|word| !word.is_empty())
-        .map(|word| {
-            let mut chars = word.chars();
-            match chars.next() {
-                Some(first) => first.to_uppercase().chain(chars).collect::<String>(),
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    )
 }
 
 /// A 34x18 pill toggle: an accent track with the knob right when on, a raised track with the knob
@@ -383,6 +383,7 @@ fn stepper(ui: &mut egui::Ui, value: &mut i64, min: i64, max: i64) -> bool {
 /// read-only display, so a mismatch is shown, never edited wrongly.
 pub(crate) fn edit(
     ui: &mut egui::Ui,
+    type_id: &str,
     spec: &ParamSpec,
     current: &ParamValue,
     histogram: Option<&[f32]>,
@@ -409,7 +410,7 @@ pub(crate) fn edit(
             let speed = (max - min) * 0.002;
             let mut result = None;
             ui.horizontal(|ui| {
-                param_label(ui, name);
+                param_label(ui, type_id, name);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let value = ui
                         .add_sized(
@@ -451,7 +452,7 @@ pub(crate) fn edit(
             let degrees = matches!(unit, Unit::Degrees);
             let mut result = None;
             ui.horizontal(|ui| {
-                param_label(ui, name);
+                param_label(ui, type_id, name);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // DragValue supplies display, click-to-type, and formatting; its own drag is
                     // made inert (speed 0) so the infinite scrub below is the only thing that moves
@@ -497,7 +498,7 @@ pub(crate) fn edit(
             let mut x = *v;
             let mut result = None;
             ui.horizontal(|ui| {
-                param_label(ui, name);
+                param_label(ui, type_id, name);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if stepper(ui, &mut x, min, max) {
                         result = Some(ParamValue::Int(x));
@@ -510,7 +511,7 @@ pub(crate) fn edit(
             let mut x = *v;
             let mut result = None;
             ui.horizontal(|ui| {
-                param_label(ui, name);
+                param_label(ui, type_id, name);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if toggle(ui, x).clicked() {
                         x = !x;
@@ -524,7 +525,7 @@ pub(crate) fn edit(
             let mut x = v.clone();
             let mut result = None;
             ui.horizontal(|ui| {
-                param_label(ui, name);
+                param_label(ui, type_id, name);
                 if ui
                     .add(
                         egui::TextEdit::singleline(&mut x)
@@ -546,7 +547,7 @@ pub(crate) fn edit(
             let mut x = v.clone();
             let mut result = None;
             ui.horizontal(|ui| {
-                param_label(ui, name);
+                param_label(ui, type_id, name);
                 if ui.button("Browse\u{2026}").clicked()
                     && let Some(path) = rfd::FileDialog::new()
                         .add_filter("Image", &["png"])
@@ -574,7 +575,7 @@ pub(crate) fn edit(
             let mut selected = v.clone();
             let mut result = None;
             ui.horizontal(|ui| {
-                param_label(ui, name);
+                param_label(ui, type_id, name);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let button = ui.button(format!(
                         "{}   {}",
@@ -652,18 +653,6 @@ mod tests {
             glyph_h, field_h,
             "the reset glyph must be the same height as the value field, or the row grows when it appears"
         );
-    }
-
-    #[test]
-    fn param_names_display_as_friendly_title_case() {
-        assert_eq!(prettify_param_name("width"), "Width");
-        assert_eq!(
-            prettify_param_name("erode_inland_basins"),
-            "Erode Inland Basins"
-        );
-        assert_eq!(prettify_param_name("world_extent"), "World Extent");
-        // Stray underscores do not leave double spaces or empty words.
-        assert_eq!(prettify_param_name("a__b_"), "A B");
     }
 
     #[test]

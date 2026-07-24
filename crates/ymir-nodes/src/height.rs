@@ -60,6 +60,8 @@ impl Operator for Height {
                 ),
                 crate::selector::output_param(),
             ],
+            emitted_layers: Vec::new(),
+            mask_aware: false,
         }
     }
 

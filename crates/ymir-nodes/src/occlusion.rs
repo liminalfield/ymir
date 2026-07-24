@@ -58,6 +58,8 @@ impl Operator for Occlusion {
                     ParamValue::Int(DEFAULT_RAYS),
                 ),
             ],
+            emitted_layers: Vec::new(),
+            mask_aware: false,
         }
     }
 

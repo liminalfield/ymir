@@ -52,6 +52,8 @@ impl Operator for Blur {
                 )
                 .with_unit(Unit::Meters),
             ],
+            emitted_layers: Vec::new(),
+            mask_aware: true,
         }
     }
 

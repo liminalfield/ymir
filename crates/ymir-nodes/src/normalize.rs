@@ -33,6 +33,8 @@ impl Operator for Normalize {
             inputs: vec![PortSpec::new("in")],
             outputs: vec![PortSpec::new("out")],
             params: vec![],
+            emitted_layers: Vec::new(),
+            mask_aware: true,
         }
     }
 

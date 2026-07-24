@@ -12,7 +12,15 @@
 /// case, derived from a `&'static` `type_id`) yields a `'static` string.
 #[must_use]
 pub fn tr(key: &str) -> &str {
-    match key {
+    lookup(key).unwrap_or(key)
+}
+
+/// Looks a display key up in the catalog, returning `None` when it is absent. This is the
+/// same table [`tr`] uses; the difference is that a miss is reported rather than folded
+/// into the key-echo, so [`resolve_param`] can distinguish an authored string from the
+/// prettified fallback and fall through the resolution tiers.
+fn lookup(key: &str) -> Option<&'static str> {
+    Some(match key {
         // Categories.
         "category-generator" => "Generators",
         "category-selector" => "Selectors",
@@ -352,8 +360,155 @@ pub fn tr(key: &str) -> &str {
              elevation in meters (height x world height) so the file is self-describing."
         }
 
-        // Unknown: echo the key so the gap is visible.
-        other => other,
+        // ---- Parameters -------------------------------------------------------------
+        // Resolved through `resolve_param(type_id, name)`: a node-specific
+        // `param-<type_id>-<name>` override wins, else a shared `param-<name>`, else the
+        // prettified id. A shared entry is used only for a parameter whose meaning is the
+        // same in every node that carries it; a contextual or enum parameter takes an
+        // override. Each label has a matching `-desc` one-liner that serves both the
+        // inspector tooltip and the reference table.
+
+        // Shared: meaning-invariant across every node that uses them.
+        "param-frequency" => "Frequency",
+        "param-frequency-desc" => {
+            "Sets the feature size of the noise; higher values pack in smaller, denser features."
+        }
+        "param-octaves" => "Octaves",
+        "param-octaves-desc" => {
+            "The number of noise layers summed together; more octaves add finer detail."
+        }
+        "param-lacunarity" => "Lacunarity",
+        "param-lacunarity-desc" => {
+            "How much finer each octave is than the one before it; higher values widen the gap \
+             between coarse and fine detail."
+        }
+        "param-gain" => "Gain",
+        "param-gain-desc" => {
+            "How much each finer octave contributes; higher values make the fine detail rougher \
+             and more pronounced."
+        }
+        "param-seed" => "Seed",
+        "param-seed-desc" => {
+            "The random seed; changing it regenerates a different variation of the same pattern."
+        }
+        "param-offset_x" => "Offset X",
+        "param-offset_x-desc" => {
+            "Pans the noise pattern along the X axis without changing its shape."
+        }
+        "param-offset_y" => "Offset Y",
+        "param-offset_y-desc" => {
+            "Pans the noise pattern along the Y axis without changing its shape."
+        }
+
+        // Enum parameters: always node-specific, because the choice they present differs by node.
+        "param-modifier.blend-mode" => "Mode",
+        "param-modifier.blend-mode-desc" => "How the overlay is combined with the base field.",
+        "param-modifier.curvature-mode" => "Mode",
+        "param-modifier.curvature-mode-desc" => {
+            "Which ground to select: convex (ridges, outcrops) or concave (valleys, hollows)."
+        }
+        "param-modifier.terrace-range" => "Range",
+        "param-modifier.terrace-range-desc" => {
+            "Whether the bands span the terrain's actual height (Auto) or sit at fixed absolute \
+             elevations (Fixed)."
+        }
+        "param-modifier.histogram_scan-range" => "Range",
+        "param-modifier.histogram_scan-range-desc" => {
+            "Whether the window scans the input's actual range (Auto) or the fixed [0, 1] range \
+             (Fixed)."
+        }
+        "param-modifier.distance-side" => "Side",
+        "param-modifier.distance-side-desc" => {
+            "Which side of the contour the band covers: both, only above, or only below."
+        }
+        "param-modifier.directional_blur-direction" => "Direction",
+        "param-modifier.directional_blur-direction-desc" => {
+            "Whether smoothing runs along the guide direction or across it."
+        }
+        "param-generator.import-edge" => "Edge",
+        "param-generator.import-edge-desc" => {
+            "How the field is filled where the placement maps outside the source image."
+        }
+        "param-endpoint.export_exr-height_units" => "Height Units",
+        "param-endpoint.export_exr-height_units-desc" => {
+            "Whether height is written as the normalized [0, 1] value or scaled to absolute metres \
+             by World Height."
+        }
+
+        // Unknown: no entry. `tr` echoes the key; `resolve_param` falls through to prettify.
+        _ => return None,
+    })
+}
+
+/// Turns a `snake_case` parameter id into a friendly Title-Case label (`offset_x` ->
+/// `Offset X`): underscores become spaces and each word is capitalised. The last-resort
+/// label when the catalog has no entry for a parameter. A pure presentation transform, so
+/// the underlying id used for lookup, hashing, and save/load is unchanged.
+#[must_use]
+pub fn prettify_param(name: &str) -> String {
+    name.split('_')
+        .filter(|word| !word.is_empty())
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().chain(chars).collect::<String>(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Which tier of the parameter-string catalog produced a resolved label.
+///
+/// Reported so a documentation lint can flag a parameter that resolved to the prettified
+/// fallback (a missing catalog entry) rather than an authored string.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParamSource {
+    /// A node-specific `param-<type_id>-<name>` entry.
+    Override,
+    /// A shared `param-<name>` entry, permitted only for meaning-invariant parameters.
+    Shared,
+    /// No catalog entry: the label is the prettified id and there is no description.
+    Prettified,
+}
+
+/// A parameter's resolved display strings and the catalog tier that produced them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedParam {
+    /// The display label.
+    pub label: String,
+    /// The one-line description, for the inspector tooltip and the reference table. `None`
+    /// when no catalog entry exists (the prettified fallback carries no prose).
+    pub description: Option<String>,
+    /// Which catalog tier produced the label.
+    pub source: ParamSource,
+}
+
+/// Resolves a parameter's display strings by the generic-with-override rule: a node-specific
+/// `param-<type_id>-<name>` wins, else a shared `param-<name>`, else the prettified id. The
+/// description is read from the same tier as the label (its `-desc` sibling). Reports the tier
+/// so a documentation lint can catch a parameter that fell through to the prettified fallback.
+#[must_use]
+pub fn resolve_param(type_id: &str, name: &str) -> ResolvedParam {
+    if let Some(label) = lookup(&format!("param-{type_id}-{name}")) {
+        return ResolvedParam {
+            label: label.to_string(),
+            description: lookup(&format!("param-{type_id}-{name}-desc")).map(str::to_string),
+            source: ParamSource::Override,
+        };
+    }
+    if let Some(label) = lookup(&format!("param-{name}")) {
+        return ResolvedParam {
+            label: label.to_string(),
+            description: lookup(&format!("param-{name}-desc")).map(str::to_string),
+            source: ParamSource::Shared,
+        };
+    }
+    ResolvedParam {
+        label: prettify_param(name),
+        description: None,
+        source: ParamSource::Prettified,
     }
 }
 
@@ -368,6 +523,53 @@ mod tests {
         assert_eq!(tr("category-geology"), "Geology");
         // Unknown key echoes itself, never panics.
         assert_eq!(tr("node-does.not.exist"), "node-does.not.exist");
+    }
+
+    #[test]
+    fn resolve_param_prefers_override_then_shared_then_prettify() {
+        // Override: a node-specific enum parameter resolves to its own entry.
+        let mode = resolve_param("modifier.blend", "mode");
+        assert_eq!(mode.source, ParamSource::Override);
+        assert_eq!(mode.label, "Mode");
+        assert!(mode.description.is_some());
+
+        // Shared: a meaning-invariant parameter resolves to the shared entry on any node.
+        let freq = resolve_param("generator.fbm", "frequency");
+        assert_eq!(freq.source, ParamSource::Shared);
+        assert_eq!(freq.label, "Frequency");
+        assert!(freq.description.is_some());
+
+        // Prettified: no catalog entry, so the label is the prettified id and there is no prose.
+        let opacity = resolve_param("modifier.blend", "opacity");
+        assert_eq!(opacity.source, ParamSource::Prettified);
+        assert_eq!(opacity.label, "Opacity");
+        assert!(opacity.description.is_none());
+    }
+
+    #[test]
+    fn a_contextual_enum_is_never_shared() {
+        // `mode` means different things in Blend and Curvature, so it must not have a shared
+        // entry: each node overrides it, and both resolve at the override tier.
+        assert!(
+            lookup("param-mode").is_none(),
+            "`mode` must never be shared"
+        );
+        assert_eq!(
+            resolve_param("modifier.curvature", "mode").source,
+            ParamSource::Override
+        );
+        assert_eq!(
+            resolve_param("modifier.blend", "mode").source,
+            ParamSource::Override
+        );
+    }
+
+    #[test]
+    fn prettify_param_titlecases_snake_case() {
+        assert_eq!(prettify_param("offset_x"), "Offset X");
+        assert_eq!(prettify_param("world_extent"), "World Extent");
+        // Empty segments (leading, trailing, doubled underscores) are dropped.
+        assert_eq!(prettify_param("a__b_"), "A B");
     }
 
     #[test]

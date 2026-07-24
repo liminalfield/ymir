@@ -78,6 +78,8 @@ impl Operator for Slope {
                 .with_unit(Unit::Degrees),
                 crate::selector::output_param(),
             ],
+            emitted_layers: Vec::new(),
+            mask_aware: false,
         }
     }
 

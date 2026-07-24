@@ -69,6 +69,8 @@ impl Operator for Radial {
                     ParamValue::Float(0.5),
                 ),
             ],
+            emitted_layers: Vec::new(),
+            mask_aware: false,
         }
     }
 

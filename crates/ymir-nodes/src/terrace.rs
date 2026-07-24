@@ -72,6 +72,8 @@ impl Operator for Terrace {
                     ParamValue::Text(RANGE_AUTO.to_string()),
                 ),
             ],
+            emitted_layers: Vec::new(),
+            mask_aware: true,
         }
     }
 

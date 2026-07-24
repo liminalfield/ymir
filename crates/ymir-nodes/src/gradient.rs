@@ -81,6 +81,8 @@ impl Operator for Gradient {
                     ParamValue::Float(0.5),
                 ),
             ],
+            emitted_layers: Vec::new(),
+            mask_aware: false,
         }
     }
 

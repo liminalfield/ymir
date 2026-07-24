@@ -335,6 +335,8 @@ impl Operator for Distance {
                     ParamValue::Text(SIDE_BOTH.to_string()),
                 ),
             ],
+            emitted_layers: Vec::new(),
+            mask_aware: false,
         }
     }
 

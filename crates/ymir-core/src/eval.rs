@@ -793,6 +793,8 @@ mod tests {
                 inputs: Vec::new(),
                 outputs: vec![PortSpec::new("out")],
                 params: Vec::new(),
+                emitted_layers: Vec::new(),
+                mask_aware: false,
             }
         }
 
@@ -822,6 +824,8 @@ mod tests {
                 inputs: vec![PortSpec::new("in")],
                 outputs: vec![PortSpec::new("out")],
                 params: Vec::new(),
+                emitted_layers: Vec::new(),
+                mask_aware: false,
             }
         }
 
@@ -854,6 +858,8 @@ mod tests {
                 inputs: vec![PortSpec::new("in")],
                 outputs: Vec::new(),
                 params: Vec::new(),
+                emitted_layers: Vec::new(),
+                mask_aware: false,
             }
         }
 
@@ -879,6 +885,8 @@ mod tests {
                 inputs: vec![PortSpec::new("a"), PortSpec::new("b")],
                 outputs: vec![PortSpec::new("out")],
                 params: Vec::new(),
+                emitted_layers: Vec::new(),
+                mask_aware: false,
             }
         }
 
@@ -910,6 +918,8 @@ mod tests {
                 inputs: Vec::new(),
                 outputs: vec![PortSpec::new("a"), PortSpec::new("b")],
                 params: Vec::new(),
+                emitted_layers: Vec::new(),
+                mask_aware: false,
             }
         }
 
@@ -940,6 +950,8 @@ mod tests {
                 inputs: vec![PortSpec::new("in"), PortSpec::optional("extra")],
                 outputs: vec![PortSpec::new("out")],
                 params: Vec::new(),
+                emitted_layers: Vec::new(),
+                mask_aware: false,
             }
         }
 
@@ -973,6 +985,8 @@ mod tests {
                 inputs: Vec::new(),
                 outputs: vec![PortSpec::new("out")],
                 params: Vec::new(),
+                emitted_layers: Vec::new(),
+                mask_aware: false,
             }
         }
 
@@ -1000,6 +1014,8 @@ mod tests {
                 inputs: Vec::new(),
                 outputs: vec![PortSpec::new("out")],
                 params: Vec::new(),
+                emitted_layers: Vec::new(),
+                mask_aware: false,
             }
         }
 
@@ -1034,6 +1050,8 @@ mod tests {
                 inputs: vec![PortSpec::new("in")],
                 outputs: vec![PortSpec::new("out")],
                 params: Vec::new(),
+                emitted_layers: Vec::new(),
+                mask_aware: false,
             }
         }
 

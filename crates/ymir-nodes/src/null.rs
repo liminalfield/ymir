@@ -25,6 +25,8 @@ impl Operator for Null {
             inputs: vec![PortSpec::new("in")],
             outputs: vec![PortSpec::new("out")],
             params: Vec::new(),
+            emitted_layers: Vec::new(),
+            mask_aware: false,
         }
     }
 

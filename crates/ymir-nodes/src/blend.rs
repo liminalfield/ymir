@@ -80,6 +80,8 @@ impl Operator for Blend {
                     ParamValue::Float(1.0),
                 ),
             ],
+            emitted_layers: Vec::new(),
+            mask_aware: true,
         }
     }
 

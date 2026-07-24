@@ -63,6 +63,8 @@ impl Operator for Expression {
                 ParamKind::Text,
                 ParamValue::Text(DEFAULT_EXPR.to_string()),
             )],
+            emitted_layers: Vec::new(),
+            mask_aware: false,
         }
     }
 

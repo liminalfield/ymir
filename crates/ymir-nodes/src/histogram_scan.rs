@@ -78,6 +78,8 @@ impl Operator for HistogramScan {
                     ParamValue::Text(RANGE_AUTO.to_string()),
                 ),
             ],
+            emitted_layers: Vec::new(),
+            mask_aware: false,
         }
     }
 
