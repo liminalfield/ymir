@@ -12,3 +12,4 @@ What each part of Ymir does. Complete and dry.
 - **[Export formats](export-formats.md)**. The three heightmap outputs: 16-bit PNG, raw R16, and 32-bit EXR.
 - **[Project format](project-format.md)**. The `.ymir` save file.
 - **[Command line](cli.md)**. The headless `ymir-cli` runner.
+- **[Keyboard and mouse](shortcuts.md)**. Canvas, viewport, and painting bindings.
