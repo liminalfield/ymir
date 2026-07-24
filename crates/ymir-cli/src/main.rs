@@ -14,6 +14,8 @@ use ymir_core::{EvalCache, EvalRequest, Graph, ParamValue, Params, Region};
 // ymir-nodes, and the linker can drop its registrations entirely.
 use ymir_nodes as _;
 
+mod docs;
+
 fn make_op(type_id: &str) -> Result<Box<dyn ymir_core::Operator>, Box<dyn Error>> {
     make(type_id).ok_or_else(|| format!("operator {type_id:?} is not registered").into())
 }
@@ -27,6 +29,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     {
         println!("ymir {}", ymir_build_info::version_string());
         return Ok(());
+    }
+
+    // `docs [--format json]`: emit the node reference as JSON from the running binary and exit,
+    // before any logging or render work.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("docs") {
+        return docs::run(&args[1..]);
     }
 
     // Headless diagnostics go to stderr (a toolchain captures it); load degradations are logged

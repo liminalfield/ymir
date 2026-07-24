@@ -21,3 +21,6 @@ log = "0.4"
 # Depended on for its operator registrations. The binary must also anchor it in
 # code (`use ymir_nodes as _;`), or the linker can drop the registrations.
 ymir-nodes = { path = "../ymir-nodes" }
+# Serializes the registered node specs to JSON for the docs generator (the `docs` subcommand).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -4088,6 +4088,8 @@ name = "ymir-cli"
 version = "0.2.0"
 dependencies = [
  "log",
+ "serde",
+ "serde_json",
  "ymir-build-info",
  "ymir-core",
  "ymir-nodes",
