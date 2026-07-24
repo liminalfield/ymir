@@ -141,6 +141,8 @@ impl Operator for StreamErosion {
                     ParamValue::Float(DEFAULT_FILL),
                 ),
             ],
+            emitted_layers: vec![layers::FLOW, layers::WEAR, layers::DEPOSITION],
+            mask_aware: true,
         }
     }
 

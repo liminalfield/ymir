@@ -90,6 +90,8 @@ impl Operator for DirectionalBlur {
                     ParamValue::Text(DIR_ALONG.to_string()),
                 ),
             ],
+            emitted_layers: Vec::new(),
+            mask_aware: true,
         }
     }
 

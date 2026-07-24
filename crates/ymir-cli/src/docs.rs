@@ -18,7 +18,8 @@ use ymir_nodes::ParamSource;
 /// Version of the docs JSON shape. Bump when the schema changes so a consumer can guard on it.
 ///
 /// v2 adds each parameter's resolved `label`, `description`, and `source` tier.
-const SCHEMA_VERSION: u32 = 2;
+/// v3 adds each node's `emitted_layers` and `mask_aware`.
+const SCHEMA_VERSION: u32 = 3;
 
 /// Handles `docs [--format json]`: prints the node reference as pretty JSON to stdout, then exits.
 /// Only `json` is supported for now; the flag exists so other formats can be added without changing
@@ -68,6 +69,10 @@ struct Node {
     inputs: Vec<Port>,
     outputs: Vec<Port>,
     params: Vec<Param>,
+    /// Named byproduct data the node emits beyond height (`wear`, `flow`, ...); empty for most.
+    emitted_layers: Vec<String>,
+    /// Whether the node scopes its effect by a mask.
+    mask_aware: bool,
 }
 
 /// One input or output port.
@@ -135,6 +140,12 @@ fn node(spec: &NodeSpec) -> Node {
         inputs: spec.inputs.iter().map(port).collect(),
         outputs: spec.outputs.iter().map(port).collect(),
         params: spec.params.iter().map(|p| param(spec.type_id, p)).collect(),
+        emitted_layers: spec
+            .emitted_layers
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect(),
+        mask_aware: spec.mask_aware,
     }
 }
 
@@ -302,5 +313,26 @@ mod tests {
             .find(|p| p.name == "radius")
             .expect("blur has a radius param");
         assert_eq!(radius.unit, Some("meters"));
+    }
+
+    #[test]
+    fn a_node_reports_its_emitted_layers_and_mask_awareness() {
+        let docs = build();
+        // Thermal erosion emits scree byproducts and is scoped by a mask.
+        let thermal = docs
+            .nodes
+            .iter()
+            .find(|n| n.type_id == "modifier.thermal_erosion")
+            .expect("modifier.thermal_erosion is registered");
+        assert_eq!(thermal.emitted_layers, ["wear", "debris"]);
+        assert!(thermal.mask_aware);
+        // A plain generator emits only height and honours no mask.
+        let fbm = docs
+            .nodes
+            .iter()
+            .find(|n| n.type_id == "generator.fbm")
+            .expect("generator.fbm is registered");
+        assert!(fbm.emitted_layers.is_empty());
+        assert!(!fbm.mask_aware);
     }
 }

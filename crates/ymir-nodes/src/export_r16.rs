@@ -40,6 +40,8 @@ impl Operator for ExportR16 {
                 // uses the fixed [0, 1] mapping: clamps, but stable and range-independent.
                 ParamSpec::new("auto_range", ParamKind::Bool, ParamValue::Bool(true)),
             ],
+            emitted_layers: Vec::new(),
+            mask_aware: false,
         }
     }
 

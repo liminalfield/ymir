@@ -77,6 +77,8 @@ impl Operator for ThermalErosion {
                     ParamValue::Int(DEFAULT_ITERATIONS),
                 ),
             ],
+            emitted_layers: vec![layers::WEAR, layers::DEBRIS],
+            mask_aware: true,
         }
     }
 

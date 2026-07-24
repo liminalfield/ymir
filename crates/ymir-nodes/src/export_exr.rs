@@ -51,6 +51,8 @@ impl Operator for ExportExr {
                     ParamValue::Text(UNITS_NORMALIZED.into()),
                 ),
             ],
+            emitted_layers: Vec::new(),
+            mask_aware: false,
         }
     }
 

@@ -81,6 +81,8 @@ impl Operator for Aspect {
                 ),
                 crate::selector::output_param(),
             ],
+            emitted_layers: Vec::new(),
+            mask_aware: false,
         }
     }
 

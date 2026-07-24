@@ -49,6 +49,8 @@ impl Operator for Paint {
                 ParamKind::Strokes,
                 ParamValue::Strokes(Strokes::new()),
             )],
+            emitted_layers: Vec::new(),
+            mask_aware: false,
         }
     }
 

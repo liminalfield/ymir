@@ -37,6 +37,8 @@ impl Operator for Constant {
                 ParamKind::Float { min: 0.0, max: 1.0 },
                 ParamValue::Float(DEFAULT_VALUE),
             )],
+            emitted_layers: Vec::new(),
+            mask_aware: false,
         }
     }
 

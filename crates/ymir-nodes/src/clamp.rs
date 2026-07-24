@@ -54,6 +54,8 @@ impl Operator for Clamp {
                     ParamValue::Float(DEFAULT_MAX),
                 ),
             ],
+            emitted_layers: Vec::new(),
+            mask_aware: true,
         }
     }
 

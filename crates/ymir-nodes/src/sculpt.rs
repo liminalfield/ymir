@@ -49,6 +49,8 @@ impl Operator for Sculpt {
                 ParamKind::Strokes,
                 ParamValue::Strokes(Strokes::new()),
             )],
+            emitted_layers: Vec::new(),
+            mask_aware: false,
         }
     }
 
