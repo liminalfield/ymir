@@ -67,5 +67,6 @@ nav:
       - Export formats: reference/export-formats.md
       - Project format: reference/project-format.md
       - Command line: reference/cli.md
+      - Keyboard and mouse: reference/shortcuts.md
   - Concepts: concepts/index.md
   - Roadmap: roadmap.md
