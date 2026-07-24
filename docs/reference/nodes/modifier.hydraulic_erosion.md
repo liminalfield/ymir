@@ -7,13 +7,13 @@ status: draft
 
 # Hydraulic Erosion
 
-`modifier.hydraulic_erosion` · Geology · Mask-aware
+`modifier.hydraulic_erosion` · Geology · Mask-aware · Resolution-dependent
 
 Water carving the terrain, simulated as rain droplets that run downhill, pick up and drop sediment, and cut rills while depositing fans and filling hollows. The deposition is what reads as weathered. Taps wear, deposition, and flow.
 
 ## Purpose
 
-*Not yet written.*
+Water carving the terrain, run as rain droplets that cut rills, drop sediment into fans, and fill hollows. Reach for it for weathered, water-worked slopes and the settled look that deposition gives raw ground.
 
 ## Inputs
 
@@ -44,3 +44,12 @@ Water carving the terrain, simulated as rain droplets that run downhill, pick up
 Honours a mask on its input, applying everywhere the mask is absent.
 
 Emits `wear`, `deposition`, `flow` alongside the height layer.
+
+## Behaviour
+
+Hydraulic erosion is an iterative simulation, so it is resolution-dependent: the preview is representative of the build, not identical. It taps wear, deposition, and flow as layers for downstream nodes, and reads a mask to hold the effect to the ground you choose.
+
+## See also
+
+- [Thermal Erosion](modifier.thermal_erosion.md)
+- [Stream Erosion](modifier.stream_erosion.md)

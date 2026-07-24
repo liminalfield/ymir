@@ -13,7 +13,7 @@ Passes the field through unchanged: a point to view, reroute, or anchor wiring.
 
 ## Purpose
 
-*Not yet written.*
+Passes the field through unchanged. Reach for it as a point to view, a place to reroute wiring, or an anchor that keeps a graph tidy.
 
 ## Inputs
 
