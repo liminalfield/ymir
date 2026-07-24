@@ -105,7 +105,7 @@ pub use ring::Ring;
 pub use sculpt::Sculpt;
 pub use slope::Slope;
 pub use stream::StreamErosion;
-pub use strings::tr;
+pub use strings::{ParamSource, ResolvedParam, prettify_param, resolve_param, tr};
 pub use terrace::Terrace;
 pub use thermal::ThermalErosion;
 pub use warp::Warp;
