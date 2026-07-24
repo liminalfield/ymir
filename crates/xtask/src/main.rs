@@ -8,6 +8,7 @@ use std::process::ExitCode;
 
 mod docs;
 mod fragment;
+mod lint;
 mod render;
 
 fn main() -> ExitCode {
@@ -24,7 +25,8 @@ fn main() -> ExitCode {
 fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     match args.first().map(String::as_str) {
         Some("docs-gen") => docs::run(&args[1..]),
-        Some(other) => Err(format!("unknown task {other:?} (tasks: docs-gen)").into()),
-        None => Err("usage: cargo xtask <task> (tasks: docs-gen)".into()),
+        Some("docs-lint") => lint::run(&args[1..]),
+        Some(other) => Err(format!("unknown task {other:?} (tasks: docs-gen, docs-lint)").into()),
+        None => Err("usage: cargo xtask <task> (tasks: docs-gen, docs-lint)".into()),
     }
 }
