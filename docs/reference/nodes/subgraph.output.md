@@ -13,7 +13,7 @@ Marks a field a subgraph hands out: each one becomes an output port on the conta
 
 ## Purpose
 
-*Not yet written.*
+Marks a field a subgraph hands out. Placed inside a subgraph, each Output node becomes an output port on the containing Subgraph node.
 
 ## Inputs
 

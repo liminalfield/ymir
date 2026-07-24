@@ -10,14 +10,14 @@ Every node, grouped by category.
 
 ## Adjust
 
-- [Clamp](modifier.clamp.md). Hard-clamps the height layer into [min, max]: caps overshoots, floors basins, or bounds a value before it feeds something range-sensitive. Mask-aware.
+- [Clamp](modifier.clamp.md). Hard-clamps the height layer into [min, max]: caps overshoots, floors basins, or bounds a value.
 - [Curve](modifier.curve.md). Reshapes height through an editable transfer curve.
-- [Expression](modifier.expression.md). A per-cell math formula over x, y, and the input layers (height, mask, …): the escape hatch for custom math. Runs wired or as a coordinate formula.
-- [Histogram-Scan](modifier.histogram_scan.md). Windows a range of input values into a crisp [0, 1] mask: position, width, and a soft falloff. Auto range scans the input's actual min-max, so it reshapes a selector's raw measure (slope degrees, curvature) directly; fixed range uses absolute [0, 1].
+- [Expression](modifier.expression.md). A per-cell math formula over x, y, and the input layers: the escape hatch for custom math.
+- [Histogram-Scan](modifier.histogram_scan.md). Windows a range of input values into a crisp [0, 1] mask, set by position, width, and a soft falloff.
 - [Invert](modifier.invert.md). Flips the height layer (1 - height).
-- [Levels](modifier.levels.md). Rescales the height range: stretch an input window to full, bias the midtones with gamma, map into an output window. Normalize, set amplitude, or clamp.
-- [Normalize](modifier.normalize.md). Fits the height layer's actual min-max to [0, 1] (the one-click companion to Levels): pulls a raw measure or out-of-range height back into the working greyscale. A flat field passes through. Mask-aware.
-- [Sculpt](modifier.sculpt.md). Sculpt terrain by brushing height onto it: paint raises, erase lowers, and overlapping strokes build up pass by pass. Wire a terrain in to sculpt it, or leave the input empty to build form from scratch. Strength sets how hard each pass bites; the height is not clamped. Stored as editable vector strokes.
+- [Levels](modifier.levels.md). Rescales the height range: stretch an input window to full, bias the midtones with gamma, and map into an output window.
+- [Normalize](modifier.normalize.md). Fits the height layer's actual min-max to [0, 1], pulling a raw or out-of-range field back into the working range.
+- [Sculpt](modifier.sculpt.md). Sculpt terrain by brushing height onto it: paint raises, erase lowers, and overlapping strokes build up.
 
 ## Combine
 
@@ -26,35 +26,35 @@ Every node, grouped by category.
 ## Filters
 
 - [Blur](modifier.blur.md). Gaussian-blurs the height layer by a world-unit radius (the scale knob for derived selectors, and feathers masks).
-- [Directional Blur](modifier.directional_blur.md). Smooths the height layer along (or across) a guide direction, not isotropically: steer by the slope (fall line, or a distance field's shore normal) or a flow field. Along combs valleys and smears downslope; across softens a cross-profile while keeping the guide crest crisp. Optional guide input; degrades gracefully.
-- [Frequency Split](modifier.frequency_split.md). Splits the height into a low-frequency band (a blur at a world-unit cut radius) and the high-frequency residual. The two recombine to the input, so you can work the large forms and re-add the fine detail.
-- [Terrace](modifier.terrace.md). Quantizes the height into stepped bands: flat treads joined by risers, for strata, benches, and mesa forms. Band count sets the number of terraces; sharpness rounds the steps (soft) or squares them off (hard). Range Auto spreads the terraces across the terrain's actual height (so the count is what you see); Fixed places them at absolute elevations.
-- [Warp](modifier.warp.md). Domain warp: pushes the height layer sideways by a noise field so straight features wander and regular shapes turn natural. Amount is in world units.
+- [Directional Blur](modifier.directional_blur.md). Smooths the height layer along or across a guide direction, steered by the slope or a flow field.
+- [Frequency Split](modifier.frequency_split.md). Splits the height into a low-frequency band and the high-frequency residual.
+- [Terrace](modifier.terrace.md). Quantizes the height into stepped bands: flat treads joined by risers, for strata, benches, and mesa forms.
+- [Warp](modifier.warp.md). Domain warp: pushes the height layer sideways by a noise field so straight features wander and regular shapes turn natural.
 
 ## Generators
 
-- [Billow Noise](generator.billow.md). Puffy, rounded mounds and dunes: the rounded inverse of ridged noise. Multiply with a Shape envelope to place rolling hills or a dune field.
-- [Cellular Bumps](generator.cellular_bumps.md). Worley noise as cones peaking at scattered feature points: rock piles, bumps, scales. Frequency sets cell density, jitter how organic the placement.
-- [Cellular Cracks](generator.cellular_cracks.md). Worley cell-edge network: cracks, fractures, dried mud, rocky cell walls. Frequency sets the network density, jitter how organic the cells.
-- [Cellular Regions](generator.cellular_regions.md). Worley cells as flat, discrete regions (plates, zones): a control field to shape or scatter per region. Frequency sets the region count, jitter shape.
+- [Billow Noise](generator.billow.md). Puffy, rounded mounds and dunes, the rounded inverse of ridged noise.
+- [Cellular Bumps](generator.cellular_bumps.md). Worley noise as cones peaking at scattered points: rock piles, bumps, and scales.
+- [Cellular Cracks](generator.cellular_cracks.md). Worley cell-edge network: cracks, fractures, dried mud, and rocky cell walls.
+- [Cellular Regions](generator.cellular_regions.md). Worley cells as flat, discrete regions (plates, zones) to shape or scatter.
 - [Constant](generator.constant.md). A flat field at a chosen [0, 1] greyscale value: a fixed level to blend against, offset or scale with, threshold, or use as a uniform control field.
 - [Radial Falloff](generator.falloff.md). A linear radial distance ramp (0 at the center, 1 at the radius): feed a Curve to draw any radial cross-section, a dome, crater, caldera, or terraces.
 - [fBm Noise](generator.fbm.md). Fractional Brownian motion of Perlin noise.
-- [Flow Noise](generator.flow.md). Noise warped along divergence-free curl streamlines: a swirly, marbled, fluid look. Also carries the flow direction on its flow_x / flow_y layers.
+- [Flow Noise](generator.flow.md). Noise warped along divergence-free curl streamlines, for a swirly, marbled, fluid look.
 - [Gradient](generator.gradient.md). A smooth directional ramp (0 to 1 across a band): the non-centered envelope for a coast-to-highland trend or a dune-field direction.
 - [Hybrid Multifractal](generator.hybrid.md). Realistic plains-to-mountains terrain in one node: roughness scales with altitude, so valleys stay smooth and flat while peaks get rough and broken.
-- [Import](generator.import.md). Loads a heightmap PNG as a field, resampled to the build resolution and placed by offset, rotation, and scale. Set the file path; an empty path is a flat field. The edge policy fills where the placement maps outside the image.
-- [Paint](generator.paint.md). A hand-painted [0, 1] mask: brush strokes on the 2D map or 3D surface, rasterized at build resolution. Feed an existing selection into the mask input to hand-correct it (paint adds, erase removes), or leave it empty to paint a fresh mask. Wire the output into an effect's mask input to scope the effect to a region you paint. Resolution-independent; stored as editable vector strokes.
-- [Polygon](generator.polygon.md). A flat-topped regular polygon with soft flanks: the envelope for an angular plateau or faceted mesa. Set the number of sides and turn it with rotation.
+- [Import](generator.import.md). Loads a heightmap image as a field, placed by offset, rotation, and scale.
+- [Paint](generator.paint.md). A hand-painted [0, 1] selection, brushed on the 2D map or 3D surface.
+- [Polygon](generator.polygon.md). A flat-topped regular polygon with soft flanks.
 - [Radial Gradient](generator.radial.md). A smooth radial dome (1 at the center, 0 at the radius): an envelope to multiply with detail, or shape downstream with a Curve.
-- [Rectangle](generator.rect.md). A flat-topped rectangular footprint with soft, rounded flanks: the envelope for a plateau, mesa, or rectangular landmass. Turn it with rotation.
-- [Ridged Noise](generator.ridged.md). Ridged multifractal noise: sharp mountain ridgelines instead of fBm's rolling hills. Multiply with a Shape envelope to place a massif.
+- [Rectangle](generator.rect.md). A flat-topped rectangular footprint with soft, rounded flanks.
+- [Ridged Noise](generator.ridged.md). Ridged multifractal noise, with sharp mountain ridgelines.
 - [Ring](generator.ring.md). A smooth circular ridge (1 on the radius, 0 on each flank): the envelope for a crater rim, caldera wall, or atoll.
 
 ## Geology
 
-- [Coastal](modifier.coastal.md). Reshapes the shore into a beach-and-bluff bevel: cuts the land down and lifts the seabed toward a gentle wedge at the world sea level, fading over a width in metres. Bevels by true distance from the shoreline, so the beach is even all around. Taps the shore band.
-- [Hydraulic Erosion](modifier.hydraulic_erosion.md). Water carving the terrain, simulated as rain droplets that run downhill, pick up and drop sediment, and cut rills while depositing fans and filling hollows. The deposition is what reads as weathered. Taps wear, deposition, and flow.
+- [Coastal](modifier.coastal.md). Reshapes the shore into a beach-and-bluff bevel at the world sea level, fading over a width in metres.
+- [Hydraulic Erosion](modifier.hydraulic_erosion.md). Water carving the terrain, simulated as rain droplets that cut rills and deposit sediment.
 - [Stream Erosion](modifier.stream_erosion.md). Carves drainage networks from flow accumulation; outputs the river/flow map.
 - [Thermal Erosion](modifier.thermal_erosion.md). Relaxes slopes steeper than the talus angle toward repose.
 
@@ -66,12 +66,12 @@ Every node, grouped by category.
 
 ## Selectors
 
-- [Aspect](modifier.aspect.md). Selects slopes facing a compass direction: high where the terrain faces the direction, softening over the falloff. Slope weight suppresses flats. Being a gradient, it amplifies sharp input (crease noise, thin ridges), so scale it with an upstream Blur. For sun/wind-facing effects, poleward snow, and directional weathering.
-- [Curvature](modifier.curvature.md). Selects convex (ridges, outcrops) or concave (valleys, hollows) ground from the surface curvature. Measures curvature, not slope, so a plain ramp reads zero. Set the scale with an upstream Blur.
-- [Distance](modifier.distance.md). Selects a band around a height contour by true distance: one near the level, fading over the range (in metres), optionally on just one side. The distance is an isotropic eikonal solve, so the band width does not vary with direction.
+- [Aspect](modifier.aspect.md). Selects slopes facing a compass direction: high where the terrain faces the direction, softening over the falloff.
+- [Curvature](modifier.curvature.md). Selects convex (ridges, outcrops) or concave (valleys, hollows) ground from the surface curvature.
+- [Distance](modifier.distance.md). Selects a band around a height contour by true distance, fading over a range in metres.
 - [Height](modifier.height.md). Selects a band of elevation: high where the normalized height is within min..max, softening over the falloff.
-- [Occlusion](modifier.occlusion.md). Ambient-occlusion / sky-view measure: high in crevices and valley floors hemmed in by higher ground, low on open peaks and flats. Ray count and world-unit radius set the sampling. Picks sheltered terrain (catchment, moisture, shadow).
-- [Slope](modifier.slope.md). Selects a band of steepness: high where the slope angle is within min..max degrees, softening over the falloff. Scale it with an upstream Blur.
+- [Occlusion](modifier.occlusion.md). Ambient-occlusion / sky-view measure: high in crevices and valley floors hemmed in by higher ground, low on open peaks and flats.
+- [Slope](modifier.slope.md). Selects a band of steepness: high where the slope angle is within min..max degrees, softening over the falloff.
 
 ## Utility
 

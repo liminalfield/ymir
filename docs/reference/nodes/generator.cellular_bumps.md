@@ -9,11 +9,11 @@ status: draft
 
 `generator.cellular_bumps` · Generators
 
-Worley noise as cones peaking at scattered feature points: rock piles, bumps, scales. Frequency sets cell density, jitter how organic the placement.
+Worley noise as cones peaking at scattered points: rock piles, bumps, and scales.
 
 ## Purpose
 
-*Not yet written.*
+Scattered cones peaking at random points, for rock piles, bumps, and scaled surfaces. Frequency sets how densely the cones pack; reach for it to add clustered relief.
 
 ## Inputs
 

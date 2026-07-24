@@ -9,11 +9,11 @@ status: draft
 
 `modifier.directional_blur` · Filters · Mask-aware
 
-Smooths the height layer along (or across) a guide direction, not isotropically: steer by the slope (fall line, or a distance field's shore normal) or a flow field. Along combs valleys and smears downslope; across softens a cross-profile while keeping the guide crest crisp. Optional guide input; degrades gracefully.
+Smooths the height layer along or across a guide direction, steered by the slope or a flow field.
 
 ## Purpose
 
-*Not yet written.*
+Smooths along a direction instead of evenly, guided by the slope or a flow field. Reach for it to comb valleys down their fall line, or to soften a cross-profile while keeping the crest crisp.
 
 ## Inputs
 
@@ -36,3 +36,7 @@ Smooths the height layer along (or across) a guide direction, not isotropically:
 ## Layer contract
 
 Honours a mask on its input, applying everywhere the mask is absent.
+
+## Behaviour
+
+The optional guide input steers the direction; with none, it follows the terrain's own slope. Along the guide it combs and smears downslope; across it softens the cross-profile while leaving the guide crest sharp.

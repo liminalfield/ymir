@@ -9,11 +9,11 @@ status: draft
 
 `modifier.clamp` · Adjust · Mask-aware
 
-Hard-clamps the height layer into [min, max]: caps overshoots, floors basins, or bounds a value before it feeds something range-sensitive. Mask-aware.
+Hard-clamps the height layer into [min, max]: caps overshoots, floors basins, or bounds a value.
 
 ## Purpose
 
-*Not yet written.*
+Caps the height to a range, flattening anything above or below it. Reach for it to floor a basin, cap an overshoot, or bound a value before a node that is sensitive to its range.
 
 ## Inputs
 

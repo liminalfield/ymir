@@ -9,11 +9,11 @@ status: draft
 
 `modifier.occlusion` · Selectors
 
-Ambient-occlusion / sky-view measure: high in crevices and valley floors hemmed in by higher ground, low on open peaks and flats. Ray count and world-unit radius set the sampling. Picks sheltered terrain (catchment, moisture, shadow).
+Ambient-occlusion / sky-view measure: high in crevices and valley floors hemmed in by higher ground, low on open peaks and flats.
 
 ## Purpose
 
-*Not yet written.*
+Selects sheltered ground, high in crevices and valley floors hemmed in by higher terrain and low on open peaks and flats. Reach for it to place moisture, shadow, or catchment where the terrain encloses itself.
 
 ## Inputs
 

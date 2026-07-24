@@ -9,11 +9,11 @@ status: draft
 
 `modifier.frequency_split` · Filters
 
-Splits the height into a low-frequency band (a blur at a world-unit cut radius) and the high-frequency residual. The two recombine to the input, so you can work the large forms and re-add the fine detail.
+Splits the height into a low-frequency band and the high-frequency residual.
 
 ## Purpose
 
-*Not yet written.*
+Splits the height into a coarse band and the fine detail riding on it, so you can work the large forms and re-add the detail afterward. Reach for it to erode or reshape the base without losing the surface texture.
 
 ## Inputs
 
@@ -33,3 +33,7 @@ Splits the height into a low-frequency band (a blur at a world-unit cut radius) 
 ## Layer contract
 
 Reads and writes the height layer.
+
+## Behaviour
+
+The two bands recombine to the original input, so splitting and rejoining with nothing between is a pass-through.

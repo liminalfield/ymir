@@ -13,7 +13,7 @@ Reshapes height through an editable transfer curve.
 
 ## Purpose
 
-*Not yet written.*
+Reshapes the height through a transfer curve you draw, remapping any input level to any output. Reach for it to carve a radial falloff into a landform profile, or to shape how a selection responds.
 
 ## Inputs
 
@@ -32,3 +32,8 @@ Reshapes height through an editable transfer curve.
 ## Layer contract
 
 Honours a mask on its input, applying everywhere the mask is absent.
+
+## See also
+
+- [Radial Falloff](generator.falloff.md)
+- [Levels](modifier.levels.md)

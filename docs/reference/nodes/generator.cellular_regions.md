@@ -9,11 +9,11 @@ status: draft
 
 `generator.cellular_regions` · Generators
 
-Worley cells as flat, discrete regions (plates, zones): a control field to shape or scatter per region. Frequency sets the region count, jitter shape.
+Worley cells as flat, discrete regions (plates, zones) to shape or scatter.
 
 ## Purpose
 
-*Not yet written.*
+Flat, discrete cells, for plates or zones you can shape or scatter one region at a time. Reach for it as a control field that varies in patches rather than smoothly.
 
 ## Inputs
 

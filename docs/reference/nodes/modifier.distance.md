@@ -9,11 +9,11 @@ status: draft
 
 `modifier.distance` · Selectors
 
-Selects a band around a height contour by true distance: one near the level, fading over the range (in metres), optionally on just one side. The distance is an isotropic eikonal solve, so the band width does not vary with direction.
+Selects a band around a height contour by true distance, fading over a range in metres.
 
 ## Purpose
 
-*Not yet written.*
+Selects a band around a height contour, measured by true distance in metres so the band is even all around. Reach for it to place a feature that tracks a level: a shoreline, a snow line, a terrace edge.
 
 ## Inputs
 
@@ -34,3 +34,7 @@ Selects a band around a height contour by true distance: one near the level, fad
 ## Layer contract
 
 Reads and writes the height layer.
+
+## Behaviour
+
+The distance is an isotropic eikonal solve, so the band width does not vary with direction. It can cover both sides of the contour or only one.

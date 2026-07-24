@@ -9,11 +9,11 @@ status: draft
 
 `modifier.sculpt` · Adjust
 
-Sculpt terrain by brushing height onto it: paint raises, erase lowers, and overlapping strokes build up pass by pass. Wire a terrain in to sculpt it, or leave the input empty to build form from scratch. Strength sets how hard each pass bites; the height is not clamped. Stored as editable vector strokes.
+Sculpt terrain by brushing height onto it: paint raises, erase lowers, and overlapping strokes build up.
 
 ## Purpose
 
-*Not yet written.*
+Sculpt terrain by brushing height onto it: paint raises, erase lowers, and overlapping strokes build up. Wire terrain in to reshape it by hand, or leave the input empty to build form from nothing.
 
 ## Inputs
 
@@ -32,3 +32,7 @@ Sculpt terrain by brushing height onto it: paint raises, erase lowers, and overl
 ## Layer contract
 
 Reads and writes the height layer.
+
+## Behaviour
+
+Strength sets how hard each pass bites, and the height is not clamped, so repeated strokes keep building. Stored as editable vector strokes, so the sculpt stays crisp at any resolution.

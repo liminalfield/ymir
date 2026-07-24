@@ -9,11 +9,11 @@ status: draft
 
 `generator.ridged` · Generators
 
-Ridged multifractal noise: sharp mountain ridgelines instead of fBm's rolling hills. Multiply with a Shape envelope to place a massif.
+Ridged multifractal noise, with sharp mountain ridgelines.
 
 ## Purpose
 
-*Not yet written.*
+Sharp mountain ridgelines, the ridged counterpart to fBm's rolling hills. Multiply it with a shape envelope to place a massif.
 
 ## Inputs
 

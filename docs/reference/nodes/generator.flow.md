@@ -9,11 +9,11 @@ status: draft
 
 `generator.flow` · Generators
 
-Noise warped along divergence-free curl streamlines: a swirly, marbled, fluid look. Also carries the flow direction on its flow_x / flow_y layers.
+Noise warped along divergence-free curl streamlines, for a swirly, marbled, fluid look.
 
 ## Purpose
 
-*Not yet written.*
+Noise warped along swirling, fluid streamlines, for a marbled, flowing look that plain fBm cannot give. Reach for it when terrain should read as folded or shaped by a current.
 
 ## Inputs
 

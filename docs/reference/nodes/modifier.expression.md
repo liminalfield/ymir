@@ -9,11 +9,11 @@ status: draft
 
 `modifier.expression` · Adjust
 
-A per-cell math formula over x, y, and the input layers (height, mask, …): the escape hatch for custom math. Runs wired or as a coordinate formula.
+A per-cell math formula over x, y, and the input layers: the escape hatch for custom math.
 
 ## Purpose
 
-*Not yet written.*
+A per-cell math formula over the coordinates and the input layers, the escape hatch for an operation no node covers. Reach for it to combine layers, threshold a value, or write a shape directly as a formula.
 
 ## Inputs
 
@@ -32,3 +32,7 @@ A per-cell math formula over x, y, and the input layers (height, mask, …): the
 ## Layer contract
 
 Reads and writes the height layer.
+
+## Behaviour
+
+It runs on a wired input or, with none, as a pure coordinate formula that generates a field from scratch.

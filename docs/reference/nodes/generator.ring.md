@@ -13,7 +13,7 @@ A smooth circular ridge (1 on the radius, 0 on each flank): the envelope for a c
 
 ## Purpose
 
-*Not yet written.*
+A smooth circular ridge, high on a radius and falling to each side. Reach for it as the envelope for a crater rim, a caldera wall, or an atoll.
 
 ## Inputs
 

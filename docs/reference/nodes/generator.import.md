@@ -9,11 +9,11 @@ status: draft
 
 `generator.import` · Generators
 
-Loads a heightmap PNG as a field, resampled to the build resolution and placed by offset, rotation, and scale. Set the file path; an empty path is a flat field. The edge policy fills where the placement maps outside the image.
+Loads a heightmap image as a field, placed by offset, rotation, and scale.
 
 ## Purpose
 
-*Not yet written.*
+Brings an existing heightmap into the graph as a field, so you can build on terrain made elsewhere. Reach for it to start from a real-world heightmap or a rough sketch, then shape and erode it like any generated terrain.
 
 ## Inputs
 
@@ -37,3 +37,7 @@ This node takes no inputs.
 ## Layer contract
 
 Reads and writes the height layer.
+
+## Behaviour
+
+The image is resampled to the build resolution and placed by offset, rotation, and scale. An empty path gives a flat field, and the edge policy fills anywhere the placement maps outside the source image.

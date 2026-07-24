@@ -9,11 +9,11 @@ status: draft
 
 `generator.cellular_cracks` · Generators
 
-Worley cell-edge network: cracks, fractures, dried mud, rocky cell walls. Frequency sets the network density, jitter how organic the cells.
+Worley cell-edge network: cracks, fractures, dried mud, and rocky cell walls.
 
 ## Purpose
 
-*Not yet written.*
+A network of cell-edge ridges, for cracks, fractures, dried mud, and rocky cell walls. Reach for it to break a surface into angular plates.
 
 ## Inputs
 

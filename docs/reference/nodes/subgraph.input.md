@@ -13,7 +13,7 @@ Marks a field a subgraph takes in: each one becomes an input port on the contain
 
 ## Purpose
 
-*Not yet written.*
+Marks a field a subgraph takes in. Placed inside a subgraph, each Input node becomes an input port on the containing Subgraph node.
 
 ## Inputs
 

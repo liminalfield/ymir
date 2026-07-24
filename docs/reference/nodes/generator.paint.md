@@ -9,11 +9,11 @@ status: draft
 
 `generator.paint` · Generators
 
-A hand-painted [0, 1] mask: brush strokes on the 2D map or 3D surface, rasterized at build resolution. Feed an existing selection into the mask input to hand-correct it (paint adds, erase removes), or leave it empty to paint a fresh mask. Wire the output into an effect's mask input to scope the effect to a region you paint. Resolution-independent; stored as editable vector strokes.
+A hand-painted [0, 1] selection, brushed on the 2D map or 3D surface.
 
 ## Purpose
 
-*Not yet written.*
+A selection you paint by hand, for scoping effects to regions no measured selector would find. Brush on the 2D map or the 3D surface and feed the result into an effect's mask input, and the effect applies only where you painted.
 
 ## Inputs
 
@@ -33,3 +33,7 @@ A hand-painted [0, 1] mask: brush strokes on the 2D map or 3D surface, rasterize
 ## Layer contract
 
 Reads and writes the height layer.
+
+## Behaviour
+
+Feed an existing selection into the mask input to hand-correct it, where paint adds and erase removes, or leave the input empty to paint a fresh one. The strokes are stored as editable vectors and rasterized at build resolution, so the mask stays crisp at any size.

@@ -9,11 +9,11 @@ status: draft
 
 `modifier.slope` · Selectors
 
-Selects a band of steepness: high where the slope angle is within min..max degrees, softening over the falloff. Scale it with an upstream Blur.
+Selects a band of steepness: high where the slope angle is within min..max degrees, softening over the falloff.
 
 ## Purpose
 
-*Not yet written.*
+Selects a band of steepness, high where the slope angle falls within a range of degrees. Reach for it to place effects by gradient: scree on the steep faces, deposits on the flats.
 
 ## Inputs
 
@@ -35,3 +35,7 @@ Selects a band of steepness: high where the slope angle is within min..max degre
 ## Layer contract
 
 Reads and writes the height layer.
+
+## Behaviour
+
+Slope is a gradient measure, so it amplifies sharp input such as crease noise. Set the scale it reads with an upstream Blur.

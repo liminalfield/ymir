@@ -9,11 +9,11 @@ status: draft
 
 `modifier.curvature` · Selectors
 
-Selects convex (ridges, outcrops) or concave (valleys, hollows) ground from the surface curvature. Measures curvature, not slope, so a plain ramp reads zero. Set the scale with an upstream Blur.
+Selects convex (ridges, outcrops) or concave (valleys, hollows) ground from the surface curvature.
 
 ## Purpose
 
-*Not yet written.*
+Selects convex ground (ridges, outcrops) or concave ground (valleys, hollows) from the surface curvature. Reach for it to catch the crests or the hollows, where neither a height nor a slope band would find them.
 
 ## Inputs
 
@@ -34,3 +34,7 @@ Selects convex (ridges, outcrops) or concave (valleys, hollows) ground from the 
 ## Layer contract
 
 Reads and writes the height layer.
+
+## Behaviour
+
+It measures curvature, not slope, so a plain ramp reads as zero. Set the scale it works at with an upstream Blur.

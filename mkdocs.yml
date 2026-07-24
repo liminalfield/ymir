@@ -63,5 +63,17 @@ nav:
   - Reference:
       - reference/index.md
       - Nodes: reference/nodes/index.md
-  - Concepts: concepts/index.md
+      - World settings: reference/world-settings.md
+      - Export formats: reference/export-formats.md
+      - Project format: reference/project-format.md
+      - Command line: reference/cli.md
+      - Keyboard and mouse: reference/shortcuts.md
+  - Concepts:
+      - concepts/index.md
+      - Fields and layers: concepts/fields-and-layers.md
+      - Masks and selections: concepts/masks-and-selections.md
+      - Preview and build: concepts/preview-and-build.md
+      - How erosion works: concepts/erosion.md
+      - Macro form and texture: concepts/macro-form.md
+      - Landforms: concepts/landforms.md
   - Roadmap: roadmap.md
