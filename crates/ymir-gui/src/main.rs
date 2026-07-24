@@ -386,6 +386,11 @@ struct AppState {
     /// node instead of the selection, so selection can move upstream to edit while the
     /// pinned downstream result keeps updating (the Houdini display-flag idea).
     preview_pin: Option<Handle>,
+    /// Set when the user clears the preview by clicking empty canvas, so the viewport goes blank
+    /// rather than falling back to the graph's result node (`preview_sink`). Reset by any
+    /// `clear_selection` (so a freshly opened or loaded graph still shows its result), then re-set
+    /// only by the background-click deselect.
+    preview_dismissed: bool,
     /// The global seed for evaluation, set by the ribbon control. Reseeds the whole
     /// world; each node stays internally stable across edits.
     seed: u64,
@@ -782,6 +787,7 @@ impl AppState {
             search: String::new(),
             node_menu: None,
             preview_pin: None,
+            preview_dismissed: false,
             rename: None,
             library_save: None,
             library_save_tab: LibraryTab::Details,
@@ -1736,6 +1742,9 @@ impl AppState {
     fn clear_selection(&mut self) {
         self.selection.clear();
         self.primary = None;
+        // Default to the result-node fallback; the background-click deselect re-sets the dismiss
+        // flag after this, so only an explicit canvas click blanks the preview.
+        self.preview_dismissed = false;
     }
 
     /// Sets the selection to `hits` (a marquee result), or adds them to it when `additive`
@@ -1790,7 +1799,14 @@ impl AppState {
             .filter(|&h| self.is_previewable(h))
             .or_else(|| self.primary.filter(|&h| self.is_previewable(h)))
             .or_else(|| self.primary.and_then(|h| self.endpoint_input_source(h)))
-            .or_else(|| self.preview_sink())
+            // Fall back to the graph's result node only when the preview was not explicitly
+            // dismissed (clicking empty canvas), so deselecting goes blank while a freshly opened
+            // graph still shows its result.
+            .or_else(|| {
+                (!self.preview_dismissed)
+                    .then(|| self.preview_sink())
+                    .flatten()
+            })
     }
 
     /// The previewable node feeding a selected endpoint's input, if any. An output-less endpoint
@@ -1845,6 +1861,9 @@ impl AppState {
     /// no node is previewable.
     fn drive_preview(&mut self, ctx: &egui::Context) {
         let Some(id) = self.preview_target().and_then(|h| self.graph.node_id_of(h)) else {
+            // No target (an empty graph, or the preview was dismissed by clicking empty canvas):
+            // blank the preview so the viewport and inspector show nothing, not a stale field.
+            self.preview.clear();
             return;
         };
         let res = self.preview_res;
@@ -6148,7 +6167,12 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         match hit {
             ClickHit::Node(handle) if additive => state.toggle_selection(handle),
             ClickHit::Node(handle) => state.select_only(handle),
-            ClickHit::Empty if !additive => state.clear_selection(),
+            ClickHit::Empty if !additive => {
+                // A plain click on empty canvas dismisses the preview: go blank rather than fall
+                // back to the graph's result node.
+                state.clear_selection();
+                state.preview_dismissed = true;
+            }
             ClickHit::Empty => {}
         }
     }
@@ -9826,6 +9850,31 @@ mod tests {
         state.preview_pin = Some(generator);
         state.clear_selection();
         assert_eq!(state.preview_target(), Some(generator));
+    }
+
+    #[test]
+    fn dismissing_the_preview_blanks_it_instead_of_the_sink_fallback() {
+        let mut state = AppState::new();
+        state.graph = Graph::new();
+        state.snarl = Snarl::new();
+        let pos = egui::Pos2::ZERO;
+        let gen_id =
+            canvas::add_node(&mut state.graph, &mut state.snarl, "generator.fbm", pos).unwrap();
+        let mod_id =
+            canvas::add_node(&mut state.graph, &mut state.snarl, "modifier.invert", pos).unwrap();
+        state.graph.connect(gen_id, 0, mod_id, 0).unwrap();
+        let modifier = state.graph.stable_id(mod_id).unwrap();
+
+        // Nothing dismissed: the sink is previewed, as before.
+        assert_eq!(state.preview_target(), Some(modifier));
+
+        // The background-click deselect sets this: the preview goes blank rather than to the sink.
+        state.preview_dismissed = true;
+        assert_eq!(state.preview_target(), None);
+
+        // A fresh open or load clears the selection, which restores the result-node fallback.
+        state.clear_selection();
+        assert_eq!(state.preview_target(), Some(modifier));
     }
 
     #[test]
