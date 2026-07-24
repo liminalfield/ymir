@@ -1,0 +1,34 @@
+---
+title: Radial Falloff
+status: draft
+---
+
+# Radial Falloff
+
+`generator.falloff` · Generators
+
+A linear radial distance ramp (0 at the center, 1 at the radius): feed a Curve to draw any radial cross-section, a dome, crater, caldera, or terraces.
+
+## Purpose
+
+*Not yet written.*
+
+## Inputs
+
+This node takes no inputs.
+
+## Outputs
+
+- `out`
+
+## Parameters
+
+| Parameter | Type | Range | Default | Unit | Description | Field-driven |
+|---|---|---|---|---|---|---|
+| Radius (`radius`) | float | [0, 100000] | 500 | m |  | no |
+| Center X (`center_x`) | float | [0, 1] | 0.5 |  |  | no |
+| Center Y (`center_y`) | float | [0, 1] | 0.5 |  |  | no |
+
+## Layer contract
+
+Reads and writes the height layer.

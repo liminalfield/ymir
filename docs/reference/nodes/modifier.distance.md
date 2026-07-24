@@ -1,0 +1,34 @@
+---
+title: Distance
+status: draft
+---
+
+# Distance
+
+`modifier.distance` · Selectors
+
+Selects a band around a height contour by true distance: one near the level, fading over the range (in metres), optionally on just one side. The distance is an isotropic eikonal solve, so the band width does not vary with direction.
+
+## Purpose
+
+*Not yet written.*
+
+## Inputs
+
+- `in`
+
+## Outputs
+
+- `out`
+
+## Parameters
+
+| Parameter | Type | Range | Default | Unit | Description | Field-driven |
+|---|---|---|---|---|---|---|
+| Level (`level`) | float | [-4, 4] | 0.5 |  |  | no |
+| Range (`range`) | float | [0, 100000] | 100 | m |  | no |
+| Side (`side`) | enum | both, outside, inside | both |  | Which side of the contour the band covers: both, only above, or only below. | no |
+
+## Layer contract
+
+Reads and writes the height layer.

@@ -1,0 +1,34 @@
+---
+title: Radial Gradient
+status: draft
+---
+
+# Radial Gradient
+
+`generator.radial` · Generators
+
+A smooth radial dome (1 at the center, 0 at the radius): an envelope to multiply with detail, or shape downstream with a Curve.
+
+## Purpose
+
+*Not yet written.*
+
+## Inputs
+
+This node takes no inputs.
+
+## Outputs
+
+- `out`
+
+## Parameters
+
+| Parameter | Type | Range | Default | Unit | Description | Field-driven |
+|---|---|---|---|---|---|---|
+| Radius (`radius`) | float | [0, 100000] | 500 | m |  | no |
+| Center X (`center_x`) | float | [0, 1] | 0.5 |  |  | no |
+| Center Y (`center_y`) | float | [0, 1] | 0.5 |  |  | no |
+
+## Layer contract
+
+Reads and writes the height layer.

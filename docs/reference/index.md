@@ -5,5 +5,6 @@ status: draft
 
 # Reference
 
-The generated node reference, world settings, export formats, project format, the command-line
-interface, and the keyboard and interaction reference will live under this section.
+The reference is generated from the running build, so it matches the current nodes exactly.
+
+- **[Nodes](nodes/index.md)**. Every node, grouped by category, with its inputs, outputs, parameters, and layer contract.

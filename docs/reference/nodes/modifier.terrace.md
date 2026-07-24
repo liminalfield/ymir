@@ -1,0 +1,34 @@
+---
+title: Terrace
+status: draft
+---
+
+# Terrace
+
+`modifier.terrace` · Filters · Mask-aware
+
+Quantizes the height into stepped bands: flat treads joined by risers, for strata, benches, and mesa forms. Band count sets the number of terraces; sharpness rounds the steps (soft) or squares them off (hard). Range Auto spreads the terraces across the terrain's actual height (so the count is what you see); Fixed places them at absolute elevations.
+
+## Purpose
+
+*Not yet written.*
+
+## Inputs
+
+- `in`
+
+## Outputs
+
+- `out`
+
+## Parameters
+
+| Parameter | Type | Range | Default | Unit | Description | Field-driven |
+|---|---|---|---|---|---|---|
+| Bands (`bands`) | float | [2, 64] | 8 |  |  | no |
+| Sharpness (`sharpness`) | float | [0, 1] | 0.5 |  |  | no |
+| Range (`range`) | enum | auto, fixed | auto |  | Whether the bands span the terrain's actual height (Auto) or sit at fixed absolute elevations (Fixed). | no |
+
+## Layer contract
+
+Honours a mask on its input, applying everywhere the mask is absent.
