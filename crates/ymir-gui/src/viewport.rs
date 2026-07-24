@@ -277,6 +277,9 @@ struct ViewportResources {
     /// changing the tint must re-render the terrain. A mask *content* change re-renders via
     /// the mask upload itself (see `prepare`), so it is not tracked here.
     terrain_paint: [f32; 4],
+    /// Whether the terrain geometry was drawn on the last terrain pass (vs the pass clearing to
+    /// empty). A change forces a re-render, so blanking the preview clears the resident mesh.
+    terrain_drawn: bool,
 }
 
 /// Creates a `res`x`res` R32Float grid texture: the terrain height the water shader samples
@@ -703,6 +706,7 @@ pub(crate) fn init(render_state: &egui_wgpu::RenderState) {
             terrain_light: [0.0; 4],
             terrain_wet: [0.0; 5],
             terrain_paint: [0.0; 4],
+            terrain_drawn: false,
         });
 }
 
@@ -717,6 +721,10 @@ struct ViewportCallback {
     light: [f32; 4],
     /// New mesh to upload this frame (the field changed), or `None` to keep the current mesh.
     mesh: Option<MeshUpload>,
+    /// Whether there is a field to draw this frame. `false` (nothing previewed) clears the terrain
+    /// pass and skips the terrain and water draws, so the viewport goes blank instead of showing the
+    /// mesh still resident in the vertex buffer.
+    draw_terrain: bool,
     /// New painted mask to upload this frame (#145), or `None` to keep the current one. Kept
     /// separate from `mesh` so a brush stroke re-uploads only the mask texture, never the
     /// vertices (the backdrop terrain under the stroke is unchanged).
@@ -926,6 +934,7 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
         let terrain_dirty = self.mesh.is_some()
             || self.mask.is_some()
             || !res.terrain_valid
+            || res.terrain_drawn != self.draw_terrain
             || res.terrain_view_proj != self.view_proj
             || res.terrain_light_dir != self.light_dir
             || res.terrain_light != self.light
@@ -965,14 +974,19 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
-                pass.set_pipeline(&res.pipeline);
-                pass.set_bind_group(0, &res.bind_group, &[]);
-                pass.set_bind_group(1, &res.mask_bind_group, &[]);
-                pass.set_vertex_buffer(0, res.vertex_buffer.slice(..));
-                pass.set_index_buffer(res.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..res.index_count, 0, 0..1);
+                // With no field, the pass still clears the target (LoadOp::Clear) but draws no
+                // geometry, so the resolve is empty and the composite shows egui's background.
+                if self.draw_terrain {
+                    pass.set_pipeline(&res.pipeline);
+                    pass.set_bind_group(0, &res.bind_group, &[]);
+                    pass.set_bind_group(1, &res.mask_bind_group, &[]);
+                    pass.set_vertex_buffer(0, res.vertex_buffer.slice(..));
+                    pass.set_index_buffer(res.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..res.index_count, 0, 0..1);
+                }
             }
             res.terrain_valid = true;
+            res.terrain_drawn = self.draw_terrain;
             res.terrain_view_proj = self.view_proj;
             res.terrain_light_dir = self.light_dir;
             res.terrain_light = self.light;
@@ -1009,7 +1023,7 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            if self.water_enabled {
+            if self.water_enabled && self.draw_terrain {
                 pass.set_pipeline(&res.water_pipeline);
                 pass.set_bind_group(0, &res.bind_group, &[]);
                 pass.set_bind_group(1, &res.height_bind_group, &[]);
@@ -1270,6 +1284,7 @@ pub(crate) fn show(
             light: [lighting.intensity, lighting.ambient, 0.0, 0.0],
             mesh,
             mask,
+            draw_terrain: field.is_some(),
             paint: [
                 PAINT_TINT[0],
                 PAINT_TINT[1],
