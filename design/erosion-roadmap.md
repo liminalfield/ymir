@@ -1,6 +1,8 @@
+> **Design record, not user documentation.** A design or decision note captured at a point in time; it may lag the current build. To learn how to use Ymir, see the documentation site (linked from the [README](../README.md)).
+
 # Design note: the erosion roadmap
 
-Status: **superseded** by [the erosion strategy and design brief](../ymir-erosion-DESIGN.md)
+Status: **superseded** by [the erosion strategy and design brief](ymir-erosion-DESIGN.md)
 (the three-transport-drivers framing, the GPU grid-hydraulic flagship, the revised determinism
 stance, and the build plan). Kept for the competitive/technical survey synthesis it records;
 the live plan is the brief.

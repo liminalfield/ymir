@@ -1,3 +1,5 @@
+> **Design record, not user documentation.** A design or decision note captured at a point in time; it may lag the current build. To learn how to use Ymir, see the documentation site (linked from the [README](../README.md)).
+
 # Design note: transform and placement (and why there is almost no Transform node)
 
 Status: design only, not scheduled. This captures a long design conversation so the
