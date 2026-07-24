@@ -1,3 +1,5 @@
+> **Design record, not user documentation.** A design or decision note captured at a point in time; it may lag the current build. To learn how to use Ymir, see the documentation site (linked from the [README](../README.md)).
+
 # Design note: biomes and hex-map export
 
 Status: **direction, not yet built.** Captured from a design discussion so the
