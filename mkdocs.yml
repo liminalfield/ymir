@@ -63,5 +63,9 @@ nav:
   - Reference:
       - reference/index.md
       - Nodes: reference/nodes/index.md
+      - World settings: reference/world-settings.md
+      - Export formats: reference/export-formats.md
+      - Project format: reference/project-format.md
+      - Command line: reference/cli.md
   - Concepts: concepts/index.md
   - Roadmap: roadmap.md
