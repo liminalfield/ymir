@@ -1,0 +1,35 @@
+---
+title: Histogram-Scan
+status: draft
+---
+
+# Histogram-Scan
+
+`modifier.histogram_scan` · Adjust
+
+Windows a range of input values into a crisp [0, 1] mask: position, width, and a soft falloff. Auto range scans the input's actual min-max, so it reshapes a selector's raw measure (slope degrees, curvature) directly; fixed range uses absolute [0, 1].
+
+## Purpose
+
+*Not yet written.*
+
+## Inputs
+
+- `in`
+
+## Outputs
+
+- `out`
+
+## Parameters
+
+| Parameter | Type | Range | Default | Unit | Description | Field-driven |
+|---|---|---|---|---|---|---|
+| Position (`position`) | float | [0, 1] | 0.5 |  |  | no |
+| Width (`width`) | float | [0, 1] | 0.5 |  |  | no |
+| Falloff (`falloff`) | float | [0, 1] | 0.1 |  |  | no |
+| Range (`range`) | enum | auto, fixed | auto |  | Whether the window scans the input's actual range (Auto) or the fixed [0, 1] range (Fixed). | no |
+
+## Layer contract
+
+Reads and writes the height layer.

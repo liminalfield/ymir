@@ -1,0 +1,277 @@
+//! Renders a reference document into Markdown: one page per node and a category index.
+//!
+//! Pure string production, unit-tested without touching the filesystem or the CLI. The section
+//! order is fixed (issue #213): metadata, one-line description, Purpose, Inputs, Outputs,
+//! Parameters, Layer contract, then the optional Behaviour / Recipes / See also carried by the
+//! prose fragment. Mechanical sections come from the JSON; prose sections come from the fragment.
+
+use std::collections::BTreeMap;
+
+use crate::docs::{Node, Param, Port};
+use crate::fragment::Fragment;
+
+/// Renders one node's reference page from its JSON data and (possibly empty) prose fragment.
+pub(crate) fn node_page(node: &Node, frag: &Fragment) -> String {
+    let status = frag.status.as_deref().unwrap_or("draft");
+    let mut out = String::new();
+
+    // Frontmatter: title and status drive the page identity and the draft/stable badge.
+    out.push_str(&format!(
+        "---\ntitle: {}\nstatus: {status}\n---\n\n",
+        node.display_name
+    ));
+    out.push_str(&format!("# {}\n\n", node.display_name));
+
+    // Metadata line: type_id and category, plus the mask-aware and resolution-dependent flags.
+    let mut meta = format!("`{}` · {}", node.type_id, node.category_label);
+    if node.mask_aware {
+        meta.push_str(" · Mask-aware");
+    }
+    if frag.resolution_dependent {
+        meta.push_str(" · Resolution-dependent");
+    }
+    out.push_str(&format!("{meta}\n\n"));
+
+    // One-line description (the catalog string).
+    out.push_str(&format!("{}\n\n", node.description));
+
+    // Purpose is required for a stable page; a missing one is a visible placeholder for now.
+    out.push_str("## Purpose\n\n");
+    out.push_str(frag.section("Purpose").unwrap_or("*Not yet written.*"));
+    out.push_str("\n\n");
+
+    out.push_str("## Inputs\n\n");
+    out.push_str(&port_list(&node.inputs, "This node takes no inputs."));
+    out.push('\n');
+
+    out.push_str("## Outputs\n\n");
+    out.push_str(&port_list(&node.outputs, "This node produces no outputs."));
+    out.push('\n');
+
+    out.push_str("## Parameters\n\n");
+    if node.params.is_empty() {
+        out.push_str("This node has no parameters.\n\n");
+    } else {
+        out.push_str(&param_table(&node.params));
+        out.push('\n');
+    }
+
+    out.push_str("## Layer contract\n\n");
+    out.push_str(&layer_contract(node));
+    out.push('\n');
+
+    // Optional prose sections, in fixed order, rendered only when the fragment carries them.
+    for heading in ["Behaviour", "Recipes", "See also"] {
+        if let Some(prose) = frag.section(heading) {
+            out.push_str(&format!("## {heading}\n\n{prose}\n\n"));
+        }
+    }
+
+    format!("{}\n", out.trim_end())
+}
+
+/// Renders the node-reference index: every node as a link, grouped by category.
+pub(crate) fn category_index(nodes: &[Node]) -> String {
+    let mut by_category: BTreeMap<&str, Vec<&Node>> = BTreeMap::new();
+    for node in nodes {
+        by_category
+            .entry(node.category_label.as_str())
+            .or_default()
+            .push(node);
+    }
+
+    let mut out = String::from(
+        "---\ntitle: Nodes\n---\n\n# Node reference\n\nEvery node, grouped by category.\n\n",
+    );
+    for (category, group) in &by_category {
+        out.push_str(&format!("## {category}\n\n"));
+        for node in group {
+            out.push_str(&format!(
+                "- [{}]({}.md). {}\n",
+                node.display_name, node.type_id, node.description
+            ));
+        }
+        out.push('\n');
+    }
+    format!("{}\n", out.trim_end())
+}
+
+/// A Markdown list of ports (with an `(optional)` marker), or a fallback sentence when there are
+/// none.
+fn port_list(ports: &[Port], empty: &str) -> String {
+    if ports.is_empty() {
+        return format!("{empty}\n");
+    }
+    let mut out = String::new();
+    for port in ports {
+        out.push_str(&format!("- `{}`", port.name));
+        if port.optional {
+            out.push_str(" (optional)");
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// The parameter table: name, type, range, default, unit, description, and a field-driven column
+/// (uniformly "no" until field-driven parameters land, so the shape is stable now).
+fn param_table(params: &[Param]) -> String {
+    let mut out = String::from(
+        "| Parameter | Type | Range | Default | Unit | Description | Field-driven |\n\
+         |---|---|---|---|---|---|---|\n",
+    );
+    for p in params {
+        // The display label with the snake_case identifier: the id is what expression syntax and
+        // project files use, and DOCS.md keeps it in the generated table rather than in prose.
+        let name = format!("{} (`{}`)", p.label, p.name);
+        out.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} | no |\n",
+            cell(&name),
+            p.kind,
+            cell(&range_cell(p)),
+            cell(&default_cell(p)),
+            unit_symbol(p),
+            cell(p.description.as_deref().unwrap_or("")),
+        ));
+    }
+    out
+}
+
+/// The range column: a closed interval for a numeric parameter, the option list for an enum, empty
+/// otherwise.
+fn range_cell(p: &Param) -> String {
+    match p.kind.as_str() {
+        "float" | "int" => match (&p.min, &p.max) {
+            (Some(lo), Some(hi)) => format!("[{}, {}]", num(lo), num(hi)),
+            _ => String::new(),
+        },
+        "enum" => p.options.as_deref().unwrap_or(&[]).join(", "),
+        _ => String::new(),
+    }
+}
+
+/// The default column, formatted by value kind.
+fn default_cell(p: &Param) -> String {
+    match &p.default {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        other => num(other),
+    }
+}
+
+/// The unit column: a compact symbol, or empty for a unit-less parameter.
+fn unit_symbol(p: &Param) -> &'static str {
+    match p.unit.as_deref() {
+        Some("meters") => "m",
+        Some("degrees") => "°",
+        _ => "",
+    }
+}
+
+/// The Layer-contract section: the mask contract and the emitted byproduct layers, or a plain
+/// statement when the node only touches height.
+fn layer_contract(node: &Node) -> String {
+    let mut lines = Vec::new();
+    if node.mask_aware {
+        lines.push(
+            "Honours a mask on its input, applying everywhere the mask is absent.".to_string(),
+        );
+    }
+    if !node.emitted_layers.is_empty() {
+        let list = node
+            .emitted_layers
+            .iter()
+            .map(|l| format!("`{l}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!("Emits {list} alongside the height layer."));
+    }
+    if lines.is_empty() {
+        lines.push("Reads and writes the height layer.".to_string());
+    }
+    format!("{}\n", lines.join("\n\n"))
+}
+
+/// Formats a JSON number without a trailing `.0` (`2.0` renders as `2`, `0.1` as `0.1`).
+fn num(v: &serde_json::Value) -> String {
+    if let Some(i) = v.as_i64() {
+        return i.to_string();
+    }
+    if let Some(f) = v.as_f64() {
+        return format!("{f}");
+    }
+    v.to_string()
+}
+
+/// Escapes a table cell: newlines collapse to spaces and pipes are escaped so a value cannot break
+/// the column layout.
+fn cell(s: &str) -> String {
+    s.replace('\n', " ").replace('|', "\\|")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::docs::parse;
+
+    fn sample() -> crate::docs::Docs {
+        parse(crate::docs::SAMPLE).expect("sample parses")
+    }
+
+    #[test]
+    fn a_generator_page_has_the_fixed_sections_in_order() {
+        let docs = sample();
+        let page = node_page(&docs.nodes[0], &Fragment::default());
+        // Frontmatter, title, metadata, description.
+        assert!(page.starts_with("---\ntitle: fBm Noise\nstatus: draft\n---"));
+        assert!(page.contains("`generator.fbm` · Generators\n"));
+        assert!(page.contains("Fractional Brownian motion."));
+        // Section order.
+        let order: Vec<usize> = [
+            "## Purpose",
+            "## Inputs",
+            "## Outputs",
+            "## Parameters",
+            "## Layer contract",
+        ]
+        .iter()
+        .map(|h| page.find(h).unwrap_or_else(|| panic!("missing {h}")))
+        .collect();
+        assert!(
+            order.windows(2).all(|w| w[0] < w[1]),
+            "sections out of order"
+        );
+        // A generator has no inputs and its param table carries the field-driven column.
+        assert!(page.contains("This node takes no inputs."));
+        assert!(page.contains(
+            "| Frequency (`frequency`) | float | [0.1, 32] | 2 |  | Feature size. | no |"
+        ));
+        // No mask flag, no emitted layers.
+        assert!(!page.contains("Mask-aware"));
+        assert!(page.contains("Reads and writes the height layer."));
+    }
+
+    #[test]
+    fn a_mask_aware_emitter_page_flags_and_lists_its_layers() {
+        let docs = sample();
+        let frag = crate::fragment::parse("---\nstatus: stable\nresolution_dependent: true\n---\n\n## Purpose\n\nRelaxes steep slopes.\n").unwrap();
+        let page = node_page(&docs.nodes[1], &frag);
+        assert!(page.contains("status: stable"));
+        assert!(page.contains("· Mask-aware"));
+        assert!(page.contains("· Resolution-dependent"));
+        assert!(page.contains("Relaxes steep slopes.")); // from the fragment
+        assert!(page.contains("Emits `wear`, `debris` alongside the height layer."));
+        assert!(page.contains("Honours a mask"));
+        assert!(page.contains("This node has no parameters."));
+    }
+
+    #[test]
+    fn the_index_groups_nodes_by_category() {
+        let docs = sample();
+        let index = category_index(&docs.nodes);
+        assert!(index.contains("## Generators\n"));
+        assert!(index.contains("## Geology\n"));
+        assert!(index.contains("- [fBm Noise](generator.fbm.md). Fractional Brownian motion."));
+    }
+}

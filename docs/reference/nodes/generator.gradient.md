@@ -1,0 +1,35 @@
+---
+title: Gradient
+status: draft
+---
+
+# Gradient
+
+`generator.gradient` · Generators
+
+A smooth directional ramp (0 to 1 across a band): the non-centered envelope for a coast-to-highland trend or a dune-field direction.
+
+## Purpose
+
+*Not yet written.*
+
+## Inputs
+
+This node takes no inputs.
+
+## Outputs
+
+- `out`
+
+## Parameters
+
+| Parameter | Type | Range | Default | Unit | Description | Field-driven |
+|---|---|---|---|---|---|---|
+| Angle (`angle`) | float | [0, 360] | 0 | ° |  | no |
+| Width (`width`) | float | [0, 100000] | 1024 | m |  | no |
+| Center X (`center_x`) | float | [0, 1] | 0.5 |  |  | no |
+| Center Y (`center_y`) | float | [0, 1] | 0.5 |  |  | no |
+
+## Layer contract
+
+Reads and writes the height layer.

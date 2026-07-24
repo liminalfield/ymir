@@ -1,0 +1,33 @@
+---
+title: Paint
+status: draft
+---
+
+# Paint
+
+`generator.paint` · Generators
+
+A hand-painted [0, 1] mask: brush strokes on the 2D map or 3D surface, rasterized at build resolution. Feed an existing selection into the mask input to hand-correct it (paint adds, erase removes), or leave it empty to paint a fresh mask. Wire the output into an effect's mask input to scope the effect to a region you paint. Resolution-independent; stored as editable vector strokes.
+
+## Purpose
+
+*Not yet written.*
+
+## Inputs
+
+- `backdrop` (optional)
+- `mask` (optional)
+
+## Outputs
+
+- `out`
+
+## Parameters
+
+| Parameter | Type | Range | Default | Unit | Description | Field-driven |
+|---|---|---|---|---|---|---|
+| Strokes (`strokes`) | strokes |  |  |  |  | no |
+
+## Layer contract
+
+Reads and writes the height layer.

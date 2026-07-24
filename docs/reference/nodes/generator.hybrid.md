@@ -1,0 +1,39 @@
+---
+title: Hybrid Multifractal
+status: draft
+---
+
+# Hybrid Multifractal
+
+`generator.hybrid` · Generators
+
+Realistic plains-to-mountains terrain in one node: roughness scales with altitude, so valleys stay smooth and flat while peaks get rough and broken.
+
+## Purpose
+
+*Not yet written.*
+
+## Inputs
+
+This node takes no inputs.
+
+## Outputs
+
+- `out`
+
+## Parameters
+
+| Parameter | Type | Range | Default | Unit | Description | Field-driven |
+|---|---|---|---|---|---|---|
+| Frequency (`frequency`) | float | [0, 64] | 2 |  | Sets the feature size of the noise; higher values pack in smaller, denser features. | no |
+| Octaves (`octaves`) | int | [1, 12] | 5 |  | The number of noise layers summed together; more octaves add finer detail. | no |
+| Lacunarity (`lacunarity`) | float | [1, 4] | 2 |  | How much finer each octave is than the one before it; higher values widen the gap between coarse and fine detail. | no |
+| Gain (`gain`) | float | [0, 1] | 0.5 |  | How much each finer octave contributes; higher values make the fine detail rougher and more pronounced. | no |
+| Bias (`bias`) | float | [0, 2] | 0.7 |  |  | no |
+| Seed (`seed`) | int | [0, 2147483647] | 0 |  | The random seed; changing it regenerates a different variation of the same pattern. | no |
+| Offset X (`offset_x`) | int | [-10000, 10000] | 0 |  | Pans the noise pattern along the X axis without changing its shape. | no |
+| Offset Y (`offset_y`) | int | [-10000, 10000] | 0 |  | Pans the noise pattern along the Y axis without changing its shape. | no |
+
+## Layer contract
+
+Reads and writes the height layer.

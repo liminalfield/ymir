@@ -1,0 +1,35 @@
+---
+title: Aspect
+status: draft
+---
+
+# Aspect
+
+`modifier.aspect` · Selectors
+
+Selects slopes facing a compass direction: high where the terrain faces the direction, softening over the falloff. Slope weight suppresses flats. Being a gradient, it amplifies sharp input (crease noise, thin ridges), so scale it with an upstream Blur. For sun/wind-facing effects, poleward snow, and directional weathering.
+
+## Purpose
+
+*Not yet written.*
+
+## Inputs
+
+- `in`
+
+## Outputs
+
+- `out`
+
+## Parameters
+
+| Parameter | Type | Range | Default | Unit | Description | Field-driven |
+|---|---|---|---|---|---|---|
+| Direction (`direction`) | float | [0, 360] | 0 | ° |  | no |
+| Falloff (`falloff`) | float | [1, 180] | 90 | ° |  | no |
+| Slope Weight (`slope_weight`) | float | [0, 1] | 1 |  |  | no |
+| Output (`output`) | enum | selection, measure | selection |  |  | no |
+
+## Layer contract
+
+Reads and writes the height layer.

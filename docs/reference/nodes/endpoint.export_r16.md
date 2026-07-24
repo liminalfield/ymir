@@ -1,0 +1,34 @@
+---
+title: Export R16
+status: draft
+---
+
+# Export R16
+
+`endpoint.export_r16` · Outputs
+
+Writes the height layer to a raw 16-bit little-endian .r16 file, Unreal's other native heightmap format. Same range mapping as the PNG, no header.
+
+## Purpose
+
+*Not yet written.*
+
+## Inputs
+
+- `in`
+
+## Outputs
+
+This node produces no outputs.
+
+## Parameters
+
+| Parameter | Type | Range | Default | Unit | Description | Field-driven |
+|---|---|---|---|---|---|---|
+| Path (`path`) | text |  | out/heightmap.r16 |  |  | no |
+| Build (`build`) | bool |  | true |  |  | no |
+| Auto Range (`auto_range`) | bool |  | true |  |  | no |
+
+## Layer contract
+
+Reads and writes the height layer.

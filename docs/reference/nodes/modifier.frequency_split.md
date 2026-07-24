@@ -1,0 +1,33 @@
+---
+title: Frequency Split
+status: draft
+---
+
+# Frequency Split
+
+`modifier.frequency_split` · Filters
+
+Splits the height into a low-frequency band (a blur at a world-unit cut radius) and the high-frequency residual. The two recombine to the input, so you can work the large forms and re-add the fine detail.
+
+## Purpose
+
+*Not yet written.*
+
+## Inputs
+
+- `in`
+
+## Outputs
+
+- `low`
+- `high`
+
+## Parameters
+
+| Parameter | Type | Range | Default | Unit | Description | Field-driven |
+|---|---|---|---|---|---|---|
+| Radius (`radius`) | float | [0, 100000] | 64 | m |  | no |
+
+## Layer contract
+
+Reads and writes the height layer.

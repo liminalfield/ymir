@@ -48,12 +48,20 @@ extra:
     - icon: fontawesome/brands/github
       link: https://github.com/liminalfield/ymir
 
+# The generated per-node reference pages are reached through the Nodes index, not listed one by one
+# in the sidebar; this keeps the nav readable and suppresses the "not in nav" build warning for them.
+not_in_nav: |
+  reference/nodes/*.md
+  !reference/nodes/index.md
+
 # Explicit nav: the four Diataxis sections plus Home, Install, and a managed Roadmap.
 nav:
   - Home: index.md
   - Install: install.md
   - Tutorial: tutorial/index.md
   - How-to: how-to/index.md
-  - Reference: reference/index.md
+  - Reference:
+      - reference/index.md
+      - Nodes: reference/nodes/index.md
   - Concepts: concepts/index.md
   - Roadmap: roadmap.md

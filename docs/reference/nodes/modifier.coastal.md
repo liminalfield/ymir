@@ -1,0 +1,39 @@
+---
+title: Coastal
+status: draft
+---
+
+# Coastal
+
+`modifier.coastal` · Geology · Mask-aware
+
+Reshapes the shore into a beach-and-bluff bevel: cuts the land down and lifts the seabed toward a gentle wedge at the world sea level, fading over a width in metres. Bevels by true distance from the shoreline, so the beach is even all around. Taps the shore band.
+
+## Purpose
+
+*Not yet written.*
+
+## Inputs
+
+- `in`
+- `mask` (optional)
+
+## Outputs
+
+- `heightfield`
+- `shore`
+
+## Parameters
+
+| Parameter | Type | Range | Default | Unit | Description | Field-driven |
+|---|---|---|---|---|---|---|
+| Width (`width`) | float | [0, 100000] | 150 | m |  | no |
+| Angle (`angle`) | float | [0, 80] | 4 | ° |  | no |
+| Strength (`strength`) | float | [0, 1] | 1 |  |  | no |
+| Erode Inland Basins (`erode_inland_basins`) | bool |  | false |  |  | no |
+
+## Layer contract
+
+Honours a mask on its input, applying everywhere the mask is absent.
+
+Emits `shore` alongside the height layer.

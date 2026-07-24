@@ -1,0 +1,34 @@
+---
+title: Curvature
+status: draft
+---
+
+# Curvature
+
+`modifier.curvature` · Selectors
+
+Selects convex (ridges, outcrops) or concave (valleys, hollows) ground from the surface curvature. Measures curvature, not slope, so a plain ramp reads zero. Set the scale with an upstream Blur.
+
+## Purpose
+
+*Not yet written.*
+
+## Inputs
+
+- `in`
+
+## Outputs
+
+- `out`
+
+## Parameters
+
+| Parameter | Type | Range | Default | Unit | Description | Field-driven |
+|---|---|---|---|---|---|---|
+| Mode (`mode`) | enum | convex, concave | convex |  | Which ground to select: convex (ridges, outcrops) or concave (valleys, hollows). | no |
+| Strength (`strength`) | float | [0, 8] | 1 |  |  | no |
+| Output (`output`) | enum | selection, measure | selection |  |  | no |
+
+## Layer contract
+
+Reads and writes the height layer.

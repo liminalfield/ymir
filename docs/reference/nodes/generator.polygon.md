@@ -1,0 +1,37 @@
+---
+title: Polygon
+status: draft
+---
+
+# Polygon
+
+`generator.polygon` · Generators
+
+A flat-topped regular polygon with soft flanks: the envelope for an angular plateau or faceted mesa. Set the number of sides and turn it with rotation.
+
+## Purpose
+
+*Not yet written.*
+
+## Inputs
+
+This node takes no inputs.
+
+## Outputs
+
+- `out`
+
+## Parameters
+
+| Parameter | Type | Range | Default | Unit | Description | Field-driven |
+|---|---|---|---|---|---|---|
+| Radius (`radius`) | float | [0, 100000] | 400 | m |  | no |
+| Sides (`sides`) | int | [3, 12] | 6 |  |  | no |
+| Falloff (`falloff`) | float | [0, 100000] | 120 | m |  | no |
+| Rotation (`rotation`) | float | [0, 360] | 0 | ° |  | no |
+| Center X (`center_x`) | float | [0, 1] | 0.5 |  |  | no |
+| Center Y (`center_y`) | float | [0, 1] | 0.5 |  |  | no |
+
+## Layer contract
+
+Reads and writes the height layer.

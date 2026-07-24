@@ -1,0 +1,36 @@
+---
+title: Warp
+status: draft
+---
+
+# Warp
+
+`modifier.warp` · Filters
+
+Domain warp: pushes the height layer sideways by a noise field so straight features wander and regular shapes turn natural. Amount is in world units.
+
+## Purpose
+
+Adds meandering irregularity to features that look too regular or machine-made. Warp displaces the
+terrain sideways rather than up, so it changes the shape of features without changing their height.
+
+## Inputs
+
+- `in`
+
+## Outputs
+
+- `out`
+
+## Parameters
+
+| Parameter | Type | Range | Default | Unit | Description | Field-driven |
+|---|---|---|---|---|---|---|
+| Amount (`amount`) | float | [0, 100000] | 50 | m |  | no |
+| Frequency (`frequency`) | float | [0, 64] | 2 |  | Sets the feature size of the noise; higher values pack in smaller, denser features. | no |
+| Octaves (`octaves`) | int | [1, 12] | 4 |  | The number of noise layers summed together; more octaves add finer detail. | no |
+| Seed (`seed`) | int | [0, 2147483647] | 0 |  | The random seed; changing it regenerates a different variation of the same pattern. | no |
+
+## Layer contract
+
+Reads and writes the height layer.

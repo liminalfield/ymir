@@ -1,0 +1,4 @@
+# `cargo xtask <task>` runs the developer-task crate. Kept as an alias so the docs
+# generator and lint (see crates/xtask) are invoked the same way from the shell and CI.
+[alias]
+xtask = "run --quiet --package xtask --"

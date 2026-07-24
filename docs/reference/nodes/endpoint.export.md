@@ -1,0 +1,34 @@
+---
+title: Export PNG
+status: draft
+---
+
+# Export PNG
+
+`endpoint.export` · Outputs
+
+Writes the height layer to a 16-bit grayscale PNG.
+
+## Purpose
+
+*Not yet written.*
+
+## Inputs
+
+- `in`
+
+## Outputs
+
+This node produces no outputs.
+
+## Parameters
+
+| Parameter | Type | Range | Default | Unit | Description | Field-driven |
+|---|---|---|---|---|---|---|
+| Path (`path`) | text |  | out/heightmap.png |  |  | no |
+| Build (`build`) | bool |  | true |  |  | no |
+| Auto Range (`auto_range`) | bool |  | true |  |  | no |
+
+## Layer contract
+
+Reads and writes the height layer.
