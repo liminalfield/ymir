@@ -19,7 +19,8 @@ use ymir_nodes::ParamSource;
 ///
 /// v2 adds each parameter's resolved `label`, `description`, and `source` tier.
 /// v3 adds each node's `emitted_layers` and `mask_aware`.
-const SCHEMA_VERSION: u32 = 3;
+/// v4 adds each node's resolved `category_label`.
+const SCHEMA_VERSION: u32 = 4;
 
 /// Handles `docs [--format json]`: prints the node reference as pretty JSON to stdout, then exits.
 /// Only `json` is supported for now; the flag exists so other formats can be added without changing
@@ -62,6 +63,8 @@ struct Docs {
 struct Node {
     type_id: String,
     category: String,
+    /// The category's resolved display name (e.g. `Generators` for `generator`), from `tr`.
+    category_label: String,
     /// Derived from arity: `generator`, `modifier`, or `endpoint`.
     kind: &'static str,
     display_name: String,
@@ -134,6 +137,7 @@ fn node(spec: &NodeSpec) -> Node {
     Node {
         type_id: spec.type_id.to_string(),
         category: spec.category.to_string(),
+        category_label: ymir_nodes::tr(&format!("category-{}", spec.category)).to_string(),
         kind,
         display_name: ymir_nodes::tr(&format!("node-{}", spec.type_id)).to_string(),
         description: ymir_nodes::tr(&format!("node-{}-desc", spec.type_id)).to_string(),
@@ -249,6 +253,7 @@ mod tests {
             .find(|n| n.type_id == "generator.fbm")
             .expect("generator.fbm is registered");
         assert_eq!(fbm.category, "generator");
+        assert_eq!(fbm.category_label, "Generators");
         assert_eq!(fbm.kind, "generator");
         // Resolved through `tr`, not the raw key: a source parse could not produce this.
         assert_eq!(fbm.display_name, "fBm Noise");
