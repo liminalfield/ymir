@@ -4226,9 +4226,14 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
         // The curve editor's corner pop-out icon (#70-style) reports through this flag,
         // opening the larger, draggable window for this node's curve param.
         let mut popout = false;
-        if let Some(new_value) =
-            param_ui::edit(ui, pspec, &current, histogram.as_deref(), &mut popout)
-        {
+        if let Some(new_value) = param_ui::edit(
+            ui,
+            spec.type_id,
+            pspec,
+            &current,
+            histogram.as_deref(),
+            &mut popout,
+        ) {
             params.insert(pspec.name.clone(), new_value);
             changed = true;
         }
@@ -4383,7 +4388,7 @@ fn color_row(
     let show_alpha = matches!(alpha, Alpha::OnlyBlend);
     let mut changed = false;
     ui.horizontal(|ui| {
-        param_ui::param_label(ui, label);
+        param_ui::plain_label(ui, label);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let srgba = hsva.to_srgba_unmultiplied();
             let hex = if show_alpha {
@@ -4518,7 +4523,7 @@ fn frame_inspector(ui: &mut egui::Ui, state: &mut AppState, index: usize) {
     ui.spacing_mut().item_spacing.y = 8.0;
 
     ui.horizontal(|ui| {
-        param_ui::param_label(ui, "Label");
+        param_ui::plain_label(ui, "Label");
         ui.add(
             egui::TextEdit::singleline(&mut state.frames[index].label)
                 .hint_text("Frame")
@@ -4546,7 +4551,7 @@ fn frame_inspector(ui: &mut egui::Ui, state: &mut AppState, index: usize) {
     state.frame_color_edit = Some((index, fill_hsva, border_hsva, text_hsva));
 
     ui.horizontal(|ui| {
-        param_ui::param_label(ui, "Label position");
+        param_ui::plain_label(ui, "Label position");
         let placement = &mut state.frames[index].label_placement;
         let label = match placement {
             project_file::LabelPlacement::TopLeft => "Top left",
