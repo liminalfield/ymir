@@ -13,7 +13,7 @@ A linear radial distance ramp (0 at the center, 1 at the radius): feed a Curve t
 
 ## Purpose
 
-*Not yet written.*
+A straight distance ramp out from a centre, the raw material for radial landforms. Feed it a Curve to draw any cross-section: a dome, a crater, a caldera, or a set of terraces.
 
 ## Inputs
 
@@ -34,3 +34,8 @@ This node takes no inputs.
 ## Layer contract
 
 Reads and writes the height layer.
+
+## See also
+
+- [Curve](modifier.curve.md)
+- [Ring](generator.ring.md)

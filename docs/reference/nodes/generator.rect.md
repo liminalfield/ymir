@@ -13,7 +13,7 @@ A flat-topped rectangular footprint with soft, rounded flanks: the envelope for 
 
 ## Purpose
 
-*Not yet written.*
+A flat-topped rectangular footprint with soft flanks. Reach for it as the envelope for a plateau, a mesa, or a rectangular landmass, turned with rotation.
 
 ## Inputs
 

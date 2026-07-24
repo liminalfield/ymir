@@ -13,7 +13,7 @@ Ridged multifractal noise: sharp mountain ridgelines instead of fBm's rolling hi
 
 ## Purpose
 
-*Not yet written.*
+Sharp mountain ridgelines, the ridged counterpart to fBm's rolling hills. Multiply it with a shape envelope to place a massif.
 
 ## Inputs
 
