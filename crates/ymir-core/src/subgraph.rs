@@ -12,7 +12,7 @@
 //! A subgraph (the container, added next) is a node holding an inner [`Graph`] whose
 //! ports are derived from these markers: an [`InputNode`] marks an inner field fed from
 //! outside, an [`OutputNode`] marks an inner field exposed outside. See
-//! `docs/design/subgraphs.md`.
+//! `design/subgraphs.md`.
 
 use std::sync::Arc;
 
@@ -120,7 +120,7 @@ inventory::submit! { OperatorEntry { type_id: OUTPUT_TYPE_ID, make: || Box::new(
 /// with the boundary inputs bound to the input markers and reads the fields feeding the
 /// output markers.
 ///
-/// Template instantiation (see `docs/design/subgraphs.md`): it holds a concrete *copy* of
+/// Template instantiation (see `design/subgraphs.md`): it holds a concrete *copy* of
 /// the inner graph, never a link to a shared definition, so two instances are independent
 /// and editing one cannot disturb another.
 #[derive(Clone)]

@@ -15,7 +15,7 @@ revision 1; what moved is the hydraulic model's discretization (now a GPU grid m
 not a CPU droplet model), the determinism stance (now visual-equivalence within
 tolerance, not a full drop), and the order of the build plan's front half.
 
-When settled, this file lives at `docs/ymir-erosion-DESIGN.md`, and the determinism
+When settled, this file lives at `design/ymir-erosion-DESIGN.md`, and the determinism
 section below is lifted into `CLAUDE.md` to replace the current hard requirement.
 
 ## Purpose and scope

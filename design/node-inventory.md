@@ -3,7 +3,7 @@
 A snapshot of every node Ymir has today, plus every node that has been discussed or
 designed but not yet built. Written to seed roadmap planning for the next set of
 nodes. Generated 2026-07-14 from the source (`crates/ymir-nodes/src/`) and the design
-docs (`docs/design/`).
+docs (`design/`).
 
 ## The model these nodes live in
 

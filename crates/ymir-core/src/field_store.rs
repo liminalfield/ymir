@@ -1,5 +1,5 @@
 //! Content-addressed disk store for cached node outputs: the warm tier of the evaluation
-//! cache (see `docs/design/evaluation-cache.md`).
+//! cache (see `design/evaluation-cache.md`).
 //!
 //! Each entry is a node's output (`Vec<Field>`) serialized with [`crate::field_cache`] to a
 //! file named by its content-hash key, in a single cache directory. The store survives

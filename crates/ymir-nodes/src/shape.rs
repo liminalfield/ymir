@@ -4,7 +4,7 @@
 //! coordinates with one fixed smoothstep falloff, places itself at a normalized
 //! center, and measures its reach in world units. The two pieces of math common to all
 //! of them live here so the family stays one implementation: the falloff curve and the
-//! normalized-center-to-cell mapping. See `docs/design/shape-generators.md`.
+//! normalized-center-to-cell mapping. See `design/shape-generators.md`.
 
 use ymir_core::Region;
 
