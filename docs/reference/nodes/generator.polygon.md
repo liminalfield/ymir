@@ -9,7 +9,7 @@ status: draft
 
 `generator.polygon` · Generators
 
-A flat-topped regular polygon with soft flanks: the envelope for an angular plateau or faceted mesa. Set the number of sides and turn it with rotation.
+A flat-topped regular polygon with soft flanks.
 
 ## Purpose
 

@@ -9,7 +9,7 @@ status: draft
 
 `modifier.frequency_split` · Filters
 
-Splits the height into a low-frequency band (a blur at a world-unit cut radius) and the high-frequency residual. The two recombine to the input, so you can work the large forms and re-add the fine detail.
+Splits the height into a low-frequency band and the high-frequency residual.
 
 ## Purpose
 

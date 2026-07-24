@@ -9,7 +9,7 @@ status: draft
 
 `modifier.slope` · Selectors
 
-Selects a band of steepness: high where the slope angle is within min..max degrees, softening over the falloff. Scale it with an upstream Blur.
+Selects a band of steepness: high where the slope angle is within min..max degrees, softening over the falloff.
 
 ## Purpose
 

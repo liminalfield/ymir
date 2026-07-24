@@ -9,7 +9,7 @@ status: draft
 
 `modifier.expression` · Adjust
 
-A per-cell math formula over x, y, and the input layers (height, mask, …): the escape hatch for custom math. Runs wired or as a coordinate formula.
+A per-cell math formula over x, y, and the input layers: the escape hatch for custom math.
 
 ## Purpose
 

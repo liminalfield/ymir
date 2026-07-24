@@ -9,7 +9,7 @@ status: draft
 
 `generator.rect` · Generators
 
-A flat-topped rectangular footprint with soft, rounded flanks: the envelope for a plateau, mesa, or rectangular landmass. Turn it with rotation.
+A flat-topped rectangular footprint with soft, rounded flanks.
 
 ## Purpose
 

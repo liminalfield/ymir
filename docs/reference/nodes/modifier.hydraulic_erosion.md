@@ -9,7 +9,7 @@ status: draft
 
 `modifier.hydraulic_erosion` · Geology · Mask-aware · Resolution-dependent
 
-Water carving the terrain, simulated as rain droplets that run downhill, pick up and drop sediment, and cut rills while depositing fans and filling hollows. The deposition is what reads as weathered. Taps wear, deposition, and flow.
+Water carving the terrain, simulated as rain droplets that cut rills and deposit sediment.
 
 ## Purpose
 

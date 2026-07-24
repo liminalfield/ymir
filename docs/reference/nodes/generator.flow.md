@@ -9,7 +9,7 @@ status: draft
 
 `generator.flow` · Generators
 
-Noise warped along divergence-free curl streamlines: a swirly, marbled, fluid look. Also carries the flow direction on its flow_x / flow_y layers.
+Noise warped along divergence-free curl streamlines, for a swirly, marbled, fluid look.
 
 ## Purpose
 
