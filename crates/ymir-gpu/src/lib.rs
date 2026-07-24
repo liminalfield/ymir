@@ -93,11 +93,21 @@ impl GpuContext {
     /// created.
     pub fn new_headless() -> Result<Self, GpuError> {
         let instance = wgpu::Instance::default();
-        let adapter =
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))?;
+        // Prefer the high-performance adapter: on a machine with both an integrated and a discrete
+        // GPU, erosion wants the discrete one.
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            ..Default::default()
+        }))?;
+        // Request the adapter's own limits, not wgpu's conservative downlevel defaults. Erosion
+        // runs on build-resolution grids (millions of cells across several large storage buffers),
+        // and the default limits cap both the storage-buffer size and, for a 1D dispatch, the
+        // workgroups-per-dimension well below that. Taking the adapter's real capability is the
+        // right call for a native application (there is no web target to stay portable to).
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                 label: Some("ymir-gpu-device"),
+                required_limits: adapter.limits(),
                 ..Default::default()
             }))?;
         Ok(Self { device, queue })
