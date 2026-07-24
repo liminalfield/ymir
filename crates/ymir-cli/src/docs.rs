@@ -13,9 +13,12 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use ymir_core::registry;
 use ymir_core::{NodeKind, NodeSpec, ParamKind, ParamSpec, ParamValue, PortSpec, Scale, Unit};
+use ymir_nodes::ParamSource;
 
 /// Version of the docs JSON shape. Bump when the schema changes so a consumer can guard on it.
-const SCHEMA_VERSION: u32 = 1;
+///
+/// v2 adds each parameter's resolved `label`, `description`, and `source` tier.
+const SCHEMA_VERSION: u32 = 2;
 
 /// Handles `docs [--format json]`: prints the node reference as pretty JSON to stdout, then exits.
 /// Only `json` is supported for now; the flag exists so other formats can be added without changing
@@ -74,11 +77,20 @@ struct Port {
     optional: bool,
 }
 
-/// One parameter's schema. Label, description, and the D5 resolution level arrive with G2; this is
-/// the mechanical half (kind, range, default, unit, scale).
+/// One parameter's schema plus its resolved display strings: the catalog `label` and one-line
+/// `description`, and the `source` tier (`override`, `shared`, or `prettified`) so a docs lint can
+/// flag a parameter that fell through to the prettified fallback.
 #[derive(Serialize)]
 struct Param {
+    /// The `snake_case` identifier, the key in a project file and in expression syntax.
     name: String,
+    /// The resolved display label (catalog entry or prettified fallback).
+    label: String,
+    /// The one-line description, absent when no catalog entry exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    /// Which catalog tier produced the label: `override`, `shared`, or `prettified`.
+    source: &'static str,
     #[serde(rename = "type")]
     kind: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -122,7 +134,7 @@ fn node(spec: &NodeSpec) -> Node {
         description: ymir_nodes::tr(&format!("node-{}-desc", spec.type_id)).to_string(),
         inputs: spec.inputs.iter().map(port).collect(),
         outputs: spec.outputs.iter().map(port).collect(),
-        params: spec.params.iter().map(param).collect(),
+        params: spec.params.iter().map(|p| param(spec.type_id, p)).collect(),
     }
 }
 
@@ -133,7 +145,7 @@ fn port(p: &PortSpec) -> Port {
     }
 }
 
-fn param(p: &ParamSpec) -> Param {
+fn param(type_id: &str, p: &ParamSpec) -> Param {
     let (kind, min, max, options) = match &p.kind {
         ParamKind::Float { min, max } => ("float", Some(json!(min)), Some(json!(max)), None),
         ParamKind::Int { min, max } => ("int", Some(json!(min)), Some(json!(max)), None),
@@ -168,8 +180,18 @@ fn param(p: &ParamSpec) -> Param {
         Scale::Linear => "linear",
         Scale::Logarithmic => "logarithmic",
     };
+    // Resolve the display strings from the running binary's catalog, the same path the GUI takes.
+    let resolved = ymir_nodes::resolve_param(type_id, &p.name);
+    let source = match resolved.source {
+        ParamSource::Override => "override",
+        ParamSource::Shared => "shared",
+        ParamSource::Prettified => "prettified",
+    };
     Param {
         name: p.name.clone(),
+        label: resolved.label,
+        description: resolved.description,
+        source,
         kind,
         min,
         max,
@@ -231,6 +253,38 @@ mod tests {
             freq.min.is_some() && freq.max.is_some(),
             "a float param carries a numeric range"
         );
+        // frequency is a shared, meaning-invariant param: it resolves with a label and description.
+        assert_eq!(freq.label, "Frequency");
+        assert_eq!(freq.source, "shared");
+        assert!(freq.description.is_some());
+    }
+
+    #[test]
+    fn param_strings_report_their_resolution_tier() {
+        let docs = build();
+        let blend = docs
+            .nodes
+            .iter()
+            .find(|n| n.type_id == "modifier.blend")
+            .expect("modifier.blend is registered");
+        // An enum param resolves to a node-specific override, with prose.
+        let mode = blend
+            .params
+            .iter()
+            .find(|p| p.name == "mode")
+            .expect("blend has a mode param");
+        assert_eq!(mode.label, "Mode");
+        assert_eq!(mode.source, "override");
+        assert!(mode.description.is_some());
+        // A param with no catalog entry falls through to the prettified label and carries no prose.
+        let opacity = blend
+            .params
+            .iter()
+            .find(|p| p.name == "opacity")
+            .expect("blend has an opacity param");
+        assert_eq!(opacity.label, "Opacity");
+        assert_eq!(opacity.source, "prettified");
+        assert!(opacity.description.is_none());
     }
 
     #[test]
