@@ -48,3 +48,19 @@ jobs:
         run: cargo build --workspace --verbose
       - name: Test
         run: cargo test --workspace --verbose
+      # The node reference is generated from the running binary's registry. Regenerate it and fail
+      # if the committed pages drift (modified or missing), so docs/reference/nodes/ can never fall
+      # out of sync with the nodes. `git status --porcelain` catches a new node's page too, which a
+      # plain `git diff` would miss.
+      - name: Docs generate + drift check
+        run: |
+          cargo xtask docs-gen
+          if [ -n "$(git status --porcelain -- docs/reference/nodes/)" ]; then
+            echo "Generated node pages are out of date; run 'cargo xtask docs-gen' and commit:"
+            git status --porcelain -- docs/reference/nodes/
+            exit 1
+          fi
+      # Lint the docs: orphaned or invalid fragments, broken links, missing figures, forbidden
+      # markers, relative design/ links, and completeness gaps on pages marked stable.
+      - name: Docs lint
+        run: cargo xtask docs-lint
