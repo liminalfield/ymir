@@ -12,6 +12,9 @@
 //!   through `dyn Operator` and never names a concrete node.
 //! - [`NodeSpec`]/[`ParamSpec`]/[`ParamValue`]/[`Params`]/[`EvalContext`]: the
 //!   node schema and per-evaluation context.
+//! - [`ComputeContext`]: the GPU-type-free device handle the [`EvalContext`]
+//!   carries, so a GPU-capable operator can run on a device supplied by the
+//!   application while the engine names no GPU type.
 //! - [`registry`]: the collection point where downstream crates register their
 //!   operators.
 //! - [`Graph`]/[`EvalCache`]/[`EvalRequest`]: the node graph and the pull-based,
@@ -30,6 +33,7 @@ pub mod project;
 pub mod registry;
 
 mod cancel;
+mod compute;
 mod context;
 mod error;
 mod eval;
@@ -48,6 +52,7 @@ mod spec;
 mod subgraph;
 
 pub use cancel::CancelToken;
+pub use compute::ComputeContext;
 pub use context::EvalContext;
 pub use error::{Error, Result};
 pub use eval::{EvalCache, EvalRequest};

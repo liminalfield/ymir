@@ -18,6 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::cancel::CancelToken;
+use crate::compute::ComputeContext;
 use crate::context::EvalContext;
 use crate::error::{Error, Result};
 use crate::field::Field;
@@ -60,6 +61,13 @@ pub struct EvalRequest {
     /// Cancellation signal, threaded into each node's context; defaults to
     /// never-cancel.
     cancel: CancelToken,
+    /// Optional compute-device handle, threaded into each node's [`EvalContext`] so a
+    /// GPU-capable operator can run on the GPU (falling back to CPU when absent). The
+    /// application creates the device and attaches it here; the engine never creates one.
+    /// Deliberately not part of the cache key: it is a device, not content, and the
+    /// determinism stance treats a GPU result as visually equivalent to the CPU one, so a
+    /// result computed on either path is interchangeable in the cache.
+    compute: Option<Arc<dyn ComputeContext>>,
 }
 
 impl EvalRequest {
@@ -76,7 +84,18 @@ impl EvalRequest {
             sea_level: 0.0,
             depth: 0,
             cancel: CancelToken::new(),
+            compute: None,
         }
+    }
+
+    /// Attaches a compute-device handle, threaded into each node's [`EvalContext`] so a
+    /// GPU-capable operator runs on the GPU. The application (`ymir-gui` or `ymir-cli`)
+    /// creates the device and calls this; a headless CPU-only request omits it and every
+    /// operator takes its CPU path. Not part of the cache key (see the field docs).
+    #[must_use]
+    pub fn with_compute(mut self, compute: Arc<dyn ComputeContext>) -> Self {
+        self.compute = Some(compute);
+        self
     }
 
     /// Sets the subgraph nesting depth this request evaluates at. The top level is 0; a
@@ -515,12 +534,15 @@ impl Graph {
             }
         }
 
-        let ctx = EvalContext::new(request.width, request.height, request.region, seed)
+        let mut ctx = EvalContext::new(request.width, request.height, request.region, seed)
             .with_cancel(request.cancel.clone())
             .with_world_extent(request.world_extent)
             .with_world_height(request.world_height)
             .with_sea_level(request.sea_level)
             .with_depth(request.depth);
+        if let Some(compute) = &request.compute {
+            ctx = ctx.with_compute(Arc::clone(compute));
+        }
         let inputs = Inputs::new(&required, &optional);
         let outputs = Arc::new(node.operator.eval(inputs, &node.params, &ctx)?);
 
