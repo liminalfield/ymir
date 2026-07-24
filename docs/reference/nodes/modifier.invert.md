@@ -13,7 +13,7 @@ Flips the height layer (1 - height).
 
 ## Purpose
 
-*Not yet written.*
+Flips the height, turning peaks into pits and back. Reach for it to reverse a shape, or to flip a selection so an effect lands on the other ground.
 
 ## Inputs
 

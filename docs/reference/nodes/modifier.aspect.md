@@ -13,7 +13,7 @@ Selects slopes facing a compass direction: high where the terrain faces the dire
 
 ## Purpose
 
-*Not yet written.*
+Selects slopes that face a compass direction, high where the terrain looks toward it and softening away from it. Reach for it for sun-facing or wind-facing effects: poleward snow, directional weathering.
 
 ## Inputs
 
@@ -35,3 +35,7 @@ Selects slopes facing a compass direction: high where the terrain faces the dire
 ## Layer contract
 
 Reads and writes the height layer.
+
+## Behaviour
+
+Being a gradient measure, it amplifies sharp input such as thin ridges, so scale it with an upstream Blur. A slope weight suppresses the flats, where facing is meaningless.

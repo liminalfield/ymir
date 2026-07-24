@@ -13,7 +13,7 @@ Quantizes the height into stepped bands: flat treads joined by risers, for strat
 
 ## Purpose
 
-*Not yet written.*
+Quantizes the height into stepped bands, flat treads joined by risers, for strata, benches, and mesa forms. Reach for it to turn a smooth slope into layered rock.
 
 ## Inputs
 
@@ -34,3 +34,7 @@ Quantizes the height into stepped bands: flat treads joined by risers, for strat
 ## Layer contract
 
 Honours a mask on its input, applying everywhere the mask is absent.
+
+## Behaviour
+
+Band count sets the number of terraces, and sharpness rounds the steps or squares them off. Auto range spreads the bands across the terrain's actual height, so the count is what you see; Fixed places them at absolute elevations.
