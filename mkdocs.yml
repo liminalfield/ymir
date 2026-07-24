@@ -1,0 +1,59 @@
+site_name: Ymir
+site_description: A node-based procedural terrain generator, written in Rust.
+site_url: https://liminalfield.github.io/ymir/
+repo_url: https://github.com/liminalfield/ymir
+repo_name: liminalfield/ymir
+edit_uri: edit/main/docs/
+copyright: >
+  Ymir is free software under the GPL-3.0. Source, issues, and design records live in the repository.
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - content.code.copy
+    - toc.follow
+    - search.suggest
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.superfences
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
+
+extra:
+  status:
+    draft: Draft
+    stable: Stable
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/liminalfield/ymir
+
+# Explicit nav: the four Diataxis sections plus Home, Install, and a managed Roadmap.
+nav:
+  - Home: index.md
+  - Install: install.md
+  - Tutorial: tutorial/index.md
+  - How-to: how-to/index.md
+  - Reference: reference/index.md
+  - Concepts: concepts/index.md
+  - Roadmap: roadmap.md
