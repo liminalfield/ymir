@@ -13,7 +13,7 @@ Worley noise as cones peaking at scattered feature points: rock piles, bumps, sc
 
 ## Purpose
 
-*Not yet written.*
+Scattered cones peaking at random points, for rock piles, bumps, and scaled surfaces. Frequency sets how densely the cones pack; reach for it to add clustered relief.
 
 ## Inputs
 

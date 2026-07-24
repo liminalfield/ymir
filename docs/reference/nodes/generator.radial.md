@@ -13,7 +13,7 @@ A smooth radial dome (1 at the center, 0 at the radius): an envelope to multiply
 
 ## Purpose
 
-*Not yet written.*
+A smooth dome, high at the centre and falling to the edge. Reach for it as an envelope to multiply detail into an island or a hill, or shape it further with a Curve.
 
 ## Inputs
 

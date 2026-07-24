@@ -13,7 +13,7 @@ A smooth directional ramp (0 to 1 across a band): the non-centered envelope for 
 
 ## Purpose
 
-*Not yet written.*
+A smooth directional ramp across the terrain. Reach for it as a large-scale trend, a coast-to-highland rise or the direction of a dune field.
 
 ## Inputs
 

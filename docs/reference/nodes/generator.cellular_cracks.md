@@ -13,7 +13,7 @@ Worley cell-edge network: cracks, fractures, dried mud, rocky cell walls. Freque
 
 ## Purpose
 
-*Not yet written.*
+A network of cell-edge ridges, for cracks, fractures, dried mud, and rocky cell walls. Reach for it to break a surface into angular plates.
 
 ## Inputs
 
