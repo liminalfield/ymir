@@ -1,12 +1,17 @@
 //! Coastal reshaping: a beach-and-bluff bevel keyed to distance from the shoreline (#139).
 //!
 //! The shoreline is the world sea-level contour of the `height` layer (sea level is a world
-//! setting carried in [`EvalContext::sea_level`], never a node param). This node lays a symmetric
-//! wedge of grade `angle` on that contour: on land it cuts the terrain *down* toward a plane
-//! rising from the waterline (`min`), and offshore it lifts the seabed *up* toward the mirror
-//! plane (`max`). Both fade to zero over `width` metres, so terrain resumes smoothly away from the
-//! coast and the surface is continuous through the waterline. Where the rising plane meets an
-//! un-cut hillside a break of slope appears on its own: that is the bluff toe, not a separate step.
+//! setting carried in [`EvalContext::sea_level`], never a node param). On land this node cuts the
+//! terrain *down* toward a two-slope beach-and-bluff profile rising from the waterline (`min`): a
+//! gentle beach face of grade `angle` up to a berm crest at `berm_height`, then a steeper backing
+//! slope of grade `bluff_angle` above it. Offshore it lifts the seabed *up* toward a gentle
+//! shoreface (`max`). Both fade to zero over `width` metres, so terrain resumes smoothly away from
+//! the coast and the surface is continuous through the waterline. Because the backing slope is
+//! steep it clears the terrain behind the beach within a short run, so the cut bites only the low
+//! apron near the water and leaves the hill behind as a bluff; the break of slope where the
+//! envelope meets the un-cut hillside is the bluff toe, not a separate step. A single gentle wedge
+//! (`berm_height = 0`, `bluff_angle = angle`) is the degenerate case, which flattens the whole
+//! band and is what the separate backing grade exists to avoid.
 //!
 //! The bevel is parameterised by *true isotropic distance from the shoreline*, from the shared
 //! eikonal substrate ([`signed_distance_to_contour`](crate::distance)). That is the whole reason
@@ -37,10 +42,17 @@ const TYPE_ID: &str = "modifier.coastal";
 
 /// Default coastal reach in world metres: how far to each side of the shoreline the bevel acts.
 const DEFAULT_WIDTH: f64 = 150.0;
-/// Default beach/shoreface grade in degrees. A few degrees reads as a gentle sandy shore.
+/// Default beach-face grade in degrees. A few degrees reads as a gentle sandy foreshore.
 const DEFAULT_ANGLE: f64 = 4.0;
-/// Maximum grade. Capped below 90 so `tan(angle)` stays finite; near the cap the wedge is a near
-/// cliff at the waterline.
+/// Default berm-crest height above sea level, in world metres. With `angle`, this sets the
+/// beach-face width (`berm_height / tan(angle)`): the gentle foreshore rises to the berm crest,
+/// then the steeper backing slope takes over.
+const DEFAULT_BERM_HEIGHT: f64 = 2.0;
+/// Default backing (bluff) grade in degrees. Steep enough to read as a coastal bluff that clears
+/// the terrain behind the beach, rather than the gentle foreshore that flattens it.
+const DEFAULT_BLUFF_ANGLE: f64 = 45.0;
+/// Maximum grade for either slope. Capped below 90 so `tan(angle)` stays finite; near the cap the
+/// backing is a near-vertical sea cliff.
 const MAX_ANGLE: f64 = 80.0;
 
 /// Coastal bevel: reshapes terrain near the sea-level shoreline into a beach-and-bluff profile.
@@ -79,6 +91,24 @@ impl Operator for Coastal {
                 )
                 .with_unit(Unit::Degrees),
                 ParamSpec::new(
+                    "berm_height",
+                    ParamKind::Float {
+                        min: 0.0,
+                        max: 100_000.0,
+                    },
+                    ParamValue::Float(DEFAULT_BERM_HEIGHT),
+                )
+                .with_unit(Unit::Meters),
+                ParamSpec::new(
+                    "bluff_angle",
+                    ParamKind::Float {
+                        min: 0.0,
+                        max: MAX_ANGLE,
+                    },
+                    ParamValue::Float(DEFAULT_BLUFF_ANGLE),
+                )
+                .with_unit(Unit::Degrees),
+                ParamSpec::new(
                     "strength",
                     ParamKind::Float { min: 0.0, max: 1.0 },
                     ParamValue::Float(1.0),
@@ -105,7 +135,21 @@ impl Operator for Coastal {
         // hard edge at the waterline rather than panicking.
         let reach = params.get_f64("width", DEFAULT_WIDTH).max(1e-6) as f32;
         let angle = params.get_f64("angle", DEFAULT_ANGLE).clamp(0.0, MAX_ANGLE);
-        let grade = angle.to_radians().tan() as f32; // rise over run, in world metres
+        let grade = angle.to_radians().tan() as f32; // beach-face rise over run, in world metres
+        let berm_height = params.get_f64("berm_height", DEFAULT_BERM_HEIGHT).max(0.0) as f32;
+        let bluff_angle = params
+            .get_f64("bluff_angle", DEFAULT_BLUFF_ANGLE)
+            .clamp(0.0, MAX_ANGLE);
+        let bluff_grade = bluff_angle.to_radians().tan() as f32; // backing rise over run, in metres
+        // The beach face rises at `grade` from the waterline until it reaches the berm crest at
+        // `berm_height`; past that horizontal run the steeper backing slope takes over. A near-flat
+        // face (`grade` ~ 0) would put the crest at infinity, so guard the division: the face then
+        // spans nothing and the profile is the backing slope alone from the waterline.
+        let berm_run = if grade > 1e-6 {
+            berm_height / grade
+        } else {
+            0.0
+        };
         let strength = params.get_f64("strength", 1.0).clamp(0.0, 1.0) as f32;
 
         let sea = ctx.sea_level() as f32;
@@ -149,15 +193,22 @@ impl Operator for Coastal {
                 let band = 1.0 - smoothstep(reach, d.abs());
                 shore[idx] = band;
 
-                // The wedge target: a plane at grade `angle` rising inland and dropping offshore
-                // from sea level. On land keep the lower of terrain and plane (cut a beach into the
-                // hill); offshore keep the higher (lift the seabed into a shoreface). Either way the
-                // shoreline sits exactly at sea level, so the two sides meet continuously.
-                let rise = grade * d.abs() / world_height;
+                // The bevel target, measured from the waterline. On land it is a two-slope profile:
+                // a gentle beach face of grade `angle` up to the berm crest at `berm_height`, then
+                // the steeper backing grade `bluff_angle` above it. Cutting to the lower of terrain
+                // and this envelope carves a beach where terrain pokes above it and leaves the hill
+                // behind untouched where the steep backing has already cleared it (the bluff toe is
+                // that break of slope). Offshore, the seabed is lifted toward a gentle shoreface at
+                // `angle`. Either side meets the waterline at sea level, so the profile is continuous.
                 let carved = if d >= 0.0 {
-                    original.min(sea + rise)
+                    let rise_m = if d < berm_run {
+                        grade * d
+                    } else {
+                        berm_height + bluff_grade * (d - berm_run)
+                    };
+                    original.min(sea + rise_m / world_height)
                 } else {
-                    original.max(sea - rise)
+                    original.max(sea - grade * d.abs() / world_height)
                 };
 
                 let weight = band * strength * mask.get(x, y).unwrap_or(1.0);
@@ -256,6 +307,100 @@ mod tests {
             "a coastal hill cell should be cut down: {before} -> {after}"
         );
         assert!(after >= 0.5 - 1e-3, "the cut should not go below sea level");
+    }
+
+    /// A coast where the land is a flat mesa well above sea level: offshore (`x < edge`) sits below
+    /// sea, and from the shoreline inland the height is a constant plateau. The shoreline is a
+    /// straight line, so distance-to-shore is the horizontal offset, and the plateau is the backing
+    /// terrain a steep bluff should preserve rather than flatten.
+    fn flat_mesa_coast(size: usize, shore_x: usize, plateau: f32) -> Field {
+        Field::new(size, size, Region::UNIT).with_layer(
+            layers::HEIGHT,
+            Arc::new(Layer::from_fn(size, size, |x, _| {
+                if x < shore_x { 0.3 } else { plateau }
+            })),
+        )
+    }
+
+    #[test]
+    fn a_steep_backing_preserves_the_mesa_behind_the_beach() {
+        // The #252 fix: a steep `bluff_angle` clears the backing terrain within a short run, so the
+        // cut bites only the low apron near the water and leaves the plateau behind untouched. The
+        // old single gentle wedge flattened the whole band toward sea level instead.
+        let coast = flat_mesa_coast(64, 20, 0.8);
+        let ctx = ctx(64);
+        let params = Params::new()
+            .with("width", ParamValue::Float(40.0))
+            .with("angle", ParamValue::Float(4.0))
+            .with("berm_height", ParamValue::Float(1.0))
+            .with("bluff_angle", ParamValue::Float(80.0));
+        let out = run(&coast, &params, &ctx);
+
+        // Just inland of the shoreline the beach face cuts the mesa edge well down toward the water.
+        let near = at(&out[0], 23, 32);
+        assert!(near < 0.6, "the beach face should carve the apron: {near}");
+        // Well inland, past the berm and up the steep backing, the plateau is left as it was: the
+        // steep envelope has already risen above it, so `min` keeps the original height.
+        let far_before = at(&coast, 44, 32);
+        let far_after = at(&out[0], 44, 32);
+        assert!(
+            (far_after - far_before).abs() < 1e-4,
+            "the mesa behind the bluff must be preserved: {far_before} -> {far_after}"
+        );
+
+        // The same cell under the degenerate single wedge (no berm, backing == beach face) is
+        // dragged down instead: this is exactly the flattening the two-slope profile fixes.
+        let wedge = Params::new()
+            .with("width", ParamValue::Float(40.0))
+            .with("angle", ParamValue::Float(4.0))
+            .with("berm_height", ParamValue::Float(0.0))
+            .with("bluff_angle", ParamValue::Float(4.0));
+        let flat = run(&coast, &wedge, &ctx);
+        assert!(
+            at(&flat[0], 44, 32) < far_before - 0.05,
+            "the single wedge should flatten the same cell the bluff preserves"
+        );
+    }
+
+    #[test]
+    fn single_wedge_is_the_degenerate_case() {
+        // With no berm and the backing grade equal to the beach face, the two-slope profile collapses
+        // to the pre-#252 single wedge. Reproduce that wedge directly from the same distance solve and
+        // assert the node matches it cell for cell, so the generalization is exact and auditable.
+        let island = cone_island(48);
+        let c = ctx(48);
+        let angle = 4.0_f32;
+        let params = Params::new()
+            .with("width", ParamValue::Float(12.0))
+            .with("angle", ParamValue::Float(f64::from(angle)))
+            .with("berm_height", ParamValue::Float(0.0))
+            .with("bluff_angle", ParamValue::Float(f64::from(angle)));
+        let out = run(&island, &params, &c);
+
+        let source = island.layer(layers::HEIGHT).unwrap();
+        let sea = c.sea_level() as f32;
+        let wh = c.world_height() as f32;
+        let grade = angle.to_radians().tan();
+        let reach = 12.0_f32;
+        // Default `erode_inland_basins` is false, so the node uses the edge-connected sea distance.
+        let signed = sea_signed_distance(source, sea, c.meters_per_cell() as f32);
+        for y in 0..48 {
+            for x in 0..48 {
+                let d = signed.get(x, y).unwrap();
+                let orig = source.get(x, y).unwrap();
+                let band = 1.0 - smoothstep(reach, d.abs());
+                let carved = if d >= 0.0 {
+                    orig.min(sea + grade * d / wh)
+                } else {
+                    orig.max(sea - grade * d.abs() / wh)
+                };
+                let expected = orig + (carved - orig) * band;
+                assert!(
+                    (at(&out[0], x, y) - expected).abs() < 1e-6,
+                    "degenerate profile must equal the single wedge at ({x}, {y})"
+                );
+            }
+        }
     }
 
     #[test]
