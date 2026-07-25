@@ -267,7 +267,8 @@ fn lookup(key: &str) -> Option<&'static str> {
         // Coastal bevel.
         "node-modifier.coastal" => "Coastal",
         "node-modifier.coastal-desc" => {
-            "Reshapes the shore into a beach-and-bluff bevel at the world sea level, fading over a width in metres."
+            "Reshapes the shore at the world sea level into a beach that rises to a berm, then a \
+             steeper bluff, and lifts a shallow shelf offshore."
         }
 
         // Null (pass-through utility).
@@ -403,9 +404,9 @@ fn lookup(key: &str) -> Option<&'static str> {
         "param-modifier.coastal-bluff_angle" => "Bluff Angle",
         "param-modifier.coastal-bluff_angle-desc" => {
             "Grade of the steep backing slope above the berm, in degrees: the bluff or sea cliff \
-             behind the beach. A steep value clears the terrain behind within a short run, so only \
-             the low apron near the water is carved and the hill behind is preserved. Lowering it \
-             toward Angle flattens the whole coastal strip; near vertical it is a sharp sea cliff."
+             behind the beach. A value steeper than the coast clears the terrain behind within a \
+             short run, so only the low apron near the water is carved and the hill behind is \
+             preserved; a shallower value cuts further inland. Near vertical it is a sharp sea cliff."
         }
         "param-modifier.coastal-rounding" => "Rounding",
         "param-modifier.coastal-rounding-desc" => {

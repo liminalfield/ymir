@@ -28,11 +28,14 @@
 //! the result is byte-identical on every machine, and the no-star isotropy is inherited from the
 //! solve rather than re-derived here.
 //!
-//! Two outputs: the reshaped `heightfield`, and a `shore` band (one near the waterline, fading to
-//! zero at `beach_width` inland and `shoreface_reach` offshore) that marks the coastal zone.
-//! `shore` is a ready selection for the beach texturing and foam work downstream, so it is emitted
-//! rather than discarded and recomputed. Water depth is not emitted: it is `sea_level - height`,
-//! recoverable from the field plus the global, so by the layer test it does not earn a stored layer.
+//! Three outputs: the reshaped `heightfield`, and two selections it computes along the way. `shore`
+//! is a band peaking at the waterline and fading to zero at `beach_width` inland and
+//! `shoreface_reach` offshore, for a wet edge or foam. `beach` is a solid footprint of the beach
+//! face, one across the beach and feathering to zero at both the waterline and the berm crest (so
+//! detail masked by it never roughens the clean shoreline), for masking detail or a material back
+//! onto the flat beach the bevel carves. Both are emitted rather than discarded and recomputed.
+//! Water depth is not emitted: it is `sea_level - height`, recoverable from the field
+//! plus the global, so by the layer test it does not earn a stored layer.
 
 use std::sync::Arc;
 
@@ -96,7 +99,11 @@ impl Operator for Coastal {
                 // mask layer is used by convention, else reshape the whole coast.
                 PortSpec::optional("mask"),
             ],
-            outputs: vec![PortSpec::new("heightfield"), PortSpec::new("shore")],
+            outputs: vec![
+                PortSpec::new("heightfield"),
+                PortSpec::new("shore"),
+                PortSpec::new("beach"),
+            ],
             params: vec![
                 ParamSpec::new(
                     "beach_width",
@@ -154,9 +161,9 @@ impl Operator for Coastal {
                     ParamValue::Bool(false),
                 ),
             ],
-            // "shore" is a byproduct output port, not a canonical layer constant (there is no
-            // `layers::SHORE`); name it by the port so the reference lists the shore band.
-            emitted_layers: vec!["shore"],
+            // "shore" and "beach" are byproduct output ports, not canonical layer constants; name
+            // them by the port so the reference lists both selections.
+            emitted_layers: vec!["shore", "beach"],
             mask_aware: true,
         }
     }
@@ -215,8 +222,15 @@ impl Operator for Coastal {
             sea_signed_distance(&source, sea, cell_size)
         };
 
+        // The beach footprint mask feathers to zero over a fifth of the beach face at each end: at
+        // the crest so its inland edge is soft, and at the waterline so detail masked by it never
+        // reaches the shoreline and roughens the clean contour. A hair minimum keeps the feather
+        // positive for a zero-width beach.
+        let beach_feather = (beach_width * 0.2).max(1e-6);
+
         let mut reshaped = vec![0.0_f32; width * height];
         let mut shore = vec![0.0_f32; width * height];
+        let mut beach = vec![0.0_f32; width * height];
         for y in 0..height {
             for x in 0..width {
                 let idx = y * width + x;
@@ -267,6 +281,19 @@ impl Operator for Coastal {
                 };
                 shore[idx] = 1.0 - smoothstep(shore_reach, d.abs());
 
+                // The beach selection is a solid footprint of the beach face, one across the beach
+                // and feathering to zero at both ends: at the waterline (so detail masked by it
+                // leaves the shoreline contour clean) and at the berm crest (a soft inland edge),
+                // zero offshore. Unlike `shore` (a band peaking at the waterline), this covers the
+                // flattened beach evenly, so it masks detail or a material put back on the beach. The
+                // product of the two ramps is one only in the interior `[beach_feather, beach_width -
+                // beach_feather]`.
+                beach[idx] = if d >= 0.0 {
+                    smoothstep(beach_feather, d) * smoothstep(beach_feather, beach_width - d)
+                } else {
+                    0.0
+                };
+
                 let weight = side_fade * strength * mask.get(x, y).unwrap_or(1.0);
                 reshaped[idx] = original + (carved - original) * weight;
             }
@@ -278,7 +305,8 @@ impl Operator for Coastal {
             Arc::new(Layer::from_vec(width, height, reshaped)),
         );
         let shore_field = erosion::byproduct_field(shore, width, height, input.region());
-        Ok(vec![heightfield, shore_field])
+        let beach_field = erosion::byproduct_field(beach, width, height, input.region());
+        Ok(vec![heightfield, shore_field, beach_field])
     }
 }
 
@@ -359,13 +387,13 @@ mod tests {
     }
 
     #[test]
-    fn spec_is_a_geology_modifier_with_heightfield_and_shore() {
+    fn spec_is_a_geology_modifier_with_heightfield_shore_and_beach() {
         let spec = Coastal.spec();
         assert_eq!(spec.kind(), NodeKind::Modifier);
         assert_eq!(spec.category, "geology");
         assert_eq!(spec.type_id, TYPE_ID);
         let outputs: Vec<&str> = spec.outputs.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(outputs, ["heightfield", "shore"]);
+        assert_eq!(outputs, ["heightfield", "shore", "beach"]);
     }
 
     #[test]
@@ -632,6 +660,39 @@ mod tests {
     }
 
     #[test]
+    fn beach_mask_covers_the_face_and_spares_the_waterline() {
+        // The beach footprint (output 2): zero at the waterline (so masked detail never touches the
+        // clean shoreline) and at the crest, and one across the interior of the beach face. Read a
+        // straight coast so distance-to-shore is the horizontal offset.
+        let coast = flat_mesa_coast(96, 30, 0.7);
+        let c = ctx(96);
+        let params = Params::new()
+            .with("beach_width", ParamValue::Float(20.0))
+            .with("berm_height", ParamValue::Float(2.0))
+            .with("bluff_angle", ParamValue::Float(80.0))
+            .with("rounding", ParamValue::Float(0.0));
+        let out = run(&coast, &params, &c);
+        let beach = &out[2];
+        // Offshore (x = 25, seaward of the x = 30 shoreline): no beach.
+        assert!(at(beach, 25, 48) < 1e-3, "the beach mask is zero offshore");
+        // At the shoreline (x = 30): feathered to near zero, protecting the contour.
+        assert!(
+            at(beach, 30, 48) < 0.2,
+            "the beach mask is low at the waterline"
+        );
+        // Mid beach (x = 40, ~10 m inland of the 20 m beach): full.
+        assert!(
+            at(beach, 40, 48) > 0.9,
+            "the beach mask is one across the face"
+        );
+        // Past the berm crest (x = 55, well beyond the 20 m beach): zero.
+        assert!(
+            at(beach, 55, 48) < 1e-3,
+            "the beach mask is zero past the crest"
+        );
+    }
+
+    #[test]
     fn far_from_shore_is_unchanged() {
         // The steep bluff (80 deg) rises faster than the cone flank, so it clears the terrain within
         // a short run of the beach and the interior peak is left identical.
@@ -818,6 +879,7 @@ mod tests {
         let twice = run(&island, &beach_params(), &ctx(48));
         assert_eq!(once[0].content_hash(), twice[0].content_hash());
         assert_eq!(once[1].content_hash(), twice[1].content_hash());
+        assert_eq!(once[2].content_hash(), twice[2].content_hash());
     }
 
     #[test]
@@ -830,5 +892,6 @@ mod tests {
         let direct = run(&island, &beach_params(), &ctx(32));
         assert_eq!(via_registry[0].content_hash(), direct[0].content_hash());
         assert_eq!(via_registry[1].content_hash(), direct[1].content_hash());
+        assert_eq!(via_registry[2].content_hash(), direct[2].content_hash());
     }
 }
