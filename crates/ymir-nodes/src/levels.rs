@@ -5,8 +5,10 @@
 //! the result into an output window `[out_low, out_high]`. This is the right tool for the
 //! jobs a Curve does badly: normalizing out-of-range height back into `[0, 1]` before a
 //! Curve, controlling amplitude (a gentle low plain via a narrow output window), or
-//! clipping a window (it doubles as a Clamp). Input points may sit outside `[0, 1]`, so
-//! height that drifted out of range (after an Add) can be pulled back.
+//! clipping a window (it doubles as a Clamp). Both windows may sit outside `[0, 1]`: an
+//! input past the range pulls drifted height back, and a signed output window (e.g.
+//! `-0.01..0.01`) recentres a `0..1` field on zero, turning noise into signed detail to
+//! Add onto a base without shifting it up.
 //!
 //! Mask-aware per the convention: the leveled height is composited over the original
 //! through the `mask` layer, so `mask = 1` is fully applied and `mask = 0` is the
@@ -63,15 +65,24 @@ impl Operator for Levels {
                     ParamValue::Float(1.0),
                 ),
                 // Output window mapped into. A narrow window scales amplitude down (a
-                // gentle plain).
+                // gentle plain). Allowed past [0, 1] and negative, symmetric with the input
+                // window, so Levels can produce signed or over-range output: a small signed
+                // window (e.g. -0.01..0.01) centres a 0..1 field on zero to add as detail
+                // without shifting the base up, matching the no-hard-clamp height model.
                 ParamSpec::new(
                     "out_low",
-                    ParamKind::Float { min: 0.0, max: 1.0 },
+                    ParamKind::Float {
+                        min: -4.0,
+                        max: 4.0,
+                    },
                     ParamValue::Float(0.0),
                 ),
                 ParamSpec::new(
                     "out_high",
-                    ParamKind::Float { min: 0.0, max: 1.0 },
+                    ParamKind::Float {
+                        min: -4.0,
+                        max: 4.0,
+                    },
                     ParamValue::Float(1.0),
                 ),
             ],
@@ -196,6 +207,17 @@ mod tests {
         let p = params(&[("out_low", 0.0), ("out_high", 0.25)]);
         assert!((at(&run(&field_with(1.0, None), &p), 0, 0) - 0.25).abs() < 1e-6);
         assert!((at(&run(&field_with(0.5, None), &p), 0, 0) - 0.125).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_signed_output_window_centres_the_field_on_zero() {
+        // A signed window maps 0..1 to -0.01..0.01, so a mid-grey field lands on zero and the
+        // extremes straddle it: the recipe for turning a 0..1 noise into signed detail to Add
+        // without shifting the base up. The output is not clamped back into [0, 1].
+        let p = params(&[("out_low", -0.01), ("out_high", 0.01)]);
+        assert!((at(&run(&field_with(0.5, None), &p), 0, 0) - 0.0).abs() < 1e-6);
+        assert!((at(&run(&field_with(0.0, None), &p), 0, 0) - -0.01).abs() < 1e-6);
+        assert!((at(&run(&field_with(1.0, None), &p), 0, 0) - 0.01).abs() < 1e-6);
     }
 
     #[test]
