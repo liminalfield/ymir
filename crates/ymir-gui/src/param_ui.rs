@@ -475,21 +475,29 @@ pub(crate) fn edit(
             ui.horizontal(|ui| {
                 param_label(ui, type_id, name);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // DragValue supplies display, click-to-type, and formatting; its own drag is
-                    // made inert (speed 0) so the infinite scrub below is the only thing that moves
-                    // the value. Degrees scrub at 0.5/px, metric at 1.0/px (the prior feel).
-                    let speed = if degrees { 0.5 } else { 1.0 };
                     // Decimals are set explicitly (DragValue derives them from `speed`, which is 0
                     // here, so otherwise it shows full float precision). Degrees always show a fixed
                     // tenth; a metric length shows a precision that suits its declared range (whole
                     // metres for a wide reach, up to a tenth for a small length like a berm crest).
+                    let metric_dp = metric_decimals(max);
+                    // The scrub step matches the shown precision, so a field displayed to a tenth
+                    // also scrubs by tenths rather than jumping whole metres. Degrees keep their
+                    // prior half-degree-per-pixel feel; a wide metric reach keeps whole-metre steps.
+                    let speed = if degrees {
+                        0.5
+                    } else {
+                        10f64.powi(-(metric_dp as i32))
+                    };
+                    // DragValue supplies display, click-to-type, and formatting; its own drag is
+                    // made inert (speed 0) so the infinite scrub below is the only thing that moves
+                    // the value.
                     let mut drag = egui::DragValue::new(&mut x)
                         .suffix(unit_suffix(unit))
                         .speed(0.0);
                     drag = if degrees {
                         drag.fixed_decimals(1)
                     } else {
-                        drag.max_decimals(metric_decimals(max))
+                        drag.max_decimals(metric_dp)
                     };
                     // Everything but a wrapping direction clamps click-to-type to the declared
                     // range; a wrapping angle has no meaningful bound to type against (it rolls).
