@@ -249,6 +249,16 @@ In practice:
   fixed per-machine partition: byte-stable on a given machine, possibly differing in the
   last bits across core counts. Do not reformulate the algorithm (for instance an
   8x-compute gather) solely to recover cross-machine bit-identity.
+- **The GPU path holds the same contract.** A node that runs on the GPU (erosion) must be a
+  deterministic gather or stencil: each cell reads its neighbours and writes only its own
+  cell, never an atomic scatter. GPU atomic ordering is nondeterministic even on one device,
+  which would break the required rung; a gather kernel is bit-repeatable on a fixed device and
+  visually equivalent across devices and vendors (a few ULPs from float reordering), matching
+  the two rungs above. The CPU path stays the reference and the headless/CI path, and the
+  compute-device handle is deliberately not part of a node's cache key, so a GPU result and a
+  CPU result are interchangeable in the cache. That interchangeability is sound only because
+  the two agree within tolerance, which is why a GPU kernel is written to match its CPU
+  reference cell for cell (see `ymir-gpu` and the thermal kernel).
 - **Seeds still derive from the global seed** (carried in `EvalContext`) and the node's
   persistent `stable_id`, never the runtime slotmap key, the clock, or a thread id, so a
   node yields the same output across reloads and graph edits while the global seed
