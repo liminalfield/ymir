@@ -74,17 +74,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # mesa-vulkan-drivers ships lavapipe (the lvp ICD) and pulls in the Vulkan loader.
+      # lavapipe (the lvp ICD) plus the Vulkan loader (libvulkan1) it needs to be usable, and
+      # vulkan-tools for the diagnostic below.
       - name: Install Mesa lavapipe (software Vulkan)
         run: |
           sudo apt-get update
-          sudo apt-get install -y mesa-vulkan-drivers
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-tools
+      # Show which ICDs the loader can see, so a "no adapter" skip is diagnosable from the log.
+      - name: Vulkan diagnostics
+        run: |
+          ls -la /usr/share/vulkan/icd.d/ || true
+          vulkaninfo --summary 2>&1 | head -40 || true
       - uses: Swatinem/rust-cache@v2
-      # Point the Vulkan loader at lavapipe explicitly, so wgpu selects it and the compute tests run
-      # on it rather than finding no adapter. --nocapture surfaces a skip (with its reason) in the log.
+      # The loader auto-discovers the lavapipe ICD in /usr/share/vulkan/icd.d/ (no VK_ICD override,
+      # which previously pointed at a path that may not exist and suppressed discovery). --nocapture
+      # surfaces a skip and its reason in the log if it still finds no adapter.
       - name: GPU tests on lavapipe
-        env:
-          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
         run: |
           cargo test -p ymir-gpu --verbose -- --nocapture
           cargo test -p ymir-nodes --lib thermal_gpu --verbose -- --nocapture
