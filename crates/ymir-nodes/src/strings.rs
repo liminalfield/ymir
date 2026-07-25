@@ -214,6 +214,13 @@ fn lookup(key: &str) -> Option<&'static str> {
             "Smooths the height layer along or across a guide direction, steered by the slope or a flow field."
         }
 
+        // Grow / Shrink (dilate / erode a selection).
+        "node-modifier.grow_shrink" => "Grow / Shrink",
+        "node-modifier.grow_shrink-desc" => {
+            "Grows or shrinks a selection by a distance in metres, moving its edge out or in with a \
+             soft border."
+        }
+
         // Frequency Split (scale separation).
         "node-modifier.frequency_split" => "Frequency Split",
         "node-modifier.frequency_split-desc" => {
@@ -376,6 +383,17 @@ fn lookup(key: &str) -> Option<&'static str> {
         "param-generator.import-edge" => "Edge",
         "param-generator.import-edge-desc" => {
             "How the field is filled where the placement maps outside the source image."
+        }
+        "param-modifier.grow_shrink-amount" => "Amount",
+        "param-modifier.grow_shrink-amount-desc" => {
+            "How far to move the selection's edge, in metres: positive grows the selection outward, \
+             negative shrinks it inward. Zero leaves the edge where it is (cleaning a soft selection \
+             to a crisp one)."
+        }
+        "param-modifier.grow_shrink-softness" => "Softness",
+        "param-modifier.grow_shrink-softness-desc" => {
+            "Width of the soft border across the grown edge, in metres. Zero is a hard edge; larger \
+             values feather the selection out over a wider band."
         }
         "param-endpoint.export_exr-height_units" => "Height Units",
         "param-endpoint.export_exr-height_units-desc" => {
