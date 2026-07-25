@@ -30,8 +30,8 @@ Rescales the height range: stretch an input window to full, bias the midtones, a
 | In Low (`in_low`) | float | [-4, 4] | 0 |  |  | no |
 | In High (`in_high`) | float | [-4, 4] | 1 |  |  | no |
 | Gamma (`gamma`) | float | [0.1, 10] | 1 |  |  | no |
-| Out Low (`out_low`) | float | [0, 1] | 0 |  |  | no |
-| Out High (`out_high`) | float | [0, 1] | 1 |  |  | no |
+| Out Low (`out_low`) | float | [-4, 4] | 0 |  |  | no |
+| Out High (`out_high`) | float | [-4, 4] | 1 |  |  | no |
 
 ## Layer contract
 
