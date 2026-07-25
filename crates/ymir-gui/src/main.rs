@@ -605,6 +605,9 @@ struct AppState {
     /// Build of the unchanged graph), falling back to the coarse preview field otherwise.
     /// Reloaded only when the key changes, not every frame.
     viewport_build: Option<(u64, Vec<Field>)>,
+    /// Whether the viewport shows the live preview or the cached build result. A view preference,
+    /// toggled from the Display flyout when a build is available; see [`ViewportSource`].
+    viewport_source: ViewportSource,
     /// A transient status line shown in the menu bar (e.g. the result of a save or
     /// open). Replaced by the next action.
     status: Option<String>,
@@ -886,6 +889,7 @@ impl AppState {
             viewport_last_h: 0.0,
             field_store: None,
             viewport_build: None,
+            viewport_source: ViewportSource::default(),
             status: None,
             history,
             saved_snapshot: initial,
@@ -7372,6 +7376,19 @@ fn author_fields_ui(ui: &mut egui::Ui, id: &str, author: &mut preferences::Autho
 /// `None` so the viewport falls back to the live preview. As the graph is edited the key drifts
 /// and misses, so the viewport shows the live preview; after a Build, the new key hits and the
 /// viewport shows build-quality terrain until the next edit.
+/// Which field the viewport shows: the live preview, or the last build's cached result. A view
+/// preference (not persisted), defaulting to Build so a completed build is shown automatically.
+/// Preview mode lets the user drop back to the responsive preview without dirtying the graph, for
+/// example when a heavy build makes the viewport sluggish.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum ViewportSource {
+    /// The live preview field: fast, follows every edit.
+    Preview,
+    /// The build-quality field from the last build when the cache has it, else the preview.
+    #[default]
+    Build,
+}
+
 fn refresh_viewport_build(state: &mut AppState) {
     let key = (|| {
         let id = state.graph.node_id_of(state.primary?)?;
@@ -7445,10 +7462,15 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // the 3D mesh and the 2D map, so the two projections show identical data.
     refresh_viewport_build(state);
     let display = state.preview.display_output();
-    let build_field = state
-        .viewport_build
-        .as_ref()
-        .and_then(|(_, fields)| fields.get(display.min(fields.len().saturating_sub(1))));
+    // Show the build-quality field only when the user asks for Build (and it is cached). Preview
+    // mode ignores a cached build, so the viewport drops back to the responsive preview.
+    let build_field = match state.viewport_source {
+        ViewportSource::Build => state
+            .viewport_build
+            .as_ref()
+            .and_then(|(_, fields)| fields.get(display.min(fields.len().saturating_sub(1)))),
+        ViewportSource::Preview => None,
+    };
     let showing_build = build_field.is_some();
     let field = build_field.or_else(|| state.preview.field());
 
@@ -7625,6 +7647,10 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
         .map(|spec| spec.outputs.iter().map(|p| p.name.clone()).collect())
         .unwrap_or_default();
     let mut display_output = state.preview.display_output();
+    // The viewport source (preview vs build) and whether a build is available to switch to. The
+    // Source toggle in the Display flyout mutates this local; it is applied back after the flyout.
+    let mut viewport_source = state.viewport_source;
+    let build_available = state.viewport_build.is_some();
     let display_output_before = display_output;
     // Draw the cluster only when the viewport is tall enough to hold it, so a short viewport shows
     // only the render rather than chrome overflowing it.
@@ -7791,6 +7817,33 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
                                         });
                                     group_separator(ui);
                                 }
+                                // Source toggle: the viewport shows the live preview or the cached
+                                // build result. Shown only when a build is available to switch to,
+                                // so the user can drop back to the responsive preview by hand.
+                                if build_available {
+                                    ui.horizontal(|ui| {
+                                        flyout_label(ui, "Source");
+                                        if ui
+                                            .selectable_label(
+                                                viewport_source == ViewportSource::Preview,
+                                                "Preview",
+                                            )
+                                            .clicked()
+                                        {
+                                            viewport_source = ViewportSource::Preview;
+                                        }
+                                        if ui
+                                            .selectable_label(
+                                                viewport_source == ViewportSource::Build,
+                                                "Build",
+                                            )
+                                            .clicked()
+                                        {
+                                            viewport_source = ViewportSource::Build;
+                                        }
+                                    });
+                                    group_separator(ui);
+                                }
                                 match mode {
                                     viewport2d::Mode::ThreeD => {
                                         viewport_3d_controls(ui, &mut scale, &mut exaggeration, &mut light);
@@ -7881,6 +7934,7 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
         state.preview.set_display_output(display_output);
     }
     state.viewport_mode = mode;
+    state.viewport_source = viewport_source;
     state.viewport_scale = scale;
     state.viewport_exaggeration = exaggeration;
     state.viewport_lighting = light;
