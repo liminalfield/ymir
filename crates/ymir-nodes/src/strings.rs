@@ -274,7 +274,8 @@ fn lookup(key: &str) -> Option<&'static str> {
         // Coastal bevel.
         "node-modifier.coastal" => "Coastal",
         "node-modifier.coastal-desc" => {
-            "Reshapes the shore into a beach-and-bluff bevel at the world sea level, fading over a width in metres."
+            "Reshapes the shore at the world sea level into a beach that rises to a berm, then a \
+             steeper bluff, and lifts a shallow shelf offshore."
         }
 
         // Null (pass-through utility).
@@ -399,6 +400,57 @@ fn lookup(key: &str) -> Option<&'static str> {
         "param-endpoint.export_exr-height_units-desc" => {
             "Whether height is written as the normalized [0, 1] value or scaled to absolute metres \
              by World Height."
+        }
+
+        // Coastal bevel: every knob is coast-specific, so each takes an override rather than a
+        // shared entry. Width, Angle, Berm Height, and Bluff Angle together shape the two-slope
+        // beach-and-bluff profile (a gentle face up to a berm crest, then a steep backing slope).
+        "param-modifier.coastal-beach_width" => "Beach Width",
+        "param-modifier.coastal-beach_width-desc" => {
+            "How far the beach reaches inland, in metres, from the waterline to the berm crest. The \
+             direct control over the visible beach: a wider value makes a longer, gentler beach \
+             face. Independent of the offshore shoreface, so widening the beach does not enlarge \
+             the underwater shelf."
+        }
+        "param-modifier.coastal-berm_height" => "Berm Height",
+        "param-modifier.coastal-berm_height-desc" => {
+            "Height of the berm crest above sea level, in metres: how far the visible beach rises \
+             above the water, where the gentle foreshore ends and the steep backing begins. On a \
+             tall world it must be raised to read against the vertical scale. With Beach Width it \
+             sets the beach-face grade (berm height / beach width)."
+        }
+        "param-modifier.coastal-bluff_angle" => "Bluff Angle",
+        "param-modifier.coastal-bluff_angle-desc" => {
+            "Grade of the steep backing slope above the berm, in degrees: the bluff or sea cliff \
+             behind the beach. A value steeper than the coast clears the terrain behind within a \
+             short run, so only the low apron near the water is carved and the hill behind is \
+             preserved; a shallower value cuts further inland. Near vertical it is a sharp sea cliff."
+        }
+        "param-modifier.coastal-rounding" => "Rounding",
+        "param-modifier.coastal-rounding-desc" => {
+            "How far, in metres, the berm crest is rounded into a shoulder where the beach face \
+             meets the steeper backing slope. Zero leaves a hard corner at the crest; larger values \
+             blend the two over a wider shoulder, so a long low-angle beach joins its backing as a \
+             soft break rather than a sharp edge."
+        }
+        "param-modifier.coastal-shoreface_reach" => "Shoreface Reach",
+        "param-modifier.coastal-shoreface_reach-desc" => {
+            "How far the seabed is lifted out to sea, in metres, forming a shallow shelf below the \
+             waterline. Independent of the beach, so the underwater shelf and the above-water beach \
+             are sized separately. Zero leaves the seabed alone."
+        }
+        "param-modifier.coastal-strength" => "Strength",
+        "param-modifier.coastal-strength-desc" => {
+            "How fully the coast profile replaces the original terrain, from 0 (no change) to 1 \
+             (the full beach-and-bluff shape). Values between blend the reshaped coast with the \
+             terrain that was there."
+        }
+        "param-modifier.coastal-erode_inland_basins" => "Erode Inland Basins",
+        "param-modifier.coastal-erode_inland_basins-desc" => {
+            "Whether below-sea areas enclosed inland (dry pits, depressions not connected to the \
+             open sea) also get a coast. Off, only sea connected to the map edge counts, so inland \
+             basins are left as land; on, every below-sea cell is treated as sea, for an \
+             inland-sea world."
         }
 
         // Unknown: no entry. `tr` echoes the key; `resolve_param` falls through to prettify.

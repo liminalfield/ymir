@@ -9,11 +9,11 @@ status: draft
 
 `modifier.coastal` · Geology · Mask-aware
 
-Reshapes the shore into a beach-and-bluff bevel at the world sea level, fading over a width in metres.
+Reshapes the shore at the world sea level into a beach that rises to a berm, then a steeper bluff, and lifts a shallow shelf offshore.
 
 ## Purpose
 
-Reshapes the shore into a beach-and-bluff bevel, cutting the land down and lifting the seabed toward a gentle wedge at sea level. Reach for it to turn a hard waterline into a believable coast.
+Reshapes the shore into a beach-and-bluff profile: a gentle beach face at the water, a berm crest, then a steeper backing slope that leaves the terrain behind standing as a bluff. Reach for it to turn a hard waterline into a believable coast without flattening the hills behind it.
 
 ## Inputs
 
@@ -24,22 +24,31 @@ Reshapes the shore into a beach-and-bluff bevel, cutting the land down and lifti
 
 - `heightfield`
 - `shore`
+- `beach`
+- `bluff`
 
 ## Parameters
 
 | Parameter | Type | Range | Default | Unit | Description | Field-driven |
 |---|---|---|---|---|---|---|
-| Width (`width`) | float | [0, 100000] | 150 | m |  | no |
-| Angle (`angle`) | float | [0, 80] | 4 | ° |  | no |
-| Strength (`strength`) | float | [0, 1] | 1 |  |  | no |
-| Erode Inland Basins (`erode_inland_basins`) | bool |  | false |  |  | no |
+| Beach Width (`beach_width`) | float | [0, 100000] | 60 | m | How far the beach reaches inland, in metres, from the waterline to the berm crest. The direct control over the visible beach: a wider value makes a longer, gentler beach face. Independent of the offshore shoreface, so widening the beach does not enlarge the underwater shelf. | no |
+| Berm Height (`berm_height`) | float | [0, 100] | 2 | m | Height of the berm crest above sea level, in metres: how far the visible beach rises above the water, where the gentle foreshore ends and the steep backing begins. On a tall world it must be raised to read against the vertical scale. With Beach Width it sets the beach-face grade (berm height / beach width). | no |
+| Bluff Angle (`bluff_angle`) | float | [0, 80] | 45 | ° | Grade of the steep backing slope above the berm, in degrees: the bluff or sea cliff behind the beach. A value steeper than the coast clears the terrain behind within a short run, so only the low apron near the water is carved and the hill behind is preserved; a shallower value cuts further inland. Near vertical it is a sharp sea cliff. | no |
+| Rounding (`rounding`) | float | [0, 100] | 8 | m | How far, in metres, the berm crest is rounded into a shoulder where the beach face meets the steeper backing slope. Zero leaves a hard corner at the crest; larger values blend the two over a wider shoulder, so a long low-angle beach joins its backing as a soft break rather than a sharp edge. | no |
+| Shoreface Reach (`shoreface_reach`) | float | [0, 100000] | 50 | m | How far the seabed is lifted out to sea, in metres, forming a shallow shelf below the waterline. Independent of the beach, so the underwater shelf and the above-water beach are sized separately. Zero leaves the seabed alone. | no |
+| Strength (`strength`) | float | [0, 1] | 1 |  | How fully the coast profile replaces the original terrain, from 0 (no change) to 1 (the full beach-and-bluff shape). Values between blend the reshaped coast with the terrain that was there. | no |
+| Erode Inland Basins (`erode_inland_basins`) | bool |  | false |  | Whether below-sea areas enclosed inland (dry pits, depressions not connected to the open sea) also get a coast. Off, only sea connected to the map edge counts, so inland basins are left as land; on, every below-sea cell is treated as sea, for an inland-sea world. | no |
 
 ## Layer contract
 
 Honours a mask on its input, applying everywhere the mask is absent.
 
-Emits `shore` alongside the height layer.
+Emits `shore`, `beach`, `bluff` alongside the height layer.
 
 ## Behaviour
 
-It bevels by true distance from the shoreline, so the beach is even all around, fading over a width in metres. It reads the world sea level and taps the shore band as a layer.
+On land it cuts the terrain down to a two-slope profile measured from the shoreline. The beach face reaches `beach_width` metres inland to the berm crest at `berm_height` (so its grade is `berm_height / beach_width`), then the steeper `bluff_angle` takes over. `rounding` blends the crest between them into a shoulder over that many metres, so a long beach meets its backing as a soft break rather than a hard edge. Because the backing slope is steep it clears the terrain behind within a short run, so only the low apron near the water is carved and the hill behind is kept as a bluff; the break of slope where the profile meets the un-cut hillside is the bluff toe. The land effect self-terminates against the terrain, so its inland reach is the beach geometry itself.
+
+Offshore it raises the seabed toward sea level, fading that lift out to `shoreface_reach`. The land and sea sides have independent extents, so widening the beach does not enlarge the underwater shelf, and the coast is not dominated by change below the waterline. It bevels by true distance from the shoreline, so the coast is even all around.
+
+It reads the world sea level and taps three selections as layers: `shore` (a band at the waterline, for a wet edge or foam), `beach` (the whole berm slope, from the waterline up through the crest), and `bluff` (the backing slope past the crest, present only where the coast is steeper than the bluff angle). `beach` and `bluff` overlap at the crest, so blending them with `max` unions the two into the whole reshaped coast with no seam. Texture each zone on its own or combine them.

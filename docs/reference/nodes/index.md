@@ -54,7 +54,7 @@ Every node, grouped by category.
 
 ## Geology
 
-- [Coastal](modifier.coastal.md). Reshapes the shore into a beach-and-bluff bevel at the world sea level, fading over a width in metres.
+- [Coastal](modifier.coastal.md). Reshapes the shore at the world sea level into a beach that rises to a berm, then a steeper bluff, and lifts a shallow shelf offshore.
 - [Hydraulic Erosion](modifier.hydraulic_erosion.md). Water carving the terrain, simulated as rain droplets that cut rills and deposit sediment.
 - [Stream Erosion](modifier.stream_erosion.md). Carves drainage networks from flow accumulation; outputs the river/flow map.
 - [Thermal Erosion](modifier.thermal_erosion.md). Relaxes slopes steeper than the talus angle toward repose.
