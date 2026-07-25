@@ -64,3 +64,27 @@ jobs:
       # markers, relative design/ links, and completeness gaps on pages marked stable.
       - name: Docs lint
         run: cargo xtask docs-lint
+
+  # Exercise the GPU compute path (ymir-gpu marshalling and the thermal erosion kernel) on Mesa
+  # lavapipe, a software Vulkan implementation, so a runner with no physical GPU still runs the
+  # kernels rather than skipping them. Separate from `check` so a lavapipe hiccup cannot break the
+  # main gate; the tests skip gracefully (printing why, visible with --nocapture) if no adapter is
+  # found, so this job never fails on a host without a working Vulkan stack.
+  gpu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # mesa-vulkan-drivers ships lavapipe (the lvp ICD) and pulls in the Vulkan loader.
+      - name: Install Mesa lavapipe (software Vulkan)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers
+      - uses: Swatinem/rust-cache@v2
+      # Point the Vulkan loader at lavapipe explicitly, so wgpu selects it and the compute tests run
+      # on it rather than finding no adapter. --nocapture surfaces a skip (with its reason) in the log.
+      - name: GPU tests on lavapipe
+        env:
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+        run: |
+          cargo test -p ymir-gpu --verbose -- --nocapture
+          cargo test -p ymir-nodes --lib thermal_gpu --verbose -- --nocapture
