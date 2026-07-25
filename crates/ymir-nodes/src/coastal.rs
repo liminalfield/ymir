@@ -15,9 +15,11 @@
 //! un-cut hillside is the bluff toe. The land effect self-terminates against the terrain, so its
 //! inland reach is the geometry itself, with no separate distance fade.
 //!
-//! Offshore it lifts the seabed *up* toward the beach face continued below the waterline (`max`),
-//! the same near-shore grade, and fades that lift to nothing at `shoreface_reach`. The waterline
-//! meets sea level on both sides, so the surface is continuous through it.
+//! Offshore it raises the seabed *up* toward sea level (`max`), fully at the waterline and fading to
+//! nothing at `shoreface_reach`, forming a shallow shelf that deepens smoothly out to the natural
+//! seabed. The lift depends only on `shoreface_reach`, never on the beach parameters, so sizing the
+//! beach never reshapes the water and raising the berm never deepens the shelf. The waterline meets
+//! sea level on both sides, so the surface is continuous through it.
 //!
 //! The bevel is parameterised by *true isotropic distance from the shoreline*, from the shared
 //! eikonal substrate ([`signed_distance_to_contour`](crate::distance)). That is the whole reason
@@ -241,13 +243,15 @@ impl Operator for Coastal {
                     let rise_m = smooth_max(beach_face, backing, rounding);
                     (original.min(sea + rise_m / world_height), 1.0)
                 } else {
-                    // Sea: lift the seabed toward the beach face continued below the waterline (same
-                    // near-shore grade), and fade that lift out to `shoreface_reach` so the shelf has
-                    // its own extent. The waterline meets sea level on both sides, so the surface is
-                    // continuous through it.
-                    let shoreface = sea - beach_grade * d.abs() / world_height;
+                    // Sea: raise the seabed toward sea level, fully at the waterline and fading to
+                    // nothing at `shoreface_reach`, forming a shallow shelf that deepens smoothly
+                    // out to the natural seabed. The lift depends only on `shoreface_reach`, never on
+                    // the beach parameters, so sizing the beach never reshapes the water and raising
+                    // the berm never deepens the shelf. `max` keeps it a lift only (a cell already
+                    // above sea is untouched). The waterline meets sea level on both sides, so the
+                    // surface is continuous through it.
                     (
-                        original.max(shoreface),
+                        original.max(sea),
                         1.0 - smoothstep(shoreface_reach, d.abs()),
                     )
                 };
@@ -532,6 +536,31 @@ mod tests {
             at(&short[0], 45, 48),
             at(&long[0], 45, 48),
             "the shoreface reach must not affect the land"
+        );
+    }
+
+    #[test]
+    fn the_berm_does_not_move_the_seabed() {
+        // The other half of the decoupling: the beach parameters never reshape the water. Raising
+        // the berm (an above-water feature) must leave an offshore cell exactly as it was, so the
+        // seabed does not deepen or shallow as the beach is sized.
+        let coast = flat_mesa_coast(96, 40, 0.7);
+        let c = ctx(96);
+        let base = |berm: f64| {
+            Params::new()
+                .with("beach_width", ParamValue::Float(10.0))
+                .with("berm_height", ParamValue::Float(berm))
+                .with("bluff_angle", ParamValue::Float(45.0))
+                .with("rounding", ParamValue::Float(0.0))
+                .with("shoreface_reach", ParamValue::Float(20.0))
+        };
+        let low = run(&coast, &base(2.0), &c);
+        let high = run(&coast, &base(20.0), &c);
+        // x = 30 is 10 m offshore of the x = 40 shoreline, within the shelf.
+        assert_eq!(
+            at(&low[0], 30, 48),
+            at(&high[0], 30, 48),
+            "the berm height must not change the seabed"
         );
     }
 
