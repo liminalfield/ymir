@@ -624,6 +624,10 @@ struct AppState {
     /// A discarding action awaiting the unsaved-changes prompt's outcome (#83). `Some`
     /// while the prompt is open; the action runs once the user chooses Save or Discard.
     pending_action: Option<PendingAction>,
+    /// `true` while the "overwrite the default startup graph?" prompt is open (#88): set when
+    /// Save as Default is chosen and a default already exists, cleared when the user confirms or
+    /// cancels. Separate from `pending_action`: that guards the session, this guards the template.
+    confirm_save_default: bool,
     /// Set once the user has confirmed quitting (saved or discarded), so the next window
     /// close request is allowed through instead of re-raising the prompt (#83).
     allow_close: bool,
@@ -895,6 +899,7 @@ impl AppState {
             saved_snapshot: initial,
             modified: false,
             pending_action: None,
+            confirm_save_default: false,
             allow_close: false,
             nav: Vec::new(),
             subgraph_layouts: HashMap::new(),
@@ -2224,7 +2229,7 @@ fn menu_bar_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 ui.close();
             }
             if ui.button("Save as Default Startup Graph").clicked() {
-                save_as_default(state);
+                request_save_as_default(state);
                 ui.close();
             }
             // Recent projects (most recent first), each opening through the unsaved-changes
@@ -2656,6 +2661,73 @@ fn save_recent(state: &mut AppState) {
             }
         }
         Err(err) => state.status = Some(format!("Could not serialize recent list: {err}")),
+    }
+}
+
+/// What a "Save as Default" request should do (#88): confirm before writing when a default
+/// already exists (a template worth protecting), or write straight away the first time (nothing
+/// to lose). Pure so the branch is unit-tested without a filesystem or a dialog.
+#[derive(Debug, PartialEq, Eq)]
+enum SaveDefaultAction {
+    /// A default already exists; prompt before overwriting it.
+    Confirm,
+    /// No default yet; write it directly.
+    SaveNow,
+}
+
+/// The action for a Save-as-Default request, given whether a default already exists on disk.
+fn save_default_action(default_exists: bool) -> SaveDefaultAction {
+    if default_exists {
+        SaveDefaultAction::Confirm
+    } else {
+        SaveDefaultAction::SaveNow
+    }
+}
+
+/// Begins saving the current session as the default startup graph (#88): when a default already
+/// exists, opens the overwrite-confirm prompt before writing; the first time (no default yet)
+/// there is nothing to protect, so it writes straight away. An unresolvable config path is treated
+/// as "no default", so `save_as_default` runs and reports the path error itself.
+fn request_save_as_default(state: &mut AppState) {
+    let default_exists = default_project_path().is_some_and(|path| path.exists());
+    match save_default_action(default_exists) {
+        SaveDefaultAction::Confirm => state.confirm_save_default = true,
+        SaveDefaultAction::SaveNow => save_as_default(state),
+    }
+}
+
+/// Draws the confirm prompt before overwriting an existing default startup graph (#88) and applies
+/// the choice: Overwrite writes the current session over the saved default, Cancel leaves it
+/// untouched. Separate from the unsaved-changes prompt (#83): that one protects the session, this
+/// one protects the template, so they never share a dialog. A no-op when none is pending.
+fn save_default_confirm_dialog(ctx: &egui::Context, state: &mut AppState) {
+    if !state.confirm_save_default {
+        return;
+    }
+    let mut choice = None;
+    egui::Window::new("Overwrite default startup graph")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.label("A default startup graph already exists. Replace it with the current graph?");
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui.button("Overwrite").clicked() {
+                    choice = Some(true);
+                }
+                if ui.button("Cancel").clicked() {
+                    choice = Some(false);
+                }
+            });
+        });
+    match choice {
+        None => {} // still open, no choice yet
+        Some(false) => state.confirm_save_default = false,
+        Some(true) => {
+            state.confirm_save_default = false;
+            save_as_default(state);
+        }
     }
 }
 
@@ -9042,6 +9114,9 @@ impl eframe::App for YmirApp {
         // The unsaved-changes prompt draws on top of the panes when a discard action is
         // pending (#83).
         unsaved_changes_dialog(ui.ctx(), &mut self.state);
+        // The overwrite-default confirm prompt draws when Save as Default would clobber an
+        // existing default startup graph (#88). Independent of the unsaved-changes prompt.
+        save_default_confirm_dialog(ui.ctx(), &mut self.state);
         // Record an edit at the end of the frame, once the panes have applied it.
         self.state.sync_history(ui.ctx());
     }
@@ -10163,6 +10238,14 @@ mod tests {
         );
         // Once confirmed, the same existing name writes (overwrites).
         assert_eq!(save_decision("Ridge", true, true), SaveDecision::Write);
+    }
+
+    #[test]
+    fn save_default_confirms_only_when_a_default_exists() {
+        // First run (no default yet): nothing to protect, so write straight away.
+        assert_eq!(save_default_action(false), SaveDefaultAction::SaveNow);
+        // A default already exists: confirm before overwriting the template (#88).
+        assert_eq!(save_default_action(true), SaveDefaultAction::Confirm);
     }
 
     #[test]
