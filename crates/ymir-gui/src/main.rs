@@ -7391,7 +7391,13 @@ enum ViewportSource {
 
 fn refresh_viewport_build(state: &mut AppState) {
     let key = (|| {
-        let id = state.graph.node_id_of(state.primary?)?;
+        // Key off the previewed node, not the raw selection: the viewport shows
+        // `preview_target()`'s field (a pinned node, or the result sink when nothing is selected),
+        // so the build to look up is that node's, and the Source toggle stays available whenever a
+        // preview is shown, matching the other display settings. Using `primary` dropped the build
+        // (and hid the toggle) the moment the selection was cleared, and mismatched a pinned preview
+        // against a different selection.
+        let id = state.graph.node_id_of(state.preview_target()?)?;
         let res = state.build_res;
         let request = EvalRequest::new(res, res, Region::UNIT, state.seed)
             .with_world_extent(state.world_extent)
