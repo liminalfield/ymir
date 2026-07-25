@@ -28,13 +28,15 @@
 //! the result is byte-identical on every machine, and the no-star isotropy is inherited from the
 //! solve rather than re-derived here.
 //!
-//! Three outputs: the reshaped `heightfield`, and two selections it computes along the way. `shore`
-//! is a band peaking at the waterline and fading to zero at `beach_width` inland and
-//! `shoreface_reach` offshore, for a wet edge or foam. `beach` is a solid footprint of the beach
-//! face, one across the beach and feathering to zero at both the waterline and the berm crest (so
-//! detail masked by it never roughens the clean shoreline), for masking detail or a material back
-//! onto the flat beach the bevel carves. Both are emitted rather than discarded and recomputed.
-//! Water depth is not emitted: it is `sea_level - height`, recoverable from the field
+//! Four outputs: the reshaped `heightfield`, and three selections it computes along the way, one per
+//! coastal zone. `shore` is a band peaking at the waterline and fading to zero at `beach_width`
+//! inland and `shoreface_reach` offshore, for a wet edge or foam. `beach` is a solid footprint of
+//! the beach face, one across the beach and feathering to zero at both the waterline and the berm
+//! crest (so detail masked by it never roughens the clean shoreline). `bluff` is the companion
+//! footprint of the backing slope: past the berm crest and following the carved slope up to the
+//! bluff toe, so together `beach` and `bluff` cover the whole reshaped coast and each can be
+//! textured on its own. All three are emitted rather than discarded and recomputed. Water depth is
+//! not emitted: it is `sea_level - height`, recoverable from the field
 //! plus the global, so by the layer test it does not earn a stored layer.
 
 use std::sync::Arc;
@@ -103,6 +105,7 @@ impl Operator for Coastal {
                 PortSpec::new("heightfield"),
                 PortSpec::new("shore"),
                 PortSpec::new("beach"),
+                PortSpec::new("bluff"),
             ],
             params: vec![
                 ParamSpec::new(
@@ -161,9 +164,9 @@ impl Operator for Coastal {
                     ParamValue::Bool(false),
                 ),
             ],
-            // "shore" and "beach" are byproduct output ports, not canonical layer constants; name
-            // them by the port so the reference lists both selections.
-            emitted_layers: vec!["shore", "beach"],
+            // "shore", "beach", and "bluff" are byproduct output ports, not canonical layer
+            // constants; name them by the port so the reference lists all three selections.
+            emitted_layers: vec!["shore", "beach", "bluff"],
             mask_aware: true,
         }
     }
@@ -227,10 +230,14 @@ impl Operator for Coastal {
         // reaches the shoreline and roughens the clean contour. A hair minimum keeps the feather
         // positive for a zero-width beach.
         let beach_feather = (beach_width * 0.2).max(1e-6);
+        // The bluff mask fades out over the last few metres of cut depth at the bluff toe, so its
+        // upper edge is soft rather than a hard line where the backing meets the terrain.
+        let cut_feather = (3.0 / world_height).max(1e-6);
 
         let mut reshaped = vec![0.0_f32; width * height];
         let mut shore = vec![0.0_f32; width * height];
         let mut beach = vec![0.0_f32; width * height];
+        let mut bluff = vec![0.0_f32; width * height];
         for y in 0..height {
             for x in 0..width {
                 let idx = y * width + x;
@@ -242,7 +249,7 @@ impl Operator for Coastal {
                 // (the `min` below), so its inland reach is the beach-and-bluff geometry itself; the
                 // sea side is bounded by `shoreface_reach`, decoupling the underwater shelf from the
                 // beach so widening one does not enlarge the other.
-                let (carved, side_fade) = if d >= 0.0 {
+                let (carved, side_fade, bluff_here) = if d >= 0.0 {
                     // Land: a two-slope profile. A gentle beach face of grade `beach_grade` from the
                     // waterline, and a steeper backing grade `bluff_angle` through the berm crest at
                     // `(beach_width, berm_height)`. Each is a line in metres; the profile is their
@@ -255,7 +262,14 @@ impl Operator for Coastal {
                     let beach_face = beach_grade * d;
                     let backing = berm_height + bluff_grade * (d - beach_width);
                     let rise_m = smooth_max(beach_face, backing, rounding);
-                    (original.min(sea + rise_m / world_height), 1.0)
+                    let env = sea + rise_m / world_height;
+                    // The bluff footprint marks the backing slope: past the berm crest, and only
+                    // where the backing actually cut the terrain, so it follows the carved slope and
+                    // ends at the bluff toe wherever the terrain sits. It feathers in at the crest
+                    // (handing off from the beach mask) and out as the cut vanishes at the toe.
+                    let past_crest = smoothstep(beach_feather, d - beach_width);
+                    let cutting = smoothstep(cut_feather, original - env);
+                    (original.min(env), 1.0, past_crest * cutting)
                 } else {
                     // Sea: raise the seabed toward sea level, fully at the waterline and fading to
                     // nothing at `shoreface_reach`, forming a shallow shelf that deepens smoothly
@@ -267,6 +281,7 @@ impl Operator for Coastal {
                     (
                         original.max(sea),
                         1.0 - smoothstep(shoreface_reach, d.abs()),
+                        0.0,
                     )
                 };
 
@@ -294,6 +309,11 @@ impl Operator for Coastal {
                     0.0
                 };
 
+                // The bluff selection is the backing slope's footprint (computed above), the
+                // companion to `beach`: together `beach` and `bluff` cover the whole reshaped coast,
+                // and each can be textured on its own.
+                bluff[idx] = bluff_here;
+
                 let weight = side_fade * strength * mask.get(x, y).unwrap_or(1.0);
                 reshaped[idx] = original + (carved - original) * weight;
             }
@@ -306,7 +326,8 @@ impl Operator for Coastal {
         );
         let shore_field = erosion::byproduct_field(shore, width, height, input.region());
         let beach_field = erosion::byproduct_field(beach, width, height, input.region());
-        Ok(vec![heightfield, shore_field, beach_field])
+        let bluff_field = erosion::byproduct_field(bluff, width, height, input.region());
+        Ok(vec![heightfield, shore_field, beach_field, bluff_field])
     }
 }
 
@@ -387,13 +408,13 @@ mod tests {
     }
 
     #[test]
-    fn spec_is_a_geology_modifier_with_heightfield_shore_and_beach() {
+    fn spec_is_a_geology_modifier_with_heightfield_shore_beach_and_bluff() {
         let spec = Coastal.spec();
         assert_eq!(spec.kind(), NodeKind::Modifier);
         assert_eq!(spec.category, "geology");
         assert_eq!(spec.type_id, TYPE_ID);
         let outputs: Vec<&str> = spec.outputs.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(outputs, ["heightfield", "shore", "beach"]);
+        assert_eq!(outputs, ["heightfield", "shore", "beach", "bluff"]);
     }
 
     #[test]
@@ -693,6 +714,39 @@ mod tests {
     }
 
     #[test]
+    fn bluff_mask_covers_the_backing_slope() {
+        // The bluff footprint (output 3): zero offshore and on the beach face, one across the carved
+        // backing slope past the crest, and zero past the bluff toe where the terrain resumes. A
+        // tall mesa (0.8) and a 45 deg backing so the bluff carves a long way up.
+        let coast = flat_mesa_coast(96, 30, 0.8);
+        let c = ctx(96);
+        let params = Params::new()
+            .with("beach_width", ParamValue::Float(10.0))
+            .with("berm_height", ParamValue::Float(2.0))
+            .with("bluff_angle", ParamValue::Float(45.0))
+            .with("rounding", ParamValue::Float(0.0));
+        let out = run(&coast, &params, &c);
+        let bluff = &out[3];
+        // Offshore (x = 25): no bluff.
+        assert!(at(bluff, 25, 48) < 1e-3, "the bluff mask is zero offshore");
+        // On the beach face (x = 35, before the 10 m crest): still beach, not bluff.
+        assert!(
+            at(bluff, 35, 48) < 0.1,
+            "the bluff mask is low on the beach face"
+        );
+        // On the backing slope (x = 52, past the crest, still carving): full.
+        assert!(
+            at(bluff, 52, 48) > 0.9,
+            "the bluff mask covers the carved backing slope"
+        );
+        // Past the bluff toe (x = 90, terrain resumed): zero.
+        assert!(
+            at(bluff, 90, 48) < 0.1,
+            "the bluff mask is zero past the toe"
+        );
+    }
+
+    #[test]
     fn far_from_shore_is_unchanged() {
         // The steep bluff (80 deg) rises faster than the cone flank, so it clears the terrain within
         // a short run of the beach and the interior peak is left identical.
@@ -880,6 +934,7 @@ mod tests {
         assert_eq!(once[0].content_hash(), twice[0].content_hash());
         assert_eq!(once[1].content_hash(), twice[1].content_hash());
         assert_eq!(once[2].content_hash(), twice[2].content_hash());
+        assert_eq!(once[3].content_hash(), twice[3].content_hash());
     }
 
     #[test]
@@ -893,5 +948,6 @@ mod tests {
         assert_eq!(via_registry[0].content_hash(), direct[0].content_hash());
         assert_eq!(via_registry[1].content_hash(), direct[1].content_hash());
         assert_eq!(via_registry[2].content_hash(), direct[2].content_hash());
+        assert_eq!(via_registry[3].content_hash(), direct[3].content_hash());
     }
 }
