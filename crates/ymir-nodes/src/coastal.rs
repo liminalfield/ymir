@@ -1,18 +1,23 @@
 //! Coastal reshaping: a beach-and-bluff bevel keyed to distance from the shoreline (#139).
 //!
 //! The shoreline is the world sea-level contour of the `height` layer (sea level is a world
-//! setting carried in [`EvalContext::sea_level`], never a node param). On land this node cuts the
-//! terrain *down* toward a two-slope beach-and-bluff profile rising from the waterline (`min`): a
-//! gentle beach face of grade `angle` up to a berm crest at `berm_height`, then a steeper backing
-//! slope of grade `bluff_angle` above it. The crest where the two meet is rounded into a shoulder
-//! over `rounding` metres rather than left a hard corner. Offshore it lifts the seabed *up* toward
-//! a gentle shoreface (`max`). Both fade to zero over `width` metres, so terrain resumes smoothly
-//! away from the coast and the surface is continuous through the waterline. Because the backing
-//! slope is steep it clears the terrain behind the beach within a short run, so the cut bites only
-//! the low apron near the water and leaves the hill behind as a bluff; the break of slope where the
-//! envelope meets the un-cut hillside is the bluff toe, not a separate step. A single gentle wedge
-//! (`berm_height = 0`, `bluff_angle = angle`, `rounding = 0`) is the degenerate case, which
-//! flattens the whole band and is what the separate backing grade exists to avoid.
+//! setting carried in [`EvalContext::sea_level`], never a node param). The land and sea sides have
+//! independent extents on purpose, so widening the beach does not enlarge the underwater shelf and
+//! the coast is not dominated by change below the waterline.
+//!
+//! On land it cuts the terrain *down* toward a two-slope beach-and-bluff profile rising from the
+//! waterline (`min`): a gentle beach face reaching `beach_width` metres inland to a berm crest at
+//! `berm_height` (so the face grade is `berm_height / beach_width`), then a steeper backing slope
+//! of grade `bluff_angle` above it. The crest where the two meet is rounded into a shoulder over
+//! `rounding` metres rather than left a hard corner. Because the backing slope is steep it clears
+//! the terrain behind the beach within a short run, so the cut bites only the low apron near the
+//! water and leaves the hill behind as a bluff; the break of slope where the envelope meets the
+//! un-cut hillside is the bluff toe. The land effect self-terminates against the terrain, so its
+//! inland reach is the geometry itself, with no separate distance fade.
+//!
+//! Offshore it lifts the seabed *up* toward the beach face continued below the waterline (`max`),
+//! the same near-shore grade, and fades that lift to nothing at `shoreface_reach`. The waterline
+//! meets sea level on both sides, so the surface is continuous through it.
 //!
 //! The bevel is parameterised by *true isotropic distance from the shoreline*, from the shared
 //! eikonal substrate ([`signed_distance_to_contour`](crate::distance)). That is the whole reason
@@ -22,10 +27,10 @@
 //! solve rather than re-derived here.
 //!
 //! Two outputs: the reshaped `heightfield`, and a `shore` band (one near the waterline, fading to
-//! zero at `width`) that the solve already produced. `shore` is a ready selection for the beach
-//! texturing and foam work downstream, so it is emitted rather than discarded and recomputed.
-//! Water depth is not emitted: it is `sea_level - height`, recoverable from the field plus the
-//! global, so by the layer test it does not earn a stored layer.
+//! zero at `beach_width` inland and `shoreface_reach` offshore) that marks the coastal zone.
+//! `shore` is a ready selection for the beach texturing and foam work downstream, so it is emitted
+//! rather than discarded and recomputed. Water depth is not emitted: it is `sea_level - height`,
+//! recoverable from the field plus the global, so by the layer test it does not earn a stored layer.
 
 use std::sync::Arc;
 
@@ -41,13 +46,12 @@ use crate::erosion;
 /// Stable type identifier and registry key.
 const TYPE_ID: &str = "modifier.coastal";
 
-/// Default coastal reach in world metres: how far to each side of the shoreline the bevel acts.
-const DEFAULT_WIDTH: f64 = 150.0;
-/// Default beach-face grade in degrees. A few degrees reads as a gentle sandy foreshore.
-const DEFAULT_ANGLE: f64 = 4.0;
-/// Default berm-crest height above sea level, in world metres. With `angle`, this sets the
-/// beach-face width (`berm_height / tan(angle)`): the gentle foreshore rises to the berm crest,
-/// then the steeper backing slope takes over.
+/// Default beach width in world metres: how far inland the gentle beach face reaches, from the
+/// waterline to the berm crest. With `berm_height` this sets the beach-face grade
+/// (`berm_height / beach_width`), so a wider beach at a given berm height is gentler.
+const DEFAULT_BEACH_WIDTH: f64 = 60.0;
+/// Default berm-crest height above sea level, in world metres. This is how far the visible beach
+/// rises above the water; on a tall world it needs to be raised to read against the vertical scale.
 const DEFAULT_BERM_HEIGHT: f64 = 2.0;
 /// Maximum berm-crest height in world metres. A berm is a small feature (a real one is a few metres;
 /// a stylized raised beach, tens), so the range is capped well below the coast's reach. The small
@@ -57,9 +61,16 @@ const MAX_BERM_HEIGHT: f64 = 100.0;
 /// Default backing (bluff) grade in degrees. Steep enough to read as a coastal bluff that clears
 /// the terrain behind the beach, rather than the gentle foreshore that flattens it.
 const DEFAULT_BLUFF_ANGLE: f64 = 45.0;
-/// Maximum grade for either slope. Capped below 90 so `tan(angle)` stays finite; near the cap the
-/// backing is a near-vertical sea cliff.
+/// Maximum grade for the backing slope. Capped below 90 so `tan(angle)` stays finite; near the cap
+/// the backing is a near-vertical sea cliff.
 const MAX_ANGLE: f64 = 80.0;
+/// Default offshore shoreface reach in world metres: how far out to sea the seabed is lifted toward
+/// a shallow shelf, independent of the on-land beach so the coast is not dominated by underwater
+/// change. Zero leaves the seabed alone.
+const DEFAULT_SHOREFACE_REACH: f64 = 50.0;
+/// Maximum reach in world metres for the beach width and the shoreface. A wide value spans a large
+/// map; the whole-metre editing steps suit a broad extent.
+const MAX_REACH: f64 = 100_000.0;
 /// Default crest-rounding radius in world metres: how far to either side of the berm crest the
 /// beach face and the backing slope are blended into a smooth shoulder. A small value keeps the
 /// crest a soft break rather than a hard corner.
@@ -86,23 +97,14 @@ impl Operator for Coastal {
             outputs: vec![PortSpec::new("heightfield"), PortSpec::new("shore")],
             params: vec![
                 ParamSpec::new(
-                    "width",
+                    "beach_width",
                     ParamKind::Float {
                         min: 0.0,
-                        max: 100_000.0,
+                        max: MAX_REACH,
                     },
-                    ParamValue::Float(DEFAULT_WIDTH),
+                    ParamValue::Float(DEFAULT_BEACH_WIDTH),
                 )
                 .with_unit(Unit::Meters),
-                ParamSpec::new(
-                    "angle",
-                    ParamKind::Float {
-                        min: 0.0,
-                        max: MAX_ANGLE,
-                    },
-                    ParamValue::Float(DEFAULT_ANGLE),
-                )
-                .with_unit(Unit::Degrees),
                 ParamSpec::new(
                     "berm_height",
                     ParamKind::Float {
@@ -131,6 +133,15 @@ impl Operator for Coastal {
                 )
                 .with_unit(Unit::Meters),
                 ParamSpec::new(
+                    "shoreface_reach",
+                    ParamKind::Float {
+                        min: 0.0,
+                        max: MAX_REACH,
+                    },
+                    ParamValue::Float(DEFAULT_SHOREFACE_REACH),
+                )
+                .with_unit(Unit::Meters),
+                ParamSpec::new(
                     "strength",
                     ParamKind::Float { min: 0.0, max: 1.0 },
                     ParamValue::Float(1.0),
@@ -153,26 +164,26 @@ impl Operator for Coastal {
         let (width, height) = (input.width(), input.height());
         let source = input.layer_or(layers::HEIGHT, 0.0);
 
-        // A zero reach would divide by zero in the falloff; clamp to a hair so it degrades to a
-        // hard edge at the waterline rather than panicking.
-        let reach = params.get_f64("width", DEFAULT_WIDTH).max(1e-6) as f32;
-        let angle = params.get_f64("angle", DEFAULT_ANGLE).clamp(0.0, MAX_ANGLE);
-        let grade = angle.to_radians().tan() as f32; // beach-face rise over run, in world metres
+        // The beach face reaches `beach_width` metres inland, rising to the berm crest at
+        // `berm_height`; the two set the beach-face grade (`berm_height / beach_width`, rise over
+        // run). This is the direct inland-extent control: a wider beach is a longer, gentler face.
+        // A zero width would put the crest at the waterline (an instant step to the berm), so clamp
+        // to a hair to keep the division finite.
+        let beach_width = params.get_f64("beach_width", DEFAULT_BEACH_WIDTH).max(1e-6) as f32;
         let berm_height = params.get_f64("berm_height", DEFAULT_BERM_HEIGHT).max(0.0) as f32;
+        let beach_grade = berm_height / beach_width; // beach-face rise over run, in world metres
         let bluff_angle = params
             .get_f64("bluff_angle", DEFAULT_BLUFF_ANGLE)
             .clamp(0.0, MAX_ANGLE);
         let bluff_grade = bluff_angle.to_radians().tan() as f32; // backing rise over run, in metres
-        // The beach face rises at `grade` from the waterline until it reaches the berm crest at
-        // `berm_height`; past that horizontal run the steeper backing slope takes over. A near-flat
-        // face (`grade` ~ 0) would put the crest at infinity, so guard the division: the face then
-        // spans nothing and the profile is the backing slope alone from the waterline.
-        let berm_run = if grade > 1e-6 {
-            berm_height / grade
-        } else {
-            0.0
-        };
         let rounding = params.get_f64("rounding", DEFAULT_ROUNDING).max(0.0) as f32;
+        // The offshore shoreface lifts the seabed toward the beach face continued below the
+        // waterline (the same near-shore grade), faded to nothing at `shoreface_reach` so the
+        // underwater shelf has its own extent, independent of the on-land beach. A zero reach means
+        // no shoreface. Clamp to a hair so the falloff never divides by zero.
+        let shoreface_reach = params
+            .get_f64("shoreface_reach", DEFAULT_SHOREFACE_REACH)
+            .max(1e-6) as f32;
         let strength = params.get_f64("strength", 1.0).clamp(0.0, 1.0) as f32;
 
         let sea = ctx.sea_level() as f32;
@@ -210,33 +221,49 @@ impl Operator for Coastal {
                 let d = signed.get(x, y).unwrap_or(0.0);
                 let original = source.get(x, y).unwrap_or(0.0);
 
-                // The coastal band: one at the waterline, easing to zero at `reach` on either side.
-                // This is the geometric extent of the coast, so it carries neither strength nor
-                // mask; it is emitted as the `shore` selection.
-                let band = 1.0 - smoothstep(reach, d.abs());
-                shore[idx] = band;
-
-                // The bevel target, measured from the waterline. On land it is a two-slope profile:
-                // a gentle beach face of grade `angle` from the waterline, and a steeper backing
-                // grade `bluff_angle` through the berm crest at `(berm_run, berm_height)`. Each is a
-                // line in metres; the profile is their upper envelope, so near the water the gentle
-                // face wins and past the crest the steep backing does. `smooth_max` rounds that crest
-                // into a shoulder over `rounding` metres instead of a hard corner (a plain `max`).
-                // Cutting to the lower of terrain and this envelope carves a beach where terrain
-                // pokes above it and leaves the hill behind untouched where the steep backing has
-                // already cleared it (the bluff toe is that break of slope). Offshore, the seabed is
-                // lifted toward a gentle shoreface at `angle`. Either side meets the waterline at sea
-                // level, so the profile is continuous.
-                let carved = if d >= 0.0 {
-                    let beach_face = grade * d;
-                    let backing = berm_height + bluff_grade * (d - berm_run);
+                // The bevel target and its per-side fade, measured from the waterline. The two sides
+                // have independent extents: on land the beach self-terminates against the terrain
+                // (the `min` below), so its inland reach is the beach-and-bluff geometry itself; the
+                // sea side is bounded by `shoreface_reach`, decoupling the underwater shelf from the
+                // beach so widening one does not enlarge the other.
+                let (carved, side_fade) = if d >= 0.0 {
+                    // Land: a two-slope profile. A gentle beach face of grade `beach_grade` from the
+                    // waterline, and a steeper backing grade `bluff_angle` through the berm crest at
+                    // `(beach_width, berm_height)`. Each is a line in metres; the profile is their
+                    // upper envelope, so near the water the gentle face wins and past the crest the
+                    // steep backing does. `smooth_max` rounds that crest into a shoulder over
+                    // `rounding` metres instead of a hard corner. Cutting to the lower of terrain and
+                    // this envelope carves a beach where terrain pokes above it and leaves the hill
+                    // behind untouched where the steep backing has cleared it (the break of slope
+                    // there is the bluff toe), so the land effect needs no separate distance fade.
+                    let beach_face = beach_grade * d;
+                    let backing = berm_height + bluff_grade * (d - beach_width);
                     let rise_m = smooth_max(beach_face, backing, rounding);
-                    original.min(sea + rise_m / world_height)
+                    (original.min(sea + rise_m / world_height), 1.0)
                 } else {
-                    original.max(sea - grade * d.abs() / world_height)
+                    // Sea: lift the seabed toward the beach face continued below the waterline (same
+                    // near-shore grade), and fade that lift out to `shoreface_reach` so the shelf has
+                    // its own extent. The waterline meets sea level on both sides, so the surface is
+                    // continuous through it.
+                    let shoreface = sea - beach_grade * d.abs() / world_height;
+                    (
+                        original.max(shoreface),
+                        1.0 - smoothstep(shoreface_reach, d.abs()),
+                    )
                 };
 
-                let weight = band * strength * mask.get(x, y).unwrap_or(1.0);
+                // The shore selection marks the coastal zone for downstream texturing and foam: the
+                // beach inland (out to `beach_width`) and the shoreface offshore (out to
+                // `shoreface_reach`), peaking at the waterline. Geometry only, so it carries neither
+                // strength nor mask.
+                let shore_reach = if d >= 0.0 {
+                    beach_width
+                } else {
+                    shoreface_reach
+                };
+                shore[idx] = 1.0 - smoothstep(shore_reach, d.abs());
+
+                let weight = side_fade * strength * mask.get(x, y).unwrap_or(1.0);
                 reshaped[idx] = original + (carved - original) * weight;
             }
         }
@@ -297,8 +324,8 @@ mod tests {
         )
     }
 
-    /// A context whose world is a cube of side `size` (so metres-per-cell is 1 and `width` reads in
-    /// cells, and the grade is gentle rather than squashed) with the shoreline at height 0.5.
+    /// A context whose world is a cube of side `size` (so metres-per-cell is 1 and every reach reads
+    /// in cells, and the grade is gentle rather than squashed) with the shoreline at height 0.5.
     fn ctx(size: usize) -> EvalContext {
         EvalContext::new(size, size, Region::UNIT, 0)
             .with_world_extent(size as f64)
@@ -316,9 +343,15 @@ mod tests {
         field.layer(layers::HEIGHT).unwrap().get(x, y).unwrap()
     }
 
-    /// A wide beach so the reshaping reaches several cells inland on the 65-cell cone.
+    /// A short beach with a steep bluff, so the reshaping carves a few cells inland on the cone and
+    /// the steep backing then clears the (steeper) cone flank, leaving the interior untouched. No
+    /// crest rounding, so the geometric tests read the exact two-slope profile.
     fn beach_params() -> Params {
-        Params::new().with("width", ParamValue::Float(12.0))
+        Params::new()
+            .with("beach_width", ParamValue::Float(8.0))
+            .with("berm_height", ParamValue::Float(2.0))
+            .with("bluff_angle", ParamValue::Float(80.0))
+            .with("rounding", ParamValue::Float(0.0))
     }
 
     #[test]
@@ -340,6 +373,8 @@ mod tests {
         // (42, 32) is 10 cells right of centre: r ~= 0.31, original height ~= 0.69, roughly
         // mid-way through the 12-cell beach (the shoreline at r = 0.5 is ~16 cells out), where the
         // blend weight is near its peak and the cut is deepest.
+        // (42, 32) is 10 cells right of centre: r ~= 0.31, ~6 cells inside the r = 0.5 shoreline, on
+        // the beach face, where the cut toward the beach plane is well below the cone height.
         let before = at(&island, 42, 32);
         let after = at(&out[0], 42, 32);
         assert!(
@@ -365,15 +400,14 @@ mod tests {
     #[test]
     fn a_steep_backing_preserves_the_mesa_behind_the_beach() {
         // The #252 fix: a steep `bluff_angle` clears the backing terrain within a short run, so the
-        // cut bites only the low apron near the water and leaves the plateau behind untouched. The
-        // old single gentle wedge flattened the whole band toward sea level instead.
+        // cut bites only the low apron near the water and leaves the plateau behind untouched.
         let coast = flat_mesa_coast(64, 20, 0.8);
         let ctx = ctx(64);
         let params = Params::new()
-            .with("width", ParamValue::Float(40.0))
-            .with("angle", ParamValue::Float(4.0))
+            .with("beach_width", ParamValue::Float(6.0))
             .with("berm_height", ParamValue::Float(1.0))
-            .with("bluff_angle", ParamValue::Float(80.0));
+            .with("bluff_angle", ParamValue::Float(80.0))
+            .with("rounding", ParamValue::Float(0.0));
         let out = run(&coast, &params, &ctx);
 
         // Just inland of the shoreline the beach face cuts the mesa edge well down toward the water.
@@ -388,62 +422,117 @@ mod tests {
             "the mesa behind the bluff must be preserved: {far_before} -> {far_after}"
         );
 
-        // The same cell under the degenerate single wedge (no berm, backing == beach face, no
-        // rounding) is dragged down instead: this is exactly the flattening the two-slope profile
-        // fixes.
-        let wedge = Params::new()
-            .with("width", ParamValue::Float(40.0))
-            .with("angle", ParamValue::Float(4.0))
-            .with("berm_height", ParamValue::Float(0.0))
+        // A gentle backing (bluff shallower than nothing to clear on the flat mesa) instead cuts a
+        // long way inland: the shallower the bluff, the more of the backing becomes coast. This is
+        // the knob that trades a preserved bluff for a flattened strip.
+        let gentle = Params::new()
+            .with("beach_width", ParamValue::Float(6.0))
+            .with("berm_height", ParamValue::Float(1.0))
             .with("bluff_angle", ParamValue::Float(4.0))
             .with("rounding", ParamValue::Float(0.0));
-        let flat = run(&coast, &wedge, &ctx);
+        let flat = run(&coast, &gentle, &ctx);
         assert!(
             at(&flat[0], 44, 32) < far_before - 0.05,
-            "the single wedge should flatten the same cell the bluff preserves"
+            "a gentle backing should cut inland where the steep bluff preserved the mesa"
         );
     }
 
     #[test]
-    fn single_wedge_is_the_degenerate_case() {
-        // With no berm and the backing grade equal to the beach face, the two-slope profile collapses
-        // to the pre-#252 single wedge. Reproduce that wedge directly from the same distance solve and
-        // assert the node matches it cell for cell, so the generalization is exact and auditable.
-        let island = cone_island(48);
-        let c = ctx(48);
-        let angle = 4.0_f32;
+    fn beach_face_grade_is_berm_over_width() {
+        // The beach face is the direct control: it rises from the waterline at `berm_height /
+        // beach_width`. Read its slope between two cells on the face (robust to the sub-cell
+        // shoreline position of the stepped mesa), where the mesa is well above the face so `min`
+        // takes the face. The rise per cell must be `grade / world_height`.
+        let coast = flat_mesa_coast(64, 20, 0.8);
+        let c = ctx(64);
+        let (beach_width, berm_height) = (10.0_f32, 2.0_f32);
         let params = Params::new()
-            .with("width", ParamValue::Float(12.0))
-            .with("angle", ParamValue::Float(f64::from(angle)))
-            .with("berm_height", ParamValue::Float(0.0))
-            .with("bluff_angle", ParamValue::Float(f64::from(angle)))
+            .with("beach_width", ParamValue::Float(f64::from(beach_width)))
+            .with("berm_height", ParamValue::Float(f64::from(berm_height)))
+            .with("bluff_angle", ParamValue::Float(80.0))
             .with("rounding", ParamValue::Float(0.0));
-        let out = run(&island, &params, &c);
-
-        let source = island.layer(layers::HEIGHT).unwrap();
-        let sea = c.sea_level() as f32;
+        let out = run(&coast, &params, &c);
         let wh = c.world_height() as f32;
-        let grade = angle.to_radians().tan();
-        let reach = 12.0_f32;
-        // Default `erode_inland_basins` is false, so the node uses the edge-connected sea distance.
-        let signed = sea_signed_distance(source, sea, c.meters_per_cell() as f32);
-        for y in 0..48 {
-            for x in 0..48 {
-                let d = signed.get(x, y).unwrap();
-                let orig = source.get(x, y).unwrap();
-                let band = 1.0 - smoothstep(reach, d.abs());
-                let carved = if d >= 0.0 {
-                    orig.min(sea + grade * d / wh)
-                } else {
-                    orig.max(sea - grade * d.abs() / wh)
-                };
-                let expected = orig + (carved - orig) * band;
-                assert!(
-                    (at(&out[0], x, y) - expected).abs() < 1e-6,
-                    "degenerate profile must equal the single wedge at ({x}, {y})"
-                );
-            }
-        }
+        let grade = berm_height / beach_width;
+        // Cells 24 and 28 are both on the face (a few metres inland, short of the ~10 m crest); their
+        // height difference over the 4-cell run is the face slope.
+        let per_cell = (at(&out[0], 28, 32) - at(&out[0], 24, 32)) / 4.0;
+        assert!(
+            (per_cell - grade / wh).abs() < 1e-4,
+            "the beach face must rise at berm_height / beach_width: {per_cell} vs {}",
+            grade / wh
+        );
+    }
+
+    #[test]
+    fn beach_width_sets_the_inland_extent() {
+        // Widening the beach carves further inland: on a flat mesa a wider beach reaches a fixed
+        // inland cell that a narrow beach leaves untouched. This is the direct control the offshore
+        // width used to lack.
+        let coast = flat_mesa_coast(96, 20, 0.7);
+        let c = ctx(96);
+        let base = |bw: f64| {
+            Params::new()
+                .with("beach_width", ParamValue::Float(bw))
+                .with("berm_height", ParamValue::Float(2.0))
+                .with("bluff_angle", ParamValue::Float(80.0))
+                .with("rounding", ParamValue::Float(0.0))
+        };
+        // Cell 40 is 20 m inland of the shoreline at x = 20.
+        let narrow = run(&coast, &base(8.0), &c);
+        let wide = run(&coast, &base(30.0), &c);
+        assert!(
+            (at(&narrow[0], 40, 48) - 0.7).abs() < 1e-4,
+            "a narrow beach leaves the cell inland of it untouched"
+        );
+        assert!(
+            at(&wide[0], 40, 48) < 0.7 - 1e-3,
+            "a wider beach carves the same cell"
+        );
+    }
+
+    #[test]
+    fn shoreface_reach_is_decoupled_from_the_beach() {
+        // The whole point of the re-model: the offshore shoreface has its own extent, so changing it
+        // moves the seabed but not the land, and changing the beach width moves the land but not the
+        // seabed. A cell offshore is lifted more by a longer shoreface; a cell on land is untouched
+        // by the shoreface reach.
+        let coast = flat_mesa_coast(96, 40, 0.7);
+        let c = ctx(96);
+        let base = || {
+            Params::new()
+                .with("beach_width", ParamValue::Float(10.0))
+                .with("berm_height", ParamValue::Float(2.0))
+                .with("bluff_angle", ParamValue::Float(80.0))
+                .with("rounding", ParamValue::Float(0.0))
+        };
+        let short = run(
+            &coast,
+            &base().with("shoreface_reach", ParamValue::Float(4.0)),
+            &c,
+        );
+        let long = run(
+            &coast,
+            &base().with("shoreface_reach", ParamValue::Float(30.0)),
+            &c,
+        );
+        // A cell 15 m offshore (x = 25) is beyond the short reach but within the long one, so only
+        // the long shoreface lifts it.
+        assert!(
+            (at(&short[0], 25, 48) - at(&coast, 25, 48)).abs() < 1e-4,
+            "beyond the short shoreface the seabed is untouched"
+        );
+        assert!(
+            at(&long[0], 25, 48) > at(&coast, 25, 48) + 1e-3,
+            "within the long shoreface the seabed is lifted"
+        );
+        // A cell on land (x = 45, inland of the x = 40 shoreline) is identical either way: the
+        // shoreface reach never touches the land.
+        assert_eq!(
+            at(&short[0], 45, 48),
+            at(&long[0], 45, 48),
+            "the shoreface reach must not affect the land"
+        );
     }
 
     #[test]
@@ -462,23 +551,19 @@ mod tests {
     fn rounding_softens_the_berm_crest() {
         // At the berm crest the sharp profile makes a hard corner; rounding blends the beach face
         // and the backing into a shoulder, lifting the envelope there so the crest is cut less
-        // abruptly (a softer break). The crest sits ~14 cells inland of the x=20 shoreline.
+        // abruptly (a softer break). With a 14 m beach the crest sits at x = 34 (14 cells inland of
+        // the x = 20 shoreline).
         let coast = flat_mesa_coast(64, 20, 0.8);
         let c = ctx(64);
-        let sharp = Params::new()
-            .with("width", ParamValue::Float(40.0))
-            .with("angle", ParamValue::Float(4.0))
-            .with("berm_height", ParamValue::Float(1.0))
-            .with("bluff_angle", ParamValue::Float(80.0))
-            .with("rounding", ParamValue::Float(0.0));
-        let rounded = Params::new()
-            .with("width", ParamValue::Float(40.0))
-            .with("angle", ParamValue::Float(4.0))
-            .with("berm_height", ParamValue::Float(1.0))
-            .with("bluff_angle", ParamValue::Float(80.0))
-            .with("rounding", ParamValue::Float(8.0));
-        let sharp_out = run(&coast, &sharp, &c);
-        let rounded_out = run(&coast, &rounded, &c);
+        let base = |rounding: f64| {
+            Params::new()
+                .with("beach_width", ParamValue::Float(14.0))
+                .with("berm_height", ParamValue::Float(1.0))
+                .with("bluff_angle", ParamValue::Float(80.0))
+                .with("rounding", ParamValue::Float(rounding))
+        };
+        let sharp_out = run(&coast, &base(0.0), &c);
+        let rounded_out = run(&coast, &base(8.0), &c);
         let crest_x = 34;
         assert!(
             at(&rounded_out[0], crest_x, 32) > at(&sharp_out[0], crest_x, 32) + 1e-3,
@@ -513,19 +598,20 @@ mod tests {
         // Somewhere along a radius the band crosses the waterline and reads ~1.
         let peak = (0..65).map(|x| at(shore, x, 32)).fold(0.0_f32, f32::max);
         assert!(peak > 0.9, "the band should peak near 1 at the shoreline");
-        // The island centre is far inland (well beyond the 12-cell reach), so its band is ~0.
+        // The island centre is far inland (well beyond the 8 m beach), so its band is ~0.
         assert!(at(shore, 32, 32) < 1e-3, "the centre is far from any shore");
     }
 
     #[test]
     fn far_from_shore_is_unchanged() {
-        // The peak is ~16 cells from the shoreline, past the 12-cell reach, so it is untouched.
+        // The steep bluff (80 deg) rises faster than the cone flank, so it clears the terrain within
+        // a short run of the beach and the interior peak is left identical.
         let island = cone_island(65);
         let out = run(&island, &beach_params(), &ctx(65));
         assert_eq!(
             at(&out[0], 32, 32),
             at(&island, 32, 32),
-            "terrain beyond the reach must be identical"
+            "terrain beyond the bluff toe must be identical"
         );
     }
 

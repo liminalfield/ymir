@@ -386,24 +386,19 @@ fn lookup(key: &str) -> Option<&'static str> {
         // Coastal bevel: every knob is coast-specific, so each takes an override rather than a
         // shared entry. Width, Angle, Berm Height, and Bluff Angle together shape the two-slope
         // beach-and-bluff profile (a gentle face up to a berm crest, then a steep backing slope).
-        "param-modifier.coastal-width" => "Width",
-        "param-modifier.coastal-width-desc" => {
-            "How far the coast effect reaches from the shoreline, in metres. Sets the offshore \
-             shoreface and the distance inland over which the reshaping fades to nothing; larger \
-             values act on a wider strip of coast. Separate from how wide the beach face itself is."
-        }
-        "param-modifier.coastal-angle" => "Angle",
-        "param-modifier.coastal-angle-desc" => {
-            "Grade of the gentle beach face, in degrees: how steeply the shore rises from the \
-             waterline up to the berm crest. A few degrees reads as a flat sandy foreshore, more \
-             as a steeper shingle beach. With Berm Height it sets the beach-face width \
-             (berm height / tan(angle))."
+        "param-modifier.coastal-beach_width" => "Beach Width",
+        "param-modifier.coastal-beach_width-desc" => {
+            "How far the beach reaches inland, in metres, from the waterline to the berm crest. The \
+             direct control over the visible beach: a wider value makes a longer, gentler beach \
+             face. Independent of the offshore shoreface, so widening the beach does not enlarge \
+             the underwater shelf."
         }
         "param-modifier.coastal-berm_height" => "Berm Height",
         "param-modifier.coastal-berm_height-desc" => {
-            "Height of the berm crest above sea level, in metres: the top of the beach face, where \
-             the gentle foreshore ends and the steep backing slope begins. Raising it lifts the \
-             crest and so widens the beach face for a given Angle; it is the \"how much beach\" knob."
+            "Height of the berm crest above sea level, in metres: how far the visible beach rises \
+             above the water, where the gentle foreshore ends and the steep backing begins. On a \
+             tall world it must be raised to read against the vertical scale. With Beach Width it \
+             sets the beach-face grade (berm height / beach width)."
         }
         "param-modifier.coastal-bluff_angle" => "Bluff Angle",
         "param-modifier.coastal-bluff_angle-desc" => {
@@ -418,6 +413,12 @@ fn lookup(key: &str) -> Option<&'static str> {
              meets the steeper backing slope. Zero leaves a hard corner at the crest; larger values \
              blend the two over a wider shoulder, so a long low-angle beach joins its backing as a \
              soft break rather than a sharp edge."
+        }
+        "param-modifier.coastal-shoreface_reach" => "Shoreface Reach",
+        "param-modifier.coastal-shoreface_reach-desc" => {
+            "How far the seabed is lifted out to sea, in metres, forming a shallow shelf below the \
+             waterline. Independent of the beach, so the underwater shelf and the above-water beach \
+             are sized separately. Zero leaves the seabed alone."
         }
         "param-modifier.coastal-strength" => "Strength",
         "param-modifier.coastal-strength-desc" => {
