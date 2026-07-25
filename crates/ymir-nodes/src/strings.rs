@@ -383,6 +383,49 @@ fn lookup(key: &str) -> Option<&'static str> {
              by World Height."
         }
 
+        // Coastal bevel: every knob is coast-specific, so each takes an override rather than a
+        // shared entry. Width, Angle, Berm Height, and Bluff Angle together shape the two-slope
+        // beach-and-bluff profile (a gentle face up to a berm crest, then a steep backing slope).
+        "param-modifier.coastal-width" => "Width",
+        "param-modifier.coastal-width-desc" => {
+            "How far the coast effect reaches from the shoreline, in metres. Sets the offshore \
+             shoreface and the distance inland over which the reshaping fades to nothing; larger \
+             values act on a wider strip of coast. Separate from how wide the beach face itself is."
+        }
+        "param-modifier.coastal-angle" => "Angle",
+        "param-modifier.coastal-angle-desc" => {
+            "Grade of the gentle beach face, in degrees: how steeply the shore rises from the \
+             waterline up to the berm crest. A few degrees reads as a flat sandy foreshore, more \
+             as a steeper shingle beach. With Berm Height it sets the beach-face width \
+             (berm height / tan(angle))."
+        }
+        "param-modifier.coastal-berm_height" => "Berm Height",
+        "param-modifier.coastal-berm_height-desc" => {
+            "Height of the berm crest above sea level, in metres: the top of the beach face, where \
+             the gentle foreshore ends and the steep backing slope begins. Raising it lifts the \
+             crest and so widens the beach face for a given Angle; it is the \"how much beach\" knob."
+        }
+        "param-modifier.coastal-bluff_angle" => "Bluff Angle",
+        "param-modifier.coastal-bluff_angle-desc" => {
+            "Grade of the steep backing slope above the berm, in degrees: the bluff or sea cliff \
+             behind the beach. A steep value clears the terrain behind within a short run, so only \
+             the low apron near the water is carved and the hill behind is preserved. Lowering it \
+             toward Angle flattens the whole coastal strip; near vertical it is a sharp sea cliff."
+        }
+        "param-modifier.coastal-strength" => "Strength",
+        "param-modifier.coastal-strength-desc" => {
+            "How fully the coast profile replaces the original terrain, from 0 (no change) to 1 \
+             (the full beach-and-bluff shape). Values between blend the reshaped coast with the \
+             terrain that was there."
+        }
+        "param-modifier.coastal-erode_inland_basins" => "Erode Inland Basins",
+        "param-modifier.coastal-erode_inland_basins-desc" => {
+            "Whether below-sea areas enclosed inland (dry pits, depressions not connected to the \
+             open sea) also get a coast. Off, only sea connected to the map edge counts, so inland \
+             basins are left as land; on, every below-sea cell is treated as sea, for an \
+             inland-sea world."
+        }
+
         // Unknown: no entry. `tr` echoes the key; `resolve_param` falls through to prettify.
         _ => return None,
     })
