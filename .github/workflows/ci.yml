@@ -64,3 +64,32 @@ jobs:
       # markers, relative design/ links, and completeness gaps on pages marked stable.
       - name: Docs lint
         run: cargo xtask docs-lint
+
+  # Exercise the GPU compute path (ymir-gpu marshalling and the thermal erosion kernel) on Mesa
+  # lavapipe, a software Vulkan implementation, so a runner with no physical GPU still runs the
+  # kernels rather than skipping them. Separate from `check` so a lavapipe hiccup cannot break the
+  # main gate; the tests skip gracefully (printing why, visible with --nocapture) if no adapter is
+  # found, so this job never fails on a host without a working Vulkan stack.
+  gpu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # lavapipe (the lvp ICD) plus the Vulkan loader (libvulkan1) it needs to be usable, and
+      # vulkan-tools for the diagnostic below.
+      - name: Install Mesa lavapipe (software Vulkan)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-tools
+      # Show which ICDs the loader can see, so a "no adapter" skip is diagnosable from the log.
+      - name: Vulkan diagnostics
+        run: |
+          ls -la /usr/share/vulkan/icd.d/ || true
+          vulkaninfo --summary 2>&1 | head -40 || true
+      - uses: Swatinem/rust-cache@v2
+      # The loader auto-discovers the lavapipe ICD in /usr/share/vulkan/icd.d/ (no VK_ICD override,
+      # which previously pointed at a path that may not exist and suppressed discovery). --nocapture
+      # surfaces a skip and its reason in the log if it still finds no adapter.
+      - name: GPU tests on lavapipe
+        run: |
+          cargo test -p ymir-gpu --verbose -- --nocapture
+          cargo test -p ymir-nodes --lib thermal_gpu --verbose -- --nocapture

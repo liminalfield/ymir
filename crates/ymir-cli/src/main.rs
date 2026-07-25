@@ -74,8 +74,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         .ok_or("export node missing after reload")?;
 
     // Pulling the endpoint evaluates the chain and writes the file as a side
-    // effect (endpoints are not memoized).
-    let request = EvalRequest::new(size, size, Region::UNIT, seed);
+    // effect (endpoints are not memoized). Run erosion on the GPU when a device is reachable,
+    // else on the CPU: a headless host with no adapter falls back cleanly.
+    let mut request = EvalRequest::new(size, size, Region::UNIT, seed);
+    match ymir_gpu::GpuContext::new_headless() {
+        Ok(gpu) => request = request.with_compute(std::sync::Arc::new(gpu)),
+        Err(err) => log::info!("no GPU device, rendering on CPU: {err}"),
+    }
     let mut cache = EvalCache::new(64);
     graph.evaluate(export, &request, &mut cache)?;
 

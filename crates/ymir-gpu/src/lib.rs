@@ -68,6 +68,31 @@ struct ScalarParams {
     _pad: [u32; 2],
 }
 
+/// The side length of the 2D compute workgroup that grid kernels dispatch against. A kernel's WGSL
+/// declares `@workgroup_size(WORKGROUP_2D, WORKGROUP_2D)`, and [`dispatch_2d`] rounds the grid up to
+/// whole workgroups of this size. 16 (256 invocations) is a portable, cache-friendly choice for a
+/// 2D stencil.
+pub const WORKGROUP_2D: u32 = 16;
+
+/// The 2D workgroup count that covers a `width` by `height` grid at [`WORKGROUP_2D`] resolution,
+/// each dimension rounded up so every cell is covered (the kernel guards the tail invocations).
+///
+/// Dispatching in 2D keeps each dimension's group count far below the hardware ceiling. A flat 1D
+/// dispatch of `cells / 64` overruns `max_compute_workgroups_per_dimension` (65535) past about four
+/// million cells (a 2048-square grid), so grid kernels dispatch 2D from the start.
+#[must_use]
+pub fn workgroup_count_2d(width: u32, height: u32) -> (u32, u32) {
+    (width.div_ceil(WORKGROUP_2D), height.div_ceil(WORKGROUP_2D))
+}
+
+/// Dispatches the current compute pass over a `width` by `height` grid in 2D workgroups. The caller
+/// sets the pipeline and bind group on `pass` first; this issues the dispatch with the
+/// [`workgroup_count_2d`] group counts.
+pub fn dispatch_2d(pass: &mut wgpu::ComputePass<'_>, width: u32, height: u32) {
+    let (groups_x, groups_y) = workgroup_count_2d(width, height);
+    pass.dispatch_workgroups(groups_x, groups_y, 1);
+}
+
 /// A headless GPU compute context: a `wgpu` device and its queue.
 ///
 /// Created by the application, not the engine. It implements [`ComputeContext`] so
@@ -149,6 +174,21 @@ impl GpuContext {
                     | wgpu::BufferUsages::COPY_SRC
                     | wgpu::BufferUsages::COPY_DST,
             })
+    }
+
+    /// Creates an uninitialized storage buffer of `bytes`, usable as a shader read/write binding and
+    /// as both a copy source and destination, so it can be seeded, ping-ponged across iterations,
+    /// and read back. The working and output grids of an iterative kernel are allocated this way.
+    #[must_use]
+    pub fn storage_buffer(&self, bytes: u64, label: &str) -> wgpu::Buffer {
+        self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: bytes,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
     }
 
     /// Reads a `width * height` storage buffer of `f32` back into a new [`Layer`].
@@ -320,6 +360,19 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use ymir_core::{EvalContext, Region};
+
+    #[test]
+    fn workgroup_count_covers_the_grid_in_2d() {
+        // Exact multiples and partial tail workgroups both round up to cover every cell.
+        assert_eq!(workgroup_count_2d(16, 16), (1, 1));
+        assert_eq!(workgroup_count_2d(17, 16), (2, 1));
+        assert_eq!(workgroup_count_2d(1, 1), (1, 1));
+        // A grid a flat 1D dispatch could not cover (2048^2 / 64 = 65536 > 65535) sits comfortably
+        // within the per-dimension limit in 2D.
+        let (gx, gy) = workgroup_count_2d(2048, 2048);
+        assert_eq!((gx, gy), (128, 128));
+        assert!(gx <= 65535 && gy <= 65535);
+    }
 
     /// CPU reference for the scalar multiply, the golden oracle the GPU path is
     /// checked against.

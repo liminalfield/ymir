@@ -89,8 +89,25 @@ fn main() -> eframe::Result {
         Some(icon) => viewport.with_icon(icon),
         None => viewport,
     };
+    // Request the adapter's real limits for the wgpu device, not egui's conservative defaults (a
+    // ~128 MiB storage-buffer cap). GPU erosion shares this device (from_device_queue), and an 8K
+    // build needs storage buffers well past that default; without this the shared device would drop
+    // large builds to the CPU (#242). A weaker GPU still gets only what it supports, so the erosion
+    // fallback stays graceful on any hardware.
+    let mut wgpu_options = eframe::egui_wgpu::WgpuConfiguration::default();
+    if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut wgpu_options.wgpu_setup {
+        setup.device_descriptor =
+            std::sync::Arc::new(|adapter: &eframe::egui_wgpu::wgpu::Adapter| {
+                eframe::egui_wgpu::wgpu::DeviceDescriptor {
+                    label: Some("ymir-gui-device"),
+                    required_limits: adapter.limits(),
+                    ..Default::default()
+                }
+            });
+    }
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
+        wgpu_options,
         viewport,
         // No shared depth on egui's pass: the 3D viewport renders to its own offscreen
         // color+depth and composites the result as a texture (#138), so egui's pass is
@@ -539,6 +556,11 @@ struct AppState {
     /// (#167). `None` in a headless/test build with no wgpu backend, where the map falls back to a
     /// black fill. Set by the app shell once the device exists, never by `AppState::new`.
     render_state: Option<eframe::egui_wgpu::RenderState>,
+    /// The GPU compute context (erosion and later grid nodes), sharing the viewport's wgpu device
+    /// so the preview and build run the GPU path without standing up a second device. `None` in a
+    /// headless/test build, where every node falls back to its CPU path. Set by the app shell
+    /// alongside `render_state`, never by `AppState::new`.
+    gpu: Option<std::sync::Arc<ymir_gpu::GpuContext>>,
     /// Whether the 3D viewport shows true amplitude (Fixed) or normalizes to fill the relief
     /// (Auto). Fixed by default so terrain reads at its real height.
     viewport_scale: shade::HeightScale,
@@ -845,6 +867,7 @@ impl AppState {
             viewport_2d: viewport2d::View2d::default(),
             viewport_camera: viewport::OrbitCamera::default(),
             render_state: None,
+            gpu: None,
             viewport_scale: shade::HeightScale::Fixed,
             viewport_exaggeration: 1.0,
             viewport_fly_speed: 0.6,
@@ -1867,10 +1890,16 @@ impl AppState {
             return;
         };
         let res = self.preview_res;
-        let request = EvalRequest::new(res, res, Region::UNIT, self.seed)
+        let mut request = EvalRequest::new(res, res, Region::UNIT, self.seed)
             .with_world_extent(self.world_extent)
             .with_world_height(self.world_height)
             .with_sea_level(self.sea_level);
+        // Run the preview on the GPU when the device is shared, so the tweak-adjust loop stays fast
+        // at higher resolutions. The handle is not part of a node's cache key, so a GPU and a CPU
+        // result are interchangeable in the cache.
+        if let Some(gpu) = &self.gpu {
+            request = request.with_compute(gpu.clone());
+        }
         let now = ctx.input(|i| i.time);
         // Inside a subgraph, bind the live input fields so the 2D preview shows real data
         // rather than the Input markers' zero stand-in (#106). `None` at the top level.
@@ -2863,10 +2892,13 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
                             ));
                         } else {
                             let res = state.build_res;
-                            let request = EvalRequest::new(res, res, Region::UNIT, state.seed)
+                            let mut request = EvalRequest::new(res, res, Region::UNIT, state.seed)
                                 .with_world_extent(state.world_extent)
                                 .with_world_height(state.world_height)
                                 .with_sea_level(state.sea_level);
+                            if let Some(gpu) = &state.gpu {
+                                request = request.with_compute(gpu.clone());
+                            }
                             state.build.start(top, targets, request, ui.ctx().clone());
                         }
                     }
@@ -8800,6 +8832,15 @@ impl YmirApp {
         if let Some(render_state) = cc.wgpu_render_state.as_ref() {
             viewport::init(render_state);
             state.render_state = Some(render_state.clone());
+            // Share the viewport's device for GPU compute, so erosion runs on the GPU in the
+            // preview and the build without standing up a second device. A GPU-capable node
+            // downcasts this handle; if it is absent, every node runs its CPU path.
+            state.gpu = Some(std::sync::Arc::new(
+                ymir_gpu::GpuContext::from_device_queue(
+                    render_state.device.clone(),
+                    render_state.queue.clone(),
+                ),
+            ));
         }
         // Empty so the first frame always pushes the real title to the OS bar.
         Self {

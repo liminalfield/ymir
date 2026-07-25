@@ -4100,6 +4100,7 @@ dependencies = [
  "serde_json",
  "ymir-build-info",
  "ymir-core",
+ "ymir-gpu",
  "ymir-nodes",
 ]
 
@@ -4148,6 +4149,7 @@ dependencies = [
  "serde_json",
  "ymir-build-info",
  "ymir-core",
+ "ymir-gpu",
  "ymir-nodes",
 ]
 
@@ -4155,9 +4157,13 @@ dependencies = [
 name = "ymir-nodes"
 version = "0.2.0"
 dependencies = [
+ "bytemuck",
  "inventory",
+ "log",
  "rayon",
+ "wgpu",
  "ymir-core",
+ "ymir-gpu",
 ]
 
 [[package]]
