@@ -12,4 +12,4 @@ On land it cuts the terrain down to a two-slope profile measured from the shorel
 
 Offshore it raises the seabed toward sea level, fading that lift out to `shoreface_reach`. The land and sea sides have independent extents, so widening the beach does not enlarge the underwater shelf, and the coast is not dominated by change below the waterline. It bevels by true distance from the shoreline, so the coast is even all around.
 
-It reads the world sea level and taps three selections as layers: `shore` (a band at the waterline, for a wet edge or foam), `beach` (the beach-face footprint), and `bluff` (the backing-slope footprint). Together `beach` and `bluff` cover the whole reshaped coast, so you can texture each zone on its own or combine them.
+It reads the world sea level and taps three selections as layers: `shore` (a band at the waterline, for a wet edge or foam), `beach` (the whole berm slope, from the waterline up to near the crest), and `bluff` (the backing slope past the crest, which is present only where the coast is steeper than the bluff angle). You can texture each zone on its own or combine them.

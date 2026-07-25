@@ -31,8 +31,9 @@
 //! Four outputs: the reshaped `heightfield`, and three selections it computes along the way, one per
 //! coastal zone. `shore` is a band peaking at the waterline and fading to zero at `beach_width`
 //! inland and `shoreface_reach` offshore, for a wet edge or foam. `beach` is a solid footprint of
-//! the beach face, one across the beach and feathering to zero at both the waterline and the berm
-//! crest (so detail masked by it never roughens the clean shoreline). `bluff` is the companion
+//! the beach face and berm slope, one from just off the waterline up to near the crest: it feathers
+//! wide at the waterline (so detail masked by it never roughens the clean shoreline) and narrow at
+//! the crest (so the steeper shoulder is covered, not left smooth). `bluff` is the companion
 //! footprint of the backing slope: past the berm crest and following the carved slope up to the
 //! bluff toe, so together `beach` and `bluff` cover the whole reshaped coast and each can be
 //! textured on its own. All three are emitted rather than discarded and recomputed. Water depth is
@@ -225,11 +226,13 @@ impl Operator for Coastal {
             sea_signed_distance(&source, sea, cell_size)
         };
 
-        // The beach footprint mask feathers to zero over a fifth of the beach face at each end: at
-        // the crest so its inland edge is soft, and at the waterline so detail masked by it never
-        // reaches the shoreline and roughens the clean contour. A hair minimum keeps the feather
+        // The beach footprint mask feathers asymmetrically. At the waterline it needs a wide feather
+        // so masked detail never reaches the clean shoreline contour. At the crest it needs only a
+        // narrow one, so the mask covers the whole berm slope up to near the crest rather than fading
+        // out well below it (leaving the steeper shoulder smooth). A hair minimum keeps each feather
         // positive for a zero-width beach.
-        let beach_feather = (beach_width * 0.2).max(1e-6);
+        let waterline_feather = (beach_width * 0.2).max(1e-6);
+        let crest_feather = (beach_width * 0.05).max(1e-6);
         // The bluff mask fades out over the last few metres of cut depth at the bluff toe, so its
         // upper edge is soft rather than a hard line where the backing meets the terrain.
         let cut_feather = (3.0 / world_height).max(1e-6);
@@ -267,7 +270,7 @@ impl Operator for Coastal {
                     // where the backing actually cut the terrain, so it follows the carved slope and
                     // ends at the bluff toe wherever the terrain sits. It feathers in at the crest
                     // (handing off from the beach mask) and out as the cut vanishes at the toe.
-                    let past_crest = smoothstep(beach_feather, d - beach_width);
+                    let past_crest = smoothstep(crest_feather, d - beach_width);
                     let cutting = smoothstep(cut_feather, original - env);
                     (original.min(env), 1.0, past_crest * cutting)
                 } else {
@@ -296,15 +299,14 @@ impl Operator for Coastal {
                 };
                 shore[idx] = 1.0 - smoothstep(shore_reach, d.abs());
 
-                // The beach selection is a solid footprint of the beach face, one across the beach
-                // and feathering to zero at both ends: at the waterline (so detail masked by it
-                // leaves the shoreline contour clean) and at the berm crest (a soft inland edge),
-                // zero offshore. Unlike `shore` (a band peaking at the waterline), this covers the
-                // flattened beach evenly, so it masks detail or a material put back on the beach. The
-                // product of the two ramps is one only in the interior `[beach_feather, beach_width -
-                // beach_feather]`.
+                // The beach selection is a solid footprint of the whole berm slope: one from just off
+                // the waterline up to near the crest, zero offshore. The waterline edge feathers wide
+                // (it leaves the shoreline contour clean); the crest edge feathers narrow, so the
+                // steeper shoulder near the crest is covered rather than left smooth. Unlike `shore`
+                // (a band peaking at the waterline), this covers the flattened beach evenly, so it
+                // masks detail or a material put back on the slope.
                 beach[idx] = if d >= 0.0 {
-                    smoothstep(beach_feather, d) * smoothstep(beach_feather, beach_width - d)
+                    smoothstep(waterline_feather, d) * smoothstep(crest_feather, beach_width - d)
                 } else {
                     0.0
                 };
@@ -705,6 +707,12 @@ mod tests {
         assert!(
             at(beach, 40, 48) > 0.9,
             "the beach mask is one across the face"
+        );
+        // Just below the crest (x = 48, ~2 m short of the 20 m crest at x = 50): the narrow crest
+        // feather keeps the steeper shoulder covered rather than fading it out.
+        assert!(
+            at(beach, 48, 48) > 0.7,
+            "the beach mask covers the berm slope up to near the crest"
         );
         // Past the berm crest (x = 55, well beyond the 20 m beach): zero.
         assert!(
