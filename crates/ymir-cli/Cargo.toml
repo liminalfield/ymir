@@ -21,6 +21,9 @@ log = "0.4"
 # Depended on for its operator registrations. The binary must also anchor it in
 # code (`use ymir_nodes as _;`), or the linker can drop the registrations.
 ymir-nodes = { path = "../ymir-nodes" }
+# A headless GPU compute context for the batch render, so erosion runs on the GPU when a device is
+# reachable; falls back to CPU on a host with no adapter (CI, a machine without a capable GPU).
+ymir-gpu = { path = "../ymir-gpu" }
 # Serializes the registered node specs to JSON for the docs generator (the `docs` subcommand).
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

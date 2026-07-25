@@ -4100,6 +4100,7 @@ dependencies = [
  "serde_json",
  "ymir-build-info",
  "ymir-core",
+ "ymir-gpu",
  "ymir-nodes",
 ]
 
@@ -4148,6 +4149,7 @@ dependencies = [
  "serde_json",
  "ymir-build-info",
  "ymir-core",
+ "ymir-gpu",
  "ymir-nodes",
 ]
 
