@@ -412,6 +412,13 @@ fn lookup(key: &str) -> Option<&'static str> {
              the low apron near the water is carved and the hill behind is preserved. Lowering it \
              toward Angle flattens the whole coastal strip; near vertical it is a sharp sea cliff."
         }
+        "param-modifier.coastal-rounding" => "Rounding",
+        "param-modifier.coastal-rounding-desc" => {
+            "How far, in metres, the berm crest is rounded into a shoulder where the beach face \
+             meets the steeper backing slope. Zero leaves a hard corner at the crest; larger values \
+             blend the two over a wider shoulder, so a long low-angle beach joins its backing as a \
+             soft break rather than a sharp edge."
+        }
         "param-modifier.coastal-strength" => "Strength",
         "param-modifier.coastal-strength-desc" => {
             "How fully the coast profile replaces the original terrain, from 0 (no change) to 1 \

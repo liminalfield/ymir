@@ -4,14 +4,15 @@
 //! setting carried in [`EvalContext::sea_level`], never a node param). On land this node cuts the
 //! terrain *down* toward a two-slope beach-and-bluff profile rising from the waterline (`min`): a
 //! gentle beach face of grade `angle` up to a berm crest at `berm_height`, then a steeper backing
-//! slope of grade `bluff_angle` above it. Offshore it lifts the seabed *up* toward a gentle
-//! shoreface (`max`). Both fade to zero over `width` metres, so terrain resumes smoothly away from
-//! the coast and the surface is continuous through the waterline. Because the backing slope is
-//! steep it clears the terrain behind the beach within a short run, so the cut bites only the low
-//! apron near the water and leaves the hill behind as a bluff; the break of slope where the
+//! slope of grade `bluff_angle` above it. The crest where the two meet is rounded into a shoulder
+//! over `rounding` metres rather than left a hard corner. Offshore it lifts the seabed *up* toward
+//! a gentle shoreface (`max`). Both fade to zero over `width` metres, so terrain resumes smoothly
+//! away from the coast and the surface is continuous through the waterline. Because the backing
+//! slope is steep it clears the terrain behind the beach within a short run, so the cut bites only
+//! the low apron near the water and leaves the hill behind as a bluff; the break of slope where the
 //! envelope meets the un-cut hillside is the bluff toe, not a separate step. A single gentle wedge
-//! (`berm_height = 0`, `bluff_angle = angle`) is the degenerate case, which flattens the whole
-//! band and is what the separate backing grade exists to avoid.
+//! (`berm_height = 0`, `bluff_angle = angle`, `rounding = 0`) is the degenerate case, which
+//! flattens the whole band and is what the separate backing grade exists to avoid.
 //!
 //! The bevel is parameterised by *true isotropic distance from the shoreline*, from the shared
 //! eikonal substrate ([`signed_distance_to_contour`](crate::distance)). That is the whole reason
@@ -59,6 +60,13 @@ const DEFAULT_BLUFF_ANGLE: f64 = 45.0;
 /// Maximum grade for either slope. Capped below 90 so `tan(angle)` stays finite; near the cap the
 /// backing is a near-vertical sea cliff.
 const MAX_ANGLE: f64 = 80.0;
+/// Default crest-rounding radius in world metres: how far to either side of the berm crest the
+/// beach face and the backing slope are blended into a smooth shoulder. A small value keeps the
+/// crest a soft break rather than a hard corner.
+const DEFAULT_ROUNDING: f64 = 8.0;
+/// Maximum crest-rounding radius in world metres. A shoulder is a local feature, so the range is
+/// capped like the berm height; the small range also earns sub-metre editing steps.
+const MAX_ROUNDING: f64 = 100.0;
 
 /// Coastal bevel: reshapes terrain near the sea-level shoreline into a beach-and-bluff profile.
 #[derive(Clone)]
@@ -114,6 +122,15 @@ impl Operator for Coastal {
                 )
                 .with_unit(Unit::Degrees),
                 ParamSpec::new(
+                    "rounding",
+                    ParamKind::Float {
+                        min: 0.0,
+                        max: MAX_ROUNDING,
+                    },
+                    ParamValue::Float(DEFAULT_ROUNDING),
+                )
+                .with_unit(Unit::Meters),
+                ParamSpec::new(
                     "strength",
                     ParamKind::Float { min: 0.0, max: 1.0 },
                     ParamValue::Float(1.0),
@@ -155,6 +172,7 @@ impl Operator for Coastal {
         } else {
             0.0
         };
+        let rounding = params.get_f64("rounding", DEFAULT_ROUNDING).max(0.0) as f32;
         let strength = params.get_f64("strength", 1.0).clamp(0.0, 1.0) as f32;
 
         let sea = ctx.sea_level() as f32;
@@ -199,18 +217,20 @@ impl Operator for Coastal {
                 shore[idx] = band;
 
                 // The bevel target, measured from the waterline. On land it is a two-slope profile:
-                // a gentle beach face of grade `angle` up to the berm crest at `berm_height`, then
-                // the steeper backing grade `bluff_angle` above it. Cutting to the lower of terrain
-                // and this envelope carves a beach where terrain pokes above it and leaves the hill
-                // behind untouched where the steep backing has already cleared it (the bluff toe is
-                // that break of slope). Offshore, the seabed is lifted toward a gentle shoreface at
-                // `angle`. Either side meets the waterline at sea level, so the profile is continuous.
+                // a gentle beach face of grade `angle` from the waterline, and a steeper backing
+                // grade `bluff_angle` through the berm crest at `(berm_run, berm_height)`. Each is a
+                // line in metres; the profile is their upper envelope, so near the water the gentle
+                // face wins and past the crest the steep backing does. `smooth_max` rounds that crest
+                // into a shoulder over `rounding` metres instead of a hard corner (a plain `max`).
+                // Cutting to the lower of terrain and this envelope carves a beach where terrain
+                // pokes above it and leaves the hill behind untouched where the steep backing has
+                // already cleared it (the bluff toe is that break of slope). Offshore, the seabed is
+                // lifted toward a gentle shoreface at `angle`. Either side meets the waterline at sea
+                // level, so the profile is continuous.
                 let carved = if d >= 0.0 {
-                    let rise_m = if d < berm_run {
-                        grade * d
-                    } else {
-                        berm_height + bluff_grade * (d - berm_run)
-                    };
+                    let beach_face = grade * d;
+                    let backing = berm_height + bluff_grade * (d - berm_run);
+                    let rise_m = smooth_max(beach_face, backing, rounding);
                     original.min(sea + rise_m / world_height)
                 } else {
                     original.max(sea - grade * d.abs() / world_height)
@@ -236,6 +256,21 @@ impl Operator for Coastal {
 fn smoothstep(edge: f32, x: f32) -> f32 {
     let t = (x / edge).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+/// Smooth maximum of `a` and `b` with rounding radius `k`, in the same units as the values
+/// (Inigo Quilez's polynomial smooth-max). At `k <= 0` it is the exact [`f32::max`], a sharp corner;
+/// a positive `k` rounds the corner where the two differ by less than `k`, lifting the join by up to
+/// `k / 4`, and is exactly `max` beyond that. Used to blend the beach face and the backing slope
+/// into a rounded berm shoulder rather than a hard crest. Where the two lines coincide it lifts by
+/// the full `k / 4` (there is no corner to round, so a caller wanting the exact envelope there
+/// passes `k = 0`).
+fn smooth_max(a: f32, b: f32, k: f32) -> f32 {
+    if k <= 0.0 {
+        return a.max(b);
+    }
+    let h = ((k - (a - b).abs()) / k).max(0.0);
+    a.max(b) + h * h * k * 0.25
 }
 
 inventory::submit! {
@@ -353,13 +388,15 @@ mod tests {
             "the mesa behind the bluff must be preserved: {far_before} -> {far_after}"
         );
 
-        // The same cell under the degenerate single wedge (no berm, backing == beach face) is
-        // dragged down instead: this is exactly the flattening the two-slope profile fixes.
+        // The same cell under the degenerate single wedge (no berm, backing == beach face, no
+        // rounding) is dragged down instead: this is exactly the flattening the two-slope profile
+        // fixes.
         let wedge = Params::new()
             .with("width", ParamValue::Float(40.0))
             .with("angle", ParamValue::Float(4.0))
             .with("berm_height", ParamValue::Float(0.0))
-            .with("bluff_angle", ParamValue::Float(4.0));
+            .with("bluff_angle", ParamValue::Float(4.0))
+            .with("rounding", ParamValue::Float(0.0));
         let flat = run(&coast, &wedge, &ctx);
         assert!(
             at(&flat[0], 44, 32) < far_before - 0.05,
@@ -379,7 +416,8 @@ mod tests {
             .with("width", ParamValue::Float(12.0))
             .with("angle", ParamValue::Float(f64::from(angle)))
             .with("berm_height", ParamValue::Float(0.0))
-            .with("bluff_angle", ParamValue::Float(f64::from(angle)));
+            .with("bluff_angle", ParamValue::Float(f64::from(angle)))
+            .with("rounding", ParamValue::Float(0.0));
         let out = run(&island, &params, &c);
 
         let source = island.layer(layers::HEIGHT).unwrap();
@@ -406,6 +444,46 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn smooth_max_rounds_only_near_the_corner() {
+        // Zero radius is the exact max: a sharp corner.
+        assert_eq!(smooth_max(1.0, 3.0, 0.0), 3.0);
+        // Far apart (difference beyond the radius) is untouched, still the exact max.
+        assert_eq!(smooth_max(0.0, 10.0, 2.0), 10.0);
+        // Never below the max, and it lifts the join near the corner.
+        assert!(smooth_max(2.0, 2.5, 2.0) > 2.5);
+        // Coincident lines lift by the full quarter-radius (k / 4).
+        assert!((smooth_max(5.0, 5.0, 4.0) - 6.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rounding_softens_the_berm_crest() {
+        // At the berm crest the sharp profile makes a hard corner; rounding blends the beach face
+        // and the backing into a shoulder, lifting the envelope there so the crest is cut less
+        // abruptly (a softer break). The crest sits ~14 cells inland of the x=20 shoreline.
+        let coast = flat_mesa_coast(64, 20, 0.8);
+        let c = ctx(64);
+        let sharp = Params::new()
+            .with("width", ParamValue::Float(40.0))
+            .with("angle", ParamValue::Float(4.0))
+            .with("berm_height", ParamValue::Float(1.0))
+            .with("bluff_angle", ParamValue::Float(80.0))
+            .with("rounding", ParamValue::Float(0.0));
+        let rounded = Params::new()
+            .with("width", ParamValue::Float(40.0))
+            .with("angle", ParamValue::Float(4.0))
+            .with("berm_height", ParamValue::Float(1.0))
+            .with("bluff_angle", ParamValue::Float(80.0))
+            .with("rounding", ParamValue::Float(8.0));
+        let sharp_out = run(&coast, &sharp, &c);
+        let rounded_out = run(&coast, &rounded, &c);
+        let crest_x = 34;
+        assert!(
+            at(&rounded_out[0], crest_x, 32) > at(&sharp_out[0], crest_x, 32) + 1e-3,
+            "rounding should lift and soften the berm crest"
+        );
     }
 
     #[test]
