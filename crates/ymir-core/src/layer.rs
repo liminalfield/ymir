@@ -1,5 +1,7 @@
 //! A single named scalar grid.
 
+use std::sync::OnceLock;
+
 use crate::hash::{ContentHash, Fnv1a64};
 
 /// A 2D grid of `f32` scalars stored in row-major order.
@@ -8,11 +10,23 @@ use crate::hash::{ContentHash, Fnv1a64};
 /// name (`"height"`, `"mask"`, and so on). The cell buffer is private and
 /// reached only through methods, so a future change to the storage stays a
 /// contained edit rather than a codebase-wide one.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Layer {
     width: usize,
     height: usize,
     data: Vec<f32>,
+    /// Memoized content hash: computed once on the first [`content_hash`](Self::content_hash) call
+    /// and reused after, so a per-frame caller (the 3D viewport checking whether the shown field
+    /// changed) does not re-hash a multi-million-cell layer every frame. Derived state, not identity:
+    /// excluded from [`PartialEq`] and never folded into [`hash_into`](Self::hash_into).
+    hash_cache: OnceLock<ContentHash>,
+}
+
+impl PartialEq for Layer {
+    fn eq(&self, other: &Self) -> bool {
+        // Content is the identity; the memoized hash is derived from it, so it is excluded.
+        self.width == other.width && self.height == other.height && self.data == other.data
+    }
 }
 
 impl Layer {
@@ -23,6 +37,7 @@ impl Layer {
             width,
             height,
             data: vec![value; width * height],
+            hash_cache: OnceLock::new(),
         }
     }
 
@@ -42,6 +57,7 @@ impl Layer {
             width,
             height,
             data,
+            hash_cache: OnceLock::new(),
         }
     }
 
@@ -75,6 +91,7 @@ impl Layer {
             width,
             height,
             data,
+            hash_cache: OnceLock::new(),
         }
     }
 
@@ -96,6 +113,7 @@ impl Layer {
             width,
             height,
             data,
+            hash_cache: OnceLock::new(),
         }
     }
 
@@ -158,16 +176,27 @@ impl Layer {
     }
 
     /// Mutable access to the row-major cell buffer, for hot per-cell loops.
+    ///
+    /// Handing out mutable cells means the content may change, so this drops the memoized
+    /// [`content_hash`](Self::content_hash): the next call recomputes it from the current cells.
+    /// Without this a clone (which copies the cache) mutated through this slice would report the
+    /// original's stale hash.
     pub fn as_mut_slice(&mut self) -> &mut [f32] {
+        self.hash_cache = OnceLock::new();
         &mut self.data
     }
 
     /// Canonical content hash of this layer.
     #[must_use]
     pub fn content_hash(&self) -> ContentHash {
-        let mut h = Fnv1a64::new();
-        self.hash_into(&mut h);
-        h.finish()
+        // Memoized: the first call hashes the cells; later calls (the 3D viewport's per-frame check
+        // for whether the shown field changed) return the cached value, so a large layer is never
+        // re-hashed every frame. The value is identical to hashing on every call.
+        *self.hash_cache.get_or_init(|| {
+            let mut h = Fnv1a64::new();
+            self.hash_into(&mut h);
+            h.finish()
+        })
     }
 
     /// Folds this layer's resolution and cells into an existing hash, so a field
