@@ -15,10 +15,13 @@
 //!
 //! - `wgpu` is a dependency of this crate, never of `ymir-core`. The engine stays
 //!   GPU-type-free; the arrow points from here to core.
-//! - [`GpuContext`] is created by the application ([`GpuContext::new_headless`] for
-//!   a batch/CLI run, or [`GpuContext::from_device_queue`] to share the GUI
-//!   viewport's existing device), then handed to the evaluator as
-//!   `Arc<dyn ComputeContext>` on the `EvalRequest`.
+//! - [`GpuContext`] is created by the application with [`GpuContext::new_headless`],
+//!   then handed to the evaluator as `Arc<dyn ComputeContext>` on the `EvalRequest`.
+//!   Both the CLI and the GUI stand up their own compute device this way: the GUI
+//!   deliberately does not share its render device, so a multi-second erosion
+//!   submission never blocks the render queue and freezes the UI. The compute device
+//!   is not part of a node's cache key, so a headless and a shared result would still
+//!   be interchangeable if sharing were ever reintroduced.
 //! - A GPU-capable operator recovers the concrete [`GpuContext`] from the context
 //!   with `ctx.compute().and_then(|c| c.as_any().downcast_ref::<GpuContext>())`,
 //!   and falls back to CPU when it is `None`.
@@ -136,15 +139,6 @@ impl GpuContext {
                 ..Default::default()
             }))?;
         Ok(Self { device, queue })
-    }
-
-    /// Wraps a device and queue the application already holds, so the GUI can share
-    /// its 3D-viewport device rather than creating a second one. Sharing is
-    /// preferable: one device means one driver context and one memory pool, and the
-    /// viewport can later display a compute result without a cross-device copy.
-    #[must_use]
-    pub fn from_device_queue(device: wgpu::Device, queue: wgpu::Queue) -> Self {
-        Self { device, queue }
     }
 
     /// The underlying `wgpu` device, for an operator building its own pipelines.

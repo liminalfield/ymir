@@ -89,11 +89,11 @@ fn main() -> eframe::Result {
         Some(icon) => viewport.with_icon(icon),
         None => viewport,
     };
-    // Request the adapter's real limits for the wgpu device, not egui's conservative defaults (a
-    // ~128 MiB storage-buffer cap). GPU erosion shares this device (from_device_queue), and an 8K
-    // build needs storage buffers well past that default; without this the shared device would drop
-    // large builds to the CPU (#242). A weaker GPU still gets only what it supports, so the erosion
-    // fallback stays graceful on any hardware.
+    // Request the adapter's real limits for the render device, not egui's conservative defaults, so
+    // large-field 2D shading textures and high-res display are bounded by the hardware, not a
+    // downlevel cap. GPU erosion runs on its own dedicated device (see `state.gpu` below), not this
+    // one, so its large storage buffers never touch the render device; this override is only about
+    // the render device's own textures. A weaker GPU still gets only what it supports.
     let mut wgpu_options = eframe::egui_wgpu::WgpuConfiguration::default();
     if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut wgpu_options.wgpu_setup {
         setup.device_descriptor =
@@ -8892,15 +8892,16 @@ impl YmirApp {
         if let Some(render_state) = cc.wgpu_render_state.as_ref() {
             viewport::init(render_state);
             state.render_state = Some(render_state.clone());
-            // Share the viewport's device for GPU compute, so erosion runs on the GPU in the
-            // preview and the build without standing up a second device. A GPU-capable node
-            // downcasts this handle; if it is absent, every node runs its CPU path.
-            state.gpu = Some(std::sync::Arc::new(
-                ymir_gpu::GpuContext::from_device_queue(
-                    render_state.device.clone(),
-                    render_state.queue.clone(),
-                ),
-            ));
+        }
+        // Stand up a dedicated compute device for GPU erosion, separate from the render device. A
+        // shared device serializes erosion and rendering on one queue (and one wgpu device lock), so
+        // a multi-second 4K/8K erosion submission blocks every present and freezes the whole UI
+        // (#244). A second logical device on the same GPU lets the driver interleave the two: the
+        // build churns while the node graph and viewport stay live. A GPU-capable node downcasts this
+        // handle; if no adapter is reachable, it is absent and every node runs its CPU path.
+        match ymir_gpu::GpuContext::new_headless() {
+            Ok(gpu) => state.gpu = Some(std::sync::Arc::new(gpu)),
+            Err(err) => log::warn!("no GPU compute device ({err}); erosion will run on the CPU"),
         }
         // Empty so the first frame always pushes the real title to the OS bar.
         Self {
