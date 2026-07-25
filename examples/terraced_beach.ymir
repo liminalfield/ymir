@@ -1,0 +1,387 @@
+{
+  "format_version": 1,
+  "world": {
+    "seed": 0,
+    "world_extent": 1024.0,
+    "world_height": 256.0,
+    "build_res": 4096,
+    "preview_res": 1024,
+    "sea_level": 0.3279043079096045,
+    "show_water": true,
+    "water": {
+      "depth": true,
+      "waves": true,
+      "reflection": true,
+      "foam_on": true,
+      "extinction": 14.926587,
+      "color": [
+        0.1,
+        0.28,
+        0.42
+      ],
+      "wave": 0.13752416,
+      "reflectivity": 0.6,
+      "specular": 0.5,
+      "steepness": 0.6,
+      "wavelength": 0.3,
+      "foam": 0.6632168,
+      "foam_width": 0.024093911,
+      "wet_on": false,
+      "wet": 0.35,
+      "wet_width": 0.03,
+      "speed": 0.7984858
+    }
+  },
+  "graph": {
+    "format_version": 1,
+    "next_stable_id": 31,
+    "nodes": [
+      {
+        "stable_id": 0,
+        "type_id": "generator.fbm",
+        "params": {
+          "frequency": {
+            "float": 0.6906239266098149
+          },
+          "lacunarity": {
+            "float": 2.0387500000000003
+          },
+          "offset_x": {
+            "int": 0
+          },
+          "offset_y": {
+            "int": 0
+          },
+          "seed": {
+            "int": 21
+          }
+        }
+      },
+      {
+        "stable_id": 4,
+        "type_id": "modifier.blend",
+        "params": {
+          "mode": {
+            "text": "add"
+          },
+          "opacity": {
+            "float": 0.0
+          }
+        },
+        "connections": [
+          {
+            "input": 0,
+            "source": 7,
+            "output": 0
+          },
+          {
+            "input": 1,
+            "source": 18,
+            "output": 0
+          },
+          {
+            "input": 2,
+            "source": 29,
+            "output": 0
+          }
+        ]
+      },
+      {
+        "stable_id": 5,
+        "type_id": "generator.gradient",
+        "params": {
+          "angle": {
+            "float": 242.5
+          }
+        }
+      },
+      {
+        "stable_id": 6,
+        "type_id": "modifier.blend",
+        "params": {
+          "opacity": {
+            "float": 0.39729166666666665
+          }
+        },
+        "connections": [
+          {
+            "input": 0,
+            "source": 5,
+            "output": 0
+          },
+          {
+            "input": 1,
+            "source": 0,
+            "output": 0
+          }
+        ]
+      },
+      {
+        "stable_id": 7,
+        "type_id": "modifier.coastal",
+        "params": {
+          "angle": {
+            "float": 2.5
+          },
+          "beach_width": {
+            "float": 164.0
+          },
+          "berm_height": {
+            "float": 17.4
+          },
+          "bluff_angle": {
+            "float": 38.5
+          },
+          "erode_inland_basins": {
+            "bool": false
+          },
+          "rounding": {
+            "float": 24.79999999999998
+          },
+          "shoreface_reach": {
+            "float": 48.0
+          },
+          "strength": {
+            "float": 0.7349305555555555
+          },
+          "width": {
+            "float": 190.0
+          }
+        },
+        "connections": [
+          {
+            "input": 0,
+            "source": 15,
+            "output": 0
+          }
+        ]
+      },
+      {
+        "stable_id": 8,
+        "type_id": "modifier.terrace",
+        "params": {
+          "bands": {
+            "float": 2.0
+          },
+          "sharpness": {
+            "float": 0.6844097222222222
+          }
+        },
+        "connections": [
+          {
+            "input": 0,
+            "source": 6,
+            "output": 0
+          }
+        ]
+      },
+      {
+        "stable_id": 12,
+        "type_id": "generator.fbm",
+        "params": {
+          "amplitude": {
+            "float": 0.054680555555555545
+          },
+          "bias": {
+            "float": 0.0054861111111110805
+          },
+          "frequency": {
+            "float": 6.968428466212177
+          }
+        }
+      },
+      {
+        "stable_id": 13,
+        "type_id": "modifier.blend",
+        "params": {
+          "mode": {
+            "text": "add"
+          },
+          "opacity": {
+            "float": 0.46932291666666665
+          }
+        },
+        "connections": [
+          {
+            "input": 0,
+            "source": 8,
+            "output": 0
+          },
+          {
+            "input": 1,
+            "source": 12,
+            "output": 0
+          }
+        ]
+      },
+      {
+        "stable_id": 15,
+        "type_id": "modifier.thermal_erosion",
+        "params": {
+          "strength": {
+            "float": 0.13697916666666668
+          },
+          "talus": {
+            "float": 71.0
+          }
+        },
+        "connections": [
+          {
+            "input": 0,
+            "source": 13,
+            "output": 0
+          }
+        ]
+      },
+      {
+        "stable_id": 18,
+        "type_id": "generator.fbm",
+        "params": {
+          "amplitude": {
+            "float": 0.05
+          },
+          "bias": {
+            "float": -0.025
+          },
+          "frequency": {
+            "float": 2.374753514261821
+          },
+          "gain": {
+            "float": 0.7370833333333333
+          }
+        }
+      },
+      {
+        "stable_id": 25,
+        "type_id": "modifier.warp",
+        "params": {
+          "amount": {
+            "float": 16.0
+          },
+          "frequency": {
+            "float": 7.101111111111111
+          },
+          "seed": {
+            "int": 3
+          }
+        },
+        "connections": [
+          {
+            "input": 0,
+            "source": 4,
+            "output": 0
+          },
+          {
+            "input": 1,
+            "source": 30,
+            "output": 0
+          }
+        ]
+      },
+      {
+        "stable_id": 29,
+        "type_id": "modifier.blend",
+        "params": {
+          "mode": {
+            "text": "max"
+          }
+        },
+        "connections": [
+          {
+            "input": 0,
+            "source": 7,
+            "output": 2
+          },
+          {
+            "input": 1,
+            "source": 7,
+            "output": 3
+          }
+        ]
+      },
+      {
+        "stable_id": 30,
+        "type_id": "modifier.grow_shrink",
+        "params": {
+          "amount": {
+            "float": 145.0
+          },
+          "softness": {
+            "float": 158.0
+          }
+        },
+        "connections": [
+          {
+            "input": 0,
+            "source": 7,
+            "output": 3
+          }
+        ]
+      }
+    ]
+  },
+  "view": {
+    "nodes": {
+      "0": [
+        572.35834,
+        559.56805
+      ],
+      "4": [
+        2456.4602,
+        529.4878
+      ],
+      "5": [
+        570.82837,
+        391.05408
+      ],
+      "6": [
+        811.9018,
+        452.80118
+      ],
+      "7": [
+        1763.0504,
+        522.31793
+      ],
+      "8": [
+        1061.6854,
+        451.1955
+      ],
+      "12": [
+        1064.891,
+        620.1747
+      ],
+      "13": [
+        1296.1995,
+        523.2044
+      ],
+      "15": [
+        1528.8866,
+        522.3352
+      ],
+      "18": [
+        2087.4536,
+        600.6978
+      ],
+      "25": [
+        2806.8228,
+        719.2478
+      ],
+      "29": [
+        2092.27,
+        783.7111
+      ],
+      "30": [
+        2550.0647,
+        786.99536
+      ]
+    },
+    "camera": {
+      "translation": [
+        820.66113,
+        232.86981
+      ],
+      "scale": 0.49487174
+    },
+    "frames": []
+  }
+}
