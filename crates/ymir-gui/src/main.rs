@@ -89,8 +89,25 @@ fn main() -> eframe::Result {
         Some(icon) => viewport.with_icon(icon),
         None => viewport,
     };
+    // Request the adapter's real limits for the wgpu device, not egui's conservative defaults (a
+    // ~128 MiB storage-buffer cap). GPU erosion shares this device (from_device_queue), and an 8K
+    // build needs storage buffers well past that default; without this the shared device would drop
+    // large builds to the CPU (#242). A weaker GPU still gets only what it supports, so the erosion
+    // fallback stays graceful on any hardware.
+    let mut wgpu_options = eframe::egui_wgpu::WgpuConfiguration::default();
+    if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut wgpu_options.wgpu_setup {
+        setup.device_descriptor =
+            std::sync::Arc::new(|adapter: &eframe::egui_wgpu::wgpu::Adapter| {
+                eframe::egui_wgpu::wgpu::DeviceDescriptor {
+                    label: Some("ymir-gui-device"),
+                    required_limits: adapter.limits(),
+                    ..Default::default()
+                }
+            });
+    }
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
+        wgpu_options,
         viewport,
         // No shared depth on egui's pass: the 3D viewport renders to its own offscreen
         // color+depth and composites the result as a texture (#138), so egui's pass is
