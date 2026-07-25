@@ -48,6 +48,11 @@ const DEFAULT_ANGLE: f64 = 4.0;
 /// beach-face width (`berm_height / tan(angle)`): the gentle foreshore rises to the berm crest,
 /// then the steeper backing slope takes over.
 const DEFAULT_BERM_HEIGHT: f64 = 2.0;
+/// Maximum berm-crest height in world metres. A berm is a small feature (a real one is a few metres;
+/// a stylized raised beach, tens), so the range is capped well below the coast's reach. The small
+/// range also earns the parameter sub-metre editing steps in the inspector, which a berm on a
+/// small-scale terrain wants.
+const MAX_BERM_HEIGHT: f64 = 100.0;
 /// Default backing (bluff) grade in degrees. Steep enough to read as a coastal bluff that clears
 /// the terrain behind the beach, rather than the gentle foreshore that flattens it.
 const DEFAULT_BLUFF_ANGLE: f64 = 45.0;
@@ -94,7 +99,7 @@ impl Operator for Coastal {
                     "berm_height",
                     ParamKind::Float {
                         min: 0.0,
-                        max: 100_000.0,
+                        max: MAX_BERM_HEIGHT,
                     },
                     ParamValue::Float(DEFAULT_BERM_HEIGHT),
                 )

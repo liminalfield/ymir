@@ -141,6 +141,25 @@ fn finalize_value(v: f64, wrap: Option<f64>, clamp: Option<(f64, f64)>) -> f64 {
     }
 }
 
+/// Whether a degree-valued quantity should wrap around the circle rather than clamp to its range.
+/// Only a *direction* wraps: an azimuth or rotation declares the full turn (`0..360`), so scrubbing
+/// past either end rolls over. A *bounded* angle (a slope grade, a beach face, a spread) declares a
+/// sub-circle range, and a value past its max is not a smaller angle the other way round but simply
+/// impossible (a slope cannot exceed 90 degrees), so it clamps to the author's declared max like a
+/// metric quantity. Keyed on the declared span, so the schema's range is what decides.
+fn angle_wraps(min: f64, max: f64) -> bool {
+    max - min >= 360.0
+}
+
+/// Display precision (decimal places) for a metric quantity, from its declared max. A wide
+/// world-unit reach (a coastal width, a blur radius, declared up to 100 km) is edited in whole
+/// metres; a small-range length (a berm crest, at most tens of metres) wants sub-metre steps to be
+/// controllable on a small-scale terrain. The author's declared max is the signal, so narrowing a
+/// parameter's range is what buys it finer steps.
+fn metric_decimals(max: f64) -> usize {
+    if max <= 100.0 { 1 } else { 0 }
+}
+
 /// Layers infinite (wrapping) scrub onto a numeric value box. While `resp` is dragged, the value is
 /// driven by *raw* mouse motion (immune to the screen edge, unlike egui's position-based DragValue),
 /// and the cursor is locked in place and hidden so the pointer never runs off the edge and returns
@@ -441,15 +460,17 @@ pub(crate) fn edit(
         (Widget::Quantity { min, max, unit }, ParamValue::Float(v)) => {
             // Same row grammar as the other params (mono label left, control right), but a
             // type/scrub value field with the unit as a suffix and no slider beneath: a wide
-            // world-unit range is too coarse to slide. Degrees wrap rather than clamp, so
-            // dragging below 0 rolls to 359.9 (a small counter-clockwise turn); metric quantities
-            // clamp to their range.
+            // world-unit range is too coarse to slide. A direction (a full-circle angle) wraps, so
+            // dragging below 0 rolls to 359.9 (a small counter-clockwise turn); a bounded angle (a
+            // slope grade) and every metric quantity clamp to their declared range instead, so an
+            // impossible value (a slope past 90) can never be scrubbed or typed in.
             let mut x = *v;
             let default = match &spec.default {
                 ParamValue::Float(d) => *d,
                 _ => x,
             };
             let degrees = matches!(unit, Unit::Degrees);
+            let wraps = degrees && angle_wraps(min, max);
             let mut result = None;
             ui.horizontal(|ui| {
                 param_label(ui, type_id, name);
@@ -458,17 +479,23 @@ pub(crate) fn edit(
                     // made inert (speed 0) so the infinite scrub below is the only thing that moves
                     // the value. Degrees scrub at 0.5/px, metric at 1.0/px (the prior feel).
                     let speed = if degrees { 0.5 } else { 1.0 };
+                    // Decimals are set explicitly (DragValue derives them from `speed`, which is 0
+                    // here, so otherwise it shows full float precision). Degrees always show a fixed
+                    // tenth; a metric length shows a precision that suits its declared range (whole
+                    // metres for a wide reach, up to a tenth for a small length like a berm crest).
                     let mut drag = egui::DragValue::new(&mut x)
                         .suffix(unit_suffix(unit))
                         .speed(0.0);
-                    // Decimals are set explicitly (DragValue derives them from `speed`, which is 0
-                    // here, so otherwise it shows full float precision). Metric world-unit lengths
-                    // are whole metres — sub-metre coastal width is not meaningful — so 0 decimals.
                     drag = if degrees {
                         drag.fixed_decimals(1)
                     } else {
-                        drag.range(min..=max).max_decimals(0)
+                        drag.max_decimals(metric_decimals(max))
                     };
+                    // Everything but a wrapping direction clamps click-to-type to the declared
+                    // range; a wrapping angle has no meaningful bound to type against (it rolls).
+                    if !wraps {
+                        drag = drag.range(min..=max);
+                    }
                     let value = ui
                         .add_sized(
                             egui::vec2(VALUE_W + 16.0, ui.spacing().interact_size.y),
@@ -476,14 +503,14 @@ pub(crate) fn edit(
                         )
                         .on_hover_text("Drag to scrub \u{b7} click to type");
                     let scrubbed = scrub_drag(ui, &value, &mut x, speed, |v| {
-                        if degrees {
+                        if wraps {
                             finalize_value(v, Some(360.0), None)
                         } else {
                             finalize_value(v, None, Some((min, max)))
                         }
                     });
                     if value.changed() || scrubbed {
-                        let stored = if degrees { x.rem_euclid(360.0) } else { x };
+                        let stored = if wraps { x.rem_euclid(360.0) } else { x };
                         result = Some(ParamValue::Float(stored));
                     }
                     if (x - default).abs() > f64::EPSILON && reset_icon(ui).clicked() {
@@ -762,6 +789,26 @@ mod tests {
                 unit: Unit::Meters
             }
         );
+    }
+
+    #[test]
+    fn only_a_full_circle_angle_wraps() {
+        // A direction declares the whole turn and rolls over when scrubbed past either end.
+        assert!(angle_wraps(0.0, 360.0));
+        // A bounded angle (a slope grade, a beach face, a spread) declares a sub-circle range, so a
+        // value past its max is impossible, not a smaller angle the other way, and it clamps.
+        assert!(!angle_wraps(0.0, 80.0)); // coastal beach/bluff grade
+        assert!(!angle_wraps(0.0, 90.0)); // thermal talus / slope threshold
+        assert!(!angle_wraps(1.0, 180.0)); // an angular spread
+    }
+
+    #[test]
+    fn metric_precision_follows_the_declared_range() {
+        // A wide world reach (declared up to 100 km) edits in whole metres.
+        assert_eq!(metric_decimals(100_000.0), 0);
+        // A small-range length (a berm crest) earns sub-metre steps from its narrow declared max.
+        assert_eq!(metric_decimals(100.0), 1);
+        assert_eq!(metric_decimals(10.0), 1);
     }
 
     #[test]
