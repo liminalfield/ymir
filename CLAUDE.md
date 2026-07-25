@@ -34,6 +34,17 @@ fire-and-forget:
 The maintainer will typically hand you one step of the build plan at a time. Respect
 that pace even if you can see further ahead.
 
+## Track work as issues
+
+Substantive work should map to a tracked GitHub issue. When the maintainer asks you to
+build a feature, fix a bug, or take on any non-trivial change, first check whether an
+issue for it already exists. If none does, do not silently start: prompt the maintainer
+to create one together, propose a title and a short body they can refine, and get the
+issue filed before the work begins. Trivial or in-flight changes (a small refactor, a
+typo, a quick follow-up to work already underway, a doc tweak) do not need their own
+issue. When unsure whether something crosses that line, ask. Creating the issue does not
+add it to a project board; that stays the maintainer's call (ask before adding).
+
 ## No shortcuts (fix causes, not symptoms)
 
 The maintainer is not in a hurry. Correctness and doing this exceedingly well always
