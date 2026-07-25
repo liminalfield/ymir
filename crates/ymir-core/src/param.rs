@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::hash::{ContentHash, Fnv1a64};
+use crate::paint::Strokes;
 
 /// A single parameter value.
 ///
@@ -29,6 +30,8 @@ pub enum ParamValue {
     Text(String),
     /// A transfer curve (control points), for shaping nodes.
     Curve(Curve),
+    /// A set of hand-painted brush strokes, for the Paint node.
+    Strokes(Strokes),
 }
 
 /// Canonical bit pattern of an `f64` for equality and hashing: every NaN maps to
@@ -43,9 +46,9 @@ fn canonical_f64_bits(v: f64) -> u64 {
     }
 }
 
-/// Canonical bit pattern of an `f32` (for curve control points), with the same NaN
-/// and signed-zero normalization as [`canonical_f64_bits`].
-fn canonical_f32_bits(v: f32) -> u32 {
+/// Canonical bit pattern of an `f32` (for curve control points and paint strokes), with the same
+/// NaN and signed-zero normalization as [`canonical_f64_bits`].
+pub(crate) fn canonical_f32_bits(v: f32) -> u32 {
     if v.is_nan() {
         f32::NAN.to_bits()
     } else if v == 0.0 {
@@ -261,6 +264,7 @@ impl PartialEq for ParamValue {
             (ParamValue::Bool(a), ParamValue::Bool(b)) => a == b,
             (ParamValue::Text(a), ParamValue::Text(b)) => a == b,
             (ParamValue::Curve(a), ParamValue::Curve(b)) => a == b,
+            (ParamValue::Strokes(a), ParamValue::Strokes(b)) => a == b,
             _ => false,
         }
     }
@@ -292,6 +296,10 @@ impl ParamValue {
             ParamValue::Curve(c) => {
                 h.write_bytes(&[4]);
                 c.hash_into(h);
+            }
+            ParamValue::Strokes(s) => {
+                h.write_bytes(&[5]);
+                s.hash_into(h);
             }
         }
     }
@@ -379,6 +387,15 @@ impl Params {
         }
     }
 
+    /// Returns the strokes at `name`, or `default` if absent or not strokes.
+    #[must_use]
+    pub fn get_strokes<'a>(&'a self, name: &str, default: &'a Strokes) -> &'a Strokes {
+        match self.0.get(name) {
+            Some(ParamValue::Strokes(s)) => s,
+            _ => default,
+        }
+    }
+
     /// Iterates the parameters in name order.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &ParamValue)> {
         self.0.iter().map(|(k, v)| (k.as_str(), v))
@@ -449,6 +466,9 @@ pub enum ParamKind {
     /// A transfer curve, edited as a visual curve widget. The value is a
     /// [`ParamValue::Curve`].
     Curve,
+    /// A hand-painted mask, edited by brushing on the 2D map. The value is a
+    /// [`ParamValue::Strokes`].
+    Strokes,
 }
 
 /// A physical unit a numeric parameter can carry. Semantic, not prose: the display
@@ -541,7 +561,8 @@ fn default_matches_kind(kind: &ParamKind, default: &ParamValue) -> bool {
         | (ParamKind::Int { .. }, ParamValue::Int(_))
         | (ParamKind::Bool, ParamValue::Bool(_))
         | (ParamKind::Text | ParamKind::Path, ParamValue::Text(_))
-        | (ParamKind::Curve, ParamValue::Curve(_)) => true,
+        | (ParamKind::Curve, ParamValue::Curve(_))
+        | (ParamKind::Strokes, ParamValue::Strokes(_)) => true,
         (ParamKind::Enum { options }, ParamValue::Text(value)) => options.contains(&value.as_str()),
         _ => false,
     }

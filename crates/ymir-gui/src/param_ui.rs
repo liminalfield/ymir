@@ -100,6 +100,7 @@ pub(crate) fn value_text(value: &ParamValue) -> String {
         ParamValue::Bool(v) => format!("{v}"),
         ParamValue::Text(v) => v.clone(),
         ParamValue::Curve(c) => format!("curve ({} points)", c.points().len()),
+        ParamValue::Strokes(s) => format!("painted ({} strokes)", s.len()),
     }
 }
 
@@ -128,10 +129,81 @@ fn reset_icon(ui: &mut egui::Ui) -> egui::Response {
     resp.on_hover_text("Reset to default")
 }
 
+/// Clamps or wraps a scrubbed value to its bounds: `wrap` (e.g. 360 for degrees) rolls the value
+/// around that period; otherwise `clamp` bounds it to `[lo, hi]`; with neither it passes through.
+fn finalize_value(v: f64, wrap: Option<f64>, clamp: Option<(f64, f64)>) -> f64 {
+    if let Some(period) = wrap {
+        v.rem_euclid(period)
+    } else if let Some((lo, hi)) = clamp {
+        v.clamp(lo, hi)
+    } else {
+        v
+    }
+}
+
+/// Layers infinite (wrapping) scrub onto a numeric value box. While `resp` is dragged, the value is
+/// driven by *raw* mouse motion (immune to the screen edge, unlike egui's position-based DragValue),
+/// and the cursor is locked in place and hidden so the pointer never runs off the edge and returns
+/// where it started on release. `finalize` clamps or wraps the result. Returns whether the value
+/// moved this frame.
+///
+/// The caller builds the DragValue with `speed(0.0)` so its own edge-limited drag is inert and only
+/// this scrub moves the value; DragValue still supplies display, click-to-type, and formatting.
+///
+/// `CursorGrab::Locked` is what pointer-lock supports on Wayland, Windows, and macOS; it pins the
+/// pointer natively while still delivering relative motion (winit rejects a bare cursor *warp* on
+/// Wayland — "cursor position can be set only for locked cursor"). On X11 Locked is unsupported and
+/// winit logs it once per drag; the scrub still runs from raw XInput2 motion, only the pointer is
+/// not pinned.
+fn scrub_drag(
+    ui: &egui::Ui,
+    resp: &egui::Response,
+    value: &mut f64,
+    speed: f64,
+    finalize: impl Fn(f64) -> f64,
+) -> bool {
+    if resp.drag_started() {
+        ui.ctx()
+            .send_viewport_cmd(egui::ViewportCommand::CursorGrab(
+                egui::viewport::CursorGrab::Locked,
+            ));
+        ui.ctx()
+            .send_viewport_cmd(egui::ViewportCommand::CursorVisible(false));
+    }
+    let mut changed = false;
+    if resp.dragged() {
+        // Raw device motion ignores the screen edge; fall back to the position delta only if the
+        // integration does not supply it (then the scrub is bounded, as it was before).
+        let dx = match ui.input(|i| i.pointer.motion()) {
+            Some(m) => f64::from(m.x),
+            None => f64::from(resp.drag_delta().x),
+        };
+        if dx != 0.0 {
+            *value = finalize(*value + dx * speed);
+            changed = true;
+        }
+    }
+    if resp.drag_stopped() {
+        ui.ctx()
+            .send_viewport_cmd(egui::ViewportCommand::CursorGrab(
+                egui::viewport::CursorGrab::None,
+            ));
+        ui.ctx()
+            .send_viewport_cmd(egui::ViewportCommand::CursorVisible(true));
+    }
+    changed
+}
+
 /// A custom horizontal slider filling the available width: a 4px deep track, an accent fill up to
 /// the handle, and a white handle with a ring. Drag or click anywhere on it to set. Marks its
 /// response changed only when the value actually moves.
-fn slider(ui: &mut egui::Ui, value: &mut f64, min: f64, max: f64, log: bool) -> egui::Response {
+pub(crate) fn slider(
+    ui: &mut egui::Ui,
+    value: &mut f64,
+    min: f64,
+    max: f64,
+    log: bool,
+) -> egui::Response {
     let w = ui.available_width().max(24.0);
     let (rect, mut resp) =
         ui.allocate_exact_size(egui::vec2(w, 14.0), egui::Sense::click_and_drag());
@@ -187,38 +259,38 @@ fn from_t(t: f64, min: f64, max: f64, log: bool) -> f64 {
     }
 }
 
-/// A parameter row's label: muted, in a friendly Title-Case form. Shared with the frame inspector
-/// so its rows read in the same grammar as the node parameters.
-pub(crate) fn param_label(ui: &mut egui::Ui, name: &str) {
+/// A node parameter's row label: the resolved display name in muted mono, with the parameter's
+/// one-line description shown as a hover tooltip when the catalog has one. Label and description
+/// come from [`ymir_nodes::resolve_param`], so the inspector, the tooltip, and the generated
+/// reference all read the same strings.
+pub(crate) fn param_label(ui: &mut egui::Ui, type_id: &str, name: &str) {
+    let resolved = ymir_nodes::resolve_param(type_id, name);
+    let resp = render_label(ui, &resolved.label);
+    if let Some(desc) = resolved.description {
+        resp.on_hover_text(desc);
+    }
+}
+
+/// Renders an already-display label (the frame and colour-picker rows) in the same muted mono
+/// style as a parameter label, without catalog resolution or a tooltip.
+pub(crate) fn plain_label(ui: &mut egui::Ui, text: &str) {
+    render_label(ui, text);
+}
+
+/// Draws a row label in the shared muted-mono style and returns its response, so a caller can
+/// attach a hover tooltip.
+fn render_label(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.label(
-        egui::RichText::new(prettify_param_name(name))
+        egui::RichText::new(text)
             .family(egui::FontFamily::Monospace)
             .size(12.0)
             .color(crate::theme::TEXT_SECONDARY),
-    );
-}
-
-/// Turns a snake_case parameter id into a friendly display label: underscores become spaces and
-/// each word is capitalised (`erode_inland_basins` -> `Erode Inland Basins`), matching the
-/// Title-Case of node names. A pure presentation transform; the underlying param id is unchanged,
-/// so lookups, hashing, and save/load still use the raw name.
-fn prettify_param_name(name: &str) -> String {
-    name.split('_')
-        .filter(|word| !word.is_empty())
-        .map(|word| {
-            let mut chars = word.chars();
-            match chars.next() {
-                Some(first) => first.to_uppercase().chain(chars).collect::<String>(),
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    )
 }
 
 /// A 34x18 pill toggle: an accent track with the knob right when on, a raised track with the knob
 /// left when off. Returns its response (click to flip).
-fn toggle(ui: &mut egui::Ui, on: bool) -> egui::Response {
+pub(crate) fn toggle(ui: &mut egui::Ui, on: bool) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(34.0, 18.0), egui::Sense::click());
     let track = if on {
         crate::theme::ACCENT_PRIMARY
@@ -311,6 +383,7 @@ fn stepper(ui: &mut egui::Ui, value: &mut i64, min: i64, max: i64) -> bool {
 /// read-only display, so a mismatch is shown, never edited wrongly.
 pub(crate) fn edit(
     ui: &mut egui::Ui,
+    type_id: &str,
     spec: &ParamSpec,
     current: &ParamValue,
     histogram: Option<&[f32]>,
@@ -337,18 +410,21 @@ pub(crate) fn edit(
             let speed = (max - min) * 0.002;
             let mut result = None;
             ui.horizontal(|ui| {
-                param_label(ui, name);
+                param_label(ui, type_id, name);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let value = ui
                         .add_sized(
                             egui::vec2(VALUE_W, ui.spacing().interact_size.y),
                             egui::DragValue::new(&mut x)
                                 .range(min..=max)
-                                .speed(speed)
+                                .speed(0.0)
                                 .fixed_decimals(3),
                         )
                         .on_hover_text("Drag to scrub \u{b7} click to type");
-                    if value.changed() {
+                    let scrubbed = scrub_drag(ui, &value, &mut x, speed, |v| {
+                        finalize_value(v, None, Some((min, max)))
+                    });
+                    if value.changed() || scrubbed {
                         result = Some(ParamValue::Float(x));
                     }
                     if (x - default).abs() > f64::EPSILON && reset_icon(ui).clicked() {
@@ -376,13 +452,22 @@ pub(crate) fn edit(
             let degrees = matches!(unit, Unit::Degrees);
             let mut result = None;
             ui.horizontal(|ui| {
-                param_label(ui, name);
+                param_label(ui, type_id, name);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let mut drag = egui::DragValue::new(&mut x).suffix(unit_suffix(unit));
+                    // DragValue supplies display, click-to-type, and formatting; its own drag is
+                    // made inert (speed 0) so the infinite scrub below is the only thing that moves
+                    // the value. Degrees scrub at 0.5/px, metric at 1.0/px (the prior feel).
+                    let speed = if degrees { 0.5 } else { 1.0 };
+                    let mut drag = egui::DragValue::new(&mut x)
+                        .suffix(unit_suffix(unit))
+                        .speed(0.0);
+                    // Decimals are set explicitly (DragValue derives them from `speed`, which is 0
+                    // here, so otherwise it shows full float precision). Metric world-unit lengths
+                    // are whole metres — sub-metre coastal width is not meaningful — so 0 decimals.
                     drag = if degrees {
-                        drag.speed(0.5).fixed_decimals(1)
+                        drag.fixed_decimals(1)
                     } else {
-                        drag.speed(1.0).range(min..=max)
+                        drag.range(min..=max).max_decimals(0)
                     };
                     let value = ui
                         .add_sized(
@@ -390,7 +475,14 @@ pub(crate) fn edit(
                             drag,
                         )
                         .on_hover_text("Drag to scrub \u{b7} click to type");
-                    if value.changed() {
+                    let scrubbed = scrub_drag(ui, &value, &mut x, speed, |v| {
+                        if degrees {
+                            finalize_value(v, Some(360.0), None)
+                        } else {
+                            finalize_value(v, None, Some((min, max)))
+                        }
+                    });
+                    if value.changed() || scrubbed {
                         let stored = if degrees { x.rem_euclid(360.0) } else { x };
                         result = Some(ParamValue::Float(stored));
                     }
@@ -406,7 +498,7 @@ pub(crate) fn edit(
             let mut x = *v;
             let mut result = None;
             ui.horizontal(|ui| {
-                param_label(ui, name);
+                param_label(ui, type_id, name);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if stepper(ui, &mut x, min, max) {
                         result = Some(ParamValue::Int(x));
@@ -419,7 +511,7 @@ pub(crate) fn edit(
             let mut x = *v;
             let mut result = None;
             ui.horizontal(|ui| {
-                param_label(ui, name);
+                param_label(ui, type_id, name);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if toggle(ui, x).clicked() {
                         x = !x;
@@ -433,7 +525,7 @@ pub(crate) fn edit(
             let mut x = v.clone();
             let mut result = None;
             ui.horizontal(|ui| {
-                param_label(ui, name);
+                param_label(ui, type_id, name);
                 if ui
                     .add(
                         egui::TextEdit::singleline(&mut x)
@@ -455,7 +547,7 @@ pub(crate) fn edit(
             let mut x = v.clone();
             let mut result = None;
             ui.horizontal(|ui| {
-                param_label(ui, name);
+                param_label(ui, type_id, name);
                 if ui.button("Browse\u{2026}").clicked()
                     && let Some(path) = rfd::FileDialog::new()
                         .add_filter("Image", &["png"])
@@ -483,7 +575,7 @@ pub(crate) fn edit(
             let mut selected = v.clone();
             let mut result = None;
             ui.horizontal(|ui| {
-                param_label(ui, name);
+                param_label(ui, type_id, name);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let button = ui.button(format!(
                         "{}   {}",
@@ -532,6 +624,20 @@ mod tests {
     }
 
     #[test]
+    fn finalize_value_wraps_or_clamps() {
+        // Degrees wrap around the period: below 0 rolls up, at/above the period rolls down.
+        assert_eq!(finalize_value(-0.1, Some(360.0), None), 359.9);
+        assert!((finalize_value(370.0, Some(360.0), None) - 10.0).abs() < 1e-9);
+        assert_eq!(finalize_value(45.0, Some(360.0), None), 45.0);
+        // Metric clamps to its range.
+        assert_eq!(finalize_value(-5.0, None, Some((0.0, 100.0))), 0.0);
+        assert_eq!(finalize_value(150.0, None, Some((0.0, 100.0))), 100.0);
+        assert_eq!(finalize_value(30.0, None, Some((0.0, 100.0))), 30.0);
+        // With neither, the value passes through.
+        assert_eq!(finalize_value(12.5, None, None), 12.5);
+    }
+
+    #[test]
     fn reset_glyph_matches_the_value_field_height() {
         // The reset glyph shares a horizontal row with the value field, so if it allocated a taller
         // box the row would grow the moment a value went off its default (#142). Both must use the
@@ -547,18 +653,6 @@ mod tests {
             glyph_h, field_h,
             "the reset glyph must be the same height as the value field, or the row grows when it appears"
         );
-    }
-
-    #[test]
-    fn param_names_display_as_friendly_title_case() {
-        assert_eq!(prettify_param_name("width"), "Width");
-        assert_eq!(
-            prettify_param_name("erode_inland_basins"),
-            "Erode Inland Basins"
-        );
-        assert_eq!(prettify_param_name("world_extent"), "World Extent");
-        // Stray underscores do not leave double spaces or empty words.
-        assert_eq!(prettify_param_name("a__b_"), "A B");
     }
 
     #[test]

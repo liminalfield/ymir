@@ -33,6 +33,11 @@ jobs:
           sh scripts/check-shortcuts.sh --range "$base...HEAD"
       # rustup on the runner honors rust-toolchain.toml and fetches the pinned version.
       - run: rustup component add rustfmt clippy
+      # Cache the cargo registry and target dir keyed on Cargo.lock + the toolchain, so
+      # the heavy dependency tree (wgpu, egui, naga, …) compiles once and later runs only
+      # rebuild the changed crates. Without it every run is a full clean build.
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
       # --workspace on every step so CI always covers all crates, regardless of
       # any future default-members.
       - name: Format
@@ -43,3 +48,48 @@ jobs:
         run: cargo build --workspace --verbose
       - name: Test
         run: cargo test --workspace --verbose
+      # The node reference is generated from the running binary's registry. Regenerate it and fail
+      # if the committed pages drift (modified or missing), so docs/reference/nodes/ can never fall
+      # out of sync with the nodes. `git status --porcelain` catches a new node's page too, which a
+      # plain `git diff` would miss.
+      - name: Docs generate + drift check
+        run: |
+          cargo xtask docs-gen
+          if [ -n "$(git status --porcelain -- docs/reference/nodes/)" ]; then
+            echo "Generated node pages are out of date; run 'cargo xtask docs-gen' and commit:"
+            git status --porcelain -- docs/reference/nodes/
+            exit 1
+          fi
+      # Lint the docs: orphaned or invalid fragments, broken links, missing figures, forbidden
+      # markers, relative design/ links, and completeness gaps on pages marked stable.
+      - name: Docs lint
+        run: cargo xtask docs-lint
+
+  # Exercise the GPU compute path (ymir-gpu marshalling and the thermal erosion kernel) on Mesa
+  # lavapipe, a software Vulkan implementation, so a runner with no physical GPU still runs the
+  # kernels rather than skipping them. Separate from `check` so a lavapipe hiccup cannot break the
+  # main gate; the tests skip gracefully (printing why, visible with --nocapture) if no adapter is
+  # found, so this job never fails on a host without a working Vulkan stack.
+  gpu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # lavapipe (the lvp ICD) plus the Vulkan loader (libvulkan1) it needs to be usable, and
+      # vulkan-tools for the diagnostic below.
+      - name: Install Mesa lavapipe (software Vulkan)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-tools
+      # Show which ICDs the loader can see, so a "no adapter" skip is diagnosable from the log.
+      - name: Vulkan diagnostics
+        run: |
+          ls -la /usr/share/vulkan/icd.d/ || true
+          vulkaninfo --summary 2>&1 | head -40 || true
+      - uses: Swatinem/rust-cache@v2
+      # The loader auto-discovers the lavapipe ICD in /usr/share/vulkan/icd.d/ (no VK_ICD override,
+      # which previously pointed at a path that may not exist and suppressed discovery). --nocapture
+      # surfaces a skip and its reason in the log if it still finds no adapter.
+      - name: GPU tests on lavapipe
+        run: |
+          cargo test -p ymir-gpu --verbose -- --nocapture
+          cargo test -p ymir-nodes --lib thermal_gpu --verbose -- --nocapture

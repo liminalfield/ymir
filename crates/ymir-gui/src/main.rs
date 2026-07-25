@@ -15,9 +15,9 @@ use egui_snarl::ui::SnarlWidget;
 use egui_snarl::{NodeId as SnarlNodeId, Snarl};
 use ymir_core::registry;
 use ymir_core::{
-    EvalCache, EvalRequest, Extraction, Field, FieldStore, Graph, INPUT_TYPE_ID, NodeId,
-    OUTPUT_TYPE_ID, ParamValue, Params, ProjectDocument, Region, SUBGRAPH_TYPE_ID,
-    marker_port_label,
+    BrushShape, EvalCache, EvalRequest, Extraction, Field, FieldStore, Graph, INPUT_TYPE_ID,
+    NodeId, OUTPUT_TYPE_ID, ParamKind, ParamValue, Params, ProjectDocument, Region,
+    SUBGRAPH_TYPE_ID, Stroke, StrokeMode, StrokePoint, Strokes, marker_port_label,
 };
 use ymir_nodes::{CategoryDef, categories, find_category, node_group, tr};
 
@@ -54,8 +54,10 @@ mod starter;
 // The Ymir Dark brand palette and egui Visuals built from it (#104).
 mod theme;
 // The 3D viewport: custom wgpu rendering inside an egui pane (#7).
+mod pick;
 mod viewport;
 mod viewport2d;
+mod viewport2d_gpu;
 // Snapshot-based undo/redo over the session (#82).
 mod history;
 use build::BuildRunner;
@@ -87,12 +89,29 @@ fn main() -> eframe::Result {
         Some(icon) => viewport.with_icon(icon),
         None => viewport,
     };
+    // Request the adapter's real limits for the wgpu device, not egui's conservative defaults (a
+    // ~128 MiB storage-buffer cap). GPU erosion shares this device (from_device_queue), and an 8K
+    // build needs storage buffers well past that default; without this the shared device would drop
+    // large builds to the CPU (#242). A weaker GPU still gets only what it supports, so the erosion
+    // fallback stays graceful on any hardware.
+    let mut wgpu_options = eframe::egui_wgpu::WgpuConfiguration::default();
+    if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut wgpu_options.wgpu_setup {
+        setup.device_descriptor =
+            std::sync::Arc::new(|adapter: &eframe::egui_wgpu::wgpu::Adapter| {
+                eframe::egui_wgpu::wgpu::DeviceDescriptor {
+                    label: Some("ymir-gui-device"),
+                    required_limits: adapter.limits(),
+                    ..Default::default()
+                }
+            });
+    }
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
+        wgpu_options,
         viewport,
-        // A 24-bit depth buffer on egui's render pass, used by the 3D viewport for correct
-        // occlusion (egui clears it to far and never writes it, so it is ours to use).
-        depth_buffer: 24,
+        // No shared depth on egui's pass: the 3D viewport renders to its own offscreen
+        // color+depth and composites the result as a texture (#138), so egui's pass is
+        // colour-only and the composite blit needs no depth attachment.
         ..Default::default()
     };
     eframe::run_native(
@@ -202,8 +221,10 @@ fn fresh_world_settings() -> project_file::WorldSettings {
         world_extent: DEFAULT_WORLD_EXTENT,
         world_height: project_file::DEFAULT_WORLD_HEIGHT,
         build_res: project_file::DEFAULT_BUILD_RES,
+        preview_res: PREVIEW_RES,
         sea_level: project_file::DEFAULT_SEA_LEVEL,
         show_water: true,
+        water: project_file::WaterSettings::default(),
     }
 }
 
@@ -382,6 +403,11 @@ struct AppState {
     /// node instead of the selection, so selection can move upstream to edit while the
     /// pinned downstream result keeps updating (the Houdini display-flag idea).
     preview_pin: Option<Handle>,
+    /// Set when the user clears the preview by clicking empty canvas, so the viewport goes blank
+    /// rather than falling back to the graph's result node (`preview_sink`). Reset by any
+    /// `clear_selection` (so a freshly opened or loaded graph still shows its result), then re-set
+    /// only by the background-click deselect.
+    preview_dismissed: bool,
     /// The global seed for evaluation, set by the ribbon control. Reseeds the whole
     /// world; each node stays internally stable across edits.
     seed: u64,
@@ -436,9 +462,16 @@ struct AppState {
     /// The Settings dialog's editable draft, `Some` while it is open. Committed to
     /// `preferences` (and written to disk) on Save, discarded on Cancel.
     settings_edit: Option<preferences::Preferences>,
+    /// Whether the About window (Help -> About Ymir) is open. Transient UI state only.
+    about_open: bool,
     /// The popped-out curve editor: a larger, draggable window for shaping a curve
     /// param with room to be precise and a coordinate readout. `None` when closed.
     curve_popout: Option<CurvePopout>,
+    /// The current paint brush, edited in a Paint node's inspector.
+    paint_brush: PaintBrush,
+    /// The Paint node currently in paint mode (`stable_id`), so a drag on the 2D map brushes into
+    /// its strokes. `None` when not painting.
+    paint_target: Option<Handle>,
     /// A one-shot "zoom to graph" transform to apply on the next frame (#65). The
     /// fit is computed from this frame's node rects (collected during rendering) and
     /// applied via the canvas's `current_transform` override next frame.
@@ -463,6 +496,39 @@ struct AppState {
     /// Whether the 3D viewport draws the water plane at [`sea_level`](Self::sea_level). A view
     /// aid, on by default so the sea reads on a fresh launch.
     show_water: bool,
+    /// Water effect layers (#157, #155): depth shading, Gerstner waves, a reflective finish (sky
+    /// Fresnel + specular), and foam. Ephemeral view state. Off is cheaper and, for the animated
+    /// layers (waves, foam), stops the viewport's per-frame repaint so still water idles the fans.
+    water_depth: bool,
+    water_waves: bool,
+    water_reflection: bool,
+    water_foam_on: bool,
+    /// Water depth falloff (Beer-Lambert extinction) for the 3D viewport water (#154). Ephemeral
+    /// view state for now (not persisted); a higher value clears to opaque faster.
+    water_extinction: f32,
+    /// Water tint (linear RGB) for the 3D viewport water. Ephemeral view state.
+    water_color: [f32; 3],
+    /// Tier 1 water surface controls (ephemeral): ripple strength, sky reflectivity, specular.
+    water_wave: f32,
+    water_reflectivity: f32,
+    water_specular: f32,
+    /// Gerstner wave shaping (#155): crest steepness and wavelength scale.
+    water_steepness: f32,
+    water_wavelength: f32,
+    /// Shoreline foam controls (ephemeral): amount and band width (#156).
+    water_foam: f32,
+    water_foam_width: f32,
+    /// Wet-shore darkening (#156): toggle, strength, and band width (normalized height).
+    water_wet_on: bool,
+    water_wet: f32,
+    water_wet_width: f32,
+    /// Water animation speed multiplier (#157), scaling how fast the ripples and foam scroll.
+    /// Ephemeral view state; `0` freezes the surface.
+    water_speed: f32,
+    /// Accumulated water animation phase in seconds of motion. Advanced each frame by the real
+    /// frame delta times [`water_speed`](Self::water_speed), so the speed control changes future
+    /// motion without jumping the waves. Not persisted (it is a running clock, not a setting).
+    water_phase: f32,
     /// The project file the session is bound to, if any (#75). `Save` writes here;
     /// `None` until the project is first saved or opened, when `Save` falls back to
     /// `Save As`.
@@ -486,6 +552,15 @@ struct AppState {
     /// The 3D viewport's orbit camera, persisted across frames so the view holds as the
     /// previewed node changes.
     viewport_camera: viewport::OrbitCamera,
+    /// eframe's wgpu render state (device, queue, renderer), stashed for the 2D map's GPU shading
+    /// (#167). `None` in a headless/test build with no wgpu backend, where the map falls back to a
+    /// black fill. Set by the app shell once the device exists, never by `AppState::new`.
+    render_state: Option<eframe::egui_wgpu::RenderState>,
+    /// The GPU compute context (erosion and later grid nodes), sharing the viewport's wgpu device
+    /// so the preview and build run the GPU path without standing up a second device. `None` in a
+    /// headless/test build, where every node falls back to its CPU path. Set by the app shell
+    /// alongside `render_state`, never by `AppState::new`.
+    gpu: Option<std::sync::Arc<ymir_gpu::GpuContext>>,
     /// Whether the 3D viewport shows true amplitude (Fixed) or normalizes to fill the relief
     /// (Auto). Fixed by default so terrain reads at its real height.
     viewport_scale: shade::HeightScale,
@@ -493,6 +568,9 @@ struct AppState {
     /// (`world_height / world_extent`). `1.0` shows real-world proportions; higher values
     /// exaggerate relief to inspect subtle terrain. A non-persisted view aid.
     viewport_exaggeration: f32,
+    /// Free-fly camera speed (#161), in world units per second (the footprint is 1.0 wide). A
+    /// non-persisted view preference.
+    viewport_fly_speed: f32,
     /// The 3D viewport's sun direction and response (azimuth/elevation degrees, diffuse
     /// intensity, ambient fill). A non-persisted view aid; raking the sun low reads form.
     viewport_lighting: viewport::Lighting,
@@ -673,6 +751,26 @@ struct CurvePopout {
     param: String,
 }
 
+/// The current paint brush, shared across paint sessions. Radius is a fraction of the region width
+/// (canvas-relative), matching the Paint node's stroke model; strength is opacity, hardness the edge.
+struct PaintBrush {
+    radius: f32,
+    strength: f32,
+    hardness: f32,
+    mode: StrokeMode,
+}
+
+impl Default for PaintBrush {
+    fn default() -> Self {
+        Self {
+            radius: 0.08,
+            strength: 1.0,
+            hardness: 0.5,
+            mode: StrokeMode::Paint,
+        }
+    }
+}
+
 impl AppState {
     fn new() -> Self {
         // Open with the built-in starter chain (#76), so a fresh session has a real
@@ -685,6 +783,9 @@ impl AppState {
         let initial =
             project_file::ProjectFile::capture(&graph, &snarl, fresh_world_settings(), &[]);
         let history = EditHistory::new(initial.clone());
+        // The water look/effect defaults, taken from one source so the fresh-session fields below
+        // and the persisted `WaterSettings::default` (used for older project files) stay in step.
+        let water_defaults = project_file::WaterSettings::default();
         Self {
             graph,
             snarl,
@@ -708,6 +809,7 @@ impl AppState {
             search: String::new(),
             node_menu: None,
             preview_pin: None,
+            preview_dismissed: false,
             rename: None,
             library_save: None,
             library_save_tab: LibraryTab::Details,
@@ -723,7 +825,10 @@ impl AppState {
             // the test-constructed state never touches the filesystem, matching apply_default.
             preferences: preferences::Preferences::default(),
             settings_edit: None,
+            about_open: false,
             curve_popout: None,
+            paint_brush: PaintBrush::default(),
+            paint_target: None,
             pending_view: None,
             build_res: project_file::DEFAULT_BUILD_RES,
             preview_res: PREVIEW_RES,
@@ -731,6 +836,27 @@ impl AppState {
             world_height: project_file::DEFAULT_WORLD_HEIGHT,
             sea_level: project_file::DEFAULT_SEA_LEVEL,
             show_water: true,
+            // Water look and effect defaults, taken from the persisted form's `Default` so a fresh
+            // session and a project saved without water settings can never drift apart (#157). All
+            // layers on, a calm speed. The phase is a running clock, started at zero.
+            water_depth: water_defaults.depth,
+            water_waves: water_defaults.waves,
+            water_reflection: water_defaults.reflection,
+            water_foam_on: water_defaults.foam_on,
+            water_extinction: water_defaults.extinction,
+            water_color: water_defaults.color,
+            water_wave: water_defaults.wave,
+            water_reflectivity: water_defaults.reflectivity,
+            water_specular: water_defaults.specular,
+            water_steepness: water_defaults.steepness,
+            water_wavelength: water_defaults.wavelength,
+            water_foam: water_defaults.foam,
+            water_foam_width: water_defaults.foam_width,
+            water_wet_on: water_defaults.wet_on,
+            water_wet: water_defaults.wet,
+            water_wet_width: water_defaults.wet_width,
+            water_speed: water_defaults.speed,
+            water_phase: 0.0,
             project_path: None,
             recent: Vec::new(),
             // The built-in starter has no saved camera, so fit it to the screen on the first
@@ -740,8 +866,11 @@ impl AppState {
             viewport_mode: viewport2d::Mode::default(),
             viewport_2d: viewport2d::View2d::default(),
             viewport_camera: viewport::OrbitCamera::default(),
+            render_state: None,
+            gpu: None,
             viewport_scale: shade::HeightScale::Fixed,
             viewport_exaggeration: 1.0,
+            viewport_fly_speed: 0.6,
             // Reproduces the previous fixed key light: high from the front-right.
             viewport_lighting: viewport::Lighting {
                 azimuth_deg: 35.0,
@@ -804,8 +933,10 @@ impl AppState {
         self.world_extent = restored.world_extent;
         self.world_height = restored.world_height;
         self.build_res = restored.build_res;
+        self.preview_res = restored.preview_res;
         self.sea_level = restored.sea_level;
         self.show_water = restored.show_water;
+        self.apply_water_settings(restored.water);
         self.clear_selection();
         self.preview_pin = None;
         self.node_menu = None;
@@ -844,8 +975,10 @@ impl AppState {
         self.world_extent = world.world_extent;
         self.world_height = world.world_height;
         self.build_res = world.build_res;
+        self.preview_res = world.preview_res;
         self.sea_level = world.sea_level;
         self.show_water = world.show_water;
+        self.apply_water_settings(world.water);
         self.clear_selection();
         self.preview_pin = None;
         self.node_menu = None;
@@ -883,8 +1016,10 @@ impl AppState {
                     world_extent: r.world_extent,
                     world_height: r.world_height,
                     build_res: r.build_res,
+                    preview_res: r.preview_res,
                     sea_level: r.sea_level,
                     show_water: r.show_water,
+                    water: r.water,
                 };
                 self.install_fresh(r.graph, r.snarl, world, r.subgraph_layouts);
             }
@@ -904,9 +1039,57 @@ impl AppState {
             world_extent: self.world_extent,
             world_height: self.world_height,
             build_res: self.build_res,
+            preview_res: self.preview_res,
             sea_level: self.sea_level,
             show_water: self.show_water,
+            water: self.water_settings(),
         }
+    }
+
+    /// Collects the ephemeral water look and effect controls into the persisted form (#157), so
+    /// the current look travels with a saved project.
+    fn water_settings(&self) -> project_file::WaterSettings {
+        project_file::WaterSettings {
+            depth: self.water_depth,
+            waves: self.water_waves,
+            reflection: self.water_reflection,
+            foam_on: self.water_foam_on,
+            extinction: self.water_extinction,
+            color: self.water_color,
+            wave: self.water_wave,
+            reflectivity: self.water_reflectivity,
+            specular: self.water_specular,
+            steepness: self.water_steepness,
+            wavelength: self.water_wavelength,
+            foam: self.water_foam,
+            foam_width: self.water_foam_width,
+            wet_on: self.water_wet_on,
+            wet: self.water_wet,
+            wet_width: self.water_wet_width,
+            speed: self.water_speed,
+        }
+    }
+
+    /// Applies restored water settings back onto the ephemeral controls. The animation phase is a
+    /// running clock, not a stored setting, so it is left as-is (the surface simply carries on).
+    fn apply_water_settings(&mut self, w: project_file::WaterSettings) {
+        self.water_depth = w.depth;
+        self.water_waves = w.waves;
+        self.water_reflection = w.reflection;
+        self.water_foam_on = w.foam_on;
+        self.water_extinction = w.extinction;
+        self.water_color = w.color;
+        self.water_wave = w.wave;
+        self.water_reflectivity = w.reflectivity;
+        self.water_specular = w.specular;
+        self.water_steepness = w.steepness;
+        self.water_wavelength = w.wavelength;
+        self.water_foam = w.foam;
+        self.water_foam_width = w.foam_width;
+        self.water_wet_on = w.wet_on;
+        self.water_wet = w.wet;
+        self.water_wet_width = w.wet_width;
+        self.water_speed = w.speed;
     }
 
     /// A snapshot of the current session (graph, canvas positions, world settings),
@@ -1493,6 +1676,7 @@ impl AppState {
                 self.world_height = restored.world_height;
                 self.sea_level = restored.sea_level;
                 self.show_water = restored.show_water;
+                self.apply_water_settings(restored.water);
                 self.selection
                     .retain(|&h| self.graph.node_id_of(h).is_some());
                 self.primary = self.primary.filter(|h| self.selection.contains(h));
@@ -1581,6 +1765,9 @@ impl AppState {
     fn clear_selection(&mut self) {
         self.selection.clear();
         self.primary = None;
+        // Default to the result-node fallback; the background-click deselect re-sets the dismiss
+        // flag after this, so only an explicit canvas click blanks the preview.
+        self.preview_dismissed = false;
     }
 
     /// Sets the selection to `hits` (a marquee result), or adds them to it when `additive`
@@ -1635,7 +1822,14 @@ impl AppState {
             .filter(|&h| self.is_previewable(h))
             .or_else(|| self.primary.filter(|&h| self.is_previewable(h)))
             .or_else(|| self.primary.and_then(|h| self.endpoint_input_source(h)))
-            .or_else(|| self.preview_sink())
+            // Fall back to the graph's result node only when the preview was not explicitly
+            // dismissed (clicking empty canvas), so deselecting goes blank while a freshly opened
+            // graph still shows its result.
+            .or_else(|| {
+                (!self.preview_dismissed)
+                    .then(|| self.preview_sink())
+                    .flatten()
+            })
     }
 
     /// The previewable node feeding a selected endpoint's input, if any. An output-less endpoint
@@ -1690,13 +1884,22 @@ impl AppState {
     /// no node is previewable.
     fn drive_preview(&mut self, ctx: &egui::Context) {
         let Some(id) = self.preview_target().and_then(|h| self.graph.node_id_of(h)) else {
+            // No target (an empty graph, or the preview was dismissed by clicking empty canvas):
+            // blank the preview so the viewport and inspector show nothing, not a stale field.
+            self.preview.clear();
             return;
         };
         let res = self.preview_res;
-        let request = EvalRequest::new(res, res, Region::UNIT, self.seed)
+        let mut request = EvalRequest::new(res, res, Region::UNIT, self.seed)
             .with_world_extent(self.world_extent)
             .with_world_height(self.world_height)
             .with_sea_level(self.sea_level);
+        // Run the preview on the GPU when the device is shared, so the tweak-adjust loop stays fast
+        // at higher resolutions. The handle is not part of a node's cache key, so a GPU and a CPU
+        // result are interchangeable in the cache.
+        if let Some(gpu) = &self.gpu {
+            request = request.with_compute(gpu.clone());
+        }
         let now = ctx.input(|i| i.time);
         // Inside a subgraph, bind the live input fields so the 2D preview shows real data
         // rather than the Input markers' zero stand-in (#106). `None` at the top level.
@@ -1755,6 +1958,13 @@ fn node_entries() -> Vec<NodeEntry> {
             }
         })
         .collect()
+}
+
+/// Whether a node type is flagged experimental (functional but rough or artifact-prone), read from
+/// its operator's [`experimental`](ymir_core::Operator::experimental). Constructs the operator (a
+/// zero-cost unit struct) to read the flag, cheap enough to call per palette row.
+fn is_experimental(type_id: &str) -> bool {
+    registry::make(type_id).is_some_and(|op| op.experimental())
 }
 
 /// The registered categories, sorted by `sort` then `id` for a stable palette.
@@ -2072,7 +2282,10 @@ fn menu_bar_pane(ui: &mut egui::Ui, state: &mut AppState) {
             ui.weak("(empty)");
         });
         ui.menu_button("Help", |ui| {
-            ui.weak("(empty)");
+            if ui.button("About Ymir").clicked() {
+                state.about_open = true;
+                ui.close();
+            }
         });
         // The project name and unsaved-changes marker live in the OS title bar now (#83, #87);
         // the menu bar carries only the transient status, pushed to the right.
@@ -2490,8 +2703,10 @@ fn apply_default(state: &mut AppState) {
             state.world_extent = restored.world_extent;
             state.world_height = restored.world_height;
             state.build_res = restored.build_res;
+            state.preview_res = restored.preview_res;
             state.sea_level = restored.sea_level;
             state.show_water = restored.show_water;
+            state.apply_water_settings(restored.water);
             state.apply_restored_view(restored.camera);
             // Anchor undo and the clean point at the default, not the starter it replaced.
             state.reset_history();
@@ -2677,10 +2892,13 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
                             ));
                         } else {
                             let res = state.build_res;
-                            let request = EvalRequest::new(res, res, Region::UNIT, state.seed)
+                            let mut request = EvalRequest::new(res, res, Region::UNIT, state.seed)
                                 .with_world_extent(state.world_extent)
                                 .with_world_height(state.world_height)
                                 .with_sea_level(state.sea_level);
+                            if let Some(gpu) = &state.gpu {
+                                request = request.with_compute(gpu.clone());
+                            }
                             state.build.start(top, targets, request, ui.ctx().clone());
                         }
                     }
@@ -3726,7 +3944,183 @@ fn library_entry_tooltip(ui: &mut egui::Ui, file: &library::SubgraphFile) {
     }
 }
 
+/// A per-node brush-UI label resolved by convention from the node's `type_id`
+/// (`paint-<suffix>-<type_id>`), falling back to `default` when the node declares none. Mirrors how
+/// node names resolve through `tr`, so a new paint node relabels itself by adding string entries.
+fn paint_label(type_id: &str, suffix: &str, default: &str) -> String {
+    let key = format!("paint-{suffix}-{type_id}");
+    let value = tr(&key);
+    // `tr` echoes an unknown key; fall back to the default rather than show the raw key.
+    if value == key {
+        default.to_string()
+    } else {
+        value.to_string()
+    }
+}
+
 /// The selected node's inspector: its display-name override and parameter widgets.
+/// The inspector controls for a paint node's stroke param: the brush, the enable toggle, the stroke
+/// count, and undo/clear. The strokes themselves are authored by brushing on the 2D map or 3D surface;
+/// these set the brush and the paint target, and undo/clear rewrite the node's strokes.
+fn paint_controls(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    handle: Handle,
+    current: &ParamValue,
+    params: &mut Params,
+    changed: &mut bool,
+) {
+    let count = match current {
+        ParamValue::Strokes(s) => s.len(),
+        _ => 0,
+    };
+    let active = state.paint_target == Some(handle);
+
+    // Per-node verb for the enable button (Sculpt vs Paint), resolved by convention from the node's
+    // type_id, defaulting to Paint for any paint node without its own label.
+    let type_id = state
+        .graph
+        .node_id_of(handle)
+        .and_then(|id| state.graph.spec(id))
+        .map_or("", |spec| spec.type_id);
+    let verb = paint_label(type_id, "verb", "Paint");
+
+    // Enable toggle: turning it on pins the preview to this node so the viewport keeps showing what
+    // you paint or sculpt; the highlight and the "click to stop" copy show the on/off state.
+    let label = if active {
+        format!("{verb} — click to stop")
+    } else {
+        verb.clone()
+    };
+    if ui.selectable_label(active, label).clicked() {
+        if active {
+            state.paint_target = None;
+            // Release the pin that was set when painting began, so stopping returns the preview to
+            // following the selection. A manual pin the user placed on another node is left alone.
+            if state.preview_pin == Some(handle) {
+                state.preview_pin = None;
+            }
+        } else {
+            // Pin the preview to this node so the viewport keeps showing what you paint even if the
+            // selection changes mid-session; released above when painting stops.
+            state.paint_target = Some(handle);
+            state.preview_pin = Some(handle);
+        }
+    }
+
+    ui.add_space(4.0);
+    // Size and Strength are log-scaled so the low end (small brushes, subtle strokes) gets real
+    // slider travel instead of being crammed into the first few pixels. Hardness stays linear over
+    // its full [0, 1]. A log slider needs a positive floor, so Strength starts just above 0.
+    brush_slider(ui, "Size", &mut state.paint_brush.radius, 0.005, 0.5, true);
+    brush_slider(
+        ui,
+        "Strength",
+        &mut state.paint_brush.strength,
+        0.005,
+        1.0,
+        true,
+    );
+    brush_slider(
+        ui,
+        "Hardness",
+        &mut state.paint_brush.hardness,
+        0.0,
+        1.0,
+        false,
+    );
+
+    // Mode names are per-node: Raise/Lower for a sculpt, Paint/Erase for a mask. The positive mode
+    // (index 0) maps to StrokeMode::Paint, the negative to Erase, whatever they are called.
+    let pos = paint_label(type_id, "mode-pos", "Paint");
+    let neg = paint_label(type_id, "mode-neg", "Erase");
+    let mode_i = usize::from(matches!(state.paint_brush.mode, StrokeMode::Erase));
+    if let Some(i) = segmented(ui, &[pos.as_str(), neg.as_str()], mode_i) {
+        state.paint_brush.mode = if i == 0 {
+            StrokeMode::Paint
+        } else {
+            StrokeMode::Erase
+        };
+    }
+
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(format!(
+                "{count} stroke{}",
+                if count == 1 { "" } else { "s" }
+            ))
+            .color(theme::TEXT_TERTIARY),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add_enabled(count > 0, egui::Button::new("Clear"))
+                .clicked()
+            {
+                let mut strokes = params.get_strokes("strokes", &Strokes::new()).clone();
+                strokes.clear();
+                params.insert("strokes", ParamValue::Strokes(strokes));
+                *changed = true;
+            }
+            if ui
+                .add_enabled(count > 0, egui::Button::new("Undo"))
+                .clicked()
+            {
+                let mut strokes = params.get_strokes("strokes", &Strokes::new()).clone();
+                strokes.pop();
+                params.insert("strokes", ParamValue::Strokes(strokes));
+                *changed = true;
+            }
+        });
+    });
+}
+
+/// A labelled brush slider bound to an `f32`, over the shared styled slider.
+fn brush_slider(ui: &mut egui::Ui, label: &str, value: &mut f32, min: f64, max: f64, log: bool) {
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [60.0, ui.spacing().interact_size.y],
+            egui::Label::new(egui::RichText::new(label).color(theme::TEXT_TERTIARY)),
+        );
+        let mut v = f64::from(*value);
+        if param_ui::slider(ui, &mut v, min, max, log).changed() {
+            *value = v as f32;
+        }
+    });
+}
+
+/// Applies a paint sample from the 2D map to the active Paint node: begin a new stroke with the
+/// current brush, or extend the last one, then write the strokes back so the mask updates live.
+fn apply_paint_sample(state: &mut AppState, sample: viewport2d::PaintSample, mode: StrokeMode) {
+    let Some(target) = state.paint_target else {
+        return;
+    };
+    let Some(id) = state.graph.node_id_of(target) else {
+        return;
+    };
+    let mut params = state.graph.params(id).cloned().unwrap_or_default();
+    let mut strokes = params.get_strokes("strokes", &Strokes::new()).clone();
+    let point = StrokePoint::new(sample.x, sample.y);
+    if sample.begin || strokes.is_empty() {
+        strokes.push(Stroke {
+            radius: state.paint_brush.radius,
+            strength: state.paint_brush.strength,
+            hardness: state.paint_brush.hardness,
+            mode,
+            shape: BrushShape::Round,
+            path: vec![point],
+        });
+    } else if let Some(mut last) = strokes.pop() {
+        last.path.push(point);
+        strokes.push(last);
+    }
+    params.insert("strokes", ParamValue::Strokes(strokes));
+    if state.graph.set_params(id, params).is_err() {
+        // The node vanished mid-frame; stop painting it rather than error every frame.
+        state.paint_target = None;
+    }
+}
+
 fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
     // The SETTINGS half edits the selected node (distinct from the PREVIEW half above, which
     // follows the pinned node). Nothing selected shows the eyebrow and a hint.
@@ -3855,12 +4249,23 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
             ui.add_space(6.0);
         }
         let current = param_ui::current_value(&params, pspec);
+        // A painted-mask param is authored by brushing on the 2D map, not by a value widget, so it
+        // gets its own controls (brush + paint toggle + undo/clear) instead of `edit`.
+        if matches!(pspec.kind, ParamKind::Strokes) {
+            paint_controls(ui, state, handle, &current, &mut params, &mut changed);
+            continue;
+        }
         // The curve editor's corner pop-out icon (#70-style) reports through this flag,
         // opening the larger, draggable window for this node's curve param.
         let mut popout = false;
-        if let Some(new_value) =
-            param_ui::edit(ui, pspec, &current, histogram.as_deref(), &mut popout)
-        {
+        if let Some(new_value) = param_ui::edit(
+            ui,
+            spec.type_id,
+            pspec,
+            &current,
+            histogram.as_deref(),
+            &mut popout,
+        ) {
             params.insert(pspec.name.clone(), new_value);
             changed = true;
         }
@@ -4015,7 +4420,7 @@ fn color_row(
     let show_alpha = matches!(alpha, Alpha::OnlyBlend);
     let mut changed = false;
     ui.horizontal(|ui| {
-        param_ui::param_label(ui, label);
+        param_ui::plain_label(ui, label);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let srgba = hsva.to_srgba_unmultiplied();
             let hex = if show_alpha {
@@ -4150,7 +4555,7 @@ fn frame_inspector(ui: &mut egui::Ui, state: &mut AppState, index: usize) {
     ui.spacing_mut().item_spacing.y = 8.0;
 
     ui.horizontal(|ui| {
-        param_ui::param_label(ui, "Label");
+        param_ui::plain_label(ui, "Label");
         ui.add(
             egui::TextEdit::singleline(&mut state.frames[index].label)
                 .hint_text("Frame")
@@ -4178,7 +4583,7 @@ fn frame_inspector(ui: &mut egui::Ui, state: &mut AppState, index: usize) {
     state.frame_color_edit = Some((index, fill_hsva, border_hsva, text_hsva));
 
     ui.horizontal(|ui| {
-        param_ui::param_label(ui, "Label position");
+        param_ui::plain_label(ui, "Label position");
         let placement = &mut state.frames[index].label_placement;
         let label = match placement {
             project_file::LabelPlacement::TopLeft => "Top left",
@@ -4213,126 +4618,412 @@ fn frame_inspector(ui: &mut egui::Ui, state: &mut AppState, index: usize) {
     }
 }
 
+/// A collapsible section for the World panel (the 1c handoff): a slim header of a chevron and an
+/// uppercase label, optionally trailed by a muted `badge` (an active count), over a body that
+/// shows only when open. With `divider`, a faint rule sits above the header so stacked sections read
+/// as distinct bands (off for the first section, which has nothing above it). Open/closed state
+/// persists for the session in egui memory, keyed by `id`.
+fn section(
+    ui: &mut egui::Ui,
+    id: &str,
+    label: &str,
+    default_open: bool,
+    divider: bool,
+    badge: Option<String>,
+    body: impl FnOnce(&mut egui::Ui),
+) {
+    use egui::collapsing_header::CollapsingState;
+
+    // A divider above the header separates this section from the block above it, bracketed by a
+    // little space. The first section (no divider) skips that and sits close to the top of the pane.
+    if divider {
+        ui.add_space(6.0);
+        let top = ui.available_rect_before_wrap().top();
+        ui.painter().hline(
+            ui.max_rect().x_range(),
+            top,
+            egui::Stroke::new(1.0, theme::LINE),
+        );
+        ui.add_space(6.0);
+    } else {
+        ui.add_space(2.0);
+    }
+
+    let sid = ui.make_persistent_id(id);
+    let mut coll = CollapsingState::load_with_default_open(ui.ctx(), sid, default_open);
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), egui::Sense::click());
+    if resp.clicked() {
+        // `toggle` flips the flag but does not persist it; `store` writes it to session memory.
+        coll.toggle(ui);
+        coll.store(ui.ctx());
+    }
+    let openness = coll.openness(ui.ctx());
+    let ink = if resp.hovered() {
+        theme::TEXT_PRIMARY
+    } else {
+        theme::TEXT_SECONDARY
+    };
+    let painter = ui.painter();
+    // The chevron, drawn as a small filled triangle rather than a font glyph so it never renders as
+    // a missing-glyph box (IBM Plex has no geometric triangles): right-pointing when closed,
+    // down-pointing when open.
+    let cx = rect.left() + 10.0;
+    let cy = rect.center().y;
+    let tri = if openness > 0.5 {
+        vec![
+            egui::pos2(cx - 4.0, cy - 2.5),
+            egui::pos2(cx + 4.0, cy - 2.5),
+            egui::pos2(cx, cy + 3.0),
+        ]
+    } else {
+        vec![
+            egui::pos2(cx - 2.5, cy - 4.0),
+            egui::pos2(cx - 2.5, cy + 4.0),
+            egui::pos2(cx + 3.0, cy),
+        ]
+    };
+    painter.add(egui::Shape::convex_polygon(tri, ink, egui::Stroke::NONE));
+    painter.text(
+        egui::pos2(rect.left() + 22.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label.to_uppercase(),
+        egui::FontId::proportional(11.0),
+        ink,
+    );
+    if let Some(badge) = badge {
+        painter.text(
+            egui::pos2(rect.right() - 4.0, rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            badge,
+            egui::FontId::proportional(11.0),
+            theme::TEXT_TERTIARY,
+        );
+    }
+
+    coll.show_body_unindented(ui, |ui| {
+        ui.add_space(2.0);
+        body(ui);
+    });
+}
+
+/// A frost pill toggle bound to a bool: draws the switch (accent track when on) and flips the value
+/// on click. Returns the response.
+fn switch(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
+    let resp = param_ui::toggle(ui, *on);
+    if resp.clicked() {
+        *on = !*on;
+    }
+    resp
+}
+
+/// One labelled slider row that fits the narrow panel without overflowing: a fixed label column on
+/// the left, a fixed scrub/type value box pinned right, and the slider filling the gap between them
+/// (its own inline value suppressed, since the box is the value). `decimals` fixes the precision.
+/// A single value edited by both the box and the slider, via a local copy to avoid a double borrow.
+fn slider_row<Num: egui::emath::Numeric>(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut Num,
+    range: std::ops::RangeInclusive<Num>,
+    decimals: usize,
+) {
+    let mut x = *value;
+    let h = ui.spacing().interact_size.y;
+    let span = range.end().to_f64() - range.start().to_f64();
+    ui.horizontal(|ui| {
+        // Left-aligned label in a column reserved at an exact width (drawn via the painter, so the
+        // column never grows or shrinks with the label's length). This keeps every slider starting
+        // at the same x and coming out the same width. Dimmed when the group is disabled.
+        let (label_rect, _) = ui.allocate_exact_size(egui::vec2(76.0, h), egui::Sense::hover());
+        let label_colour = if ui.is_enabled() {
+            theme::TEXT_SECONDARY
+        } else {
+            theme::TEXT_SECONDARY.gamma_multiply(0.5)
+        };
+        ui.painter().text(
+            egui::pos2(label_rect.left(), label_rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            label,
+            egui::FontId::proportional(11.5),
+            label_colour,
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add_sized(
+                [44.0, h],
+                egui::DragValue::new(&mut x)
+                    .range(range.clone())
+                    .speed(span * 0.002)
+                    .fixed_decimals(decimals),
+            );
+            // The app's one styled slider (visible trough, accent fill, ringed knob) fills the width
+            // left between the value box and the label, so the left panel matches the node params.
+            let (min, max) = (range.start().to_f64(), range.end().to_f64());
+            let mut v = x.to_f64();
+            if param_ui::slider(ui, &mut v, min, max, false).changed() {
+                x = Num::from_f64(v);
+            }
+        });
+    });
+    *value = x;
+}
+
+/// A subtle full-width divider between water setting groups, so the groups read as distinct bands.
+fn group_separator(ui: &mut egui::Ui) {
+    ui.add_space(6.0);
+    let top = ui.available_rect_before_wrap().top();
+    ui.painter().hline(
+        ui.max_rect().x_range(),
+        top,
+        egui::Stroke::new(1.0, theme::LINE),
+    );
+    ui.add_space(6.0);
+}
+
+/// A water effect group: a divider, a header row of the group name (a step larger than the param
+/// labels) and an enable toggle, over the params it gates. Flat (no bordered box), so nothing paints
+/// a hard right edge against the pane border. When `on` is false the params grey out and stop
+/// responding (`add_enabled_ui`) while the header toggle stays live, so the group can be reenabled.
+fn water_group(ui: &mut egui::Ui, title: &str, on: &mut bool, body: impl FnOnce(&mut egui::Ui)) {
+    group_separator(ui);
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(title)
+                .size(13.0)
+                .strong()
+                .color(theme::TEXT_PRIMARY),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            switch(ui, on);
+        });
+    });
+    ui.add_enabled_ui(*on, body);
+}
+
 /// The world/build settings: the global eval-request inputs (seed, resolutions) that
-/// apply to the whole graph. Outputs selection and the Build action land here in
-/// later steps.
+/// apply to the whole graph, laid out as collapsible World, Build, Water, and Outputs sections.
 fn world_settings(ui: &mut egui::Ui, state: &mut AppState) {
-    ui.add_space(2.0);
-    ui.horizontal(|ui| {
-        ui.label("Seed");
-        ui.add(egui::DragValue::new(&mut state.seed).speed(1.0));
-    });
+    // Frost accent: fill sliders up to the handle with the bright accent (the default trailing fill
+    // uses the muted selection colour). Scoped to this pane by mutating its visuals only.
+    ui.visuals_mut().selection.bg_fill = theme::ACCENT_PRIMARY;
+    ui.visuals_mut().slider_trailing_fill = true;
 
-    ui.separator();
-    ui.label("World extent");
-    ui.horizontal(|ui| {
-        ui.add(
-            egui::DragValue::new(&mut state.world_extent)
-                .speed(8.0)
-                .range(1.0..=1_000_000.0)
-                .suffix(" m"),
-        );
-        // The meters-to-cells bridge made tangible. Cells are square, so this is the
-        // size along both axes; it follows from extent / build resolution.
-        let m_per_cell = state.world_extent / state.build_res as f64;
-        ui.weak(format!("≈ {m_per_cell:.3} m/cell at build"));
-    });
+    // WORLD: the identity and most-touched settings, now a collapsible section like the rest.
+    section(
+        ui,
+        "world_section_world",
+        "World",
+        true,
+        false,
+        None,
+        |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Seed");
+                ui.add(egui::DragValue::new(&mut state.seed).speed(1.0));
+            });
 
-    ui.separator();
-    ui.label("World height");
-    ui.horizontal(|ui| {
-        ui.add(
-            egui::DragValue::new(&mut state.world_height)
-                .speed(2.0)
-                .range(1.0..=100_000.0)
-                .suffix(" m"),
-        );
-        // The vertical:horizontal ratio a height of 1.0 reaches over the footprint: what the
-        // viewport shows at 1x exaggeration. A value of 1.0 would be as tall as it is wide.
-        let proportion = state.world_height / state.world_extent;
-        ui.weak(format!("≈ {proportion:.2}× footprint at full height"));
-    });
+            ui.add_space(4.0);
+            ui.label("World extent");
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::DragValue::new(&mut state.world_extent)
+                        .speed(8.0)
+                        .range(1.0..=1_000_000.0)
+                        .suffix(" m"),
+                );
+                // The meters-to-cells bridge made tangible. Cells are square, so this is the size along
+                // both axes; it follows from extent / build resolution.
+                let m_per_cell = state.world_extent / state.build_res as f64;
+                ui.weak(format!("≈ {m_per_cell:.3} m/cell at build"));
+            });
 
-    ui.separator();
-    ui.horizontal(|ui| {
-        ui.label("Sea level");
-        ui.checkbox(&mut state.show_water, "Show water");
-    });
-    ui.horizontal(|ui| {
-        // Normalized height in [0, 1]; the 3D viewport draws a water plane here. The height in
-        // meters (sea_level × world_height) makes the level tangible against the world height.
-        ui.add(
-            egui::Slider::new(&mut state.sea_level, 0.0..=1.0)
-                .fixed_decimals(3)
-                .clamping(egui::SliderClamping::Always),
-        );
-        let meters = state.sea_level * state.world_height;
-        ui.weak(format!("≈ {meters:.0} m"));
-    });
+            ui.add_space(4.0);
+            ui.label("World height");
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::DragValue::new(&mut state.world_height)
+                        .speed(2.0)
+                        .range(1.0..=100_000.0)
+                        .suffix(" m"),
+                );
+                // The vertical:horizontal ratio a height of 1.0 reaches over the footprint: what the
+                // viewport shows at 1x exaggeration. A value of 1.0 would be as tall as it is wide.
+                let proportion = state.world_height / state.world_extent;
+                ui.weak(format!("≈ {proportion:.2}× footprint at full height"));
+            });
 
-    ui.separator();
-    ui.label("Build resolution");
-    ui.horizontal(|ui| {
-        // Custom value (UE5 landscapes need specific sizes), with presets as
-        // shortcuts.
-        ui.add(
-            egui::DragValue::new(&mut state.build_res)
-                .speed(8.0)
-                .range(16..=8192),
-        );
-        egui::ComboBox::from_id_salt("build-res-presets")
-            .selected_text("presets")
-            .show_ui(ui, |ui| {
-                for &preset in BUILD_RES_PRESETS {
-                    if ui.selectable_label(false, preset.to_string()).clicked() {
-                        state.build_res = preset;
-                    }
+            ui.add_space(4.0);
+            // Show water: the master toggle for the water overlay, on its own row directly above the sea
+            // level so it is easy to find (it used to hide at the right edge of the sea-level header).
+            ui.horizontal(|ui| {
+                ui.label("Show water");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    switch(ui, &mut state.show_water);
+                });
+            });
+            ui.add_space(2.0);
+            ui.label("Sea level");
+            // Normalized height in [0, 1]; the 3D viewport draws a water plane here. Slider fills the row
+            // with a scrub/type value box pinned right (a local copy avoids the double borrow); the
+            // elevation in meters (sea_level × world_height) reads below it.
+            let mut sl = state.sea_level;
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_sized(
+                        [48.0, ui.spacing().interact_size.y],
+                        egui::DragValue::new(&mut sl)
+                            .range(0.0..=1.0)
+                            .speed(0.002)
+                            .fixed_decimals(3),
+                    );
+                    // The styled slider (clamps to [0, 1] by construction), matching the rest.
+                    param_ui::slider(ui, &mut sl, 0.0, 1.0, false);
+                });
+            });
+            state.sea_level = sl;
+            let meters = state.sea_level * state.world_height;
+            ui.weak(format!("≈ {meters:.0} m elevation"));
+        },
+    );
+
+    // BUILD AND PREVIEW: the resolutions a Build and the interactive preview evaluate at.
+    section(
+        ui,
+        "world_section_build",
+        "Build and Preview",
+        true,
+        true,
+        None,
+        |ui| {
+            ui.label("Build resolution");
+            ui.horizontal(|ui| {
+                // Custom value (UE5 landscapes need specific sizes), with presets as shortcuts.
+                ui.add(
+                    egui::DragValue::new(&mut state.build_res)
+                        .speed(8.0)
+                        .range(16..=8192),
+                );
+                egui::ComboBox::from_id_salt("build-res-presets")
+                    .selected_text("presets")
+                    .show_ui(ui, |ui| {
+                        for &preset in BUILD_RES_PRESETS {
+                            if ui.selectable_label(false, preset.to_string()).clicked() {
+                                state.build_res = preset;
+                            }
+                        }
+                    });
+            });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label("Preview resolution");
+                ui.add(
+                    egui::DragValue::new(&mut state.preview_res)
+                        .speed(4.0)
+                        .range(32..=1024),
+                );
+            });
+        },
+    );
+
+    // WATER: the rendering look, grouped (the 1c handoff) into Surface / Depth / Foam, each a header
+    // row with an enable toggle owning the params it gates. The effect toggles are those headers.
+    section(ui, "world_section_water", "Water", true, true, None, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("Water colour");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // egui's colour button round-trips rgb -> Hsva -> rgb every frame, which drifts the
+                // floats (0.1 -> 0.10000002) even with no interaction; committing that back would
+                // mark the project modified on the first frame (#160). Edit a copy and only store it
+                // on a real change, so the silent round-trip never dirties the persisted colour.
+                let mut colour = state.water_color;
+                if ui.color_edit_button_rgb(&mut colour).changed() {
+                    state.water_color = colour;
                 }
             });
+        });
+        // Depth sits directly below the colour it tints.
+        water_group(ui, "Depth", &mut state.water_depth, |ui| {
+            slider_row(ui, "Falloff", &mut state.water_extinction, 1.0..=30.0, 1);
+        });
+        // Gerstner waves (the geometric wave surface) and the reflective finish toggle separately, so
+        // you can have flat mirror water or matte chop.
+        water_group(ui, "Gerstner waves", &mut state.water_waves, |ui| {
+            slider_row(ui, "Speed", &mut state.water_speed, 0.0..=2.0, 2);
+            slider_row(ui, "Amplitude", &mut state.water_wave, 0.0..=1.0, 2);
+            slider_row(ui, "Steepness", &mut state.water_steepness, 0.0..=1.0, 2);
+            slider_row(ui, "Wavelength", &mut state.water_wavelength, 0.3..=3.0, 2);
+        });
+        water_group(ui, "Reflection", &mut state.water_reflection, |ui| {
+            slider_row(
+                ui,
+                "Reflectivity",
+                &mut state.water_reflectivity,
+                0.0..=1.0,
+                2,
+            );
+            slider_row(ui, "Specular", &mut state.water_specular, 0.0..=1.0, 2);
+        });
+        water_group(ui, "Foam", &mut state.water_foam_on, |ui| {
+            slider_row(ui, "Amount", &mut state.water_foam, 0.0..=1.0, 2);
+            slider_row(ui, "Width", &mut state.water_foam_width, 0.0..=0.05, 3);
+        });
+        water_group(ui, "Wet shore", &mut state.water_wet_on, |ui| {
+            slider_row(ui, "Strength", &mut state.water_wet, 0.0..=1.0, 2);
+            slider_row(ui, "Width", &mut state.water_wet_width, 0.0..=0.1, 3);
+        });
     });
 
-    ui.separator();
-    ui.horizontal(|ui| {
-        ui.label("Preview resolution");
-        ui.add(
-            egui::DragValue::new(&mut state.preview_res)
-                .speed(4.0)
-                .range(32..=1024),
-        );
-    });
-
-    ui.separator();
-    ui.label("Outputs");
-    ui.weak("Endpoints a Build will write; tick to include.");
-    // Endpoints are nodes with no outputs. Collect them first (releasing the snarl
-    // borrow) before mutating params below.
+    // OUTPUTS: endpoints a Build will write, with a badge counting how many are ticked. Endpoints
+    // are nodes with no outputs; collect them (releasing the snarl borrow) before the body mutates
+    // params, and count the active ones for the header badge.
     let endpoints: Vec<NodeId> = state
         .snarl
         .node_ids()
         .filter_map(|(_, &handle)| state.graph.node_id_of(handle))
         .filter(|&id| state.graph.spec(id).is_some_and(|s| s.outputs.is_empty()))
         .collect();
-    if endpoints.is_empty() {
-        ui.weak("No output nodes in the graph.");
-        return;
-    }
-    for id in endpoints {
-        let mut params = state.graph.params(id).cloned().unwrap_or_default();
-        let mut include = params.get_bool("build", true);
-        let name = node_display_name(&state.graph, id);
-        let path = params.get_str("path", "").to_string();
-        ui.horizontal(|ui| {
-            if ui.checkbox(&mut include, name).changed() {
-                params.insert("build".to_string(), ParamValue::Bool(include));
-                if let Err(err) = state.graph.set_params(id, params) {
-                    ui.colored_label(ui.visuals().error_fg_color, err.to_string());
-                }
+    let active = endpoints
+        .iter()
+        .filter(|&&id| {
+            state
+                .graph
+                .params(id)
+                .is_none_or(|p| p.get_bool("build", true))
+        })
+        .count();
+    let badge = (!endpoints.is_empty()).then(|| active.to_string());
+    section(
+        ui,
+        "world_section_outputs",
+        "Outputs",
+        true,
+        true,
+        badge,
+        |ui| {
+            ui.weak("Endpoints a Build will write; tick to include.");
+            if endpoints.is_empty() {
+                ui.weak("No output nodes in the graph.");
+                return;
             }
-            if !path.is_empty() {
-                ui.weak(path);
+            for id in endpoints {
+                let mut params = state.graph.params(id).cloned().unwrap_or_default();
+                let mut include = params.get_bool("build", true);
+                let name = node_display_name(&state.graph, id);
+                let path = params.get_str("path", "").to_string();
+                ui.horizontal(|ui| {
+                    if ui.checkbox(&mut include, name).changed() {
+                        params.insert("build".to_string(), ParamValue::Bool(include));
+                        if let Err(err) = state.graph.set_params(id, params) {
+                            ui.colored_label(ui.visuals().error_fg_color, err.to_string());
+                        }
+                    }
+                    if !path.is_empty() {
+                        ui.weak(path);
+                    }
+                });
             }
-        });
-    }
+        },
+    );
 }
 
 /// The preview's pin toggle: a 24px square. Pinned = accent fill, accent border, light pin glyph
@@ -4381,24 +5072,33 @@ fn pin_toggle(ui: &mut egui::Ui, pinned: bool, enabled: bool) -> egui::Response 
 
 /// The small `PINNED` pill shown beside the pinned node's name: accent text in an accent outline.
 fn pinned_pill(ui: &mut egui::Ui) {
+    name_pill(ui, "PINNED", theme::ACCENT_PRIMARY);
+}
+
+/// The small `EXPERIMENTAL` pill shown beside an experimental node's name: warning-amber, distinct
+/// from the accent `PINNED` pill and colourblind-safe against it.
+fn experimental_pill(ui: &mut egui::Ui) {
+    name_pill(ui, "EXPERIMENTAL", theme::WARNING).on_hover_text(
+        "Functional but rough: expect artifacts. A stylistic effect, not a settled tool.",
+    );
+}
+
+/// A small outlined text pill in `color`, shared by the node-name badges. Returns its response so a
+/// caller can attach a tooltip.
+fn name_pill(ui: &mut egui::Ui, text: &str, color: egui::Color32) -> egui::Response {
     let font = egui::FontId::proportional(9.5);
-    let galley = ui
-        .painter()
-        .layout_no_wrap("PINNED".to_string(), font, theme::ACCENT_PRIMARY);
+    let galley = ui.painter().layout_no_wrap(text.to_string(), font, color);
     let pad = egui::vec2(6.0, 3.0);
-    let (rect, _) = ui.allocate_exact_size(galley.size() + pad * 2.0, egui::Sense::hover());
+    let (rect, resp) = ui.allocate_exact_size(galley.size() + pad * 2.0, egui::Sense::hover());
     let painter = ui.painter();
     painter.rect_stroke(
         rect,
         3.0,
-        egui::Stroke::new(1.0, theme::ACCENT_PRIMARY),
+        egui::Stroke::new(1.0, color),
         egui::StrokeKind::Inside,
     );
-    painter.galley(
-        rect.center() - galley.size() * 0.5,
-        galley,
-        theme::ACCENT_PRIMARY,
-    );
+    painter.galley(rect.center() - galley.size() * 0.5, galley, color);
+    resp
 }
 
 /// A segmented control: `labels` shown as one pill in a deep `c0` container, the active segment
@@ -4506,6 +5206,13 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 .on_hover_text(state.preview.status_label());
                 if is_pinned {
                     pinned_pill(ui);
+                }
+                if state
+                    .graph
+                    .spec(id)
+                    .is_some_and(|s| is_experimental(s.type_id))
+                {
+                    experimental_pill(ui);
                 }
                 // A bypassed node shows its input, not its own output (#105).
                 if state.graph.is_bypassed(id) {
@@ -4768,13 +5475,18 @@ fn node_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
             // scroll area is the deliberate addition for when a category can overflow
             // the screen.
             ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
-                // The blue selection is the only row highlight; suppress egui's grey
-                // hover fill so it never competes with the blue when the content
-                // changes under a stationary pointer (e.g. just after drilling into a
-                // category). Hover still drives the blue highlight (below) on movement.
+                // The blue selection is the only row highlight; suppress egui's own hover box
+                // (fill and stroke) so it never competes with the blue. egui styles whichever
+                // row the pointer is physically over, so mid-transit the entering row would draw
+                // its own hover box a frame before `menu.highlight` catches up to it, flashing a
+                // second highlight next to the leaving row's blue one. Suppressing both leaves a
+                // single highlight, the blue selection, which already tracks the pointer. (The
+                // row height is pinned in `menu_row`, so this is only about the visible box, not
+                // the layout.)
                 let hovered_vis = &mut ui.visuals_mut().widgets.hovered;
                 hovered_vis.weak_bg_fill = egui::Color32::TRANSPARENT;
                 hovered_vis.bg_fill = egui::Color32::TRANSPARENT;
+                hovered_vis.bg_stroke = egui::Stroke::NONE;
                 if rows.is_empty() {
                     ui.weak("no matches");
                 }
@@ -4913,10 +5625,20 @@ fn node_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
 /// align in a column instead of trailing each name at a different x (#93). `selected`
 /// draws the keyboard/hover highlight.
 fn menu_row(ui: &mut egui::Ui, row: MenuRow, selected: bool, enabled: bool) -> egui::Response {
+    // Pin the row to the boxed height so a state change can never reflow the column. egui's
+    // selectable button draws a plain row (inactive, unselected) with no frame stroke but a
+    // boxed row (hovered or selected) with one, and `Frame::total_margin` counts the stroke
+    // width, so a boxed row is 2px taller than a plain one. Normally one row is boxed (the
+    // selection) and it is stable, but mid-transit the leaving row is still selected while the
+    // entering row is hovered: two boxed rows at once grow the menu 2px, then it shrinks when
+    // the highlight catches up, a visible jitter. A floor equal to the boxed height (text plus
+    // both button-padding edges) makes every row that height, so the box only ever recolours a
+    // fixed-size row.
+    let row_h = ui.text_style_height(&egui::TextStyle::Body) + 2.0 * ui.spacing().button_padding.y;
     let resp = ui
         .add_enabled(
             enabled,
-            egui::Button::selectable(selected, menu_row_text(row)),
+            egui::Button::selectable(selected, menu_row_text(row)).min_size(egui::vec2(0.0, row_h)),
         )
         .on_disabled_hover_text("Only available inside a subgraph");
     if matches!(row, MenuRow::Category(_)) {
@@ -4930,6 +5652,19 @@ fn menu_row(ui: &mut egui::Ui, row: MenuRow, selected: bool, enabled: bool) -> e
             egui_phosphor::regular::CARET_RIGHT,
             egui::TextStyle::Button.resolve(ui.style()),
             color,
+        );
+    }
+    if let MenuRow::Node(type_id) = row
+        && is_experimental(type_id)
+    {
+        // A small amber marker at the right edge flags the node as experimental before it is added.
+        let x = resp.rect.right() - ui.spacing().button_padding.x;
+        ui.painter().text(
+            egui::pos2(x, resp.rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            "exp",
+            egui::FontId::proportional(9.5),
+            theme::WARNING,
         );
     }
     resp
@@ -5469,7 +6204,12 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         match hit {
             ClickHit::Node(handle) if additive => state.toggle_selection(handle),
             ClickHit::Node(handle) => state.select_only(handle),
-            ClickHit::Empty if !additive => state.clear_selection(),
+            ClickHit::Empty if !additive => {
+                // A plain click on empty canvas dismisses the preview: go blank rather than fall
+                // back to the graph's result node.
+                state.clear_selection();
+                state.preview_dismissed = true;
+            }
             ClickHit::Empty => {}
         }
     }
@@ -6553,6 +7293,50 @@ fn settings_dialog(ctx: &egui::Context, state: &mut AppState) {
     }
 }
 
+/// The About window (Help -> About Ymir): the app name, the build-stamped version, the
+/// license, and a link to the repository, so a bug report can name the exact build. Opened
+/// from the Help menu, closed by its own close control.
+fn about_dialog(ctx: &egui::Context, state: &mut AppState) {
+    if !state.about_open {
+        return;
+    }
+    let mut open = true;
+    egui::Window::new("About Ymir")
+        .collapsible(false)
+        .resizable(false)
+        .open(&mut open)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.add_space(2.0);
+            ui.heading("Ymir");
+            ui.label(
+                egui::RichText::new("Node-based procedural terrain generator.")
+                    .color(theme::TEXT_SECONDARY),
+            );
+            ui.add_space(8.0);
+            egui::Grid::new("about-facts")
+                .num_columns(2)
+                .spacing([10.0, 6.0])
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new("Version").color(theme::TEXT_TERTIARY));
+                    ui.label(
+                        egui::RichText::new(ymir_build_info::version_string())
+                            .family(egui::FontFamily::Monospace),
+                    );
+                    ui.end_row();
+                    ui.label(egui::RichText::new("License").color(theme::TEXT_TERTIARY));
+                    ui.label(env!("CARGO_PKG_LICENSE"));
+                    ui.end_row();
+                    ui.label(egui::RichText::new("Repository").color(theme::TEXT_TERTIARY));
+                    ui.hyperlink(env!("CARGO_PKG_REPOSITORY"));
+                    ui.end_row();
+                });
+        });
+    if !open {
+        state.about_open = false;
+    }
+}
+
 /// The author-identity fields (name, email, website, documentation) as a two-column grid,
 /// shared by the Settings dialog and the Save-to-library dialog. `id` names the grid so two
 /// instances never collide.
@@ -6673,6 +7457,74 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
     let sea_level = state.sea_level as f32;
     let show_water = state.show_water;
 
+    // Paint mode is on when a paint node is the target and is the previewed node.
+    let paint_active = state.paint_target.is_some() && state.preview_target() == state.paint_target;
+
+    // Ctrl + wheel resizes the brush, Shift + wheel changes its hardness. Read from the raw wheel
+    // events rather than `smooth_scroll_delta`: egui reroutes a modified scroll before it lands there
+    // (Ctrl becomes a zoom delta, Shift moves to the x axis), so the smoothed value reads zero under
+    // either modifier. Normalize the raw delta to points so the step is consistent across mice. Size is
+    // exponential (matching its log slider), hardness linear. Only while the pointer is over the pane.
+    if paint_active {
+        const SIZE_WHEEL: f32 = 0.0015;
+        const HARDNESS_WHEEL: f32 = 0.002;
+        let pane = ui.available_rect_before_wrap();
+        let layer = ui.layer_id();
+        let over = ui
+            .ctx()
+            .pointer_latest_pos()
+            .is_some_and(|p| pane.contains(p) && ui.ctx().layer_id_at(p) == Some(layer));
+        let (wheel, ctrl, shift) = ui.input(|i| {
+            let mut wheel = 0.0_f32;
+            let mut modifiers = egui::Modifiers::default();
+            for event in &i.events {
+                if let egui::Event::MouseWheel {
+                    unit,
+                    delta,
+                    modifiers: mods,
+                    ..
+                } = event
+                {
+                    let to_points = match unit {
+                        egui::MouseWheelUnit::Point => 1.0,
+                        egui::MouseWheelUnit::Line => 50.0,
+                        egui::MouseWheelUnit::Page => 400.0,
+                    };
+                    wheel += delta.y * to_points;
+                    modifiers = *mods;
+                }
+            }
+            (wheel, modifiers.ctrl, modifiers.shift)
+        });
+        if over && wheel != 0.0 && (ctrl || shift) {
+            if ctrl {
+                state.paint_brush.radius =
+                    (state.paint_brush.radius * (wheel * SIZE_WHEEL).exp()).clamp(0.005, 0.5);
+            } else {
+                state.paint_brush.hardness =
+                    (state.paint_brush.hardness + wheel * HARDNESS_WHEEL).clamp(0.0, 1.0);
+            }
+        }
+    }
+
+    // Ctrl held inverts Raise <-> Lower for the stroke and the cursor's mark, without touching the
+    // stored mode, so you can carve a quick pit without leaving the brush.
+    let effective_mode = if paint_active && ui.input(|i| i.modifiers.ctrl) {
+        match state.paint_brush.mode {
+            StrokeMode::Paint => StrokeMode::Erase,
+            StrokeMode::Erase => StrokeMode::Paint,
+        }
+    } else {
+        state.paint_brush.mode
+    };
+
+    // The brush cursor, shown in whichever projection is active; its mark reflects the effective mode.
+    let brush = paint_active.then_some(viewport2d::BrushCursor {
+        radius: state.paint_brush.radius,
+        hardness: state.paint_brush.hardness,
+        raise: matches!(effective_mode, StrokeMode::Paint),
+    });
+
     match state.viewport_mode {
         viewport2d::Mode::ThreeD => {
             // True world proportion: a height of 1.0 rises to (world_height / world_extent)
@@ -6680,196 +7532,655 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
             // proportion.
             let true_proportion =
                 (state.world_height / state.world_extent.max(f64::EPSILON)) as f32;
+            // Advance the animation phase by the real frame delta scaled by the speed control, but
+            // only while an animated layer is on, so the speed slider changes future motion without
+            // rescaling the elapsed phase (which would jump the waves) and dropped frames do not
+            // slow it (the delta is real). Frozen or hidden water leaves the phase untouched.
+            if state.show_water && (state.water_waves || state.water_foam_on) {
+                let dt = ui.input(|i| i.stable_dt);
+                state.water_phase += dt * state.water_speed;
+            }
             let settings = viewport::ViewSettings {
                 fixed_range: state.viewport_scale == shade::HeightScale::Fixed,
                 vertical_scale: true_proportion * state.viewport_exaggeration,
+                fly_speed: state.viewport_fly_speed,
                 sea_level,
                 show_water,
+                water_depth: state.water_depth,
+                water_waves: state.water_waves,
+                water_reflection: state.water_reflection,
+                water_foam_on: state.water_foam_on,
+                water_extinction: state.water_extinction,
+                water_color: state.water_color,
+                water_wave: state.water_wave,
+                water_reflectivity: state.water_reflectivity,
+                water_specular: state.water_specular,
+                water_steepness: state.water_steepness,
+                water_wavelength: state.water_wavelength,
+                water_foam: state.water_foam,
+                water_foam_width: state.water_foam_width,
+                // The wet-shore toggle gates the effect by passing zero strength when off.
+                water_wet: if state.water_wet_on {
+                    state.water_wet
+                } else {
+                    0.0
+                },
+                water_wet_width: state.water_wet_width,
+                water_time: state.water_phase,
+                water_speed: state.water_speed,
             };
-            viewport::show(
+            // Paint mode: with a Paint node targeted and previewed, a plain drag on the 3D surface
+            // brushes onto it (ray-cast pick). Orbit stays on Alt-drag, fly on right-drag.
+            let sample = viewport::show(
                 ui,
                 &mut state.viewport_camera,
                 field,
                 settings,
                 state.viewport_lighting,
                 &mut state.viewport_mesh,
+                brush,
             );
+            if let Some(sample) = sample {
+                apply_paint_sample(state, sample, effective_mode);
+            }
         }
         viewport2d::Mode::TwoD => {
-            state.viewport_2d.show(
+            // Paint mode is on when a Paint node is the target and it is the node the map previews,
+            // so brushing lands on the mask you are looking at.
+            let sample = state.viewport_2d.show(
                 ui,
+                state.render_state.as_ref(),
                 field,
-                display,
-                state.viewport_scale,
-                sea_level,
-                show_water,
+                viewport2d::MapDisplay {
+                    output: display,
+                    scale: state.viewport_scale,
+                    sea_level,
+                    show_water,
+                },
+                brush,
             );
+            if let Some(sample) = sample {
+                apply_paint_sample(state, sample, effective_mode);
+            }
         }
     }
 
-    // A small control HUD overlaid at the top-left of the viewport. A temporary home: the
-    // design calls for a vertical toolbar down the left edge, not yet built.
+    // The on-render control cluster overlaid at the top-left of the viewport (#164): a compact row
+    // of the projection toggle, the fidelity readout, the fly speed (3D only), and a Display button
+    // that opens a flyout holding the rest (height scale, exaggeration, light).
     let mut mode = state.viewport_mode;
     let mut scale = state.viewport_scale;
     let mut exaggeration = state.viewport_exaggeration;
     let mut light = state.viewport_lighting;
     let mut shade_mode = state.viewport_2d.shade_mode();
-    // Draw the floating HUD only when the viewport is tall enough to hold it, so a short viewport
-    // shows only the render rather than a HUD overflowing it.
+    let mut light2d = state.viewport_2d.relief_light();
+    let mut fly_speed = state.viewport_fly_speed;
+    // The tapped outputs of the previewed node and the index the viewport shows (#165). The flyout's
+    // Output picker and the inspector thumbnail's picker both read and write this one index, so the
+    // two stay in sync. Names come from the node's spec, matching the inspector.
+    let output_names: Vec<String> = state
+        .preview_target()
+        .and_then(|t| state.graph.node_id_of(t))
+        .and_then(|id| state.graph.spec(id))
+        .map(|spec| spec.outputs.iter().map(|p| p.name.clone()).collect())
+        .unwrap_or_default();
+    let mut display_output = state.preview.display_output();
+    let display_output_before = display_output;
+    // Draw the cluster only when the viewport is tall enough to hold it, so a short viewport shows
+    // only the render rather than chrome overflowing it.
     if rect.height() >= WORKSPACE_HUD_MIN {
-        egui::Area::new(ui.id().with("viewport-hud"))
-        .order(egui::Order::Foreground)
-        .fixed_pos(rect.left_top() + egui::vec2(8.0, 8.0))
-        .show(ui.ctx(), |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| {
-                // The projection: the 3D relief or the flat 2D map (#134). The 2D view gives
-                // data maps (flow, masks) the room the small preview pane can't.
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut mode, viewport2d::Mode::ThreeD, "3D")
-                        .on_hover_text("Meshed relief, orbit camera");
-                    ui.selectable_value(&mut mode, viewport2d::Mode::TwoD, "2D")
-                        .on_hover_text("Flat map; drag to pan, scroll to zoom, double-click to fit");
+        egui::Area::new(ui.id().with("viewport-cluster"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(rect.left_top() + egui::vec2(8.0, 8.0))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::NONE.show(ui, |ui| {
+                    // The cluster row: each control floats on the render in its own subtle chip
+                    // (an integrated-overlay look, not one raised popup box). The Display button's
+                    // response is returned so the flyout can anchor beneath it and toggle on its click.
+                    let display_btn = ui
+                        .horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            // The projection: the 3D relief or the flat 2D map (#134). The 2D view
+                            // gives data maps (flow, masks) the room the small preview pane can't.
+                            overlay_chip(ui, |ui| {
+                                let mode_i = usize::from(mode == viewport2d::Mode::TwoD);
+                                if let Some(i) = segmented(ui, &["3D", "2D"], mode_i) {
+                                    mode = if i == 0 {
+                                        viewport2d::Mode::ThreeD
+                                    } else {
+                                        viewport2d::Mode::TwoD
+                                    };
+                                }
+                            });
+                            // 2D: the Height/Relief shading toggle rides the cluster (its scale and
+                            // 2D sun live in the flyout). Height is the greyscale field, best for data
+                            // maps; Relief is the hillshade, best for reading shape.
+                            if mode == viewport2d::Mode::TwoD {
+                                overlay_chip(ui, |ui| {
+                                    let shade_i =
+                                        usize::from(shade_mode == shade::ShadeMode::Relief);
+                                    if let Some(i) = segmented(ui, &["Height", "Relief"], shade_i) {
+                                        shade_mode = if i == 0 {
+                                            shade::ShadeMode::Height
+                                        } else {
+                                            shade::ShadeMode::Relief
+                                        };
+                                    }
+                                });
+                            }
+                            // Whether the viewport shows the full build result or the coarse
+                            // preview, so it is clear which fidelity is on screen while tuning.
+                            overlay_chip(ui, |ui| {
+                                ui.label(
+                                    egui::RichText::new(if showing_build {
+                                        "Showing: build"
+                                    } else {
+                                        "Showing: preview"
+                                    })
+                                    .family(egui::FontFamily::Monospace)
+                                    .size(11.5)
+                                    .color(theme::TEXT_TERTIARY),
+                                )
+                                .on_hover_text(
+                                    "Build quality appears after a Build, until the graph changes; otherwise the live preview",
+                                );
+                            });
+                            // Fly speed rides the cluster (always accessible), only in 3D where the
+                            // fly camera exists. Shift boosts 4x over this.
+                            if mode == viewport2d::Mode::ThreeD {
+                                overlay_chip(ui, |ui| {
+                                    ui.label(
+                                        egui::RichText::new("Fly speed")
+                                            .size(11.5)
+                                            .color(theme::TEXT_SECONDARY),
+                                    )
+                                    .on_hover_text(
+                                        "Speed of the right-mouse + WASD fly-through (Shift boosts 4x)",
+                                    );
+                                    // The styled slider (visible trough + accent fill), matching the
+                                    // flyout sliders. It fills available width, so pin it to a fixed
+                                    // region, and show the value beside it since the styled slider has
+                                    // no inline readout.
+                                    let mut v = f64::from(fly_speed);
+                                    ui.allocate_ui_with_layout(
+                                        egui::vec2(90.0, 18.0),
+                                        egui::Layout::left_to_right(egui::Align::Center),
+                                        |ui| {
+                                            if param_ui::slider(ui, &mut v, 0.05, 1.5, true).changed()
+                                            {
+                                                fly_speed = v as f32;
+                                            }
+                                        },
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(format!("{fly_speed:.2}"))
+                                            .family(egui::FontFamily::Monospace)
+                                            .size(11.5)
+                                            .color(theme::TEXT_PRIMARY),
+                                    );
+                                });
+                            }
+                            display_button(ui)
+                        })
+                        .inner;
+                    // The Display flyout, its open state managed by hand so the Output list can float
+                    // as its own overlay (below) without the list's clicks tripping a close: a nested
+                    // menu popup renders in its own layer and would dismiss a click-outside flyout on
+                    // selection. So the flyout ignores clicks (dragging its sliders never dismisses
+                    // it); the Display button toggles it, and a click outside it and the list, or
+                    // Escape, closes it.
+                    let flyout_open_id = ui.make_persistent_id("viewport-flyout-open");
+                    let outputs_open_id = ui.make_persistent_id("viewport-outputs-open");
+                    let mut flyout_open = ui.data(|d| d.get_temp(flyout_open_id).unwrap_or(false));
+                    let mut outputs_open = ui.data(|d| d.get_temp(outputs_open_id).unwrap_or(false));
+                    let has_outputs = output_names.len() > 1;
+                    let cur = display_output.min(output_names.len().saturating_sub(1));
+                    if display_btn.clicked() {
+                        flyout_open = !flyout_open;
+                        outputs_open = false;
+                    }
+                    let mut flyout_rect = None;
+                    let mut output_btn_rect = None;
+                    if flyout_open {
+                        let inner = egui::Popup::from_response(&display_btn)
+                            .open(true)
+                            .close_behavior(egui::PopupCloseBehavior::IgnoreClicks)
+                            .gap(6.0)
+                            .frame(egui::Frame::popup(ui.style()))
+                            .show(|ui| {
+                                ui.set_max_width(250.0);
+                                // The Output header block tops the flyout: the picked output on a faint
+                                // accent-tinted block (the "what", not the "how"), with a note that it
+                                // mirrors the inspector thumbnail's picker. Always shown; a single-output
+                                // node has no choice, so its name is static rather than a dropdown.
+                                if !output_names.is_empty() {
+                                    egui::Frame::new()
+                                        .fill(theme::ACCENT_PRIMARY.gamma_multiply(0.12))
+                                        .corner_radius(6)
+                                        .inner_margin(egui::Margin::symmetric(8, 6))
+                                        .show(ui, |ui| {
+                                            ui.horizontal(|ui| {
+                                                flyout_label(ui, "Output");
+                                                if has_outputs {
+                                                    let field = output_field(
+                                                        ui,
+                                                        &output_names[cur],
+                                                        outputs_open,
+                                                    );
+                                                    output_btn_rect = Some(field.rect);
+                                                    if field.clicked() {
+                                                        outputs_open = !outputs_open;
+                                                    }
+                                                } else {
+                                                    ui.label(
+                                                        egui::RichText::new(&output_names[cur])
+                                                            .color(theme::TEXT_PRIMARY),
+                                                    );
+                                                }
+                                            });
+                                            ui.horizontal(|ui| {
+                                                ui.label(
+                                                    egui::RichText::new(format!(
+                                                        "{}  synced with inspector thumbnail",
+                                                        egui_phosphor::regular::ARROWS_CLOCKWISE
+                                                    ))
+                                                    .size(10.5)
+                                                    .color(theme::TEXT_TERTIARY),
+                                                );
+                                            });
+                                        });
+                                    group_separator(ui);
+                                }
+                                match mode {
+                                    viewport2d::Mode::ThreeD => {
+                                        viewport_3d_controls(ui, &mut scale, &mut exaggeration, &mut light);
+                                    }
+                                    viewport2d::Mode::TwoD => {
+                                        viewport_2d_controls(ui, shade_mode, &mut scale, &mut light2d);
+                                    }
+                                }
+                            });
+                        flyout_rect = inner.map(|r| r.response.rect);
+                    }
+                    // The Output list: its own foreground overlay, so revealing it never grows the
+                    // flyout. Anchored under the Output button and raised above the flyout; picking one
+                    // sets the shared index and closes the list (the click lands inside the list, so it
+                    // never closes the flyout).
+                    let mut list_rect = None;
+                    if flyout_open
+                        && outputs_open
+                        && let Some(anchor) = output_btn_rect
+                    {
+                        let list = egui::Area::new(ui.id().with("viewport-outputs-list"))
+                            .order(egui::Order::Foreground)
+                            .fixed_pos(anchor.left_bottom() + egui::vec2(0.0, 4.0))
+                            .show(ui.ctx(), |ui| {
+                                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                                    // Size to the widest option (plus the label padding), not the
+                                    // anchor button, whose width tracks the *selected* name; otherwise
+                                    // a short selection shrinks the list and wraps the longer options.
+                                    let font = egui::TextStyle::Button.resolve(ui.style());
+                                    let widest = output_names
+                                        .iter()
+                                        .map(|n| {
+                                            ui.painter()
+                                                .layout_no_wrap(
+                                                    n.clone(),
+                                                    font.clone(),
+                                                    theme::TEXT_PRIMARY,
+                                                )
+                                                .size()
+                                                .x
+                                        })
+                                        .fold(0.0_f32, f32::max);
+                                    let pad = ui.spacing().button_padding.x * 2.0 + 6.0;
+                                    ui.set_min_width((widest + pad).max(anchor.width()));
+                                    for (i, name) in output_names.iter().enumerate() {
+                                        if ui.selectable_label(i == cur, name).clicked() {
+                                            display_output = i;
+                                            outputs_open = false;
+                                        }
+                                    }
+                                });
+                            });
+                        // Raise above the flyout (both Foreground) so the list is never occluded.
+                        ui.ctx().move_to_top(list.response.layer_id);
+                        list_rect = Some(list.response.rect);
+                    }
+                    // Manual dismissal: Escape backs out (list first, then flyout); a click outside the
+                    // Display button, the flyout, and the list closes everything.
+                    if flyout_open {
+                        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            if outputs_open {
+                                outputs_open = false;
+                            } else {
+                                flyout_open = false;
+                            }
+                        } else if ui.input(|i| i.pointer.any_click()) {
+                            let pos = ui.input(|i| i.pointer.interact_pos());
+                            let inside_flyout =
+                                flyout_rect.zip(pos).is_some_and(|(r, p)| r.contains(p));
+                            let inside_list = list_rect.zip(pos).is_some_and(|(r, p)| r.contains(p));
+                            let on_btn = pos.is_some_and(|p| display_btn.rect.contains(p));
+                            if !on_btn && !inside_flyout && !inside_list {
+                                flyout_open = false;
+                                outputs_open = false;
+                            }
+                        }
+                    }
+                    ui.data_mut(|d| {
+                        d.insert_temp(flyout_open_id, flyout_open);
+                        d.insert_temp(outputs_open_id, outputs_open);
+                    });
                 });
-                // Whether the viewport shows the full build result or the coarse preview,
-                // so it is clear which fidelity is on screen while tuning.
-                ui.weak(if showing_build {
-                    "Showing: build"
-                } else {
-                    "Showing: preview"
-                })
-                .on_hover_text(
-                    "Build quality appears after a Build, until the graph changes; otherwise the live preview",
-                );
-                match mode {
-                    viewport2d::Mode::ThreeD => {
-                        viewport_3d_controls(ui, &mut scale, &mut exaggeration, &mut light);
-                    }
-                    viewport2d::Mode::TwoD => {
-                        viewport_2d_controls(ui, &mut shade_mode, &mut scale);
-                    }
-                }
             });
-        });
+    }
+    // Write the picked output back only when the flyout changed it, so this never clobbers a change
+    // the inspector's picker made the same frame.
+    if display_output != display_output_before {
+        state.preview.set_display_output(display_output);
     }
     state.viewport_mode = mode;
     state.viewport_scale = scale;
     state.viewport_exaggeration = exaggeration;
     state.viewport_lighting = light;
     state.viewport_2d.set_shade_mode(shade_mode);
-
-    // The relief sun, anchored top-right and shown only in the 2D map's relief mode (#96): a
-    // compact dial to steer the hillshade light the flat map cannot otherwise set. Its own
-    // Foreground area, mirroring the top-left HUD, so dragging it never pans the map beneath.
-    if rect.height() >= WORKSPACE_HUD_MIN
-        && mode == viewport2d::Mode::TwoD
-        && shade_mode == shade::ShadeMode::Relief
-    {
-        egui::Area::new(ui.id().with("viewport-sun"))
-            .order(egui::Order::Foreground)
-            .fixed_pos(rect.right_top() + egui::vec2(-8.0, 8.0))
-            .pivot(egui::Align2::RIGHT_TOP)
-            .show(ui.ctx(), |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.add(egui::Label::new(
-                            egui::RichText::new("Sun").color(theme::TEXT_SECONDARY),
-                        ));
-                        state.viewport_2d.sun_dial(ui);
-                        // Read the angles after the dial so a drag this frame is reflected.
-                        // Right-pad to a fixed width (azimuth 3 digits, altitude 2) so the
-                        // monospace readout, and thus the popup, keeps a constant size as the
-                        // digit count changes instead of jittering while the dial is dragged.
-                        let (az, alt) = state.viewport_2d.light_angles();
-                        ui.label(
-                            egui::RichText::new(format!("{az:>3.0}° · {alt:>2.0}°"))
-                                .family(egui::FontFamily::Monospace)
-                                .color(theme::TEXT_TERTIARY),
-                        );
-                    });
-                });
-            });
-    }
+    state.viewport_2d.set_relief_light(light2d);
+    state.viewport_fly_speed = fly_speed;
 }
 
-/// The 3D viewport HUD controls: the Auto/Fixed height scale, the vertical exaggeration,
-/// and the sun under a collapsing header.
+/// A left label for a flyout row that reserves its own measured width plus a small gap, so the
+/// control to its right never overlaps it however long the label is (a fixed column was narrower than
+/// "Exaggeration" renders). Painted rather than a widget so it sits flush with the row's baseline.
+fn flyout_label(ui: &mut egui::Ui, text: &str) {
+    let font = egui::FontId::proportional(11.5);
+    let text_w = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), font.clone(), theme::TEXT_SECONDARY)
+        .size()
+        .x;
+    let h = ui.spacing().interact_size.y;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(text_w + 10.0, h), egui::Sense::hover());
+    ui.painter().text(
+        egui::pos2(rect.left(), rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        text,
+        font,
+        theme::TEXT_SECONDARY,
+    );
+}
+
+/// The cluster's Display button: accent-outlined with a sliders glyph, the only cluster control that
+/// opens a panel. Returned so the flyout can anchor to it and toggle on its click.
+fn display_button(ui: &mut egui::Ui) -> egui::Response {
+    let label = format!("{}  Display", egui_phosphor::regular::SLIDERS_HORIZONTAL);
+    ui.add(
+        egui::Button::new(
+            egui::RichText::new(label)
+                .size(13.0)
+                .color(theme::ACCENT_PRIMARY),
+        )
+        .fill(chip_fill())
+        .stroke(egui::Stroke::new(1.0, theme::ACCENT_PRIMARY))
+        .corner_radius(6)
+        // Match the chip row height (the segmented control's 26px content + the chips' 4px top and
+        // bottom margins), so the button's top and bottom borders line up with the other controls.
+        .min_size(egui::vec2(0.0, 34.0)),
+    )
+    .on_hover_text("Height scale, exaggeration, and light")
+}
+
+/// Wraps a cluster control in subtle translucent-dark chrome, so it floats directly on the render and
+/// stays legible over both the dark 3D relief and the light 2D map while reading as embedded, not as
+/// a raised popup box. Each cluster control gets its own chip rather than one wrapping frame.
+fn overlay_chip<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    egui::Frame::new()
+        .fill(chip_fill())
+        .stroke(egui::Stroke::new(1.0, chip_border()))
+        .corner_radius(6)
+        .inner_margin(egui::Margin::symmetric(8, 4))
+        .show(ui, add)
+        .inner
+}
+
+/// Frosted chrome for the on-render cluster chips (shared by the Display button, for consistency): a
+/// translucent slate at low opacity, so the render shows through and the chip reads as a subtle,
+/// unobtrusive frost rather than a solid dark box, while light text stays readable over both the dark
+/// 3D relief and the lighter 2D map. egui cannot blur, so this approximates frosted glass with alpha.
+fn chip_fill() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(34, 39, 47, 105)
+}
+
+/// The chip's hairline edge: a faint light stroke that gives the frost a defined border without
+/// weight.
+fn chip_border() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(150, 160, 175, 55)
+}
+
+/// The flyout's Output dropdown field: a dark rounded field spanning the available width, the current
+/// output name on the left and a caret on the right. Returns its click response, so the caller anchors
+/// the floating option list under it.
+fn output_field(ui: &mut egui::Ui, name: &str, open: bool) -> egui::Response {
+    let w = ui.available_width().max(48.0);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 24.0), egui::Sense::click());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 4.0, theme::BG_ABYSS);
+    painter.rect_stroke(
+        rect,
+        4.0,
+        egui::Stroke::new(1.0, theme::LINE),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        egui::pos2(rect.left() + 8.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        name,
+        egui::FontId::proportional(12.5),
+        theme::TEXT_PRIMARY,
+    );
+    let caret = if open {
+        egui_phosphor::regular::CARET_UP
+    } else {
+        egui_phosphor::regular::CARET_DOWN
+    };
+    painter.text(
+        egui::pos2(rect.right() - 8.0, rect.center().y),
+        egui::Align2::RIGHT_CENTER,
+        caret,
+        egui::FontId::proportional(12.0),
+        theme::TEXT_SECONDARY,
+    );
+    resp
+}
+
+/// Fixed width of one light-grid cell, so the two columns line up and their sliders match width.
+const LIGHT_CELL_W: f32 = 100.0;
+
+/// One cell of the flyout's 2-column light grid: a `label ........ value` header over a full-cell
+/// slider (its inline value suppressed, since the header carries it). `suffix` (e.g. "°") is shown on
+/// the readout only.
+fn light_cell(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    decimals: usize,
+    suffix: &str,
+) {
+    ui.vertical(|ui| {
+        ui.set_width(LIGHT_CELL_W);
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(label)
+                    .size(11.5)
+                    .color(theme::TEXT_SECONDARY),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new(format!("{value:.decimals$}{suffix}"))
+                        .family(egui::FontFamily::Monospace)
+                        .size(11.5)
+                        .color(theme::TEXT_PRIMARY),
+                );
+            });
+        });
+        // The app's styled slider (visible dark trough, accent fill, ringed knob), so the track reads
+        // on the dark flyout where egui's default rail blends in — and it matches the mockup.
+        let mut v = f64::from(*value);
+        if param_ui::slider(
+            ui,
+            &mut v,
+            f64::from(*range.start()),
+            f64::from(*range.end()),
+            false,
+        )
+        .changed()
+        {
+            *value = v as f32;
+        }
+    });
+}
+
+/// The 3D display-flyout controls: the Auto/Fixed height scale, the vertical exaggeration, and the
+/// sun under the collapsing LIGHT section. Fly speed is not here: it rides the always-visible
+/// cluster, since it is adjusted often enough that burying it in the flyout would be a nuisance.
 fn viewport_3d_controls(
     ui: &mut egui::Ui,
     scale: &mut shade::HeightScale,
     exaggeration: &mut f32,
     light: &mut viewport::Lighting,
 ) {
+    ui.spacing_mut().item_spacing.y = 6.0;
+    // Height scale: Fixed shows true amplitude; Auto normalizes to fill the relief (and so hides
+    // amplitude). Mirrors the 2D preview's Auto/Fixed toggle.
     ui.horizontal(|ui| {
-        // Fixed shows true amplitude; Auto normalizes to fill the relief (and so hides
-        // amplitude). Mirrors the 2D preview's Auto/Fixed toggle.
-        ui.selectable_value(scale, shade::HeightScale::Fixed, "Fixed")
-            .on_hover_text("Show true height (clips out of range)");
-        ui.selectable_value(scale, shade::HeightScale::Auto, "Auto")
-            .on_hover_text("Stretch the field's actual range to fill the relief");
+        flyout_label(ui, "Height scale");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let active = usize::from(*scale == shade::HeightScale::Auto);
+            if let Some(i) = segmented(ui, &["Fixed", "Auto"], active) {
+                *scale = if i == 0 {
+                    shade::HeightScale::Fixed
+                } else {
+                    shade::HeightScale::Auto
+                };
+            }
+        })
+        .response
+        .on_hover_text(
+            "Fixed shows true height (clips out of range); Auto stretches to fill the relief",
+        );
     });
+    // Exaggeration: a right-pinned "1.00x" scrub/type box, the log slider filling the gap with its
+    // own inline value suppressed (the box is the value), mirroring the panel slider rows.
     ui.horizontal(|ui| {
-        ui.label("Exaggeration").on_hover_text(
-            "Vertical exaggeration; 1x is real-world proportion (set by World height)",
-        );
-        ui.add(
-            egui::Slider::new(exaggeration, 0.25..=8.0)
-                .logarithmic(true)
-                .fixed_decimals(2)
-                .custom_formatter(|v, _| format!("{v:.2}x")),
-        );
+        flyout_label(ui, "Exaggeration");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let h = ui.spacing().interact_size.y;
+            ui.add_sized(
+                [48.0, h],
+                egui::DragValue::new(exaggeration)
+                    .range(0.25..=8.0)
+                    .speed(0.01)
+                    .fixed_decimals(2)
+                    .suffix("x"),
+            )
+            .on_hover_text("1x is real-world proportion (set by World height)");
+            // The styled slider (visible trough, accent fill), so the track reads on the dark flyout.
+            let mut v = f64::from(*exaggeration);
+            if param_ui::slider(ui, &mut v, 0.25, 8.0, true).changed() {
+                *exaggeration = v as f32;
+            }
+        });
     });
-    // Lighting tucks under a collapsing header so the HUD stays compact.
-    ui.collapsing("Light", |ui| {
-        egui::Grid::new("viewport-light")
-            .num_columns(2)
-            .show(ui, |ui| {
-                ui.label("Azimuth")
-                    .on_hover_text("Compass direction the sun comes from");
-                ui.add(
-                    egui::Slider::new(&mut light.azimuth_deg, 0.0..=360.0)
-                        .fixed_decimals(0)
-                        .suffix("°"),
-                );
-                ui.end_row();
-                ui.label("Elevation")
-                    .on_hover_text("Sun height above the horizon; low rakes the form");
-                ui.add(
-                    egui::Slider::new(&mut light.elevation_deg, 0.0..=90.0)
-                        .fixed_decimals(0)
-                        .suffix("°"),
-                );
-                ui.end_row();
-                ui.label("Intensity");
-                ui.add(egui::Slider::new(&mut light.intensity, 0.0..=2.0).fixed_decimals(2));
-                ui.end_row();
-                ui.label("Ambient");
-                ui.add(egui::Slider::new(&mut light.ambient, 0.0..=1.0).fixed_decimals(2));
-                ui.end_row();
-            });
-    });
+    // The sun, under a LIGHT section tagged with the projection it edits, collapsed by default to
+    // keep the flyout compact. A 2-column grid: azimuth/elevation, then intensity/ambient.
+    section(
+        ui,
+        "viewport-light-3d",
+        "Light",
+        false,
+        true,
+        Some("3D sun".to_string()),
+        |ui| {
+            egui::Grid::new("viewport-light-3d-grid")
+                .num_columns(2)
+                .spacing([14.0, 8.0])
+                .show(ui, |ui| {
+                    light_cell(ui, "Azimuth", &mut light.azimuth_deg, 0.0..=360.0, 0, "°");
+                    light_cell(
+                        ui,
+                        "Elevation",
+                        &mut light.elevation_deg,
+                        0.0..=90.0,
+                        0,
+                        "°",
+                    );
+                    ui.end_row();
+                    light_cell(ui, "Intensity", &mut light.intensity, 0.0..=2.0, 2, "");
+                    light_cell(ui, "Ambient", &mut light.ambient, 0.0..=1.0, 2, "");
+                    ui.end_row();
+                });
+        },
+    );
 }
 
-/// The 2D map HUD controls: the Height/Relief shading toggle, and (in Height) the shared
-/// Auto/Fixed scale. Relief uses a fixed light here; the small preview pane is where the
-/// light is steered.
+/// The 2D map's flyout controls. The Height/Relief toggle now rides the cluster, so this shows the
+/// set for the active shading: in Height, the Auto/Fixed scale; in Relief, the 2D sun dial (a single
+/// drag sets azimuth and altitude together), which the map steers from here rather than an on-map
+/// overlay dial.
 fn viewport_2d_controls(
     ui: &mut egui::Ui,
-    shade_mode: &mut shade::ShadeMode,
+    shade_mode: shade::ShadeMode,
     scale: &mut shade::HeightScale,
+    light: &mut [f32; 3],
 ) {
-    ui.horizontal(|ui| {
-        ui.selectable_value(shade_mode, shade::ShadeMode::Height, "Height")
-            .on_hover_text("Grayscale value, best for data maps (flow, masks)");
-        ui.selectable_value(shade_mode, shade::ShadeMode::Relief, "Relief")
-            .on_hover_text("Hillshade, best for terrain shape");
-    });
-    if *shade_mode == shade::ShadeMode::Height {
-        ui.horizontal(|ui| {
-            ui.selectable_value(scale, shade::HeightScale::Fixed, "Fixed")
-                .on_hover_text("Map a fixed [0, 1]: true amplitude, clips out of range");
-            ui.selectable_value(scale, shade::HeightScale::Auto, "Auto")
-                .on_hover_text("Stretch the field's actual range to black/white");
-        });
+    ui.spacing_mut().item_spacing.y = 6.0;
+    match shade_mode {
+        // Height shading: the Auto/Fixed scale (which does not apply to the hillshade).
+        shade::ShadeMode::Height => {
+            ui.horizontal(|ui| {
+                flyout_label(ui, "Height scale");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let active = usize::from(*scale == shade::HeightScale::Auto);
+                    if let Some(i) = segmented(ui, &["Fixed", "Auto"], active) {
+                        *scale = if i == 0 {
+                            shade::HeightScale::Fixed
+                        } else {
+                            shade::HeightScale::Auto
+                        };
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "Fixed maps a true [0, 1] (clips out of range); Auto stretches the actual range",
+                );
+            });
+        }
+        // Relief shading: the 2D sun, its own light independent of the 3D sun. The dial is a single
+        // draggable disk (azimuth from angle, altitude from distance), far more direct than two
+        // sliders; it only writes on a drag, so idle frames never rebuild the CPU-shaded map (#167).
+        shade::ShadeMode::Relief => {
+            section(
+                ui,
+                "viewport-light-2d",
+                "Light",
+                false,
+                true,
+                Some("2D sun".to_string()),
+                |ui| {
+                    ui.horizontal(|ui| {
+                        crate::sun::dial(ui, light);
+                        // Read the angles after the dial so a drag this frame shows immediately.
+                        let (az, alt) = crate::sun::light_angles(*light);
+                        ui.label(
+                            egui::RichText::new(format!("{az:>3.0}° · {alt:>2.0}°"))
+                                .family(egui::FontFamily::Monospace)
+                                .color(theme::TEXT_TERTIARY),
+                        );
+                    });
+                },
+            );
+        }
     }
 }
 inventory::submit! { PaneKind { id: "viewport-3d", draw: viewport_pane } }
@@ -7516,9 +8827,20 @@ impl YmirApp {
         // Open the build cache's disk store (read view) for the viewport, in the app shell so
         // the test-constructed state never touches the filesystem.
         state.field_store = build::open_store();
-        // Set up the 3D viewport's wgpu pipeline once, now that the wgpu device exists.
+        // Set up the 3D viewport's wgpu pipeline once, now that the wgpu device exists, and stash
+        // the render state so the 2D map can shade on the GPU too (#167).
         if let Some(render_state) = cc.wgpu_render_state.as_ref() {
             viewport::init(render_state);
+            state.render_state = Some(render_state.clone());
+            // Share the viewport's device for GPU compute, so erosion runs on the GPU in the
+            // preview and the build without standing up a second device. A GPU-capable node
+            // downcasts this handle; if it is absent, every node runs its CPU path.
+            state.gpu = Some(std::sync::Arc::new(
+                ymir_gpu::GpuContext::from_device_queue(
+                    render_state.device.clone(),
+                    render_state.queue.clone(),
+                ),
+            ));
         }
         // Empty so the first frame always pushes the real title to the OS bar.
         Self {
@@ -7645,6 +8967,7 @@ impl eframe::App for YmirApp {
         // The "Save to library" dialog floats over the panes when open (#106).
         library_save_dialog(ui.ctx(), &mut self.state);
         settings_dialog(ui.ctx(), &mut self.state);
+        about_dialog(ui.ctx(), &mut self.state);
         // Intercept a window close with unsaved changes: cancel it and raise the prompt
         // (#83). An already-confirmed close (allow_close) or a clean session goes through.
         if ui.ctx().input(|i| i.viewport().close_requested())
@@ -8576,6 +9899,31 @@ mod tests {
     }
 
     #[test]
+    fn dismissing_the_preview_blanks_it_instead_of_the_sink_fallback() {
+        let mut state = AppState::new();
+        state.graph = Graph::new();
+        state.snarl = Snarl::new();
+        let pos = egui::Pos2::ZERO;
+        let gen_id =
+            canvas::add_node(&mut state.graph, &mut state.snarl, "generator.fbm", pos).unwrap();
+        let mod_id =
+            canvas::add_node(&mut state.graph, &mut state.snarl, "modifier.invert", pos).unwrap();
+        state.graph.connect(gen_id, 0, mod_id, 0).unwrap();
+        let modifier = state.graph.stable_id(mod_id).unwrap();
+
+        // Nothing dismissed: the sink is previewed, as before.
+        assert_eq!(state.preview_target(), Some(modifier));
+
+        // The background-click deselect sets this: the preview goes blank rather than to the sink.
+        state.preview_dismissed = true;
+        assert_eq!(state.preview_target(), None);
+
+        // A fresh open or load clears the selection, which restores the result-node fallback.
+        state.clear_selection();
+        assert_eq!(state.preview_target(), Some(modifier));
+    }
+
+    #[test]
     fn selecting_an_export_endpoint_previews_its_input_not_an_unrelated_sink() {
         let mut state = AppState::new();
         state.graph = Graph::new();
@@ -8889,8 +10237,28 @@ mod tests {
                 world_extent: 2048.0,
                 world_height: 640.0,
                 build_res: 4096,
+                preview_res: 384,
                 sea_level: 0.55,
                 show_water: true,
+                water: project_file::WaterSettings {
+                    depth: false,
+                    waves: true,
+                    reflection: false,
+                    foam_on: false,
+                    extinction: 12.5,
+                    color: [0.2, 0.3, 0.4],
+                    wave: 0.25,
+                    reflectivity: 0.75,
+                    specular: 0.1,
+                    steepness: 0.4,
+                    wavelength: 1.5,
+                    foam: 0.8,
+                    foam_width: 0.02,
+                    wet_on: false,
+                    wet: 0.5,
+                    wet_width: 0.04,
+                    speed: 0.9,
+                },
             },
             &[],
         );
@@ -8906,8 +10274,17 @@ mod tests {
         assert_eq!(restored.world_extent, 2048.0);
         assert_eq!(restored.world_height, 640.0);
         assert_eq!(restored.build_res, 4096);
+        assert_eq!(restored.preview_res, 384);
         assert_eq!(restored.sea_level, 0.55);
         assert!(restored.show_water);
+        // The water look and effect layers travel with the project (#157).
+        assert!(!restored.water.depth);
+        assert!(restored.water.waves);
+        assert!(!restored.water.reflection);
+        assert!(!restored.water.foam_on);
+        assert_eq!(restored.water.extinction, 12.5);
+        assert_eq!(restored.water.color, [0.2, 0.3, 0.4]);
+        assert_eq!(restored.water.speed, 0.9);
     }
 
     #[test]

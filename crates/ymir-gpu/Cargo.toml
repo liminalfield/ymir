@@ -1,0 +1,30 @@
+[package]
+name = "ymir-gpu"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Headless GPU compute for Ymir: a wgpu device, Field-to-buffer marshalling, and the ComputeContext handle the engine threads through evaluation."
+
+[lints]
+workspace = true
+
+[dependencies]
+# The engine crate, for Layer/Field and the ComputeContext trait this crate implements.
+# The dependency arrow points core -> here is impossible (core stays GPU-free); it points
+# from here to core, so the heavy wgpu tree never reaches the engine.
+ymir-core = { path = "../ymir-core" }
+# The GPU abstraction. Version tracks the one eframe/egui-wgpu already pull in (29.x), so the
+# workspace resolves a single wgpu in the tree rather than two. This is the one heavy
+# dependency the erosion work justifies; it lives here, never in ymir-core.
+wgpu = "29"
+# Blocks on wgpu's async device/adapter requests and buffer maps. The project is no-async by
+# policy; pollster confines that async surface to a synchronous call at the crate boundary.
+# Already in the tree via the egui/wgpu stack, so no new transitive weight.
+pollster = "0.4"
+# Plain-old-data casting between the Field's `&[f32]` and GPU buffer bytes, and for the
+# uniform struct. Already in the tree via wgpu; no unsafe reaches our code.
+bytemuck = { version = "1", features = ["derive"] }
+# The single crate error type, matching the engine's thiserror convention.
+thiserror = "2"

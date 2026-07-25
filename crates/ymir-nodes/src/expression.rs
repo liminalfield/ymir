@@ -63,6 +63,8 @@ impl Operator for Expression {
                 ParamKind::Text,
                 ParamValue::Text(DEFAULT_EXPR.to_string()),
             )],
+            emitted_layers: Vec::new(),
+            mask_aware: false,
         }
     }
 
@@ -272,7 +274,7 @@ mod tests {
 
     #[test]
     fn cookbook_examples_compile_and_run() {
-        // Every recipe in docs/expression-cookbook.md, kept honest: if a function is renamed
+        // Every recipe in design/expression-cookbook.md, kept honest: if a function is renamed
         // or the grammar changes, the documented examples must not silently break.
         let input = input_field(8, 0.5, 1.0);
         let examples = [

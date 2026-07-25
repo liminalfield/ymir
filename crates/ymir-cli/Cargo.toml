@@ -1,6 +1,6 @@
 [package]
 name = "ymir-cli"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -13,9 +13,17 @@ workspace = true
 
 [dependencies]
 ymir-core = { path = "../ymir-core" }
+# Compile-time version and git provenance, for `--version`.
+ymir-build-info = { path = "../ymir-build-info" }
 # The logging facade, so a headless run records load degradations to stderr. The backend
 # is installed in `main` via `ymir_core::logging`.
 log = "0.4"
 # Depended on for its operator registrations. The binary must also anchor it in
 # code (`use ymir_nodes as _;`), or the linker can drop the registrations.
 ymir-nodes = { path = "../ymir-nodes" }
+# A headless GPU compute context for the batch render, so erosion runs on the GPU when a device is
+# reachable; falls back to CPU on a host with no adapter (CI, a machine without a capable GPU).
+ymir-gpu = { path = "../ymir-gpu" }
+# Serializes the registered node specs to JSON for the docs generator (the `docs` subcommand).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

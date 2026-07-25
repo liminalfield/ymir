@@ -127,6 +127,8 @@ impl Operator for HydraulicErosion {
                     ParamValue::Int(DEFAULT_RADIUS),
                 ),
             ],
+            emitted_layers: vec![layers::WEAR, layers::DEPOSITION, layers::FLOW],
+            mask_aware: true,
         }
     }
 

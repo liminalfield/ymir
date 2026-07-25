@@ -144,8 +144,10 @@ mod tests {
                 world_extent: 1024.0,
                 world_height: 256.0,
                 build_res: crate::project_file::DEFAULT_BUILD_RES,
+                preview_res: crate::PREVIEW_RES,
                 sea_level: crate::project_file::DEFAULT_SEA_LEVEL,
                 show_water: false,
+                water: crate::project_file::WaterSettings::default(),
             },
             &[],
         )

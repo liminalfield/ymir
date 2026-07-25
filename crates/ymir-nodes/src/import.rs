@@ -97,6 +97,8 @@ impl Operator for Import {
                     ParamValue::Text(EDGE_EXTEND.to_string()),
                 ),
             ],
+            emitted_layers: Vec::new(),
+            mask_aware: false,
         }
     }
 

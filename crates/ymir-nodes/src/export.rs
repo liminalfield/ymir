@@ -41,6 +41,8 @@ impl Operator for ExportPng {
                 // stable, range-independent output.
                 ParamSpec::new("auto_range", ParamKind::Bool, ParamValue::Bool(true)),
             ],
+            emitted_layers: Vec::new(),
+            mask_aware: false,
         }
     }
 

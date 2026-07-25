@@ -14,11 +14,30 @@ use ymir_core::{EvalCache, EvalRequest, Graph, ParamValue, Params, Region};
 // ymir-nodes, and the linker can drop its registrations entirely.
 use ymir_nodes as _;
 
+mod docs;
+
 fn make_op(type_id: &str) -> Result<Box<dyn ymir_core::Operator>, Box<dyn Error>> {
     make(type_id).ok_or_else(|| format!("operator {type_id:?} is not registered").into())
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    // `--version`/`-V` prints the build-stamped version and exits before any work, so it
+    // stays usable for provenance even if a render would fail.
+    if std::env::args()
+        .skip(1)
+        .any(|a| a == "--version" || a == "-V")
+    {
+        println!("ymir {}", ymir_build_info::version_string());
+        return Ok(());
+    }
+
+    // `docs [--format json]`: emit the node reference as JSON from the running binary and exit,
+    // before any logging or render work.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("docs") {
+        return docs::run(&args[1..]);
+    }
+
     // Headless diagnostics go to stderr (a toolchain captures it); load degradations are logged
     // rather than swallowed.
     ymir_core::logging::init(None, log::LevelFilter::Info);
@@ -55,8 +74,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         .ok_or("export node missing after reload")?;
 
     // Pulling the endpoint evaluates the chain and writes the file as a side
-    // effect (endpoints are not memoized).
-    let request = EvalRequest::new(size, size, Region::UNIT, seed);
+    // effect (endpoints are not memoized). Run erosion on the GPU when a device is reachable,
+    // else on the CPU: a headless host with no adapter falls back cleanly.
+    let mut request = EvalRequest::new(size, size, Region::UNIT, seed);
+    match ymir_gpu::GpuContext::new_headless() {
+        Ok(gpu) => request = request.with_compute(std::sync::Arc::new(gpu)),
+        Err(err) => log::info!("no GPU device, rendering on CPU: {err}"),
+    }
     let mut cache = EvalCache::new(64);
     graph.evaluate(export, &request, &mut cache)?;
 

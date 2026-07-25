@@ -3,14 +3,95 @@
 //! preview pane cannot afford.
 //!
 //! It shades the same field the 3D view meshes (build-quality when a Build is loaded,
-//! else the live preview) through the shared [`shade::field_to_image`], so 2D and 3D
-//! show the same data and differ only in projection. The texture is rebuilt only when
-//! the field, output, or shading changes, so panning and zooming are free.
+//! else the live preview), on the GPU (see [`crate::viewport2d_gpu`]), so 2D and 3D show
+//! the same data and differ only in projection. The field is uploaded only when it
+//! changes; light, mode, scale, and water are uniforms, so steering the sun re-shades a
+//! resident texture rather than recomputing the whole field on the CPU each frame (#167).
+//! Panning and zooming reuse the shaded texture and cost nothing.
 
 use eframe::egui;
-use ymir_core::{Field, layers};
+use eframe::egui_wgpu;
+use ymir_core::Field;
 
-use crate::shade::{self, DEFAULT_LIGHT, HeightScale, ShadeMode};
+use crate::shade::{DEFAULT_LIGHT, HeightScale, ShadeMode};
+use crate::viewport2d_gpu::{Gpu2d, ShadeParams};
+
+/// What the caller asks the 2D map to draw: which output, the Auto/Fixed scale, and the water
+/// overlay (sea level plus whether it is shown). The shading mode and light are the view's own
+/// state. Bundled so [`View2d::show`] takes one parameter for these, not four.
+pub(crate) struct MapDisplay {
+    /// Which tapped output is shown.
+    pub output: usize,
+    /// The shared Auto/Fixed Height scale.
+    pub scale: HeightScale,
+    /// Sea level as a raw layer value.
+    pub sea_level: f32,
+    /// Whether to draw the water overlay.
+    pub show_water: bool,
+}
+
+/// A paint sample from the 2D map while paint mode is active: a normalized `[0, 1]` position in the
+/// field, and whether it begins a new stroke (the primary button was pressed this frame) or extends
+/// the current one (held and dragging).
+pub(crate) struct PaintSample {
+    /// Normalized x in `[0, 1]`.
+    pub x: f32,
+    /// Normalized y in `[0, 1]`.
+    pub y: f32,
+    /// True on the frame the stroke began; false while dragging it.
+    pub begin: bool,
+}
+
+/// The active brush, for the on-surface cursor drawn while painting: two rings (the brush radius and
+/// its `radius * hardness` full-strength core) plus a small raise/lower mark. `Some` exactly when a
+/// paint node is the target, so `is_some()` is "paint mode on".
+#[derive(Clone, Copy)]
+pub(crate) struct BrushCursor {
+    /// Brush radius as a fraction of the region width (the stroke model's unit).
+    pub radius: f32,
+    /// Edge hardness in `[0, 1]`: the inner ring sits at `radius * hardness`.
+    pub hardness: f32,
+    /// True in Raise mode (mark `+`), false in Lower (`−`).
+    pub raise: bool,
+}
+
+/// The dark-halo + light-core stroke pair that keeps the brush cursor legible over any terrain, light
+/// or dark. Drawn dark-under-light so the ring reads on any background without relying on colour.
+pub(crate) fn cursor_strokes() -> (egui::Stroke, egui::Stroke) {
+    (
+        egui::Stroke::new(2.6, egui::Color32::from_black_alpha(150)),
+        egui::Stroke::new(1.2, egui::Color32::from_white_alpha(235)),
+    )
+}
+
+/// Draws the small raise (`+`) / lower (`−`) mark just outside the top-right of a cursor of screen
+/// radius `screen_r` centred at `center`. Shape-based (not colour), so it reads under red/green
+/// colour vision.
+pub(crate) fn draw_mode_badge(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    screen_r: f32,
+    raise: bool,
+) {
+    let diag = std::f32::consts::FRAC_1_SQRT_2;
+    let pos = center + egui::vec2(diag, -diag) * (screen_r + 7.0);
+    let mark = if raise { "+" } else { "−" };
+    let font = egui::FontId::proportional(15.0);
+    painter.text(
+        pos + egui::vec2(0.6, 0.6),
+        egui::Align2::CENTER_CENTER,
+        mark,
+        font.clone(),
+        egui::Color32::from_black_alpha(170),
+    );
+    painter.text(
+        pos,
+        egui::Align2::CENTER_CENTER,
+        mark,
+        font,
+        egui::Color32::from_white_alpha(240),
+    );
+}
 
 /// Which projection the main viewport draws.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -30,21 +111,15 @@ const ZOOM_SPEED: f32 = 0.0015;
 const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 64.0;
 
-/// The identity a 2D-map texture was built from: field hash, output index, shading mode and scale,
-/// relief light bits, sea-level bits, and whether water is shown. The texture is rebuilt when any
-/// of these change.
-type TextureKey = (u64, usize, ShadeMode, HeightScale, [u32; 3], u32, bool);
-
-/// The 2D view's own state: the uploaded texture and the key it was built for (so it is
-/// rebuilt only when the field or shading changes), the relief light, and the pan/zoom transform.
+/// The 2D view's own state: the GPU shading resources (created lazily once the wgpu render state is
+/// available), the relief light, and the pan/zoom transform.
 ///
 /// `zoom` is a multiplier over the fit-to-pane scale (`1.0` = the whole map fits), and
 /// `pan` is the screen-space offset of the image centre from the pane centre, in points.
 /// Both reset to fit on a double-click. `light` is this view's own relief sun (independent of the
 /// preview pane and the 3D light), ephemeral like the camera and not persisted.
 pub(crate) struct View2d {
-    texture: Option<egui::TextureHandle>,
-    texture_key: Option<TextureKey>,
+    gpu: Option<Gpu2d>,
     mode: ShadeMode,
     light: [f32; 3],
     zoom: f32,
@@ -54,8 +129,7 @@ pub(crate) struct View2d {
 impl Default for View2d {
     fn default() -> Self {
         Self {
-            texture: None,
-            texture_key: None,
+            gpu: None,
             mode: ShadeMode::Height,
             light: DEFAULT_LIGHT,
             zoom: 1.0,
@@ -75,15 +149,16 @@ impl View2d {
         self.mode = mode;
     }
 
-    /// Draws the relief sun dial and steers this view's light on drag; the texture rebuilds on the
-    /// next `show` if it moved. Only meaningful in relief mode.
-    pub(crate) fn sun_dial(&mut self, ui: &mut egui::Ui) {
-        crate::sun::dial(ui, &mut self.light);
+    /// This view's relief light as a unit image-space vector; the flyout's 2D-sun sliders read and
+    /// write it through [`crate::sun::light_angles`] / [`crate::sun::light_from_angles`], now that
+    /// the map steers its light from the Display flyout rather than an on-map dial.
+    pub(crate) fn relief_light(&self) -> [f32; 3] {
+        self.light
     }
 
-    /// This view's relief light azimuth and altitude in degrees, for the dial readout.
-    pub(crate) fn light_angles(&self) -> (f32, f32) {
-        crate::sun::light_angles(self.light)
+    /// Sets the relief light; the texture rebuilds on the next `show` if it changed.
+    pub(crate) fn set_relief_light(&mut self, light: [f32; 3]) {
+        self.light = light;
     }
 
     /// Resets to fit-to-view (the whole map centred in the pane).
@@ -93,28 +168,31 @@ impl View2d {
     }
 
     /// Draws the field flat over the pane, handling pan (drag), zoom (scroll about the
-    /// cursor), and reset (double-click). `field` is the field the 3D view would mesh;
-    /// `output` names which output it is (part of the texture key); `scale` is the shared
-    /// Auto/Fixed Height scale; `sea_level`/`show_water` mirror the World settings to draw the
-    /// same water overlay the 3D plane shows. A black fill stands in when there is no field.
+    /// cursor), and reset (double-click). `field` is the field the 3D view would mesh; `output`
+    /// names which output it is; `scale` is the shared Auto/Fixed Height scale; `sea_level`/
+    /// `show_water` mirror the World settings to draw the same water overlay the 3D plane shows.
+    /// The field is shaded on the GPU via `render_state`; a black fill stands in when there is no
+    /// field (or no GPU, in a headless build).
     pub(crate) fn show(
         &mut self,
         ui: &mut egui::Ui,
+        render_state: Option<&egui_wgpu::RenderState>,
         field: Option<&Field>,
-        output: usize,
-        scale: HeightScale,
-        sea_level: f32,
-        show_water: bool,
-    ) {
-        self.refresh_texture(ui.ctx(), field, output, scale, sea_level, show_water);
-
+        display: MapDisplay,
+        brush: Option<BrushCursor>,
+    ) -> Option<PaintSample> {
         let rect = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+        let paint_active = brush.is_some();
 
-        if response.double_clicked() {
+        // Double-click resets the view, except while painting (where it would be a stray dab).
+        if response.double_clicked() && !paint_active {
             self.reset_view();
         }
-        if response.dragged() {
+        // Pan with the middle button always, or the primary button when not painting; painting takes
+        // the primary drag on the map.
+        let pan_primary = !paint_active && response.dragged_by(egui::PointerButton::Primary);
+        if pan_primary || response.dragged_by(egui::PointerButton::Middle) {
             self.pan += response.drag_delta();
         }
         let scroll = ui.input(|i| i.smooth_scroll_delta.y);
@@ -125,25 +203,83 @@ impl View2d {
             self.zoom_about(cursor, rect.center(), scroll);
         }
 
-        // Clip to the pane so a panned or zoomed image never spills over the HUD or
-        // neighbouring panes.
+        // The field's pixel size and the image transform, computed before shading so the paint
+        // mapping and the image draw share one rect.
+        let size = field
+            .filter(|f| f.width() > 0 && f.height() > 0)
+            .map(|f| egui::vec2(f.width() as f32, f.height() as f32));
+        let image_rect = size.map(|s| {
+            let fit = fit_scale(s, rect.size());
+            egui::Rect::from_center_size(rect.center() + self.pan, s * (fit * self.zoom))
+        });
+
+        // A paint sample: the primary button held over the map, mapped to normalized coordinates.
+        let sample = if paint_active
+            && let Some(ir) = image_rect
+            && response.is_pointer_button_down_on()
+            && ui.input(|i| i.pointer.primary_down())
+            && let Some(pos) = response.interact_pointer_pos()
+        {
+            Some(PaintSample {
+                x: ((pos.x - ir.min.x) / ir.width()).clamp(0.0, 1.0),
+                y: ((pos.y - ir.min.y) / ir.height()).clamp(0.0, 1.0),
+                begin: ui.input(|i| i.pointer.primary_pressed()),
+            })
+        } else {
+            None
+        };
+
+        // Shade the field on the GPU (a no-op re-shade when nothing but pan/zoom changed), then draw
+        // it at the image transform, clipped to the pane; a black fill stands in with no field or GPU.
+        let params = ShadeParams {
+            output: display.output,
+            mode: self.mode,
+            scale: display.scale,
+            light: self.light,
+            sea_level: display.sea_level,
+            show_water: display.show_water,
+        };
+        let shaded = match (render_state, field) {
+            (Some(rs), Some(field)) if field.width() > 0 && field.height() > 0 => Some(
+                self.gpu
+                    .get_or_insert_with(|| Gpu2d::new(rs))
+                    .shade(rs, field, params),
+            ),
+            _ => None,
+        };
         let painter = ui.painter_at(rect);
-        match self.texture.as_ref() {
-            Some(texture) => {
-                let fit = fit_scale(texture.size_vec2(), rect.size());
-                let draw = texture.size_vec2() * (fit * self.zoom);
-                let image_rect = egui::Rect::from_center_size(rect.center() + self.pan, draw);
-                painter.image(
-                    texture.id(),
-                    image_rect,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    egui::Color32::WHITE,
-                );
+        match (shaded, image_rect) {
+            (Some(id), Some(ir)) => painter.image(
+                id,
+                ir,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            ),
+            _ => painter.rect_filled(rect, 0.0, egui::Color32::BLACK),
+        };
+
+        // The brush cursor: rings sized to the brush (and its hardness core) plus the raise/lower
+        // mark, with the OS pointer hidden so only the ring shows where the stroke lands. The 2D map is
+        // flat, so the rings are plain circles scaled by the field's on-screen width.
+        if let Some(brush) = brush
+            && let Some(ir) = image_rect
+            && let Some(pos) = ui.ctx().pointer_latest_pos()
+            && rect.contains(pos)
+            // Only when the map is the top layer here, so a dialog over it keeps its own pointer.
+            && ui.ctx().layer_id_at(pos) == Some(ui.layer_id())
+        {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+            let r = brush.radius * ir.width();
+            let (dark, light) = cursor_strokes();
+            painter.circle_stroke(pos, r, dark);
+            painter.circle_stroke(pos, r, light);
+            if brush.hardness > 0.02 {
+                painter.circle_stroke(pos, r * brush.hardness, dark);
+                painter.circle_stroke(pos, r * brush.hardness, light);
             }
-            None => {
-                painter.rect_filled(rect, 0.0, egui::Color32::BLACK);
-            }
+            draw_mode_badge(&painter, pos, r, brush.raise);
         }
+        sample
     }
 
     /// Zooms toward/away so the map point under `cursor` stays fixed: the offset of the
@@ -156,58 +292,6 @@ impl View2d {
         let new_center = cursor - (cursor - old_center) * applied;
         self.pan = new_center - pane_center;
         self.zoom = new_zoom;
-    }
-
-    /// Rebuilds the texture when the field, output, or shading changed since it was last
-    /// uploaded; a no-op otherwise, so it is cheap every frame. Magnify with nearest so
-    /// zoomed-in cells stay crisp for artifact spotting, minify with linear so the fit
-    /// view does not alias.
-    fn refresh_texture(
-        &mut self,
-        ctx: &egui::Context,
-        field: Option<&Field>,
-        output: usize,
-        scale: HeightScale,
-        sea_level: f32,
-        show_water: bool,
-    ) {
-        let Some(field) = field else {
-            self.texture = None;
-            self.texture_key = None;
-            return;
-        };
-        // Sea level enters the key only while water is shown, so moving the slider with water off
-        // costs no rebuild.
-        let water_bits = if show_water { sea_level.to_bits() } else { 0 };
-        let key = (
-            field.content_hash().to_u64(),
-            output,
-            self.mode,
-            scale,
-            self.light.map(f32::to_bits),
-            water_bits,
-            show_water,
-        );
-        if self.texture_key == Some(key) {
-            return;
-        }
-        let mut image = shade::field_to_image(field, layers::HEIGHT, self.mode, scale, self.light);
-        if show_water {
-            shade::apply_water(
-                &mut image,
-                field,
-                layers::HEIGHT,
-                sea_level,
-                &shade::WaterStyle::default(),
-            );
-        }
-        let options = egui::TextureOptions {
-            magnification: egui::TextureFilter::Nearest,
-            minification: egui::TextureFilter::Linear,
-            ..Default::default()
-        };
-        self.texture = Some(ctx.load_texture("viewport-2d", image, options));
-        self.texture_key = Some(key);
     }
 }
 

@@ -37,6 +37,8 @@ impl Operator for CurveNode {
                 ParamKind::Curve,
                 ParamValue::Curve(Curve::identity()),
             )],
+            emitted_layers: Vec::new(),
+            mask_aware: true,
         }
     }
 

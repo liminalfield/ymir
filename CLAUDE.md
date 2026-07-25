@@ -73,6 +73,25 @@ commit time; the conceptual shortcuts are caught by the per-step review and the 
 A deliberate, justified exception is annotated inline with `// shortcut-ok: <reason>`,
 which should be rare and visible in review.
 
+## Documentation is part of done
+
+A change that alters user-visible behavior is not done until its documentation is updated in
+the same step. For a node, that is its prose fragment in `crates/ymir-nodes/docs/<type_id>.md`:
+the mechanical reference (ports, parameters, defaults, layer contract) regenerates from the
+`NodeSpec` via `cargo xtask docs-gen`, so it needs no hand edit, but the Purpose and behaviour
+prose does. For a new capability, that is the relevant how-to or concepts page under `docs/`.
+The writing follows `DOCS.md`.
+
+The keyboard and interaction reference (`docs/reference/shortcuts.md`) is the exception that
+needs naming, because it is hand-maintained and no lint can guard it. The bindings live in code
+(the viewport camera in `OrbitCamera`, the GUI's `main.rs`, canvas click handling), and nothing
+mechanically ties them to the page. A change to input handling, a new shortcut, or a changed one
+is not done until that page reflects it.
+
+The docs lint (`cargo xtask docs-lint`, run in CI) catches missing fragments, broken links, and
+generated-page drift, but it cannot tell whether a claim is true or whether a shortcut is
+documented at all. Those are on you.
+
 ## Core philosophy
 
 Everything is data. One universal type flows on every edge of the node graph, so the
@@ -241,6 +260,16 @@ In practice:
   fixed per-machine partition: byte-stable on a given machine, possibly differing in the
   last bits across core counts. Do not reformulate the algorithm (for instance an
   8x-compute gather) solely to recover cross-machine bit-identity.
+- **The GPU path holds the same contract.** A node that runs on the GPU (erosion) must be a
+  deterministic gather or stencil: each cell reads its neighbours and writes only its own
+  cell, never an atomic scatter. GPU atomic ordering is nondeterministic even on one device,
+  which would break the required rung; a gather kernel is bit-repeatable on a fixed device and
+  visually equivalent across devices and vendors (a few ULPs from float reordering), matching
+  the two rungs above. The CPU path stays the reference and the headless/CI path, and the
+  compute-device handle is deliberately not part of a node's cache key, so a GPU result and a
+  CPU result are interchangeable in the cache. That interchangeability is sound only because
+  the two agree within tolerance, which is why a GPU kernel is written to match its CPU
+  reference cell for cell (see `ymir-gpu` and the thermal kernel).
 - **Seeds still derive from the global seed** (carried in `EvalContext`) and the node's
   persistent `stable_id`, never the runtime slotmap key, the clock, or a thread id, so a
   node yields the same output across reloads and graph edits while the global seed

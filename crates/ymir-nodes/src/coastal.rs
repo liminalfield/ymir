@@ -89,6 +89,10 @@ impl Operator for Coastal {
                     ParamValue::Bool(false),
                 ),
             ],
+            // "shore" is a byproduct output port, not a canonical layer constant (there is no
+            // `layers::SHORE`); name it by the port so the reference lists the shore band.
+            emitted_layers: vec!["shore"],
+            mask_aware: true,
         }
     }
 

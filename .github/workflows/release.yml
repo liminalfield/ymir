@@ -1,0 +1,64 @@
+name: Release
+
+# Fires on a version tag (v0.2.0, v1.0.0, ...). The tag is the trigger; the workspace
+# Cargo version is the source of truth, and the two must agree (verified below) so a
+# published binary's embedded version always matches the tag it ships under.
+on:
+  push:
+    tags: ["v*"]
+
+# The release step creates a GitHub Release and uploads assets, which needs write access
+# to repository contents. Nothing else here writes, so the token stays otherwise read-only.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      # Full history so build.rs can stamp the commit and the tag resolves to a commit.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Guard: the tag (minus its leading v) must equal the workspace version. A mismatch
+      # means someone tagged without bumping Cargo.toml, or vice versa; fail before building
+      # rather than ship a binary whose About box disagrees with its tag.
+      - name: Verify tag matches Cargo version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          cargo_ver="$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c "import json,sys; print(next(p['version'] for p in json.load(sys.stdin)['packages'] if p['name']=='ymir-gui'))")"
+          echo "tag=$tag cargo=$cargo_ver"
+          if [ "$tag" != "$cargo_ver" ]; then
+            echo "::error::tag v$tag does not match workspace version $cargo_ver; bump Cargo.toml or retag"
+            exit 1
+          fi
+
+      # rustup honors rust-toolchain.toml. The cache is shared with the CI workflow's key
+      # scheme, so a release usually reuses the already-compiled dependency tree.
+      - run: rustup component add rustfmt clippy
+      - uses: Swatinem/rust-cache@v2
+
+      # Release binaries for both the GUI and the headless CLI. build.rs stamps the tagged
+      # commit into each, so `--version` and the About box report exactly this build.
+      - name: Build release binaries
+        run: cargo build --release --workspace --bins
+
+      # Name the assets by platform and record checksums, so a download is verifiable.
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/release/ymir-gui dist/ymir-gui-linux-x86_64
+          cp target/release/ymir-cli dist/ymir-cli-linux-x86_64
+          (cd dist && sha256sum ymir-* > SHA256SUMS)
+
+      # Create the Release via the preinstalled gh CLI (no third-party action), attaching the
+      # binaries and checksums and auto-generating notes from the commits since the last tag.
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes

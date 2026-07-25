@@ -97,6 +97,8 @@ impl Operator for Hybrid {
                     ParamValue::Int(0),
                 ),
             ],
+            emitted_layers: Vec::new(),
+            mask_aware: false,
         }
     }
 

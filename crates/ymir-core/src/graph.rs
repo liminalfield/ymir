@@ -1066,6 +1066,8 @@ mod tests {
                     .map(|i| PortSpec::new(format!("out{i}")))
                     .collect(),
                 params: Vec::new(),
+                emitted_layers: Vec::new(),
+                mask_aware: false,
             }
         }
 

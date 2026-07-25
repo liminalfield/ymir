@@ -80,6 +80,8 @@ impl Operator for Ridged {
                     ParamValue::Int(0),
                 ),
             ],
+            emitted_layers: Vec::new(),
+            mask_aware: false,
         }
     }
 

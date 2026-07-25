@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::cancel::CancelToken;
+use crate::compute::ComputeContext;
 use crate::region::Region;
 
 /// The context an operator receives for one evaluation.
@@ -50,6 +51,12 @@ pub struct EvalContext {
     /// [`ContextDeps`](crate::ContextDeps) cover every field its `eval` touches. Not part of the
     /// context's identity, so it is ignored by hashing and cloning-for-identity concerns.
     access_log: Option<Arc<AtomicU8>>,
+    /// Optional handle to a compute device, threaded through by the evaluator when the
+    /// request carries one. A GPU-capable operator downcasts it (see [`ComputeContext`])
+    /// and uses the GPU path; when it is `None`, the operator falls back to CPU. Held as
+    /// an `Arc` so cloning a context (which the evaluator does per node) is a pointer bump,
+    /// and so it stays a GPU-type-free capability marker in core.
+    compute: Option<Arc<dyn ComputeContext>>,
 }
 
 impl EvalContext {
@@ -67,6 +74,7 @@ impl EvalContext {
             depth: 0,
             cancel: CancelToken::new(),
             access_log: None,
+            compute: None,
         }
     }
 
@@ -103,6 +111,32 @@ impl EvalContext {
     pub fn with_cancel(mut self, cancel: CancelToken) -> Self {
         self.cancel = cancel;
         self
+    }
+
+    /// Attaches a compute-device handle, so a GPU-capable operator can run on the
+    /// GPU. The evaluator calls this to thread the request's device into each
+    /// node's context; an operator reads it back through [`compute`](Self::compute).
+    #[must_use]
+    pub fn with_compute(mut self, compute: Arc<dyn ComputeContext>) -> Self {
+        self.compute = Some(compute);
+        self
+    }
+
+    /// The compute-device handle for this evaluation, or `None` on a CPU-only run.
+    ///
+    /// A GPU-capable operator downcasts it to the concrete device type from the GPU
+    /// crate and takes the GPU path when present, falling back to CPU when absent
+    /// (the soft-capability contract, mirroring the soft-layer contract):
+    ///
+    /// ```ignore
+    /// match ctx.compute().and_then(|c| c.as_any().downcast_ref::<GpuContext>()) {
+    ///     Some(gpu) => /* GPU path */,
+    ///     None => /* CPU fallback */,
+    /// }
+    /// ```
+    #[must_use]
+    pub fn compute(&self) -> Option<&dyn ComputeContext> {
+        self.compute.as_deref()
     }
 
     /// Sets the world's physical size along x, in world units (meters) across the

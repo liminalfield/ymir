@@ -1,7 +1,7 @@
 # Architecture
 
 This is the contributor's orientation to Ymir: how the pieces fit together and why.
-It is deliberately high level. The design notes in [`docs/design/`](docs/design/) go
+It is deliberately high level. The design notes in [`design/`](design/) go
 deeper on individual subsystems, and [`CLAUDE.md`](CLAUDE.md) records the working
 brief and quality bar. For the terminology and conventions, read this first.
 

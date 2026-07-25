@@ -6,7 +6,7 @@
 //! free. A model that tracks eroded and deposited material explicitly (the grid hydraulic's
 //! erode/deposit terms, the stream model's sediment flux) should emit that tracked quantity
 //! instead, since it is more accurate than the net height difference. See
-//! `docs/ymir-erosion-DESIGN.md` for the layer vocabulary this serves.
+//! `design/ymir-erosion-DESIGN.md` for the layer vocabulary this serves.
 
 use std::sync::Arc;
 

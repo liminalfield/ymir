@@ -28,6 +28,8 @@ impl Operator for Invert {
             inputs: vec![PortSpec::new("in")],
             outputs: vec![PortSpec::new("out")],
             params: Vec::new(),
+            emitted_layers: Vec::new(),
+            mask_aware: true,
         }
     }
 

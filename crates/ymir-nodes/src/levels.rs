@@ -75,6 +75,8 @@ impl Operator for Levels {
                     ParamValue::Float(1.0),
                 ),
             ],
+            emitted_layers: Vec::new(),
+            mask_aware: true,
         }
     }
 

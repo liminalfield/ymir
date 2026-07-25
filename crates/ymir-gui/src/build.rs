@@ -220,6 +220,8 @@ mod tests {
                 inputs: Vec::new(),
                 outputs: vec![PortSpec::new("out")],
                 params: Vec::new(),
+                emitted_layers: Vec::new(),
+                mask_aware: false,
             }
         }
 

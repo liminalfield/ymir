@@ -8,7 +8,7 @@
 //! node set so a drop fails fast in CI.
 //!
 //! This test links `ymir-nodes` the way a real front-end does (the `use ymir_nodes
-//! as _` anchor below) and pins the full production registry: the 33 operators from
+//! as _` anchor below) and pins the full production registry: the 37 operators from
 //! `ymir-nodes` plus the three subgraph operators from `ymir-core`. Adding, removing,
 //! or renaming an operator is a deliberate act, so it must be reflected here in the
 //! same change. A mismatch reports exactly which `type_id`s drifted.
@@ -38,32 +38,43 @@ const EXPECTED: &[&str] = &[
     "generator.cellular_bumps",
     "generator.cellular_cracks",
     "generator.cellular_regions",
+    "generator.constant",
     "generator.falloff",
     "generator.fbm",
     "generator.flow",
     "generator.gradient",
     "generator.hybrid",
     "generator.import",
+    "generator.paint",
     "generator.polygon",
     "generator.radial",
     "generator.rect",
     "generator.ridged",
     "generator.ring",
     // ymir-nodes: modifiers
+    "modifier.aspect",
     "modifier.blend",
     "modifier.blur",
+    "modifier.clamp",
     "modifier.coastal",
     "modifier.curvature",
     "modifier.curve",
+    "modifier.directional_blur",
     "modifier.distance",
     "modifier.expression",
+    "modifier.frequency_split",
     "modifier.height",
+    "modifier.histogram_scan",
     "modifier.hydraulic_erosion",
     "modifier.invert",
     "modifier.levels",
+    "modifier.normalize",
     "modifier.null",
+    "modifier.occlusion",
+    "modifier.sculpt",
     "modifier.slope",
     "modifier.stream_erosion",
+    "modifier.terrace",
     "modifier.thermal_erosion",
     "modifier.warp",
 ];

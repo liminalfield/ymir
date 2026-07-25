@@ -99,6 +99,8 @@ impl Operator for Rect {
                     ParamValue::Float(0.5),
                 ),
             ],
+            emitted_layers: Vec::new(),
+            mask_aware: false,
         }
     }
 

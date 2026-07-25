@@ -199,6 +199,32 @@ impl PreviewEngine {
         self.last_outputs.get(index)
     }
 
+    /// Blanks the preview: cancels any in-flight job, drops the shown outputs, texture, and errors,
+    /// and forgets the last submission so a re-selected node evaluates afresh. Used when there is no
+    /// preview target (the user dismissed the preview by clicking empty canvas). Idempotent, so it is
+    /// cheap to call every frame while nothing is previewed.
+    pub(crate) fn clear(&mut self) {
+        if self.last_outputs.is_empty()
+            && self.texture.is_none()
+            && self.submitted_key.is_none()
+            && self.pending_key.is_none()
+            && self.structural_error.is_none()
+            && self.eval_error.is_none()
+        {
+            return;
+        }
+        self.current_cancel.cancel();
+        self.submitted_key = None;
+        self.pending_key = None;
+        self.structural_error = None;
+        self.eval_error = None;
+        self.last_outputs = Vec::new();
+        self.last_histogram = None;
+        self.histogram_target = None;
+        self.texture = None;
+        self.texture_key = None;
+    }
+
     /// The current shading mode, for the pane's toggle.
     pub(crate) fn mode(&self) -> ShadeMode {
         self.mode

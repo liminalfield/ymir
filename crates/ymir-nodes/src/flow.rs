@@ -15,7 +15,7 @@
 use ymir_core::registry::OperatorEntry;
 use ymir_core::{
     EvalContext, Field, Inputs, NodeSpec, Operator, ParamKind, ParamSpec, ParamValue, Params,
-    PortSpec, Result,
+    PortSpec, Result, layers,
 };
 
 use crate::noise::{FbmParams, flow_field};
@@ -96,6 +96,8 @@ impl Operator for Flow {
                     ParamValue::Int(0),
                 ),
             ],
+            emitted_layers: vec![layers::FLOW_X, layers::FLOW_Y],
+            mask_aware: false,
         }
     }
 

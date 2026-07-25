@@ -12,7 +12,7 @@
 //! A subgraph (the container, added next) is a node holding an inner [`Graph`] whose
 //! ports are derived from these markers: an [`InputNode`] marks an inner field fed from
 //! outside, an [`OutputNode`] marks an inner field exposed outside. See
-//! `docs/design/subgraphs.md`.
+//! `design/subgraphs.md`.
 
 use std::sync::Arc;
 
@@ -75,6 +75,8 @@ impl Operator for InputNode {
             inputs: Vec::new(),
             outputs: vec![PortSpec::new("out")],
             params: Vec::new(),
+            emitted_layers: Vec::new(),
+            mask_aware: false,
         }
     }
 
@@ -104,6 +106,8 @@ impl Operator for OutputNode {
             inputs: vec![PortSpec::new("in")],
             outputs: Vec::new(),
             params: Vec::new(),
+            emitted_layers: Vec::new(),
+            mask_aware: false,
         }
     }
 
@@ -120,7 +124,7 @@ inventory::submit! { OperatorEntry { type_id: OUTPUT_TYPE_ID, make: || Box::new(
 /// with the boundary inputs bound to the input markers and reads the fields feeding the
 /// output markers.
 ///
-/// Template instantiation (see `docs/design/subgraphs.md`): it holds a concrete *copy* of
+/// Template instantiation (see `design/subgraphs.md`): it holds a concrete *copy* of
 /// the inner graph, never a link to a shared definition, so two instances are independent
 /// and editing one cannot disturb another.
 #[derive(Clone)]
@@ -186,6 +190,8 @@ impl Operator for SubgraphNode {
                 },
                 ParamValue::Int(0),
             )],
+            emitted_layers: Vec::new(),
+            mask_aware: false,
         }
     }
 
@@ -326,6 +332,8 @@ mod tests {
                 inputs: Vec::new(),
                 outputs: vec![PortSpec::new("out")],
                 params: Vec::new(),
+                emitted_layers: Vec::new(),
+                mask_aware: false,
             }
         }
 
@@ -352,6 +360,8 @@ mod tests {
                 inputs: Vec::new(),
                 outputs: vec![PortSpec::new("out")],
                 params: Vec::new(),
+                emitted_layers: Vec::new(),
+                mask_aware: false,
             }
         }
 

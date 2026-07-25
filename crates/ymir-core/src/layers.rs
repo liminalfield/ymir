@@ -30,7 +30,7 @@ pub const FLOW_Y: &str = "flow_y";
 // Erosion byproducts. Erosion nodes write these alongside the height so downstream nodes can
 // texture, mask, and chain off them; each is absent on a plain heightfield, so consumers read
 // them through [`Field::layer_or`](crate::Field::layer_or) and degrade gracefully. This is the
-// shared vocabulary the erosion roadmap is built on (see docs/design/erosion-roadmap.md).
+// shared vocabulary the erosion roadmap is built on (see design/erosion-roadmap.md).
 
 /// Flow accumulation: how much upstream drainage passes through each cell, the magnitude behind
 /// a drainage network. Written by stream and hydraulic erosion; a primary texturing signal and
@@ -64,6 +64,11 @@ pub const ERODIBILITY: &str = "erodibility";
 /// rather than endlessly incised. Absent on a plain heightfield, where erosion is unbounded
 /// below.
 pub const BEDROCK: &str = "bedrock";
+
+/// Backdrop terrain height, carried for display only: the terrain a Paint node is painted over, so
+/// the viewport can mesh the real surface (geometry) while the painted mask rides the height layer
+/// as a texture (not displacement). Never consumed by an operator; a pass-through for the editor.
+pub const BACKDROP: &str = "backdrop";
 
 #[cfg(test)]
 mod tests {

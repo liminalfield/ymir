@@ -71,6 +71,17 @@ pub struct NodeSpec {
     pub outputs: Vec<PortSpec>,
     /// Parameter schema.
     pub params: Vec<ParamSpec>,
+    /// The named byproduct data this node produces beyond its primary height, in the canonical
+    /// layer vocabulary (`wear`, `flow`, `deposition`, ...). Documentation metadata for the
+    /// reference: it names what a node emits for a downstream node to consume, whether carried as
+    /// an extra output port or as a layer on the node's field. Empty for a node that emits only
+    /// height. The engine never reads this; only the docs generator does.
+    pub emitted_layers: Vec<&'static str>,
+    /// Whether the node scopes its effect by a mask: it honours a `mask` layer on its input (or a
+    /// wired mask input) and applies everywhere the mask is absent. Documentation metadata for the
+    /// reference; the graceful degradation itself lives in the operator via `layer_or`, and the
+    /// absent-layer behaviour stays prose rather than being encoded here.
+    pub mask_aware: bool,
 }
 
 impl NodeSpec {
@@ -104,6 +115,8 @@ mod tests {
                 .map(|i| PortSpec::new(format!("out{i}")))
                 .collect(),
             params: vec![],
+            emitted_layers: Vec::new(),
+            mask_aware: false,
         }
     }
 
@@ -113,5 +126,13 @@ mod tests {
         assert_eq!(spec(1, 1).kind(), NodeKind::Modifier);
         assert_eq!(spec(2, 1).kind(), NodeKind::Modifier);
         assert_eq!(spec(1, 0).kind(), NodeKind::Endpoint);
+    }
+
+    #[test]
+    fn metadata_defaults_are_empty() {
+        // A node emits nothing and is not mask-aware unless it says so.
+        let s = spec(1, 1);
+        assert!(s.emitted_layers.is_empty());
+        assert!(!s.mask_aware);
     }
 }

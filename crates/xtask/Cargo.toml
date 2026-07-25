@@ -1,0 +1,18 @@
+[package]
+name = "xtask"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Developer tasks for Ymir (documentation generation and linting), run via `cargo xtask`."
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# The docs generator consumes the versioned JSON that `ymir docs --format json` emits.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
