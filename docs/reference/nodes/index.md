@@ -28,6 +28,7 @@ Every node, grouped by category.
 - [Blur](modifier.blur.md). Gaussian-blurs the height layer by a world-unit radius (the scale knob for derived selectors, and feathers masks).
 - [Directional Blur](modifier.directional_blur.md). Smooths the height layer along or across a guide direction, steered by the slope or a flow field.
 - [Frequency Split](modifier.frequency_split.md). Splits the height into a low-frequency band and the high-frequency residual.
+- [Grow / Shrink](modifier.grow_shrink.md). Grows or shrinks a selection by a distance in metres, moving its edge out or in with a soft border.
 - [Terrace](modifier.terrace.md). Quantizes the height into stepped bands: flat treads joined by risers, for strata, benches, and mesa forms.
 - [Warp](modifier.warp.md). Domain warp: pushes the height layer sideways by a noise field so straight features wander and regular shapes turn natural.
 

@@ -7,7 +7,7 @@ status: draft
 
 # Warp
 
-`modifier.warp` · Filters
+`modifier.warp` · Filters · Mask-aware
 
 Domain warp: pushes the height layer sideways by a noise field so straight features wander and regular shapes turn natural.
 
@@ -19,6 +19,7 @@ terrain sideways rather than up, so it changes the shape of features without cha
 ## Inputs
 
 - `in`
+- `mask` (optional)
 
 ## Outputs
 
@@ -35,4 +36,10 @@ terrain sideways rather than up, so it changes the shape of features without cha
 
 ## Layer contract
 
-Reads and writes the height layer.
+Honours a mask on its input, applying everywhere the mask is absent.
+
+## Behaviour
+
+Wire the optional mask input to confine the warp to a selection: the displacement scales by the
+mask, so a Curvature selection of the ridgelines jitters only the ridges while the rest holds still.
+Where the mask is zero the terrain passes through unwarped, and a partial mask eases the warp in.

@@ -13,6 +13,12 @@
 //! adding the very finest detail. The displacement distance (`amount`) is in world units
 //! and the noise is sampled in world coordinates, so the warp pattern is
 //! resolution-independent even though the resampling is a raster operation.
+//!
+//! An optional `mask` input scales the displacement per cell, so the warp can be confined to a
+//! selection instead of the whole field: a Curvature selection of the ridgelines masks the warp to
+//! jitter only the ridges (the heightfield analog of selecting points and jittering their position),
+//! while everything outside the selection holds still. Where the mask is zero the cell samples its
+//! own position and passes through unwarped; a partial mask eases the warp in.
 
 use std::sync::Arc;
 
@@ -44,7 +50,12 @@ impl Operator for Warp {
         NodeSpec {
             type_id: TYPE_ID,
             category: "filter",
-            inputs: vec![PortSpec::new("in")],
+            inputs: vec![
+                PortSpec::new("in"),
+                // Optional: a field whose height gates the warp. When unwired, the input's own mask
+                // layer is used by convention, else warp everywhere.
+                PortSpec::optional("mask"),
+            ],
             outputs: vec![PortSpec::new("out")],
             params: vec![
                 ParamSpec::new(
@@ -81,7 +92,7 @@ impl Operator for Warp {
                 ),
             ],
             emitted_layers: Vec::new(),
-            mask_aware: false,
+            mask_aware: true,
         }
     }
 
@@ -97,6 +108,14 @@ impl Operator for Warp {
         let height = input.height();
         let h = input.layer_or(layers::HEIGHT, 0.0);
         let region = input.region();
+
+        // The mask localizes the warp. An explicit mask input wins (its height layer is the
+        // selection); with none, the input's own mask layer by convention; with neither, a uniform
+        // 1.0 (warp everywhere). Soft-layer contract: the node never gates on a mask.
+        let mask = match inputs.optional(0) {
+            Some(mask_field) => mask_field.layer_or(layers::HEIGHT, 1.0),
+            None => input.layer_or(layers::MASK, 1.0),
+        };
 
         // The displacement distance is a world-unit length, converted to cells like the
         // other world-unit parameters, so the same amount moves the same ground at any
@@ -125,9 +144,12 @@ impl Operator for Warp {
             let v = region.min_y + (y as f64 + 0.5) / height as f64 * region.height();
             let nx = u as f32 * frequency;
             let ny = v as f32 * frequency;
-            // Independent x and y offsets in cells.
-            let dx = fbm_sample(seed_x, nx, ny, warp) * amount_cells;
-            let dy = fbm_sample(seed_y, nx, ny, warp) * amount_cells;
+            // Independent x and y offsets in cells, scaled by the mask so the warp eases in where
+            // the selection is partial and vanishes where it is zero (the cell then holds its own
+            // value, unwarped).
+            let m = mask.get(x, y).unwrap_or(1.0);
+            let dx = fbm_sample(seed_x, nx, ny, warp) * amount_cells * m;
+            let dy = fbm_sample(seed_y, nx, ny, warp) * amount_cells * m;
             // Resample the input at the displaced position, clamped at the edge.
             sample_bilinear(&h, x as f32 + dx, y as f32 + dy, width, height)
         });
@@ -302,6 +324,74 @@ mod tests {
     fn spec_is_a_modifier() {
         assert_eq!(Warp.spec().kind(), ymir_core::NodeKind::Modifier);
         assert_eq!(Warp.spec().type_id, TYPE_ID);
+    }
+
+    fn mask(res: usize, value: f32) -> Field {
+        Field::new(res, res, Region::UNIT)
+            .with_layer(layers::HEIGHT, Arc::new(Layer::filled(res, res, value)))
+    }
+
+    fn run_masked(input: &Field, amount: f64, mask: &Field, ctx: &EvalContext) -> Field {
+        let params = Params::new().with("amount", ParamValue::Float(amount));
+        Warp.eval(Inputs::new(&[input], &[Some(mask)]), &params, ctx)
+            .unwrap()
+            .remove(0)
+    }
+
+    #[test]
+    fn a_zero_mask_leaves_the_field_unwarped() {
+        // With the mask zero everywhere the displacement is scaled to nothing, so every cell samples
+        // its own position and the output equals the input exactly.
+        let input = ramp(32);
+        let out = run_masked(&input, 20.0, &mask(32, 0.0), &ctx(32, 32.0));
+        assert_eq!(
+            out.layer(layers::HEIGHT).unwrap().content_hash(),
+            input.layer(layers::HEIGHT).unwrap().content_hash(),
+            "mask 0 must pass the field through unwarped"
+        );
+    }
+
+    #[test]
+    fn a_full_mask_matches_the_unmasked_warp() {
+        // A uniform mask of one is the same as no mask: the displacement is unscaled.
+        let input = ramp(32);
+        let c = ctx(32, 32.0);
+        let unmasked = run(&input, 20.0, &c);
+        let full = run_masked(&input, 20.0, &mask(32, 1.0), &c);
+        assert_eq!(
+            unmasked.content_hash(),
+            full.content_hash(),
+            "a full mask must match warping with no mask"
+        );
+    }
+
+    #[test]
+    fn the_mask_gates_the_warp_by_region() {
+        // A mask that is zero on the left half and one on the right: the left stays put while the
+        // right is displaced. Compared against the unmasked warp, the left half is unchanged and the
+        // right half diverges.
+        let input = ramp(48);
+        let c = ctx(48, 48.0);
+        let unmasked = run(&input, 24.0, &c);
+        let half = Field::new(48, 48, Region::UNIT).with_layer(
+            layers::HEIGHT,
+            Arc::new(Layer::from_fn(
+                48,
+                48,
+                |x, _| if x < 24 { 0.0 } else { 1.0 },
+            )),
+        );
+        let masked = run_masked(&input, 24.0, &half, &c);
+        // Left column: masked equals the untouched input (mask 0), and differs from the unmasked warp.
+        assert!(
+            (at(&masked, 6, 24) - at(&input, 6, 24)).abs() < 1e-6,
+            "left half must be unwarped"
+        );
+        // Right column: masked equals the unmasked warp there (mask 1).
+        assert!(
+            (at(&masked, 40, 24) - at(&unmasked, 40, 24)).abs() < 1e-6,
+            "right half must warp like the unmasked field"
+        );
     }
 
     #[test]
