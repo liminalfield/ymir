@@ -2956,11 +2956,22 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
                         // Build the whole project: the effective top-level graph, even if a
                         // subgraph is currently open on the canvas.
                         let top = state.top_graph();
-                        let targets = included_endpoints(&top);
+                        let endpoints = included_endpoints(&top);
+                        // Without an output node to build, evaluate the previewed node instead
+                        // (#253), so Build still fills the viewport with build-resolution
+                        // terrain. Nothing is written, which the status says.
+                        let (targets, kind) = if endpoints.is_empty() {
+                            (
+                                build_fallback_target(state, &top).into_iter().collect(),
+                                build::BuildKind::Preview {
+                                    res: state.build_res,
+                                },
+                            )
+                        } else {
+                            (endpoints, build::BuildKind::Outputs)
+                        };
                         if targets.is_empty() {
-                            state
-                                .build
-                                .report("No outputs selected to build.".to_string());
+                            state.build.report("Nothing to build.".to_string());
                         } else if targets.len() > MAX_BUILD_OUTPUTS {
                             state.build.report(format!(
                                 "Too many outputs ({}); the limit is {MAX_BUILD_OUTPUTS}.",
@@ -2975,7 +2986,9 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
                             if let Some(gpu) = &state.gpu {
                                 request = request.with_compute(gpu.clone());
                             }
-                            state.build.start(top, targets, request, ui.ctx().clone());
+                            state
+                                .build
+                                .start(top, targets, request, kind, ui.ctx().clone());
                         }
                     }
                     state.build.show(ui);
@@ -3060,6 +3073,55 @@ fn included_endpoints(graph: &Graph) -> Vec<u64> {
             included.then_some(nd.stable_id)
         })
         .collect()
+}
+
+/// The node a Build targets when the graph holds no output node to build (#253): the
+/// previewed node, so Build produces build-resolution terrain for exactly what the viewport
+/// is showing. `None` when there is nothing evaluable to build.
+///
+/// The previewed node is a node of `top` only at the top level. With a subgraph open it
+/// belongs to the inner graph, and the build falls back to the top-level graph's own result
+/// node, whose evaluation runs the container (and so the inner node) anyway. The test is the
+/// navigation depth rather than a lookup of the previewed `stable_id` in `top`: ids are
+/// allocated per graph (`Graph::add_op`), so an inner node's id can collide with an unrelated
+/// top-level node's, and a lookup would build that unrelated node.
+fn build_fallback_target(state: &AppState, top: &Graph) -> Option<u64> {
+    if state.nav.is_empty()
+        && let Some(handle) = state.preview_target()
+    {
+        return Some(handle);
+    }
+    graph_sink(top)
+}
+
+/// The result node of `graph`: a node with an output that no other node reads, taking the
+/// highest `stable_id` when several qualify. This is `AppState::preview_sink`'s rule applied
+/// to an arbitrary graph. The two are kept separate deliberately: the canvas walks its snarl
+/// every frame, which is cheap, while this walks a document and runs once per Build click.
+fn graph_sink(graph: &Graph) -> Option<u64> {
+    let doc = graph.to_document();
+    let mut consumed: HashSet<NodeId> = HashSet::new();
+    for node in &doc.nodes {
+        let Some(id) = graph.node_id_of(node.stable_id) else {
+            continue;
+        };
+        let Some(spec) = graph.spec(id) else {
+            continue;
+        };
+        for port in 0..spec.inputs.len() {
+            if let Some((source, _)) = graph.input_source(id, port) {
+                consumed.insert(source);
+            }
+        }
+    }
+    doc.nodes
+        .iter()
+        .filter_map(|node| {
+            let id = graph.node_id_of(node.stable_id)?;
+            let spec = graph.spec(id)?;
+            (!spec.outputs.is_empty() && !consumed.contains(&id)).then_some(node.stable_id)
+        })
+        .max()
 }
 
 /// Folds an active inner graph back up through its suspended parents to the top-level
@@ -10033,6 +10095,85 @@ mod tests {
         state.preview_pin = Some(generator);
         state.clear_selection();
         assert_eq!(state.preview_target(), Some(generator));
+    }
+
+    #[test]
+    fn build_without_an_output_node_targets_the_previewed_node() {
+        // #253: a graph with no endpoint still builds, targeting whatever the viewport shows,
+        // so the terrain can be seen at the build resolution before an Export is wired.
+        let mut state = AppState::new();
+        state.graph = Graph::new();
+        state.snarl = Snarl::new();
+
+        // An empty graph has nothing to evaluate, so Build still has nothing to do.
+        assert_eq!(build_fallback_target(&state, &state.top_graph()), None);
+
+        let pos = egui::Pos2::ZERO;
+        let gen_id =
+            canvas::add_node(&mut state.graph, &mut state.snarl, "generator.fbm", pos).unwrap();
+        let mod_id =
+            canvas::add_node(&mut state.graph, &mut state.snarl, "modifier.invert", pos).unwrap();
+        state.graph.connect(gen_id, 0, mod_id, 0).unwrap();
+        let generator = state.graph.stable_id(gen_id).unwrap();
+        let modifier = state.graph.stable_id(mod_id).unwrap();
+        let top = state.top_graph();
+
+        assert!(
+            included_endpoints(&top).is_empty(),
+            "the graph has no output node, which is what triggers the fallback"
+        );
+        // Nothing selected: the graph's own result node, matching what the preview shows.
+        assert_eq!(build_fallback_target(&state, &top), Some(modifier));
+        // A selection moves the build to the node being previewed.
+        state.select_only(generator);
+        assert_eq!(build_fallback_target(&state, &top), Some(generator));
+    }
+
+    #[test]
+    fn build_inside_a_subgraph_falls_back_to_the_top_level_sink() {
+        // #253: with a subgraph open, the previewed node belongs to the inner graph, so the
+        // build targets the top-level result node instead. Stable ids are per graph, so the
+        // inner node's id can name an unrelated top-level node: this guards against building
+        // that one by mistake.
+        let mut state = AppState::new();
+        state.graph = Graph::new();
+        state.snarl = Snarl::new();
+        let pos = egui::Pos2::ZERO;
+        let inner =
+            canvas::add_node(&mut state.graph, &mut state.snarl, "generator.fbm", pos).unwrap();
+        let inner_handle = state.graph.stable_id(inner).unwrap();
+        assert_eq!(state.preview_target(), Some(inner_handle));
+
+        // The parent graph, standing in for the folded top level. Its first node carries the
+        // same stable id as the previewed inner node, which is exactly the collision.
+        let mut top = Graph::new();
+        let mut top_snarl = Snarl::new();
+        let gen_id = canvas::add_node(&mut top, &mut top_snarl, "generator.fbm", pos).unwrap();
+        let mod_id = canvas::add_node(&mut top, &mut top_snarl, "modifier.invert", pos).unwrap();
+        top.connect(gen_id, 0, mod_id, 0).unwrap();
+        let top_sink = top.stable_id(mod_id).unwrap();
+        assert_eq!(
+            top.stable_id(gen_id),
+            Some(inner_handle),
+            "the ids collide across graphs, which is the case under test"
+        );
+
+        // At the top level the previewed node is the target.
+        assert_eq!(build_fallback_target(&state, &top), Some(inner_handle));
+
+        // Dived into a subgraph, it is the top-level graph's own result node.
+        state.nav.push(NavFrame {
+            graph: top.clone(),
+            positions: BTreeMap::new(),
+            frames: Vec::new(),
+            selection: HashSet::new(),
+            primary: None,
+            preview_pin: None,
+            container: top_sink,
+            label: "Subgraph".to_string(),
+            view: None,
+        });
+        assert_eq!(build_fallback_target(&state, &top), Some(top_sink));
     }
 
     #[test]

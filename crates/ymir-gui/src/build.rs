@@ -23,6 +23,20 @@ enum Outcome {
     Failed(String),
 }
 
+/// What a build was asked to produce, so its status can report what actually happened.
+#[derive(Clone, Copy)]
+pub(crate) enum BuildKind {
+    /// The graph's output endpoints, each writing its file as it evaluates.
+    Outputs,
+    /// A node evaluated at the build resolution to fill the viewport, with no endpoint
+    /// among the targets and so no file written (#253). Carries the resolution for the
+    /// status text.
+    Preview {
+        /// The square resolution the build ran at.
+        res: usize,
+    },
+}
+
 /// The build's coarse state, for the status shown beside the Build button.
 enum Status {
     Idle,
@@ -42,6 +56,9 @@ pub(crate) struct BuildRunner {
     /// Cancel button sets it, and the erosion (and the evaluator between nodes) polls it.
     cancel: CancelToken,
     status: Status,
+    /// What the current (or last) build was asked to produce, so the finished status can
+    /// distinguish written outputs from a viewport-only build (#253).
+    kind: BuildKind,
 }
 
 impl BuildRunner {
@@ -50,6 +67,7 @@ impl BuildRunner {
             rx: None,
             cancel: CancelToken::new(),
             status: Status::Idle,
+            kind: BuildKind::Outputs,
         }
     }
 
@@ -60,12 +78,14 @@ impl BuildRunner {
 
     /// Starts a build: evaluates each `target` (a node `stable_id`) at `request` on a
     /// worker thread against a snapshot `graph`. Each export endpoint writes its file
-    /// as the side effect of being evaluated.
+    /// as the side effect of being evaluated. `kind` is what the targets represent, and
+    /// only shapes the status text.
     pub(crate) fn start(
         &mut self,
         graph: Graph,
         targets: Vec<u64>,
         request: EvalRequest,
+        kind: BuildKind,
         ctx: egui::Context,
     ) {
         // A fresh token per build; the worker's request carries a clone so the erosion's
@@ -76,6 +96,7 @@ impl BuildRunner {
         let (tx, rx) = channel();
         self.rx = Some(rx);
         self.status = Status::Building;
+        self.kind = kind;
         thread::spawn(move || {
             let mut cache = build_cache();
             let outcome = run(&graph, &targets, &request, &mut cache);
@@ -144,10 +165,17 @@ impl BuildRunner {
                 ui.spinner();
                 ui.weak("Building…");
             }
-            Status::Done(n) => {
-                let plural = if *n == 1 { "" } else { "s" };
-                ui.weak(format!("Built {n} output{plural}"));
-            }
+            Status::Done(n) => match self.kind {
+                BuildKind::Outputs => {
+                    let plural = if *n == 1 { "" } else { "s" };
+                    ui.weak(format!("Built {n} output{plural}"));
+                }
+                // A viewport-only build wrote no file, so the status says the resolution it
+                // reached and that nothing was exported (#253).
+                BuildKind::Preview { res } => {
+                    ui.weak(format!("Built preview at {res}px (no output exported)"));
+                }
+            },
             Status::Cancelled => {
                 ui.weak("Cancelled");
             }
