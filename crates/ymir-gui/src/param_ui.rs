@@ -331,8 +331,22 @@ pub(crate) fn toggle(ui: &mut egui::Ui, on: bool) -> egui::Response {
     resp.on_hover_text(if on { "On" } else { "Off" })
 }
 
+/// Where an integer scrub settles: rounded to a whole step, then held inside the bounds the
+/// schema declared (#246). Both halves matter. Without the round a drag would leave a fraction
+/// that the box shows and the graph stores as a truncated value; without the clamp a scrub could
+/// carry a seed below zero or octaves past their maximum, which the widget must not allow since
+/// the range is the node author's declared intent. Pure, so it is unit-tested.
+fn settle_int(v: f64, min: i64, max: i64) -> i64 {
+    v.round().clamp(min as f64, max as f64) as i64
+}
+
 /// An integer stepper: a deep field with a minus button, the value in the centre, and a plus button.
-/// Steps by one within `[min, max]`. Returns whether the value changed.
+/// The buttons step by one within `[min, max]`; the centre is the same value box the float params
+/// use, so an integer can be scrubbed with an infinite cursor-locked drag or clicked and typed
+/// (#246). A wide range (fbm's seed runs to `i32::MAX`) is unreachable one click at a time, and
+/// scrubbing at any range-proportional speed would be either useless there or twitchy on a range
+/// like octaves' 1..12, so the scrub is a flat unit per pixel and typing covers the long jumps.
+/// Returns whether the value changed.
 fn stepper(ui: &mut egui::Ui, value: &mut i64, min: i64, max: i64) -> bool {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(104.0, 24.0), egui::Sense::hover());
     let btn_w = 26.0;
@@ -385,13 +399,52 @@ fn stepper(ui: &mut egui::Ui, value: &mut i64, min: i64, max: i64) -> bool {
         egui::FontId::proportional(15.0),
         glyph(&plus_resp, *value < max),
     );
-    painter.text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        value.to_string(),
-        egui::FontId::new(13.0, egui::FontFamily::Monospace),
-        crate::theme::TEXT_PRIMARY,
+    // The centre of the field is a value box rather than painted text: a DragValue supplies
+    // click-to-type and formatting, and its own edge-limited drag is made inert (speed 0) so the
+    // wrapping-free infinite scrub below is the only thing that moves it, exactly as the float
+    // params do. It is drawn without a frame so the field painted above stays the visible control.
+    let centre = egui::Rect::from_min_max(
+        egui::pos2(minus.right(), rect.top()),
+        egui::pos2(plus.left(), rect.bottom()),
     );
+    // Seeded from this allocation's own (auto-unique) id for the same reason the buttons are: the
+    // stepper rows share a parent ui, so an auto-generated id would clash between rows and two
+    // steppers would share one text-edit state.
+    let value_resp = ui
+        .push_id(resp.id, |ui| {
+            let v = ui.visuals_mut();
+            for w in [
+                &mut v.widgets.inactive,
+                &mut v.widgets.hovered,
+                &mut v.widgets.active,
+            ] {
+                w.weak_bg_fill = egui::Color32::TRANSPARENT;
+                w.bg_stroke = egui::Stroke::NONE;
+                w.fg_stroke.color = crate::theme::TEXT_PRIMARY;
+            }
+            ui.style_mut().text_styles.insert(
+                egui::TextStyle::Button,
+                egui::FontId::new(13.0, egui::FontFamily::Monospace),
+            );
+            ui.put(
+                centre,
+                egui::DragValue::new(value)
+                    .speed(0.0)
+                    .range(min as f64..=max as f64),
+            )
+            .on_hover_text("Drag to scrub \u{b7} click to type")
+        })
+        .inner;
+    changed |= value_resp.changed();
+    // The scrub runs on a float mirror (that is what `scrub_drag` drives) and lands back on the
+    // integer each frame. At one unit per pixel every step is whole, so nothing is lost rounding.
+    let mut scrubbed_value = *value as f64;
+    if scrub_drag(ui, &value_resp, &mut scrubbed_value, 1.0, |v| {
+        settle_int(v, min, max) as f64
+    }) {
+        *value = settle_int(scrubbed_value, min, max);
+        changed = true;
+    }
     changed
 }
 
@@ -656,6 +709,34 @@ mod tests {
 
     fn spec(kind: ParamKind, default: ParamValue) -> ParamSpec {
         ParamSpec::new("p", kind, default)
+    }
+
+    #[test]
+    fn settle_int_rounds_then_clamps_to_the_declared_range() {
+        // #246: a scrub lands on whole steps and can never leave the schema's range.
+        assert_eq!(settle_int(3.4, 0, 12), 3);
+        assert_eq!(settle_int(3.6, 0, 12), 4);
+        // fbm's seed is declared non-negative: scrubbing down stops at zero rather than going
+        // negative, and a long drag up stops at the declared maximum.
+        assert_eq!(settle_int(-8.0, 0, i64::from(i32::MAX)), 0);
+        assert_eq!(
+            settle_int(1e12, 0, i64::from(i32::MAX)),
+            i64::from(i32::MAX)
+        );
+        // A signed range keeps both ends.
+        assert_eq!(settle_int(-10_500.0, -10_000, 10_000), -10_000);
+        assert_eq!(settle_int(-2.5, -10_000, 10_000), -3);
+    }
+
+    #[test]
+    fn drawing_the_stepper_leaves_the_value_alone() {
+        // Drawing must not rewrite the value: a param edit is what marks a project modified, so a
+        // widget that nudged its own value on the first frame would report a phantom edit.
+        let mut value = 65_323_i64;
+        egui::__run_test_ui(|ui| {
+            assert!(!stepper(ui, &mut value, 0, i64::from(i32::MAX)));
+        });
+        assert_eq!(value, 65_323);
     }
 
     #[test]
