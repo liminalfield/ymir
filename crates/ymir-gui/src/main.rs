@@ -7013,7 +7013,13 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // orange "Unaligned" lines, which is a false positive here: it briefly flashes on
     // the thumbnail footer as a node resizes. The overlay earns its keep on the static
     // panes (catching blurry text), so disable it only for this ui, not globally.
-    ui.style_mut().debug.show_unaligned = false;
+    //
+    // Gated because the overlay, and the `Style::debug` field itself, exist only in a debug
+    // build: unconditionally naming the field fails to compile in release (#300).
+    #[cfg(debug_assertions)]
+    {
+        ui.style_mut().debug.show_unaligned = false;
+    }
 
     // Plain scroll wheel zooms the canvas about the cursor (#36). snarl's egui Scene
     // would scroll-pan instead, so suppress its scroll-pan and hand the zoom to the
