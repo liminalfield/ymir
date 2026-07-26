@@ -135,9 +135,14 @@ fn default_steepness() -> f32 {
 }
 
 /// Prevailing wave bearing for a project saved before the control existed (#251): the bearing the
-/// shader's baked fan already travelled along, so such a project renders exactly as it did.
+/// shader's tallest component already travelled along, so such a project renders exactly as it did.
 fn default_wave_direction() -> f32 {
     crate::viewport::WAVE_FAN_BEARING_DEG
+}
+
+/// Wave fan spread for a project saved before the control existed (#251): the fan as authored.
+fn default_wave_spread() -> f32 {
+    crate::viewport::WAVE_SPREAD_DEFAULT
 }
 
 /// Gerstner wavelength scale for a project saved before the control existed (#155).
@@ -185,9 +190,12 @@ pub(crate) struct WaterSettings {
     pub steepness: f32,
     #[serde(default = "default_wavelength")]
     pub wavelength: f32,
-    /// The bearing the swell travels along, in degrees (#251).
+    /// The bearing the swell travels along, in degrees, and how widely the wave components fan
+    /// around it (`0` parallel, `1` the fan as authored) (#251).
     #[serde(default = "default_wave_direction")]
     pub direction: f32,
+    #[serde(default = "default_wave_spread")]
+    pub spread: f32,
     /// Foam amount and band width (in normalized depth).
     pub foam: f32,
     pub foam_width: f32,
@@ -220,6 +228,7 @@ impl Default for WaterSettings {
             steepness: 0.6,
             wavelength: 1.0,
             direction: default_wave_direction(),
+            spread: default_wave_spread(),
             foam: 0.5,
             foam_width: 0.015,
             wet_on: true,
@@ -853,9 +862,10 @@ mod tests {
 
     #[test]
     fn wave_direction_defaults_to_the_shader_fan_for_an_older_project() {
-        // #251: a project saved before the direction control must render exactly as it did, which
-        // means loading with the bearing the shader's baked fan already travelled along. Any other
-        // default would silently swing the swell on every existing project.
+        // #251: a project saved before the direction and spread controls must render exactly as it
+        // did, which means loading with the bearing the shader's tallest component already
+        // travelled along, and with the fan at its authored width. Any other default would silently
+        // swing or narrow the swell on every existing project.
         let json = r#"{
             "format_version": 1,
             "world": {
@@ -874,10 +884,18 @@ mod tests {
             file.world.water.direction,
             crate::viewport::WAVE_FAN_BEARING_DEG
         );
+        assert_eq!(
+            file.world.water.spread,
+            crate::viewport::WAVE_SPREAD_DEFAULT
+        );
         // A fresh project agrees with the migrated one, so both render the same swell.
         assert_eq!(
             WaterSettings::default().direction,
             crate::viewport::WAVE_FAN_BEARING_DEG
+        );
+        assert_eq!(
+            WaterSettings::default().spread,
+            crate::viewport::WAVE_SPREAD_DEFAULT
         );
     }
 

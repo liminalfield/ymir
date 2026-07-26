@@ -513,10 +513,11 @@ struct AppState {
     water_reflectivity: f32,
     water_specular: f32,
     /// Gerstner wave shaping (#155): crest steepness and wavelength scale, plus the prevailing
-    /// wave bearing in degrees (#251).
+    /// wave bearing in degrees and the fan's spread around it (#251).
     water_steepness: f32,
     water_wavelength: f32,
     water_direction: f32,
+    water_spread: f32,
     /// Shoreline foam controls (ephemeral): amount and band width (#156).
     water_foam: f32,
     water_foam_width: f32,
@@ -860,6 +861,7 @@ impl AppState {
             water_steepness: water_defaults.steepness,
             water_wavelength: water_defaults.wavelength,
             water_direction: water_defaults.direction,
+            water_spread: water_defaults.spread,
             water_foam: water_defaults.foam,
             water_foam_width: water_defaults.foam_width,
             water_wet_on: water_defaults.wet_on,
@@ -1074,6 +1076,7 @@ impl AppState {
             steepness: self.water_steepness,
             wavelength: self.water_wavelength,
             direction: self.water_direction,
+            spread: self.water_spread,
             foam: self.water_foam,
             foam_width: self.water_foam_width,
             wet_on: self.water_wet_on,
@@ -1098,6 +1101,7 @@ impl AppState {
         self.water_steepness = w.steepness;
         self.water_wavelength = w.wavelength;
         self.water_direction = w.direction;
+        self.water_spread = w.spread;
         self.water_foam = w.foam;
         self.water_foam_width = w.foam_width;
         self.water_wet_on = w.wet_on;
@@ -4942,7 +4946,11 @@ fn angle_row(ui: &mut egui::Ui, label: &str, value: &mut f32) {
                         .fixed_decimals(0)
                         .suffix("\u{b0}"),
                 )
-                .on_hover_text("Drag to scrub \u{b7} click to type");
+                .on_hover_text(
+                    "Drag to scrub \u{b7} click to type\n\
+                     The bearing the swell travels: 0\u{b0} toward the right of the map, \
+                     90\u{b0} toward the bottom",
+                );
             let scrubbed = param_ui::scrub_drag(ui, &resp, &mut x, SCRUB_SPEED, |v| {
                 param_ui::finalize_value(v, Some(360.0), None)
             });
@@ -5143,6 +5151,7 @@ fn world_settings(ui: &mut egui::Ui, state: &mut AppState) {
             slider_row(ui, "Steepness", &mut state.water_steepness, 0.0..=1.0, 2);
             slider_row(ui, "Wavelength", &mut state.water_wavelength, 0.3..=3.0, 2);
             angle_row(ui, "Direction", &mut state.water_direction);
+            slider_row(ui, "Spread", &mut state.water_spread, 0.0..=1.0, 2);
         });
         water_group(ui, "Reflection", &mut state.water_reflection, |ui| {
             slider_row(
@@ -7774,6 +7783,7 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 water_steepness: state.water_steepness,
                 water_wavelength: state.water_wavelength,
                 water_direction: state.water_direction,
+                water_spread: state.water_spread,
                 water_foam: state.water_foam,
                 water_foam_width: state.water_foam_width,
                 // The wet-shore toggle gates the effect by passing zero strength when off.
@@ -10605,6 +10615,7 @@ mod tests {
                     steepness: 0.4,
                     wavelength: 1.5,
                     direction: 120.0,
+                    spread: 0.25,
                     foam: 0.8,
                     foam_width: 0.02,
                     wet_on: false,
