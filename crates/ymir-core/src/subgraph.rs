@@ -249,12 +249,23 @@ impl Operator for SubgraphNode {
         // itself memoizes in the outer cache, so an unchanged subgraph is never re-run, and
         // within this one call the evaluator's working set pins the active path regardless of
         // cache capacity.
-        let request = EvalRequest::new(ctx.width, ctx.height, ctx.region, inner_seed)
+        let mut request = EvalRequest::new(ctx.width, ctx.height, ctx.region, inner_seed)
             .with_world_extent(ctx.world_extent())
             .with_world_height(ctx.world_height())
             .with_sea_level(ctx.sea_level())
             .with_cancel(ctx.cancel_token())
             .with_depth(ctx.depth() + 1);
+        // The device crosses the boundary with everything else (#297). Without it every node in
+        // here takes its CPU path, which is correct and several times slower, and says nothing
+        // about why: a subgraph holding erosion built in minutes what the same nodes inline built
+        // in seconds.
+        //
+        // The progress sink is deliberately *not* carried across. Inner nodes would report events
+        // carrying inner-graph `stable_id`s, which collide with top-level ones, so a subgraph's
+        // progress would attach itself to an unrelated node's row (#287).
+        if let Some(compute) = ctx.compute_handle() {
+            request = request.with_compute(compute);
+        }
         let mut cache = EvalCache::new(0);
         self.inner
             .evaluate_bound(&bound, &outputs, &request, &mut cache)
@@ -374,6 +385,84 @@ mod tests {
                 ),
             ])
         }
+    }
+
+    /// A stand-in compute device, so a test can check that the handle reaches an operator without
+    /// needing a real GPU.
+    #[derive(Debug)]
+    struct FakeDevice;
+
+    impl crate::ComputeContext for FakeDevice {
+        fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
+            self
+        }
+    }
+
+    /// A test-only generator whose output says whether it was handed a compute device: 1.0 when it
+    /// was, 0.0 when it was not. Never registered.
+    #[derive(Clone)]
+    struct DeviceProbe;
+
+    impl Operator for DeviceProbe {
+        fn spec(&self) -> NodeSpec {
+            NodeSpec {
+                type_id: "test.device_probe",
+                category: "test",
+                inputs: Vec::new(),
+                outputs: vec![PortSpec::new("out")],
+                params: Vec::new(),
+                emitted_layers: Vec::new(),
+                mask_aware: false,
+            }
+        }
+
+        fn eval(&self, _: Inputs, _: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
+            let saw_device = f32::from(u8::from(ctx.compute().is_some()));
+            Ok(vec![
+                Field::new(ctx.width, ctx.height, ctx.region).with_layer(
+                    layers::HEIGHT,
+                    Arc::new(Layer::filled(ctx.width, ctx.height, saw_device)),
+                ),
+            ])
+        }
+    }
+
+    #[test]
+    fn a_node_inside_a_subgraph_gets_the_same_compute_device_as_one_outside() {
+        // #297: the inner request is built fresh, and the device has to be carried across with the
+        // other world values. Without it every node inside silently takes its CPU path: correct,
+        // several times slower, and quiet about why.
+        let mut inner = Graph::new();
+        let probe = inner.add_op(Box::new(DeviceProbe), Params::new());
+        let output = inner.add_op(Box::new(OutputNode), Params::new());
+        inner.connect(probe, 0, output, 0).expect("probe -> output");
+
+        let mut graph = Graph::new();
+        let container = graph.add_op(Box::new(SubgraphNode::new(inner)), Params::new());
+        let outside = graph.add_op(Box::new(DeviceProbe), Params::new());
+
+        let request = EvalRequest::new(4, 4, Region::UNIT, 0)
+            .with_compute(Arc::new(FakeDevice) as Arc<dyn crate::ComputeContext>);
+        let mut cache = EvalCache::new(8);
+
+        let inside_value = graph
+            .evaluate(container, &request, &mut cache)
+            .expect("subgraph evaluates")[0]
+            .layer_or(layers::HEIGHT, 0.0)
+            .get(0, 0)
+            .expect("a cell");
+        let outside_value = graph
+            .evaluate(outside, &request, &mut cache)
+            .expect("plain node evaluates")[0]
+            .layer_or(layers::HEIGHT, 0.0)
+            .get(0, 0)
+            .expect("a cell");
+
+        assert_eq!(outside_value, 1.0, "a plain node is handed the device");
+        assert_eq!(
+            inside_value, 1.0,
+            "and so is a node inside a subgraph, or GPU work silently falls back to the CPU"
+        );
     }
 
     /// An inner graph of Input -> Output: a passthrough whose single output is its single

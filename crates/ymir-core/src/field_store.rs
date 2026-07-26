@@ -54,6 +54,16 @@ impl FieldStore {
         self.dir.join(format!("{key:016x}.{EXTENSION}"))
     }
 
+    /// Whether a blob is stored under `key`, without reading it.
+    ///
+    /// A stat, not a read. [`load`](Self::load) pulls a whole build-resolution result into memory
+    /// and deserializes it, which at 4096 squared is tens of megabytes; a caller that only needs to
+    /// know whether a result *exists* (to offer a Build/Preview toggle, say) must not pay that.
+    #[must_use]
+    pub fn contains(&self, key: u64) -> bool {
+        self.path(key).is_file()
+    }
+
     /// Loads the cached output for `key`, or `None` on any miss (absent, corrupt, unreadable).
     /// On a hit, best-effort bumps the file's modification time so eviction is least-recently-
     /// *used*, not merely least-recently-written.

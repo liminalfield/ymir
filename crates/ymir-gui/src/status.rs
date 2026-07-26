@@ -83,6 +83,63 @@ pub(crate) enum Fidelity {
     Build,
 }
 
+/// What can go visibly wrong with a node inside a subgraph, seen from outside it.
+///
+/// Deliberately short. A container evaluates its contents as one unit with a transient cache, so
+/// from outside there is no per-node freshness and no per-node build progress to report. What is
+/// left is what can be read off the inner graph without running anything: a wiring fault, or a
+/// node switched off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChildFault {
+    /// A required input is unwired, so the subgraph cannot evaluate.
+    NoInput,
+    /// Structurally broken in a way its own ports do not show, such as a cycle.
+    Failed,
+    /// Passing its input through untouched.
+    Bypassed,
+}
+
+impl ChildFault {
+    /// The mark shown in the row's glyph cell, matching [`NodeState`]'s vocabulary.
+    pub(crate) fn glyph(self) -> &'static str {
+        match self {
+            ChildFault::NoInput | ChildFault::Failed => "\u{25b2}",
+            ChildFault::Bypassed => "\u{23f8}",
+        }
+    }
+
+    /// The word shown in the trailing slot.
+    pub(crate) fn word(self) -> &'static str {
+        match self {
+            ChildFault::NoInput => "no input",
+            ChildFault::Failed => "failed",
+            ChildFault::Bypassed => "bypassed",
+        }
+    }
+
+    /// Whether this is a fault rather than a deliberate setting, for the collapsed summary. A
+    /// bypassed node is a choice someone made; an unwired input is not.
+    pub(crate) fn is_broken(self) -> bool {
+        matches!(self, ChildFault::NoInput | ChildFault::Failed)
+    }
+}
+
+/// One node inside a subgraph, as seen from outside it.
+///
+/// Carries no handle: an inner node's `stable_id` is allocated by its own graph and can collide
+/// with an unrelated node's outside, so it must never be used to look anything up out here. A
+/// reader who wants to act on one dives into the subgraph, where it is an ordinary node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ChildStatus {
+    /// The name shown on the row.
+    pub name: String,
+    /// The registered `type_id`, shown under the name.
+    pub type_id: &'static str,
+    /// What is visibly wrong, or `None`. `None` means nothing is wrong that can be seen from
+    /// here, which is not the same as "up to date": freshness is not tracked per inner node.
+    pub fault: Option<ChildFault>,
+}
+
 /// One node's status: its state, plus the flags that are true *about* it rather than states of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NodeStatus {
@@ -103,6 +160,9 @@ pub(crate) struct NodeStatus {
     pub build_included: Option<bool>,
     /// The highest-fidelity result held.
     pub fidelity: Fidelity,
+    /// For a subgraph container, what is inside it, in dependency order. Empty for every other
+    /// node. Only what is knowable from outside; see [`ChildStatus`].
+    pub children: Vec<ChildStatus>,
 }
 
 /// What the derivation needs that the graph cannot tell it: everything the evaluation worker and
@@ -169,6 +229,7 @@ fn status_of(graph: &Graph, id: NodeId, report: &StatusReport) -> Option<NodeSta
 
     Some(NodeStatus {
         handle,
+        children: graph.nested(id).map(children_of).unwrap_or_default(),
         name: graph.name(id).map_or_else(
             || ymir_nodes::tr(&format!("node-{}", spec.type_id)).to_string(),
             ToString::to_string,
@@ -366,6 +427,37 @@ pub(crate) fn suffixes(nodes: &[&NodeStatus]) -> Vec<Option<String>> {
         }
     }
     out
+}
+
+/// What is inside a subgraph, in dependency order, limited to what can be seen from outside.
+///
+/// No freshness and no build progress: a container runs its contents as one unit with a transient
+/// cache, so those facts do not exist per inner node. Dive in and they do, because the inner graph
+/// is then the graph being evaluated.
+fn children_of(inner: &Graph) -> Vec<ChildStatus> {
+    dependency_order(inner)
+        .into_iter()
+        .filter_map(|id| {
+            let spec = inner.spec(id)?;
+            let fault = if required_input_missing(inner, id, &spec) {
+                Some(ChildFault::NoInput)
+            } else if structurally_broken(inner, id) {
+                Some(ChildFault::Failed)
+            } else if inner.is_bypassed(id) {
+                Some(ChildFault::Bypassed)
+            } else {
+                None
+            };
+            Some(ChildStatus {
+                name: inner.name(id).map_or_else(
+                    || ymir_nodes::tr(&format!("node-{}", spec.type_id)).to_string(),
+                    ToString::to_string,
+                ),
+                type_id: spec.type_id,
+                fault,
+            })
+        })
+        .collect()
 }
 
 /// Every node a pull of `targets` would touch: the targets and everything upstream of them.
@@ -832,6 +924,61 @@ mod tests {
         assert!(
             colliding.contains(&"\u{b7}invert 2".to_string()),
             "{colliding:?}"
+        );
+    }
+
+    #[test]
+    fn a_container_reports_what_is_inside_it_and_an_ordinary_node_reports_nothing() {
+        // #287: seen from outside, a subgraph's contents are structure plus visible faults. There
+        // is no freshness per inner node, because the container evaluates them as one unit with a
+        // transient cache, so `None` here means "nothing visibly wrong", never "up to date".
+        let mut inner = Graph::new();
+        let mut inner_snarl = Snarl::<Handle>::new();
+        let source = add(&mut inner, &mut inner_snarl, FBM);
+        let ok = add(&mut inner, &mut inner_snarl, INVERT);
+        let orphan = add(&mut inner, &mut inner_snarl, INVERT);
+        let off = add(&mut inner, &mut inner_snarl, INVERT);
+        inner.connect(source, 0, ok, 0).expect("source -> ok");
+        inner.connect(source, 0, off, 0).expect("source -> off");
+        inner.set_bypassed(off, true).expect("bypass");
+        inner.set_name(orphan, Some("Orphan".into())).expect("name");
+
+        let (mut g, mut s) = graph();
+        let plain = add(&mut g, &mut s, FBM);
+        // Built the way the editor builds one: add the registered container type, then install
+        // the inner graph into it.
+        let container = add(&mut g, &mut s, ymir_core::SUBGRAPH_TYPE_ID);
+        g.set_nested(container, inner)
+            .expect("install the inner graph");
+
+        let list = statuses(&g, &StatusReport::default());
+        let of = |h: Handle| list.iter().find(|n| n.handle == h).expect("listed");
+
+        assert!(
+            of(handle(&g, plain)).children.is_empty(),
+            "an ordinary node has no contents to report"
+        );
+        let children = &of(handle(&g, container)).children;
+        assert_eq!(children.len(), 4);
+
+        let fault = |name: &str| {
+            children
+                .iter()
+                .find(|c| c.name == name)
+                .unwrap_or_else(|| panic!("{name} is listed"))
+                .fault
+        };
+        assert_eq!(fault("Orphan"), Some(ChildFault::NoInput));
+        assert!(
+            children
+                .iter()
+                .any(|c| c.fault == Some(ChildFault::Bypassed))
+        );
+        // The wired ones report nothing wrong, which is all that can honestly be said.
+        assert_eq!(
+            children.iter().filter(|c| c.fault.is_none()).count(),
+            2,
+            "the generator and the node it feeds"
         );
     }
 

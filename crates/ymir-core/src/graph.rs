@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
+use std::sync::OnceLock;
 
 use slotmap::{SlotMap, new_key_type};
 
@@ -93,6 +94,15 @@ pub(crate) struct Node {
 pub struct Graph {
     nodes: SlotMap<NodeId, Node>,
     next_stable_id: u64,
+    /// Memoized [`content_hash`](Self::content_hash), cleared by every mutation.
+    ///
+    /// Computing it serializes the whole graph, cloning every node's params and recursing into
+    /// nested subgraphs, so a caller that asks each frame (the editor keys its per-node status on
+    /// it) pays that repeatedly for a graph that has not moved. Same reasoning as #254, which
+    /// memoized `Layer::content_hash` after the viewport re-hashed every frame.
+    ///
+    /// Cloning carries the cached value, which is sound: a clone has identical content.
+    hash: OnceLock<u64>,
 }
 
 impl Graph {
@@ -102,12 +112,14 @@ impl Graph {
         Self {
             nodes: SlotMap::with_key(),
             next_stable_id: 0,
+            hash: OnceLock::new(),
         }
     }
 
     /// Adds a node backed by `operator`, returning its runtime handle. The node's
     /// input ports are sized from the operator's spec and start unconnected.
     pub fn add_op(&mut self, operator: Box<dyn Operator>, params: Params) -> NodeId {
+        self.hash = OnceLock::new();
         let spec = operator.spec();
         let type_id = spec.type_id;
         let input_count = spec.inputs.len();
@@ -156,6 +168,7 @@ impl Graph {
     ///
     /// Returns [`Error::NodeNotFound`] if `id` is not in the graph.
     pub fn set_operator(&mut self, id: NodeId, operator: Box<dyn Operator>) -> Result<()> {
+        self.hash = OnceLock::new();
         let spec = operator.spec();
         let type_id = spec.type_id;
         let input_count = spec.inputs.len();
@@ -216,6 +229,7 @@ impl Graph {
     ///
     /// Returns [`Error::NodeNotFound`] if `id` is not in the graph.
     pub fn set_nested(&mut self, id: NodeId, inner: Graph) -> Result<()> {
+        self.hash = OnceLock::new();
         let rebuilt = self
             .node(id)
             .ok_or(Error::NodeNotFound)?
@@ -230,6 +244,7 @@ impl Graph {
     ///
     /// Returns [`Error::NodeNotFound`] if `node` is not in the graph.
     pub fn set_params(&mut self, node: NodeId, params: Params) -> Result<()> {
+        self.hash = OnceLock::new();
         let node = self.nodes.get_mut(node).ok_or(Error::NodeNotFound)?;
         node.params = params;
         Ok(())
@@ -248,6 +263,7 @@ impl Graph {
     ///
     /// Returns [`Error::NodeNotFound`] if `node` is not in the graph.
     pub fn set_name(&mut self, node: NodeId, name: Option<String>) -> Result<()> {
+        self.hash = OnceLock::new();
         let node = self.nodes.get_mut(node).ok_or(Error::NodeNotFound)?;
         node.name = name;
         Ok(())
@@ -266,6 +282,7 @@ impl Graph {
     ///
     /// Returns [`Error::NodeNotFound`] if `node` is not in the graph.
     pub fn set_bypassed(&mut self, node: NodeId, bypassed: bool) -> Result<()> {
+        self.hash = OnceLock::new();
         let node = self.nodes.get_mut(node).ok_or(Error::NodeNotFound)?;
         node.bypassed = bypassed;
         Ok(())
@@ -285,6 +302,7 @@ impl Graph {
         dest: NodeId,
         dest_port: usize,
     ) -> Result<()> {
+        self.hash = OnceLock::new();
         let (source_type, source_outputs) = {
             let s = self.nodes.get(source).ok_or(Error::NodeNotFound)?;
             (s.type_id, s.output_count)
@@ -382,6 +400,7 @@ impl Graph {
     /// Returns [`Error::NodeNotFound`] if `dest` is absent, or [`Error::InvalidPort`]
     /// if `dest_port` is out of range.
     pub fn disconnect(&mut self, dest: NodeId, dest_port: usize) -> Result<()> {
+        self.hash = OnceLock::new();
         let node = self.nodes.get_mut(dest).ok_or(Error::NodeNotFound)?;
         if dest_port >= node.inputs.len() {
             return Err(Error::InvalidPort {
@@ -400,6 +419,7 @@ impl Graph {
     /// is left dangling to a missing source. Removing an absent node is a no-op that
     /// returns `false`.
     pub fn remove_node(&mut self, id: NodeId) -> bool {
+        self.hash = OnceLock::new();
         if self.nodes.remove(id).is_none() {
             return false;
         }
@@ -430,6 +450,7 @@ impl Graph {
     /// always yields the same id assignment (determinism the seed and cache depend on),
     /// independent of the order `nodes` is given in.
     pub fn copy_subgraph(&mut self, nodes: &[NodeId]) -> HashMap<NodeId, NodeId> {
+        self.hash = OnceLock::new();
         // Deduplicate to the live nodes paired with their stable_id, then order by it,
         // so fresh ids are assigned deterministically regardless of the caller's order.
         let unique: HashSet<NodeId> = nodes.iter().copied().collect();
@@ -508,6 +529,7 @@ impl Graph {
     /// Propagates an error only if an internal or external reconnection is rejected, which
     /// does not happen for a well-formed selection (every port is copied from a live node).
     pub fn extract_subgraph(&mut self, nodes: &[NodeId]) -> Result<Extraction> {
+        self.hash = OnceLock::new();
         use crate::subgraph::{InputNode, OutputNode, SubgraphNode};
 
         // Live, de-duplicated selection in ascending stable_id order, for deterministic port
@@ -732,6 +754,38 @@ impl Graph {
     /// output or a cache key.
     #[must_use]
     pub fn content_hash(&self) -> u64 {
+        *self.hash.get_or_init(|| self.compute_content_hash())
+    }
+
+    /// A hash of what a *reader* sees: every node's identity and its display name.
+    ///
+    /// Deliberately separate from [`content_hash`](Self::content_hash), which ignores names
+    /// because renaming a node does not change what it produces, and folding names into it would
+    /// make a rename invalidate every cache key downstream. A UI that lists nodes does need to
+    /// notice a rename, so it has this instead.
+    ///
+    /// Cheap by construction: it walks the nodes without serializing anything, so it needs no
+    /// memo.
+    #[must_use]
+    pub fn display_hash(&self) -> u64 {
+        let mut h = Fnv1a64::new();
+        h.write_usize(self.nodes.len());
+        // Sorted by `stable_id` so the result does not depend on slot-map iteration order.
+        let mut named: Vec<(u64, Option<&str>)> = self
+            .nodes
+            .values()
+            .map(|n| (n.stable_id, n.name.as_deref()))
+            .collect();
+        named.sort_unstable_by_key(|(id, _)| *id);
+        for (id, name) in named {
+            h.write_u64(id);
+            h.write_str(name.unwrap_or(""));
+        }
+        h.finish().to_u64()
+    }
+
+    /// The uncached computation behind [`content_hash`](Self::content_hash).
+    fn compute_content_hash(&self) -> u64 {
         let doc = self.to_document();
         let mut h = Fnv1a64::new();
         h.write_usize(doc.nodes.len());
@@ -1039,6 +1093,9 @@ impl Default for Graph {
 
 #[cfg(test)]
 mod tests {
+    // #299: the memoized content hash is only safe if every mutation clears it. These walk the
+    // mutating surface of `Graph` one method at a time; a new mutator that forgets to invalidate
+    // shows up here as a hash that did not move.
     use super::*;
     use crate::context::EvalContext;
     use crate::field::Field;
@@ -1074,6 +1131,94 @@ mod tests {
         fn eval(&self, _: crate::Inputs, _: &Params, _: &EvalContext) -> Result<Vec<Field>> {
             Ok(Vec::new())
         }
+    }
+
+    #[test]
+    fn every_mutation_invalidates_the_memoized_content_hash() {
+        // The hash is memoized because computing it serializes the whole graph, and the editor
+        // asks for it every frame. A mutation that forgot to clear the memo would leave the
+        // editor showing a graph that has changed as though it had not.
+        let mut graph = Graph::new();
+        let a = add(&mut graph, "test.a", 0, 1);
+        let b = add(&mut graph, "test.b", 1, 1);
+
+        // Each step performs one mutation and asserts the reported hash moved. `hash` is read
+        // before and after so the memo is populated first; an invalidation that never happened
+        // would return the stale value.
+        // A plain fn rather than a closure, so reassigning `last` between steps is not a borrow
+        // held across them.
+        fn moved(graph: &Graph, last: &mut u64, what: &str) {
+            let now = graph.content_hash();
+            assert_ne!(*last, now, "{what} left the memoized hash stale");
+            *last = now;
+        }
+        let mut last = graph.content_hash();
+
+        graph.connect(a, 0, b, 0).expect("connect");
+        moved(&graph, &mut last, "connect");
+
+        graph
+            .set_params(b, Params::new().with("k", crate::ParamValue::Int(1)))
+            .expect("set_params");
+        moved(&graph, &mut last, "set_params");
+
+        // A rename is deliberately *not* content: it changes nothing a node produces, and
+        // folding it in would invalidate every downstream cache key. It moves `display_hash`
+        // instead, which is what a UI listing nodes keys on.
+        let before_name = graph.display_hash();
+        graph.set_name(b, Some("named".into())).expect("set_name");
+        assert_eq!(
+            last,
+            graph.content_hash(),
+            "a rename must not invalidate evaluation caches"
+        );
+        assert_ne!(
+            before_name,
+            graph.display_hash(),
+            "but a reader has to see it"
+        );
+
+        graph.set_bypassed(b, true).expect("set_bypassed");
+        moved(&graph, &mut last, "set_bypassed");
+
+        graph
+            .set_operator(
+                b,
+                Box::new(Stub {
+                    type_id: "test.replaced",
+                    inputs: 1,
+                    outputs: 1,
+                }),
+            )
+            .expect("set_operator");
+        moved(&graph, &mut last, "set_operator");
+
+        graph.disconnect(b, 0).expect("disconnect");
+        moved(&graph, &mut last, "disconnect");
+
+        let c = add(&mut graph, "test.c", 0, 1);
+        moved(&graph, &mut last, "add_op");
+
+        graph.copy_subgraph(&[c]);
+        moved(&graph, &mut last, "copy_subgraph");
+
+        assert!(graph.remove_node(c), "the node was there to remove");
+        moved(&graph, &mut last, "remove_node");
+
+        let d = add(&mut graph, "test.d", 0, 1);
+        last = graph.content_hash();
+        graph.extract_subgraph(&[d]).expect("extract_subgraph");
+        moved(&graph, &mut last, "extract_subgraph");
+    }
+
+    #[test]
+    fn the_memoized_hash_is_stable_and_survives_a_clone() {
+        // Repeated reads agree, and a clone carries the value because it has identical content.
+        let mut graph = Graph::new();
+        add(&mut graph, "test.a", 0, 1);
+        let first = graph.content_hash();
+        assert_eq!(first, graph.content_hash());
+        assert_eq!(first, graph.clone().content_hash());
     }
 
     fn add(graph: &mut Graph, type_id: &'static str, inputs: usize, outputs: usize) -> NodeId {

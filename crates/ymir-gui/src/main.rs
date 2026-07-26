@@ -415,12 +415,16 @@ struct AppState {
     /// status model: this changes many times a second and must never trigger the graph walk that
     /// derives the model.
     build_progress: build_progress::BuildProgress,
-    node_status_key: Option<(u64, usize, Option<Handle>)>,
+    node_status_key: Option<(u64, u64, usize, Option<Handle>)>,
     /// The node pane's filter text and quick chips (#281). Deliberately not persisted: a filter
     /// is a momentary question, and restoring one means opening a project to a list that hides
     /// most of its nodes with no memory of why.
     node_filter: String,
     node_chips: status::Chips,
+    /// Subgraph groups the user has collapsed in the node pane (#287), by container handle.
+    /// Session state: which groups are open is about the reading you are doing right now, not
+    /// about the project, so it is not saved with it.
+    node_collapsed: HashSet<canvas::Handle>,
     /// How the node pane orders and draws its rows. Persisted with the project, since it is how
     /// the user likes to read this graph rather than a passing question.
     node_sort: status::NodeSort,
@@ -638,6 +642,10 @@ struct AppState {
     /// Whether the viewport shows the live preview or the cached build result. A view preference,
     /// toggled from the Display flyout when a build is available; see [`ViewportSource`].
     viewport_source: ViewportSource,
+    /// Whether a build-resolution result exists for the previewed node, from a stat rather than a
+    /// read (#301). The Source toggle needs only this; the blob itself is read when the user
+    /// actually switches to Build.
+    build_available: bool,
     /// A transient status line shown in the menu bar (e.g. the result of a save or
     /// open). Replaced by the next action.
     status: Option<String>,
@@ -849,6 +857,7 @@ impl AppState {
             build_progress: build_progress::BuildProgress::default(),
             node_status_key: None,
             node_filter: String::new(),
+            node_collapsed: HashSet::new(),
             node_chips: status::Chips::default(),
             node_sort: status::NodeSort::default(),
             node_density: status::Density::default(),
@@ -933,6 +942,7 @@ impl AppState {
             field_store: None,
             viewport_build: None,
             viewport_source: ViewportSource::default(),
+            build_available: false,
             status: None,
             history,
             saved_snapshot: initial,
@@ -1808,8 +1818,12 @@ impl AppState {
     /// One graph hash a frame replaces the per-node key computation the canvas ran for every node
     /// on every frame, so this is cheaper than what it replaces even before the pane reads it too.
     fn refresh_node_status(&mut self) {
+        // `content_hash` is memoized in core (#299), so this is a lookup on an unchanged graph
+        // rather than a fresh serialization every frame. `display_hash` rides alongside because a
+        // rename is invisible to `content_hash` by design, and the pane shows names.
         let key = (
             self.graph.content_hash(),
+            self.graph.display_hash(),
             self.preview.cache_report().len(),
             self.preview_pin,
         );
@@ -3687,6 +3701,107 @@ fn node_row(
     }
 }
 
+/// The caret under a subgraph's row, with what is inside it summarised when collapsed.
+///
+/// A collapsed group says only what can honestly be said from outside: how many nodes are in
+/// there, and how many of them are visibly broken. It does not summarise freshness, because a
+/// container evaluates its contents as one unit and there is no per-node freshness to summarise.
+fn group_caret(ui: &mut egui::Ui, node: &status::NodeStatus, collapsed: bool) -> egui::Response {
+    let broken = node
+        .children
+        .iter()
+        .filter(|c| c.fault.is_some_and(status::ChildFault::is_broken))
+        .count();
+    let caret = if collapsed { "\u{25b8}" } else { "\u{25be}" };
+    let label = if collapsed && broken > 0 {
+        format!(
+            "{caret} {} inside \u{b7} {broken} broken",
+            node.children.len()
+        )
+    } else {
+        format!("{caret} {} inside", node.children.len())
+    };
+    let colour = if collapsed && broken > 0 {
+        theme::ERROR
+    } else {
+        theme::TEXT_TERTIARY
+    };
+    ui.horizontal(|ui| {
+        ui.add_space(18.0);
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(label)
+                    .size(10.5)
+                    .monospace()
+                    .color(colour),
+            )
+            .sense(egui::Sense::click()),
+        )
+    })
+    .inner
+    .on_hover_text(if collapsed {
+        "Show what is inside"
+    } else {
+        "Hide what is inside"
+    })
+}
+
+/// One node inside a subgraph, listed beneath its container.
+///
+/// Display only: an inner node cannot be selected from out here, since it belongs to another
+/// graph. Dive into the subgraph and it is an ordinary node again. It reports a fault or nothing;
+/// nothing means nothing is visibly wrong, never that it is up to date.
+fn child_row(ui: &mut egui::Ui, child: &status::ChildStatus, density: status::Density) {
+    ui.horizontal(|ui| {
+        let h = ui.spacing().interact_size.y;
+        ui.add_space(18.0);
+        let (glyph_rect, _) = ui.allocate_exact_size(egui::vec2(13.0, h), egui::Sense::hover());
+        let colour = match child.fault {
+            Some(fault) if fault.is_broken() => theme::ERROR,
+            Some(_) => theme::TEXT_TERTIARY,
+            None => theme::LINE_STRONG,
+        };
+        ui.painter().text(
+            glyph_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            child.fault.map_or("\u{2022}", status::ChildFault::glyph),
+            egui::FontId::monospace(11.0),
+            colour,
+        );
+        let name = egui::RichText::new(&child.name)
+            .size(if density == status::Density::Compact {
+                12.0
+            } else {
+                12.5
+            })
+            .color(theme::TEXT_SECONDARY);
+        if density == status::Density::Compact {
+            ui.label(name);
+        } else {
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.label(name);
+                ui.label(
+                    egui::RichText::new(child.type_id)
+                        .size(10.5)
+                        .monospace()
+                        .color(theme::TEXT_TERTIARY),
+                );
+            });
+        }
+        if let Some(fault) = child.fault {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new(fault.word())
+                        .size(10.5)
+                        .monospace()
+                        .color(colour),
+                );
+            });
+        }
+    });
+}
+
 /// A row's trailing slot while a build touches its node (#285).
 ///
 /// A percentage appears only for a node that reported one. Everything else shows how long it has
@@ -3790,7 +3905,9 @@ fn nodes_pane(ui: &mut egui::Ui, state: &mut AppState) {
             }
             let mut select = None;
             let mut toggle = None;
+            let mut fold = None;
             for (node, suffix) in rows.iter().zip(&suffixes) {
+                let collapsed = state.node_collapsed.contains(&node.handle);
                 let action = node_row(ui, state, node, suffix.as_deref(), state.node_density);
                 if action.select {
                     select = Some(node.handle);
@@ -3798,6 +3915,25 @@ fn nodes_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 if action.toggle_build {
                     toggle = Some(node.handle);
                 }
+                if node.children.is_empty() {
+                    continue;
+                }
+                // A subgraph's own row is the group header: it already carries the subgraph's real
+                // state, including live build progress, because the container is an ordinary node
+                // (#287). The caret and the contents hang off it.
+                if group_caret(ui, node, collapsed).clicked() {
+                    fold = Some(node.handle);
+                }
+                if !collapsed {
+                    for child in &node.children {
+                        child_row(ui, child, state.node_density);
+                    }
+                }
+            }
+            if let Some(handle) = fold
+                && !state.node_collapsed.remove(&handle)
+            {
+                state.node_collapsed.insert(handle);
             }
             // Selecting from the pane selects on the canvas: one selection, two places to make it.
             if let Some(handle) = select {
@@ -6882,7 +7018,13 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // orange "Unaligned" lines, which is a false positive here: it briefly flashes on
     // the thumbnail footer as a node resizes. The overlay earns its keep on the static
     // panes (catching blurry text), so disable it only for this ui, not globally.
-    ui.style_mut().debug.show_unaligned = false;
+    //
+    // Gated because the overlay, and the `Style::debug` field itself, exist only in a debug
+    // build: unconditionally naming the field fails to compile in release (#300).
+    #[cfg(debug_assertions)]
+    {
+        ui.style_mut().debug.show_unaligned = false;
+    }
 
     // Plain scroll wheel zooms the canvas about the cursor (#36). snarl's egui Scene
     // would scroll-pan instead, so suppress its scroll-pan and hand the zoom to the
@@ -8306,17 +8448,28 @@ fn refresh_viewport_build(state: &mut AppState) {
     {
         return; // already loaded for this key
     }
-    let loaded = state.field_store.as_ref().and_then(|store| store.load(key));
-    let probe = (key << 1) | u64::from(loaded.is_some());
+    // Only read the blob when the viewport is actually showing the build. `load` pulls a whole
+    // build-resolution result off disk and deserializes it on this thread, tens of megabytes at
+    // 4K, and it was running on every change of previewed node even while the viewport was showing
+    // the preview (#301). Availability, which is all the Source toggle needs, is a stat.
+    let wants_data = state.viewport_source == ViewportSource::Build;
+    let loaded = state
+        .field_store
+        .as_ref()
+        .and_then(|store| if wants_data { store.load(key) } else { None });
+    state.build_available = state
+        .field_store
+        .as_ref()
+        .is_some_and(|store| store.contains(key));
+    // The probe reports availability, not whether a blob was read: in Preview the answer is
+    // "there is one, and we deliberately did not read it", which is different from a miss.
+    let probe = (key << 1) | u64::from(state.build_available);
     if LAST_PROBE.swap(probe, Ordering::Relaxed) != probe {
         log::debug!(
-            "viewport build lookup: key={key:016x} store_open={} -> {}",
+            "viewport build lookup: key={key:016x} store_open={} available={} read={}",
             state.field_store.is_some(),
-            if loaded.is_some() {
-                "HIT (showing build)"
-            } else {
-                "miss (showing preview)"
-            },
+            state.build_available,
+            loaded.is_some(),
         );
     }
     state.viewport_build = loaded.map(|fields| (key, fields));
@@ -8537,7 +8690,7 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // The viewport source (preview vs build) and whether a build is available to switch to. The
     // Source toggle in the Display flyout mutates this local; it is applied back after the flyout.
     let mut viewport_source = state.viewport_source;
-    let build_available = state.viewport_build.is_some();
+    let build_available = state.build_available;
     let display_output_before = display_output;
     // Draw the cluster only when the viewport is tall enough to hold it, so a short viewport shows
     // only the render rather than chrome overflowing it.
