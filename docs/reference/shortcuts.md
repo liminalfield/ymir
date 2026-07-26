@@ -47,10 +47,13 @@ The left dock's list of every node in the graph, in dependency order.
 | Include or exclude an output from the next build | Click its `build` chip |
 | Narrow the list | Type in the filter, or click a `stale`, `failed` or `endpoints` chip |
 | Clear the filter | Clear, beside the count |
+| Show or hide what is inside a subgraph | Click the caret beneath its row |
 
 Each row states what its node is doing as a stripe, a glyph and a word, so no state is told apart by colour alone. Every node on the canvas carries the same state as a dot on its header, so the graph reads at a glance and the pane spells out whichever row you are reading.
 
 The list is in dependency order unless you change the sort, and the sort you choose is saved with the project. A filter is not: opening a project always shows the whole graph.
+
+A subgraph's row reports the state of the subgraph as a whole, since that is what Ymir evaluates: the nodes inside it run together. Opening it lists what is inside and flags anything visibly wrong there, such as an unconnected input. To see the state of an individual node inside, dive into the subgraph, where it is an ordinary node.
 
 While a build runs, each row it touches reports what the build is doing with that node: queued, how far along it is, how long it took, or that a cached result was reused. Nodes report a percentage only where they can measure one; the rest show how long they have been running.
 

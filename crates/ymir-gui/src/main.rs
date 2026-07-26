@@ -421,6 +421,10 @@ struct AppState {
     /// most of its nodes with no memory of why.
     node_filter: String,
     node_chips: status::Chips,
+    /// Subgraph groups the user has collapsed in the node pane (#287), by container handle.
+    /// Session state: which groups are open is about the reading you are doing right now, not
+    /// about the project, so it is not saved with it.
+    node_collapsed: HashSet<canvas::Handle>,
     /// How the node pane orders and draws its rows. Persisted with the project, since it is how
     /// the user likes to read this graph rather than a passing question.
     node_sort: status::NodeSort,
@@ -849,6 +853,7 @@ impl AppState {
             build_progress: build_progress::BuildProgress::default(),
             node_status_key: None,
             node_filter: String::new(),
+            node_collapsed: HashSet::new(),
             node_chips: status::Chips::default(),
             node_sort: status::NodeSort::default(),
             node_density: status::Density::default(),
@@ -3687,6 +3692,107 @@ fn node_row(
     }
 }
 
+/// The caret under a subgraph's row, with what is inside it summarised when collapsed.
+///
+/// A collapsed group says only what can honestly be said from outside: how many nodes are in
+/// there, and how many of them are visibly broken. It does not summarise freshness, because a
+/// container evaluates its contents as one unit and there is no per-node freshness to summarise.
+fn group_caret(ui: &mut egui::Ui, node: &status::NodeStatus, collapsed: bool) -> egui::Response {
+    let broken = node
+        .children
+        .iter()
+        .filter(|c| c.fault.is_some_and(status::ChildFault::is_broken))
+        .count();
+    let caret = if collapsed { "\u{25b8}" } else { "\u{25be}" };
+    let label = if collapsed && broken > 0 {
+        format!(
+            "{caret} {} inside \u{b7} {broken} broken",
+            node.children.len()
+        )
+    } else {
+        format!("{caret} {} inside", node.children.len())
+    };
+    let colour = if collapsed && broken > 0 {
+        theme::ERROR
+    } else {
+        theme::TEXT_TERTIARY
+    };
+    ui.horizontal(|ui| {
+        ui.add_space(18.0);
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(label)
+                    .size(10.5)
+                    .monospace()
+                    .color(colour),
+            )
+            .sense(egui::Sense::click()),
+        )
+    })
+    .inner
+    .on_hover_text(if collapsed {
+        "Show what is inside"
+    } else {
+        "Hide what is inside"
+    })
+}
+
+/// One node inside a subgraph, listed beneath its container.
+///
+/// Display only: an inner node cannot be selected from out here, since it belongs to another
+/// graph. Dive into the subgraph and it is an ordinary node again. It reports a fault or nothing;
+/// nothing means nothing is visibly wrong, never that it is up to date.
+fn child_row(ui: &mut egui::Ui, child: &status::ChildStatus, density: status::Density) {
+    ui.horizontal(|ui| {
+        let h = ui.spacing().interact_size.y;
+        ui.add_space(18.0);
+        let (glyph_rect, _) = ui.allocate_exact_size(egui::vec2(13.0, h), egui::Sense::hover());
+        let colour = match child.fault {
+            Some(fault) if fault.is_broken() => theme::ERROR,
+            Some(_) => theme::TEXT_TERTIARY,
+            None => theme::LINE_STRONG,
+        };
+        ui.painter().text(
+            glyph_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            child.fault.map_or("\u{2022}", status::ChildFault::glyph),
+            egui::FontId::monospace(11.0),
+            colour,
+        );
+        let name = egui::RichText::new(&child.name)
+            .size(if density == status::Density::Compact {
+                12.0
+            } else {
+                12.5
+            })
+            .color(theme::TEXT_SECONDARY);
+        if density == status::Density::Compact {
+            ui.label(name);
+        } else {
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.label(name);
+                ui.label(
+                    egui::RichText::new(child.type_id)
+                        .size(10.5)
+                        .monospace()
+                        .color(theme::TEXT_TERTIARY),
+                );
+            });
+        }
+        if let Some(fault) = child.fault {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new(fault.word())
+                        .size(10.5)
+                        .monospace()
+                        .color(colour),
+                );
+            });
+        }
+    });
+}
+
 /// A row's trailing slot while a build touches its node (#285).
 ///
 /// A percentage appears only for a node that reported one. Everything else shows how long it has
@@ -3790,7 +3896,9 @@ fn nodes_pane(ui: &mut egui::Ui, state: &mut AppState) {
             }
             let mut select = None;
             let mut toggle = None;
+            let mut fold = None;
             for (node, suffix) in rows.iter().zip(&suffixes) {
+                let collapsed = state.node_collapsed.contains(&node.handle);
                 let action = node_row(ui, state, node, suffix.as_deref(), state.node_density);
                 if action.select {
                     select = Some(node.handle);
@@ -3798,6 +3906,25 @@ fn nodes_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 if action.toggle_build {
                     toggle = Some(node.handle);
                 }
+                if node.children.is_empty() {
+                    continue;
+                }
+                // A subgraph's own row is the group header: it already carries the subgraph's real
+                // state, including live build progress, because the container is an ordinary node
+                // (#287). The caret and the contents hang off it.
+                if group_caret(ui, node, collapsed).clicked() {
+                    fold = Some(node.handle);
+                }
+                if !collapsed {
+                    for child in &node.children {
+                        child_row(ui, child, state.node_density);
+                    }
+                }
+            }
+            if let Some(handle) = fold
+                && !state.node_collapsed.remove(&handle)
+            {
+                state.node_collapsed.insert(handle);
             }
             // Selecting from the pane selects on the canvas: one selection, two places to make it.
             if let Some(handle) = select {
