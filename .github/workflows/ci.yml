@@ -46,6 +46,17 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Build
         run: cargo build --workspace --verbose
+      # The release profile is a different compilation: `debug_assertions` is off, so anything
+      # behind `cfg(debug_assertions)` vanishes and code that names it stops compiling. That is not
+      # hypothetical, it is #300: the release build was broken for weeks because every step above
+      # runs in debug and `release.yml` only builds on a `v*` tag, so the break would have surfaced
+      # when cutting a release.
+      #
+      # `check` rather than `build`: it catches compile errors, which is the class that broke, for a
+      # fraction of the time a full release codegen costs on every pull request. The real release
+      # build still happens in `release.yml` at tag time.
+      - name: Check the release profile
+        run: cargo check --workspace --all-targets --release --verbose
       - name: Test
         run: cargo test --workspace --verbose
       # The node reference is generated from the running binary's registry. Regenerate it and fail
