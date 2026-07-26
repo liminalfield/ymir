@@ -1,0 +1,815 @@
+<!-- Design record, not user documentation. A mockup captured for the node status pane
+     review (supersedes the open questions in #44 and #45). Fake data, no engine state.
+     Open it from a local checkout: the typefaces load from the GUI crate's own assets. -->
+<title>Ymir — node status pane mockup</title>
+
+<style>
+  @font-face {
+    font-family: "Plex Sans";
+    font-weight: 400;
+    src: url("../crates/ymir-gui/assets/fonts/IBMPlexSans-Regular.ttf") format("truetype");
+  }
+  @font-face {
+    font-family: "Plex Sans";
+    font-weight: 600;
+    src: url("../crates/ymir-gui/assets/fonts/IBMPlexSans-SemiBold.ttf") format("truetype");
+  }
+  @font-face {
+    font-family: "Plex Mono";
+    font-weight: 400;
+    src: url("../crates/ymir-gui/assets/fonts/IBMPlexMono-Regular.ttf") format("truetype");
+  }
+
+
+  /* ---- Frost, verbatim from crates/ymir-gui/src/theme.rs. The mocked chrome uses these
+     directly and never themes: it depicts the application, which is dark chrome only. ---- */
+  :root {
+    --chrome-0: #2b3038;
+    --chrome-1: #363b44;
+    --chrome-2: #3f444d;
+    --chrome-hover: #484e57;
+    --line: #4c525c;
+    --line-strong: #5a616b;
+    --ink-hi: #e9edf2;
+    --ink-mid: #b2b9c2;
+    --ink-lo: #878f99;
+    --accent: #1fa0c4;
+    --success: #2bff5c;
+    --warning: #ffbf47;
+    --error: #ff4d6d;
+    --canvas: #9aa8b6;
+    --node-bg: #d7e0e8;
+    --node-head: #b2cddb;
+    --node-line: #9daebc;
+    --node-ink: #373f4b;
+    --node-ink-mid: #5d6674;
+
+    /* Page chrome: a slate neutral pulled toward the same cyan, so the surround reads as chosen. */
+    --page-bg: #eef2f5;
+    --page-panel: #ffffff;
+    --page-ink: #1b2027;
+    --page-ink-mid: #4a5560;
+    --page-ink-lo: #6d7883;
+    --page-line: #d3dbe2;
+    --page-accent: #10708c;
+    --page-tint: #dfe8ee;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page-bg: #1b1f25;
+      --page-panel: #232830;
+      --page-ink: #e9edf2;
+      --page-ink-mid: #aab3bd;
+      --page-ink-lo: #7d8792;
+      --page-line: #333941;
+      --page-accent: #4fc3e3;
+      --page-tint: #272d35;
+    }
+  }
+  :root[data-theme="light"] {
+    --page-bg: #eef2f5;
+    --page-panel: #ffffff;
+    --page-ink: #1b2027;
+    --page-ink-mid: #4a5560;
+    --page-ink-lo: #6d7883;
+    --page-line: #d3dbe2;
+    --page-accent: #10708c;
+    --page-tint: #dfe8ee;
+  }
+  :root[data-theme="dark"] {
+    --page-bg: #1b1f25;
+    --page-panel: #232830;
+    --page-ink: #e9edf2;
+    --page-ink-mid: #aab3bd;
+    --page-ink-lo: #7d8792;
+    --page-line: #333941;
+    --page-accent: #4fc3e3;
+    --page-tint: #272d35;
+  }
+
+  body {
+    margin: 0;
+    background: var(--page-bg);
+    color: var(--page-ink);
+    font-family: "Plex Sans", ui-sans-serif, system-ui, sans-serif;
+    font-size: 16px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 1220px;
+    margin: 0 auto;
+    padding: 56px 28px 96px;
+    display: flex;
+    flex-direction: column;
+    gap: 52px;
+  }
+
+  .masthead { display: flex; flex-direction: column; gap: 14px; }
+  .eyebrow {
+    font-family: "Plex Mono", ui-monospace, monospace;
+    font-size: 12px;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--page-accent);
+  }
+  h1 {
+    margin: 0;
+    font-size: clamp(28px, 4vw, 40px);
+    font-weight: 600;
+    line-height: 1.14;
+    letter-spacing: -0.015em;
+    text-wrap: balance;
+  }
+  .standfirst { margin: 0; max-width: 64ch; font-size: 17px; color: var(--page-ink-mid); }
+  .meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 18px;
+    font-family: "Plex Mono", ui-monospace, monospace;
+    font-size: 12.5px;
+    color: var(--page-ink-lo);
+  }
+
+  h2 { margin: 0 0 6px; font-size: 21px; font-weight: 600; letter-spacing: -0.01em; }
+  .section { display: flex; flex-direction: column; gap: 20px; }
+  .lede { margin: 0; max-width: 68ch; color: var(--page-ink-mid); }
+
+  .states {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(288px, 1fr));
+    gap: 22px;
+    align-items: start;
+  }
+  .state { display: flex; flex-direction: column; gap: 10px; }
+  .state-head { display: flex; flex-direction: column; gap: 2px; }
+  .state-name { font-weight: 600; font-size: 15px; }
+  .state-note { font-size: 13.5px; color: var(--page-ink-lo); }
+
+  /* ---- the pane ---- */
+  .pane {
+    width: 100%;
+    background: var(--chrome-1);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    overflow: hidden;
+    color: var(--ink-hi);
+    box-shadow: 0 12px 28px rgb(0 0 0 / 0.22);
+  }
+  .pane-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 9px 11px;
+    background: var(--chrome-0);
+    border-bottom: 1px solid var(--line);
+  }
+  .pane-title strong { font-weight: 600; font-size: 13.5px; }
+  .pane-title .glyph { color: var(--ink-lo); font-size: 14px; }
+
+  .summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 12px;
+    padding: 8px 11px;
+    background: var(--chrome-2);
+    border-bottom: 1px solid var(--line);
+    font-family: "Plex Mono", ui-monospace, monospace;
+    font-size: 12px;
+    color: var(--ink-mid);
+    font-variant-numeric: tabular-nums;
+  }
+  .summary b { color: var(--ink-hi); font-weight: 600; }
+  .summary .spacer { flex: 1 1 auto; }
+  .btn {
+    font-family: "Plex Sans", sans-serif;
+    font-size: 11.5px;
+    padding: 2px 9px;
+    border-radius: 3px;
+    border: 1px solid var(--line-strong);
+    background: var(--chrome-1);
+    color: var(--ink-mid);
+  }
+  .btn.stop { border-color: #7d3a46; color: #ffb3c0; }
+
+  /* toolbar: the sort is the user's, never the state's */
+  .tools {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 9px;
+    border-bottom: 1px solid var(--line);
+    background: var(--chrome-1);
+  }
+  .field {
+    flex: 1 1 auto;
+    min-width: 0;
+    background: var(--chrome-0);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: 3px 7px;
+    font-size: 11.5px;
+    color: var(--ink-lo);
+  }
+  .field.typed { color: var(--ink-hi); }
+  .sel-ctl {
+    font-family: "Plex Mono", ui-monospace, monospace;
+    font-size: 11px;
+    padding: 3px 7px;
+    border: 1px solid var(--line-strong);
+    border-radius: 3px;
+    color: var(--ink-mid);
+    white-space: nowrap;
+  }
+  .quick { display: flex; gap: 5px; padding: 0 9px 8px; background: var(--chrome-1); border-bottom: 1px solid var(--line); }
+  .qchip {
+    font-family: "Plex Mono", ui-monospace, monospace;
+    font-size: 10.5px;
+    padding: 2px 7px;
+    border-radius: 10px;
+    border: 1px solid var(--line-strong);
+    color: var(--ink-lo);
+  }
+  .qchip.on { border-color: var(--accent); background: #23515f; color: #bfe8f5; }
+
+  .rows { display: flex; flex-direction: column; }
+
+  /* group header for a subgraph */
+  .group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 10px 5px 6px;
+    background: var(--chrome-2);
+    border-bottom: 1px solid rgb(76 82 92 / 0.5);
+    font-size: 11.5px;
+    color: var(--ink-mid);
+  }
+  .group .caret { color: var(--ink-lo); font-size: 10px; width: 10px; }
+  .group .gname { font-weight: 600; color: var(--ink-hi); }
+  .group .gcount { font-family: "Plex Mono", ui-monospace, monospace; font-size: 10.5px; color: var(--ink-lo); margin-left: auto; }
+
+  .row {
+    display: grid;
+    grid-template-columns: 3px 15px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0 8px;
+    padding: 6px 10px 6px 0;
+    border-bottom: 1px solid rgb(76 82 92 / 0.45);
+  }
+  .row.nested { padding-left: 12px; }
+  .row:last-child { border-bottom: 0; }
+  .row.sel { background: #2f596a; }
+
+  .stripe { align-self: stretch; border-radius: 0 2px 2px 0; background: transparent; }
+  .s-current .stripe { background: var(--success); }
+  .s-stale .stripe { background: var(--warning); }
+  .s-error .stripe { background: var(--error); }
+  .s-active .stripe { background: var(--accent); }
+  .s-none .stripe { background: var(--line-strong); }
+  .s-off .stripe { background: transparent; }
+
+  .pip { font-family: "Plex Mono", ui-monospace, monospace; font-size: 12px; text-align: center; color: var(--ink-lo); }
+  .s-current .pip { color: var(--success); }
+  .s-stale .pip { color: var(--warning); }
+  .s-error .pip { color: var(--error); }
+  .s-active .pip { color: var(--accent); }
+
+  .label { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+  .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12.5px; color: var(--ink-hi); }
+  .s-off .name { color: var(--ink-lo); }
+  .kind {
+    font-family: "Plex Mono", ui-monospace, monospace;
+    font-size: 10.5px;
+    color: var(--ink-lo);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* the trailing slot: the only part that changes between states */
+  .tail {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-family: "Plex Mono", ui-monospace, monospace;
+    font-size: 10.5px;
+    color: var(--ink-lo);
+    font-variant-numeric: tabular-nums;
+  }
+  .word { letter-spacing: 0.02em; color: var(--ink-lo); }
+  .s-stale .word { color: var(--warning); }
+  .s-error .word { color: var(--error); }
+  .s-active .word { color: var(--accent); }
+  .chip { padding: 1px 5px; border: 1px solid var(--line-strong); border-radius: 3px; color: var(--ink-mid); }
+  .chip.on { border-color: var(--accent); color: #9fdcef; }
+  .chip.mirror { border-style: dashed; }
+  .flag.pin { color: var(--accent); font-size: 11px; }
+
+  .bar { width: 46px; height: 5px; border-radius: 3px; background: var(--chrome-0); overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: var(--accent); }
+  .bar.indet > i { width: 38%; background: repeating-linear-gradient(115deg, var(--line-strong) 0 5px, var(--chrome-2) 5px 10px); }
+
+  /* compact density: one line, type_id dropped to a tooltip */
+  .compact .row { padding: 3px 10px 3px 0; grid-template-columns: 3px 15px minmax(0, 1fr) auto; }
+  .compact .kind { display: none; }
+  .compact .name { font-size: 12px; }
+  .compact .group { padding-top: 3px; padding-bottom: 3px; }
+
+  /* ---- canvas vignette: the other rendering of the same model ---- */
+  .canvas-demo {
+    display: flex;
+    gap: 14px;
+    flex-wrap: wrap;
+    padding: 18px;
+    background: var(--canvas);
+    border-radius: 6px;
+    border: 1px solid var(--page-line);
+  }
+  .cnode { width: 132px; border-radius: 4px; overflow: hidden; border: 1px solid var(--node-line); background: var(--node-bg); }
+  .cnode header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 7px;
+    background: var(--node-head);
+    border-bottom: 1px solid var(--node-line);
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--node-ink);
+  }
+  .cnode .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  .cnode .body { padding: 6px 7px; font-family: "Plex Mono", ui-monospace, monospace; font-size: 10px; color: var(--node-ink-mid); }
+
+  .legend-wrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 14.5px; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--page-line); vertical-align: top; }
+  th {
+    font-family: "Plex Mono", ui-monospace, monospace;
+    font-size: 11.5px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--page-ink-lo);
+    font-weight: 400;
+    white-space: nowrap;
+  }
+  td.g { font-family: "Plex Mono", ui-monospace, monospace; white-space: nowrap; font-size: 13px; }
+  td.g b { font-weight: 400; padding-right: 7px; }
+  td.src { font-family: "Plex Mono", ui-monospace, monospace; font-size: 12px; color: var(--page-ink-lo); }
+  tbody tr:last-child td { border-bottom: 0; }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(272px, 1fr)); gap: 16px; }
+  .card {
+    background: var(--page-panel);
+    border: 1px solid var(--page-line);
+    border-radius: 6px;
+    padding: 16px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+  .card h3 { margin: 0; font-size: 14px; font-weight: 600; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .card p { margin: 0; font-size: 14px; color: var(--page-ink-mid); }
+  .tag {
+    font-family: "Plex Mono", ui-monospace, monospace;
+    font-size: 10.5px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 2px 7px;
+    border-radius: 3px;
+    border: 1px solid var(--page-line);
+    background: var(--page-tint);
+    color: var(--page-ink-lo);
+    white-space: nowrap;
+  }
+
+  ol.q, ul.q { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 10px; max-width: 76ch; }
+  ol.q li, ul.q li { color: var(--page-ink-mid); }
+  ol.q li b, ul.q li b { color: var(--page-ink); font-weight: 600; }
+
+  code { font-family: "Plex Mono", ui-monospace, monospace; font-size: 0.88em; background: var(--page-tint); padding: 1px 5px; border-radius: 3px; }
+  hr { border: 0; border-top: 1px solid var(--page-line); margin: 0; }
+  footer { font-size: 13.5px; color: var(--page-ink-lo); max-width: 72ch; }
+  a { color: var(--page-accent); }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <div class="eyebrow">Ymir · design review · not built</div>
+    <h1>One node pane, three states</h1>
+    <p class="standfirst">
+      A single dock pane listing every node in the graph and what each one is doing. It replaces two planned
+      panes, a node outliner and a build list, with one view. Rows never reorder: the left half of a row is
+      identical in every state, and only the trailing slot changes. Fake data, real palette, real typeface,
+      real node names.
+    </p>
+    <div class="meta">
+      <span>consolidates #44 + #45</span>
+      <span>fixes the cause of #135</span>
+      <span>palette: theme.rs</span>
+      <span>type: IBM Plex</span>
+    </div>
+  </header>
+
+  <hr>
+
+  <section class="section">
+    <div>
+      <h2>The states</h2>
+      <p class="lede">
+        Order is dependency order, always, in every state. The sort control changes it only when you ask;
+        starting a build never reshuffles the list under your hands.
+      </p>
+    </div>
+
+    <div class="states">
+
+      <!-- ============ IDLE ============ -->
+      <div class="state">
+        <div class="state-head">
+          <span class="state-name">Idle, after editing</span>
+          <span class="state-note">Erosion parameters just changed, so everything downstream is stale.</span>
+        </div>
+        <div class="pane">
+          <div class="pane-title"><strong>Nodes</strong><span class="glyph">▤</span></div>
+          <div class="summary"><span><b>10</b> nodes</span><span><b>4</b> stale</span><span><b>1</b> blocked</span></div>
+          <div class="tools">
+            <span class="field">Filter…</span>
+            <span class="sel-ctl">Dependency ▾</span>
+          </div>
+          <div class="quick"><span class="qchip">stale</span><span class="qchip">failed</span><span class="qchip">endpoints</span></div>
+          <div class="rows">
+            <div class="row s-current">
+              <div class="stripe"></div><div class="pip">●</div>
+              <div class="label"><span class="name">Base noise</span><span class="kind">generator.fbm</span></div>
+              <div class="tail"><span class="chip on">2D</span><span class="chip on">4K</span></div>
+            </div>
+            <div class="row s-current">
+              <div class="stripe"></div><div class="pip">●</div>
+              <div class="label"><span class="name">Domain warp</span><span class="kind">modifier.warp</span></div>
+              <div class="tail"><span class="chip on">2D</span><span class="chip on">4K</span></div>
+            </div>
+            <div class="row s-stale sel">
+              <div class="stripe"></div><div class="pip">◐</div>
+              <div class="label"><span class="name">River carve</span><span class="kind">modifier.stream_erosion</span></div>
+              <div class="tail"><span class="flag pin">⊙</span><span class="word">stale</span></div>
+            </div>
+            <div class="row s-stale">
+              <div class="stripe"></div><div class="pip">◐</div>
+              <div class="label"><span class="name">Talus</span><span class="kind">modifier.thermal_erosion</span></div>
+              <div class="tail"><span class="word">stale</span></div>
+            </div>
+            <div class="row s-current">
+              <div class="stripe"></div><div class="pip">●</div>
+              <div class="label"><span class="name">Steep faces</span><span class="kind">selector.slope</span></div>
+              <div class="tail"><span class="chip on">2D</span></div>
+            </div>
+            <div class="row s-stale">
+              <div class="stripe"></div><div class="pip">◐</div>
+              <div class="label"><span class="name">Rock blend</span><span class="kind">modifier.blend</span></div>
+              <div class="tail"><span class="word">stale</span></div>
+            </div>
+            <div class="group"><span class="caret">▾</span><span class="gname">Coast</span><span class="gcount">2</span></div>
+            <div class="row nested s-off">
+              <div class="stripe"></div><div class="pip">⏸</div>
+              <div class="label"><span class="name">Shoreline</span><span class="kind">modifier.coastal</span></div>
+              <div class="tail"><span class="word">bypassed</span></div>
+            </div>
+            <div class="row nested s-error">
+              <div class="stripe"></div><div class="pip">▲</div>
+              <div class="label"><span class="name">Smooth</span><span class="kind">modifier.blur</span></div>
+              <div class="tail"><span class="word">no input</span></div>
+            </div>
+            <div class="row s-stale">
+              <div class="stripe"></div><div class="pip">◐</div>
+              <div class="label"><span class="name">Heightmap</span><span class="kind">endpoint.export</span></div>
+              <div class="tail"><span class="chip on mirror">build</span></div>
+            </div>
+            <div class="row s-none">
+              <div class="stripe"></div><div class="pip">○</div>
+              <div class="label"><span class="name">Metres EXR</span><span class="kind">endpoint.export_exr</span></div>
+              <div class="tail"><span class="chip mirror">build</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ============ BUILDING ============ -->
+      <div class="state">
+        <div class="state-head">
+          <span class="state-name">Building</span>
+          <span class="state-note">Identical rows in identical order. Only the trailing slot has changed.</span>
+        </div>
+        <div class="pane">
+          <div class="pane-title"><strong>Nodes</strong><span class="glyph">▤</span></div>
+          <div class="summary">
+            <span>Building <b>4</b>/10</span><span>01:12</span><span class="spacer"></span><span class="btn stop">Cancel</span>
+          </div>
+          <div class="tools">
+            <span class="field">Filter…</span>
+            <span class="sel-ctl">Dependency ▾</span>
+          </div>
+          <div class="quick"><span class="qchip">stale</span><span class="qchip">failed</span><span class="qchip">endpoints</span></div>
+          <div class="rows">
+            <div class="row s-current">
+              <div class="stripe"></div><div class="pip">●</div>
+              <div class="label"><span class="name">Base noise</span><span class="kind">generator.fbm</span></div>
+              <div class="tail"><span class="word">cached</span></div>
+            </div>
+            <div class="row s-current">
+              <div class="stripe"></div><div class="pip">●</div>
+              <div class="label"><span class="name">Domain warp</span><span class="kind">modifier.warp</span></div>
+              <div class="tail"><span class="word">0.4s</span></div>
+            </div>
+            <div class="row s-active sel">
+              <div class="stripe"></div><div class="pip">◗</div>
+              <div class="label"><span class="name">River carve</span><span class="kind">modifier.stream_erosion</span></div>
+              <div class="tail"><span class="bar"><i style="width:62%"></i></span><span>62%</span></div>
+            </div>
+            <div class="row s-active">
+              <div class="stripe"></div><div class="pip">◗</div>
+              <div class="label"><span class="name">Talus</span><span class="kind">modifier.thermal_erosion</span></div>
+              <div class="tail"><span class="bar indet"><i></i></span><span>00:09</span></div>
+            </div>
+            <div class="row s-none">
+              <div class="stripe"></div><div class="pip">·</div>
+              <div class="label"><span class="name">Steep faces</span><span class="kind">selector.slope</span></div>
+              <div class="tail"><span class="word">queued</span></div>
+            </div>
+            <div class="row s-none">
+              <div class="stripe"></div><div class="pip">·</div>
+              <div class="label"><span class="name">Rock blend</span><span class="kind">modifier.blend</span></div>
+              <div class="tail"><span class="word">queued</span></div>
+            </div>
+            <div class="group"><span class="caret">▾</span><span class="gname">Coast</span><span class="gcount">2</span></div>
+            <div class="row nested s-off">
+              <div class="stripe"></div><div class="pip">⏸</div>
+              <div class="label"><span class="name">Shoreline</span><span class="kind">modifier.coastal</span></div>
+              <div class="tail"><span class="word">bypassed</span></div>
+            </div>
+            <div class="row nested s-off">
+              <div class="stripe"></div><div class="pip">—</div>
+              <div class="label"><span class="name">Smooth</span><span class="kind">modifier.blur</span></div>
+              <div class="tail"><span class="word">skipped</span></div>
+            </div>
+            <div class="row s-none">
+              <div class="stripe"></div><div class="pip">·</div>
+              <div class="label"><span class="name">Heightmap</span><span class="kind">endpoint.export</span></div>
+              <div class="tail"><span class="word">queued</span></div>
+            </div>
+            <div class="row s-off">
+              <div class="stripe"></div><div class="pip">—</div>
+              <div class="label"><span class="name">Metres EXR</span><span class="kind">endpoint.export_exr</span></div>
+              <div class="tail"><span class="word">excluded</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ============ BUILT ============ -->
+      <div class="state">
+        <div class="state-head">
+          <span class="state-name">After a build</span>
+          <span class="state-note">Which nodes you can inspect at build quality, which is what the viewport's source toggle reads.</span>
+        </div>
+        <div class="pane">
+          <div class="pane-title"><strong>Nodes</strong><span class="glyph">▤</span></div>
+          <div class="summary"><span>Built <b>10</b></span><span>02:41</span><span>4096²</span></div>
+          <div class="tools">
+            <span class="field">Filter…</span>
+            <span class="sel-ctl">Dependency ▾</span>
+          </div>
+          <div class="quick"><span class="qchip">stale</span><span class="qchip">failed</span><span class="qchip">endpoints</span></div>
+          <div class="rows">
+            <div class="row s-current">
+              <div class="stripe"></div><div class="pip">●</div>
+              <div class="label"><span class="name">Base noise</span><span class="kind">generator.fbm</span></div>
+              <div class="tail"><span class="chip on">2D</span><span class="chip on">4K</span></div>
+            </div>
+            <div class="row s-current">
+              <div class="stripe"></div><div class="pip">●</div>
+              <div class="label"><span class="name">Domain warp</span><span class="kind">modifier.warp</span></div>
+              <div class="tail"><span class="chip on">2D</span><span class="chip on">4K</span></div>
+            </div>
+            <div class="row s-current sel">
+              <div class="stripe"></div><div class="pip">●</div>
+              <div class="label"><span class="name">River carve</span><span class="kind">modifier.stream_erosion</span></div>
+              <div class="tail"><span class="flag pin">⊙</span><span class="chip on">2D</span><span class="chip on">4K</span></div>
+            </div>
+            <div class="row s-current">
+              <div class="stripe"></div><div class="pip">●</div>
+              <div class="label"><span class="name">Talus</span><span class="kind">modifier.thermal_erosion</span></div>
+              <div class="tail"><span class="chip on">2D</span><span class="chip on">4K</span></div>
+            </div>
+            <div class="row s-current">
+              <div class="stripe"></div><div class="pip">●</div>
+              <div class="label"><span class="name">Steep faces</span><span class="kind">selector.slope</span></div>
+              <div class="tail"><span class="chip on">2D</span><span class="chip on">4K</span></div>
+            </div>
+            <div class="row s-current">
+              <div class="stripe"></div><div class="pip">●</div>
+              <div class="label"><span class="name">Rock blend</span><span class="kind">modifier.blend</span></div>
+              <div class="tail"><span class="chip on">2D</span><span class="chip on">4K</span></div>
+            </div>
+            <div class="group"><span class="caret">▾</span><span class="gname">Coast</span><span class="gcount">2</span></div>
+            <div class="row nested s-off">
+              <div class="stripe"></div><div class="pip">⏸</div>
+              <div class="label"><span class="name">Shoreline</span><span class="kind">modifier.coastal</span></div>
+              <div class="tail"><span class="word">bypassed</span></div>
+            </div>
+            <div class="row nested s-error">
+              <div class="stripe"></div><div class="pip">▲</div>
+              <div class="label"><span class="name">Smooth</span><span class="kind">modifier.blur</span></div>
+              <div class="tail"><span class="word">no input</span></div>
+            </div>
+            <div class="row s-current">
+              <div class="stripe"></div><div class="pip">✓</div>
+              <div class="label"><span class="name">Heightmap</span><span class="kind">endpoint.export</span></div>
+              <div class="tail"><span class="word">written</span></div>
+            </div>
+            <div class="row s-off">
+              <div class="stripe"></div><div class="pip">—</div>
+              <div class="label"><span class="name">Metres EXR</span><span class="kind">endpoint.export_exr</span></div>
+              <div class="tail"><span class="chip mirror">build</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ============ COMPACT + FILTERED ============ -->
+      <div class="state">
+        <div class="state-head">
+          <span class="state-name">Compact, filtered</span>
+          <span class="state-note">One line per node for a large graph, with the stale chip active. Same order, same states.</span>
+        </div>
+        <div class="pane compact">
+          <div class="pane-title"><strong>Nodes</strong><span class="glyph">▤</span></div>
+          <div class="summary"><span><b>4</b> of 10 shown</span><span>filter: stale</span></div>
+          <div class="tools">
+            <span class="field typed">ero</span>
+            <span class="sel-ctl">Dependency ▾</span>
+          </div>
+          <div class="quick"><span class="qchip on">stale</span><span class="qchip">failed</span><span class="qchip">endpoints</span></div>
+          <div class="rows">
+            <div class="row s-stale">
+              <div class="stripe"></div><div class="pip">◐</div>
+              <div class="label"><span class="name">River carve</span></div>
+              <div class="tail"><span class="word">stale</span></div>
+            </div>
+            <div class="row s-stale">
+              <div class="stripe"></div><div class="pip">◐</div>
+              <div class="label"><span class="name">Talus</span></div>
+              <div class="tail"><span class="word">stale</span></div>
+            </div>
+            <div class="row s-stale">
+              <div class="stripe"></div><div class="pip">◐</div>
+              <div class="label"><span class="name">Rock blend</span></div>
+              <div class="tail"><span class="word">stale</span></div>
+            </div>
+            <div class="row s-stale">
+              <div class="stripe"></div><div class="pip">◐</div>
+              <div class="label"><span class="name">Heightmap</span></div>
+              <div class="tail"><span class="word">stale</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <hr>
+
+  <section class="section">
+    <div>
+      <h2>Two renderings, two fidelities</h2>
+      <p class="lede">
+        The canvas and the pane draw the same status model at different weights. A node header carries the dot
+        and nothing else, so the graph stays readable at a glance; the pane carries the glyph, the word and the
+        detail. Neither is the other's legend, and only the pane needs to be read.
+      </p>
+    </div>
+    <div class="canvas-demo">
+      <div class="cnode">
+        <header><span class="dot" style="background:#2bff5c"></span>Base noise</header>
+        <div class="body">generator.fbm</div>
+      </div>
+      <div class="cnode">
+        <header><span class="dot" style="background:#ffbf47"></span>River carve</header>
+        <div class="body">modifier.stream_erosion</div>
+      </div>
+      <div class="cnode">
+        <header><span class="dot" style="background:#ff4d6d"></span>Smooth</header>
+        <div class="body">modifier.blur</div>
+      </div>
+      <div class="cnode">
+        <header><span class="dot" style="background:#5a616b"></span>Metres EXR</header>
+        <div class="body">endpoint.export_exr</div>
+      </div>
+    </div>
+  </section>
+
+  <hr>
+
+  <section class="section">
+    <div>
+      <h2>State vocabulary</h2>
+      <p class="lede">
+        Every state carries a stripe, a glyph and a word, so none of them depends on telling one hue from
+        another. Colour reinforces; it never carries the meaning alone.
+      </p>
+    </div>
+    <div class="legend-wrap">
+      <table>
+        <thead><tr><th>State</th><th>Means</th><th>Comes from</th></tr></thead>
+        <tbody>
+          <tr><td class="g"><b style="color:#2bff5c">●</b> current</td><td>Evaluated at the key it would evaluate at now.</td><td class="src">Graph::cache_status</td></tr>
+          <tr><td class="g"><b style="color:#ffbf47">◐</b> stale</td><td>An edit upstream changed its key. It recomputes on the next pull.</td><td class="src">Graph::cache_status</td></tr>
+          <tr><td class="g"><b>○</b> not evaluated</td><td>Never computed at this resolution.</td><td class="src">Graph::cache_status</td></tr>
+          <tr><td class="g"><b style="color:#ff4d6d">▲</b> failed / no input</td><td>Errored, or a required input is unwired so it cannot run.</td><td class="src">graph.input_source · evaluate</td></tr>
+          <tr><td class="g"><b>⏸</b> bypassed</td><td>Passing its input through untouched.</td><td class="src">Graph::is_bypassed</td></tr>
+          <tr><td class="g"><b style="color:#1fa0c4">◗</b> active</td><td>Computing now, with a percentage where the node reports one.</td><td class="src">evaluator progress sink</td></tr>
+          <tr><td class="g"><b>·</b> queued</td><td>In this build, not started.</td><td class="src">evaluator progress sink</td></tr>
+          <tr><td class="g">cached</td><td>Skipped: the memo cache already held it. Says so rather than flicking past.</td><td class="src">evaluator progress sink</td></tr>
+          <tr><td class="g">— excluded</td><td>An endpoint left out of this build, or a branch feeding nothing being built.</td><td class="src">endpoint "build" param</td></tr>
+          <tr><td class="g"><span class="tag">2D</span> <span class="tag">4K</span></td><td>Where this node can be viewed: preview result, build result, or both.</td><td class="src">FieldStore + output_key</td></tr>
+          <tr><td class="g"><span class="tag">build</span></td><td>Included in the next build. A dashed chip: a mirror of the World panel's Outputs list, which owns it.</td><td class="src">endpoint "build" param</td></tr>
+          <tr><td class="g" style="color:#1fa0c4">⊙ pinned</td><td>The display flag: the viewport stays on this node while you work elsewhere.</td><td class="src">preview_pin</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <hr>
+
+  <section class="section">
+    <div>
+      <h2>Settled</h2>
+      <p class="lede">Decided in review, and drawn above rather than described.</p>
+    </div>
+    <ol class="q">
+      <li><b>One pane, not two.</b> Rows never reorder, and a row's left half is identical in every state. Only the trailing slot changes, so nothing moves under you when a build starts.</li>
+      <li><b>Canvas and pane both, at different fidelity.</b> Node headers keep the dot alone; the pane carries glyph, word and detail.</li>
+      <li><b>Outputs stays the source of truth</b> for build inclusion. The pane's build chip mirrors it, on the same two-controls-one-value pattern as the viewport's output picker.</li>
+      <li><b>Dependency order always</b>, in every state, with an explicit user sort for canvas order, alphabetical, or stale first. Sorting is a choice you make, never one the state makes for you.</li>
+      <li><b>Large graphs</b> get collapsible subgraph groups, a filter field with stale, failed and endpoint quick chips, and a compact one-line density.</li>
+      <li><b>Elapsed time only</b>, plus a percentage for the nodes that report one. No build-level estimate, because it would be extrapolation and wrong exactly when it matters.</li>
+    </ol>
+  </section>
+
+  <hr>
+
+  <section class="section">
+    <div>
+      <h2>What this costs to build</h2>
+      <p class="lede">
+        Most of the pane needs no engine work. Only the live build picture does: one observational seam, plus
+        opt-in reporting from the slow operators.
+      </p>
+    </div>
+    <div class="cards">
+      <div class="card">
+        <h3>Idle and after-build <span class="tag">available today</span></h3>
+        <p><code>Graph::cache_status</code> already returns current-versus-stale for every node in a pull without evaluating anything. Bypass, pinning, wiring and build inclusion are readable from the graph. Build availability is the field-store lookup the viewport's source toggle already does.</p>
+      </div>
+      <div class="card">
+        <h3>Queued, active, done <span class="tag">engine seam</span></h3>
+        <p>The evaluator computes nodes one at a time in dependency order and emits nothing. It needs an optional progress sink, notified as each node starts and finishes. Purely observational, so determinism is untouched.</p>
+      </div>
+      <div class="card">
+        <h3>Percentage within a node <span class="tag">operators opt in</span></h3>
+        <p>A bar inside a node means the operator reports fractional progress, such as erosion's iteration <code>i / N</code>. Nodes that do not report show elapsed time and a barber pole, never an invented percentage.</p>
+      </div>
+    </div>
+  </section>
+
+  <hr>
+
+  <section class="section">
+    <div>
+      <h2>Left for the design pass</h2>
+      <p class="lede">Smaller than it was, and all of it visual rather than structural.</p>
+    </div>
+    <ul class="q">
+      <li><b>What the compact row drops.</b> It hides the type id here, which makes two nodes of the same name harder to tell apart. Hover, a suffix, or something else.</li>
+      <li><b>What a collapsed group summarises.</b> A count is the minimum; the worst state inside it may matter more than the number.</li>
+      <li><b>How the trailing slot handles crowding.</b> A pinned, built, stale endpoint wants four marks in a slot about ninety pixels wide.</li>
+      <li><b>Whether the filter and sort persist</b> across sessions, or reset with each project open.</li>
+      <li><b>How the active row reads without motion.</b> The barber pole is the only animated thing here, and it should still work for a viewer with reduced motion set.</li>
+    </ul>
+  </section>
+
+  <hr>
+
+  <footer>
+    Mockup only: no engine data, no live state. Palette and typefaces are the application's own, taken from
+    <code>crates/ymir-gui/src/theme.rs</code> and <code>assets/fonts</code>, so the panel reads at the fidelity of
+    the real chrome. The surrounding page follows your light or dark preference; the panel does not, because the
+    application is dark chrome only.
+  </footer>
+
+</div>
