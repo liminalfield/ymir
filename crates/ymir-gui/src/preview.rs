@@ -7,6 +7,7 @@
 //! evaluates the newest state, and the UI shows only the newest result. The worker
 //! owns a persistent cache, so an unchanged upstream is reused across requests.
 
+use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::thread::{self, JoinHandle};
 
@@ -60,10 +61,17 @@ enum Outcome {
         /// it), for the editor histogram. `None` for a generator (no input) or a failed
         /// input eval.
         histogram: Option<Vec<f32>>,
+        /// Which nodes hold a cache entry still keyed to what they would produce now, by
+        /// `stable_id` (#279). Computed here because the cache lives on this thread, and the
+        /// node pane must never recompute keys per frame.
+        cache: HashMap<u64, bool>,
     },
     Failed {
         generation: u64,
         message: String,
+        /// The failing node's `stable_id`, so the pane marks that row rather than guessing
+        /// which node in the pull broke (#279).
+        target: u64,
     },
 }
 
@@ -141,6 +149,12 @@ pub(crate) struct PreviewEngine {
     /// The most recent evaluated node's outputs, kept so switching the shown output or the
     /// shading mode re-renders without re-evaluating the graph. Empty when none.
     last_outputs: Vec<Field>,
+    /// The worker's last cache report, by `stable_id` (#279): which nodes hold a result still
+    /// keyed to what they would produce now. Held until the next report, so the node pane and the
+    /// canvas read a settled fact instead of recomputing keys every frame.
+    cache_report: HashMap<u64, bool>,
+    /// The node the last evaluation failed on, if it failed.
+    failed_node: Option<u64>,
     /// The input histogram of the most recent result, and the node it is for. Surfaced
     /// to the curve/levels editors via [`input_histogram`](Self::input_histogram).
     last_histogram: Option<Vec<f32>>,
@@ -176,6 +190,8 @@ impl PreviewEngine {
             show_water: false,
             display_output: 0,
             last_outputs: Vec::new(),
+            cache_report: HashMap::new(),
+            failed_node: None,
             last_histogram: None,
             histogram_target: None,
             texture: None,
@@ -226,6 +242,17 @@ impl PreviewEngine {
     }
 
     /// The current shading mode, for the pane's toggle.
+    /// The worker's last cache report, by `stable_id` (#279): `true` where the node holds a
+    /// result still keyed to what it would produce now, absent where it has never been evaluated.
+    pub(crate) fn cache_report(&self) -> &HashMap<u64, bool> {
+        &self.cache_report
+    }
+
+    /// The node the last evaluation failed on, if it failed.
+    pub(crate) fn failed_node(&self) -> Option<u64> {
+        self.failed_node
+    }
+
     pub(crate) fn mode(&self) -> ShadeMode {
         self.mode
     }
@@ -376,17 +403,23 @@ impl PreviewEngine {
                 fields,
                 target,
                 histogram,
+                cache,
                 ..
             } => {
                 self.eval_error = None;
+                self.failed_node = None;
+                self.cache_report = cache;
                 // Keep all outputs; `refresh_texture` re-uploads only when the shown output
                 // or the shading mode changed.
                 self.last_outputs = fields;
                 self.last_histogram = histogram;
                 self.histogram_target = Some(target);
             }
-            Outcome::Failed { message, .. } => {
+            Outcome::Failed {
+                message, target, ..
+            } => {
                 self.eval_error = Some(message);
+                self.failed_node = Some(target);
                 self.last_outputs = Vec::new();
                 self.last_histogram = None;
                 self.histogram_target = None;
@@ -532,6 +565,31 @@ impl PreviewEngine {
     }
 }
 
+/// Which nodes hold a cache entry still keyed to what they would produce now, by `stable_id`.
+///
+/// Walked from every sink rather than from the evaluated target, so a node on a branch the last
+/// preview did not touch still reports honestly instead of reading as never evaluated. This runs on
+/// the worker, right after an evaluation, because the cache lives here and because the alternative
+/// is the UI recomputing keys every frame (#279, and the shape of the bug #254 fixed).
+fn cache_report(graph: &Graph, request: &EvalRequest, cache: &EvalCache) -> HashMap<u64, bool> {
+    let mut report = HashMap::new();
+    for sink in crate::status::sinks(graph) {
+        let Ok(status) = graph.cache_status(sink, request, cache) else {
+            continue; // a cycle: the evaluator reports it, and the pane still lists the nodes
+        };
+        for (id, current) in status {
+            if let Some(handle) = graph.stable_id(id) {
+                // A node reachable from two sinks is current only if every walk agrees.
+                report
+                    .entry(handle)
+                    .and_modify(|v: &mut bool| *v &= current)
+                    .or_insert(current);
+            }
+        }
+    }
+    report
+}
+
 /// The worker: evaluates submitted jobs with a persistent cache, skipping
 /// superseded ones. Exits when the job channel closes (the engine is dropped).
 fn worker_loop(job_rx: &Receiver<Job>, result_tx: &Sender<Outcome>) {
@@ -560,6 +618,7 @@ fn evaluate_job(job: &Job, cache: &mut EvalCache) -> Option<Outcome> {
         return Some(Outcome::Failed {
             generation,
             message: "node was removed".to_string(),
+            target: job.target,
         });
     };
     // Inside a subgraph (#106), bind the live input fields so the preview shows real data
@@ -597,6 +656,7 @@ fn evaluate_job(job: &Job, cache: &mut EvalCache) -> Option<Outcome> {
             Outcome::Failed {
                 generation,
                 message: "node has no output to preview".to_string(),
+                target: job.target,
             }
         } else {
             let histogram = match &bound {
@@ -612,12 +672,14 @@ fn evaluate_job(job: &Job, cache: &mut EvalCache) -> Option<Outcome> {
                 target: job.target,
                 fields: outputs,
                 histogram,
+                cache: cache_report(&job.graph, &job.request, cache),
             }
         }),
         Err(Error::Cancelled) => None,
         Err(err) => Some(Outcome::Failed {
             generation,
             message: err.to_string(),
+            target: job.target,
         }),
     }
 }

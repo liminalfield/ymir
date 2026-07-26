@@ -64,6 +64,8 @@ mod history;
 // compile at run time (#272).
 #[cfg(test)]
 mod wgsl;
+// The one per-node status model the canvas and the node pane both read (#279).
+mod status;
 use build::BuildRunner;
 use history::EditHistory;
 
@@ -3417,6 +3419,196 @@ inventory::submit! {
         icon: egui_phosphor::regular::GLOBE_HEMISPHERE_WEST,
         title: "World",
         draw: world_dock_pane,
+    }
+}
+
+/// The colour a status reads in: the palette's semantics, which are separated in lightness so a
+/// red/green colour-blind reader can tell them apart. It never carries a state on its own; the
+/// glyph and the word beside it do that (#279).
+fn status_color(state: status::NodeState) -> egui::Color32 {
+    match state {
+        status::NodeState::NoInput | status::NodeState::Failed => theme::ERROR,
+        status::NodeState::Stale => theme::WARNING,
+        status::NodeState::Current => theme::SUCCESS,
+        status::NodeState::Bypassed | status::NodeState::NotEvaluated => theme::LINE_STRONG,
+    }
+}
+
+/// One node's row: the state stripe, the glyph cell, the name over its type id, and the trailing
+/// slot. The left half is identical whatever the graph is doing; only the trailing slot changes
+/// (#278), so nothing moves under the pointer when a build starts.
+fn node_row(ui: &mut egui::Ui, state: &AppState, node: &status::NodeStatus) -> egui::Response {
+    let id = state.graph.node_id_of(node.handle);
+    let name = id.map_or_else(
+        || "(removed)".to_string(),
+        |id| node_display_name(&state.graph, id),
+    );
+    let type_id = id
+        .and_then(|id| state.graph.spec(id))
+        .map_or_else(String::new, |spec| spec.type_id.to_string());
+    let colour = status_color(node.state);
+    let selected = state.selection.contains(&node.handle);
+
+    let row = ui.scope(|ui| {
+        ui.horizontal(|ui| {
+            let h = ui.spacing().interact_size.y;
+            // The stripe: state as position and value, before any glyph is read.
+            let (stripe, _) = ui.allocate_exact_size(egui::vec2(3.0, h), egui::Sense::hover());
+            ui.painter().rect_filled(stripe, 1.0, colour);
+            ui.add_space(4.0);
+            // The glyph cell, which the pin takes when this row is pinned: an identity flag is
+            // the more specific fact about a row than a mark reinforcing the stripe beside it.
+            let (glyph_rect, _) = ui.allocate_exact_size(egui::vec2(13.0, h), egui::Sense::hover());
+            let (glyph, glyph_colour) = if node.pinned {
+                ("\u{2299}", theme::ACCENT_PRIMARY)
+            } else {
+                (node.state.glyph(), colour)
+            };
+            ui.painter().text(
+                glyph_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                glyph,
+                egui::FontId::monospace(11.0),
+                glyph_colour,
+            );
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.label(
+                    egui::RichText::new(name)
+                        .size(12.5)
+                        .color(theme::TEXT_PRIMARY),
+                );
+                ui.label(
+                    egui::RichText::new(type_id)
+                        .size(10.5)
+                        .monospace()
+                        .color(theme::TEXT_TERTIARY),
+                );
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Trailing slot, capped at two marks. A pinned row always spells its state out
+                // here, because the pin took the glyph that would otherwise carry it.
+                let word = node.state.word().or_else(|| {
+                    (node.pinned && node.state == status::NodeState::Current).then_some("current")
+                });
+                if node.build_included == Some(true) {
+                    ui.label(
+                        egui::RichText::new("build")
+                            .size(10.5)
+                            .monospace()
+                            .color(theme::TEXT_SECONDARY),
+                    );
+                } else if node.fidelity != status::Fidelity::None && word.is_none() {
+                    ui.label(
+                        egui::RichText::new("2D")
+                            .size(10.5)
+                            .monospace()
+                            .color(theme::ACCENT_PRIMARY),
+                    );
+                }
+                if let Some(word) = word {
+                    ui.label(egui::RichText::new(word).size(10.5).monospace().color(
+                        if node.state == status::NodeState::Current {
+                            theme::TEXT_TERTIARY
+                        } else {
+                            colour
+                        },
+                    ));
+                }
+            });
+        });
+    });
+    let rect = row.response.rect;
+    let response = ui.interact(rect, ui.id().with(node.handle), egui::Sense::click());
+    if selected {
+        ui.painter()
+            .rect_filled(rect, 2.0, theme::SELECTION.gamma_multiply(0.55));
+    }
+    response
+}
+
+/// The node pane (#280): every node in the graph and what it is doing, in dependency order.
+///
+/// Reads the one status model the canvas will also read (#279), derived from the worker's last
+/// cache report rather than recomputed here, so listing a large graph costs a walk and not a
+/// hash of every node every frame.
+fn nodes_pane(ui: &mut egui::Ui, state: &mut AppState) {
+    let report = status::StatusReport {
+        cache: state.preview.cache_report().clone(),
+        failed: state.preview.failed_node().into_iter().collect(),
+        // Which nodes hold a *build* result is not known here yet: it needs the build to report
+        // what it wrote, which arrives with the build states (#285). Until then a row reports the
+        // preview fidelity only, rather than guessing.
+        built: std::collections::HashSet::new(),
+        pinned: state.preview_pin,
+    };
+    let nodes = status::statuses(&state.graph, &report);
+
+    egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(8, 6))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            if nodes.is_empty() {
+                ui.weak("No nodes in this graph.");
+                return;
+            }
+            let stale = nodes
+                .iter()
+                .filter(|n| n.state == status::NodeState::Stale)
+                .count();
+            let blocked = nodes
+                .iter()
+                .filter(|n| {
+                    matches!(
+                        n.state,
+                        status::NodeState::NoInput | status::NodeState::Failed
+                    )
+                })
+                .count();
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("{} nodes", nodes.len()))
+                        .size(11.5)
+                        .monospace()
+                        .color(theme::TEXT_SECONDARY),
+                );
+                if stale > 0 {
+                    ui.label(
+                        egui::RichText::new(format!("{stale} stale"))
+                            .size(11.5)
+                            .monospace()
+                            .color(theme::WARNING),
+                    );
+                }
+                if blocked > 0 {
+                    ui.label(
+                        egui::RichText::new(format!("{blocked} blocked"))
+                            .size(11.5)
+                            .monospace()
+                            .color(theme::ERROR),
+                    );
+                }
+            });
+            ui.add_space(4.0);
+            let mut clicked = None;
+            for node in &nodes {
+                if node_row(ui, state, node).clicked() {
+                    clicked = Some(node.handle);
+                }
+            }
+            // Selecting from the pane selects on the canvas: one selection, two places to make it.
+            if let Some(handle) = clicked {
+                state.select_only(handle);
+            }
+        });
+}
+inventory::submit! {
+    dock::DockPane {
+        id: "nodes",
+        order: 20,
+        icon: egui_phosphor::regular::LIST_BULLETS,
+        title: "Nodes",
+        draw: nodes_pane,
     }
 }
 
