@@ -55,6 +55,8 @@ The list is in dependency order unless you change the sort, and the sort you cho
 
 A subgraph's row reports the state of the subgraph as a whole, since that is what Ymir evaluates: the nodes inside it run together. Opening it lists what is inside and flags anything visibly wrong there, such as an unconnected input. To see the state of an individual node inside, dive into the subgraph, where it is an ordinary node.
 
+While a build runs, the window title says so, so you can tell from the taskbar without switching to Ymir. When it finishes, the status beside the Build button states what happened and how long it took, and quietens after a few seconds; a failure stays until the next build.
+
 While a build runs, each row it touches reports what the build is doing with that node: queued, how far along it is, how long it took, or that a cached result was reused. Nodes report a percentage only where they can measure one; the rest show how long they have been running.
 
 ## 3D viewport
