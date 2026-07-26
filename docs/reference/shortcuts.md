@@ -48,7 +48,7 @@ The left dock's list of every node in the graph, in dependency order.
 | Narrow the list | Type in the filter, or click a `stale`, `failed` or `endpoints` chip |
 | Clear the filter | Clear, beside the count |
 
-Each row states what its node is doing as a stripe, a glyph and a word, so no state is told apart by colour alone.
+Each row states what its node is doing as a stripe, a glyph and a word, so no state is told apart by colour alone. Every node on the canvas carries the same state as a dot on its header, so the graph reads at a glance and the pane spells out whichever row you are reading.
 
 The list is in dependency order unless you change the sort, and the sort you choose is saved with the project. A filter is not: opening a project always shows the whole graph.
 

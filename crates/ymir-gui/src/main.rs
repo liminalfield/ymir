@@ -404,6 +404,12 @@ struct AppState {
     /// Set after wire-to-create makes a node, to ask snarl (via the viewer) to drop the
     /// armed wire next frame so its rubber-band clears (#123). One-shot.
     consume_wire: bool,
+    /// The derived per-node status, and the inputs it was derived from (#282). Both the canvas
+    /// dots and the node pane read this, and it is rebuilt only when the graph, the worker's
+    /// report or the pin actually change: deriving it per frame would walk and hash the whole
+    /// graph every frame, which is what the canvas used to do and what #254 was about.
+    node_status: Vec<status::NodeStatus>,
+    node_status_key: Option<(u64, usize, Option<Handle>)>,
     /// The node pane's filter text and quick chips (#281). Deliberately not persisted: a filter
     /// is a momentary question, and restoring one means opening a project to a list that hides
     /// most of its nodes with no memory of why.
@@ -833,6 +839,8 @@ impl AppState {
             active_tab: None,
             search: String::new(),
             node_menu: None,
+            node_status: Vec::new(),
+            node_status_key: None,
             node_filter: String::new(),
             node_chips: status::Chips::default(),
             node_sort: status::NodeSort::default(),
@@ -1782,6 +1790,31 @@ impl AppState {
             // state clears the modified flag (#83).
             self.modified = snapshot != self.saved_snapshot;
             self.history.record(&snapshot);
+        }
+    }
+
+    /// Rebuilds the per-node status if anything it depends on has moved, and returns it (#282).
+    ///
+    /// The key is the graph's content hash, the size of the worker's cache report, and the pin.
+    /// One graph hash a frame replaces the per-node key computation the canvas ran for every node
+    /// on every frame, so this is cheaper than what it replaces even before the pane reads it too.
+    fn refresh_node_status(&mut self) {
+        let key = (
+            self.graph.content_hash(),
+            self.preview.cache_report().len(),
+            self.preview_pin,
+        );
+        if self.node_status_key != Some(key) {
+            let report = status::StatusReport {
+                cache: self.preview.cache_report().clone(),
+                failed: self.preview.failed_node().into_iter().collect(),
+                // Which nodes hold a *build* result needs the build to report what it wrote,
+                // which arrives with #285. Empty rather than guessed.
+                built: HashSet::new(),
+                pinned: self.preview_pin,
+            };
+            self.node_status = status::statuses(&self.graph, &report);
+            self.node_status_key = Some(key);
         }
     }
 
@@ -3631,27 +3664,29 @@ fn node_row(
 /// cache report rather than recomputed here, so listing a large graph costs a walk and not a
 /// hash of every node every frame.
 fn nodes_pane(ui: &mut egui::Ui, state: &mut AppState) {
-    let report = status::StatusReport {
-        cache: state.preview.cache_report().clone(),
-        failed: state.preview.failed_node().into_iter().collect(),
-        // Which nodes hold a *build* result is not known here yet: it needs the build to report
-        // what it wrote, which arrives with the build states (#285). Until then a row reports the
-        // preview fidelity only, rather than guessing.
-        built: std::collections::HashSet::new(),
-        pinned: state.preview_pin,
+    // Refresh the shared model, then read it. Deriving it here instead would walk and key the
+    // whole graph on every frame, and a build repaints continuously, so that cost lands many
+    // times a second exactly when the machine is busiest (#282).
+    state.refresh_node_status();
+    let total = state.node_status.len();
+    // Canvas order is the only sort that needs positions, so the map is built only for it rather
+    // than allocated every frame for a sort that ignores it.
+    let positions = if state.node_sort == status::NodeSort::Canvas {
+        project_file::snarl_positions(&state.snarl)
+    } else {
+        BTreeMap::new()
     };
-    let mut nodes = status::statuses(&state.graph, &report);
-    let total = nodes.len();
-    status::sort(
-        &mut nodes,
-        state.node_sort,
-        &project_file::snarl_positions(&state.snarl),
-    );
+    // Moved out for the frame, so the rows can be borrowed while the drawing below edits the
+    // state, and put back untouched afterwards. The alternative is cloning the derived list every
+    // frame, which is the cost this whole cache exists to avoid.
+    let derived = std::mem::take(&mut state.node_status);
+    let mut rows: Vec<&status::NodeStatus> = derived.iter().collect();
+    status::sort(&mut rows, state.node_sort, &positions);
     let filtering = !state.node_filter.trim().is_empty() || state.node_chips.any();
-    nodes.retain(|n| status::matches(n, &state.node_filter, state.node_chips));
+    rows.retain(|n| status::matches(n, &state.node_filter, state.node_chips));
     // Computed over the rows that survived the filter, so a suffix appears only where two rows
     // you can actually see share a name.
-    let suffixes = status::suffixes(&nodes);
+    let suffixes = status::suffixes(&rows);
 
     egui::Frame::new()
         .inner_margin(egui::Margin::symmetric(8, 6))
@@ -3666,16 +3701,16 @@ fn nodes_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 ui.weak("No nodes in this graph.");
                 return;
             }
-            nodes_summary(ui, state, &nodes, total, filtering);
+            nodes_summary(ui, state, &rows, total, filtering);
             nodes_toolbar(ui, state);
             ui.add_space(4.0);
-            if nodes.is_empty() {
+            if rows.is_empty() {
                 ui.weak("No nodes match.");
                 return;
             }
             let mut select = None;
             let mut toggle = None;
-            for (node, suffix) in nodes.iter().zip(&suffixes) {
+            for (node, suffix) in rows.iter().zip(&suffixes) {
                 let action = node_row(ui, state, node, suffix.as_deref(), state.node_density);
                 if action.select {
                     select = Some(node.handle);
@@ -3692,6 +3727,8 @@ fn nodes_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 toggle_build_inclusion(state, handle);
             }
         });
+    drop(rows);
+    state.node_status = derived;
 }
 
 /// The counts above the list. While a filter is active it states the hidden count and offers a way
@@ -3699,7 +3736,7 @@ fn nodes_pane(ui: &mut egui::Ui, state: &mut AppState) {
 fn nodes_summary(
     ui: &mut egui::Ui,
     state: &mut AppState,
-    shown: &[status::NodeStatus],
+    shown: &[&status::NodeStatus],
     total: usize,
     filtering: bool,
 ) {
@@ -5910,6 +5947,18 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
         }
         match id {
             Some(id) => {
+                // The preview's own stoplight, which used to ride the previewed node's canvas dot.
+                // That dot now shows the node's *state*, like every other node (#282), and an
+                // evaluation being in flight is a fact about the preview rather than about the
+                // node, so it belongs on the preview's header.
+                let diameter = ui.text_style_height(&egui::TextStyle::Body) * 0.5;
+                let (dot, _) =
+                    ui.allocate_exact_size(egui::vec2(diameter, diameter), egui::Sense::hover());
+                ui.painter().circle_filled(
+                    dot.center(),
+                    diameter * 0.5,
+                    state.preview.status_color(ui.visuals()),
+                );
                 ui.label(
                     egui::RichText::new(node_display_name(&state.graph, id))
                         .family(egui::FontFamily::Name("plex-semibold".into()))
@@ -6512,9 +6561,15 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // The previewed node's status dot, drawn on the node the preview is showing (the
     // pinned node if any, else the selection). The pinned node also gets a ring
     // marker. Both computed before the disjoint borrow below, from read-only fields.
-    let status = state
-        .preview_target()
-        .map(|h| (h, state.preview.status_color(ui.visuals())));
+    // Every node's dot colour, from the one status model the node pane reads (#282). Derived
+    // before the disjoint borrow below, and only rebuilt when the graph, the worker's report or
+    // the pin move.
+    state.refresh_node_status();
+    let statuses: HashMap<canvas::Handle, egui::Color32> = state
+        .node_status
+        .iter()
+        .map(|n| (n.handle, status_color(n.state)))
+        .collect();
     let pinned = state.preview_pin.filter(|&h| state.is_previewable(h));
     // A one-shot "zoom to graph" view to apply this frame (#65), Copy, read before
     // the disjoint borrow.
@@ -6615,7 +6670,7 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         dropped_wire: None,
         node_dropped_on_wire: None,
         consume_wire,
-        status,
+        statuses: &statuses,
         pinned,
         add_node_at: None,
         add_frame_at: None,
