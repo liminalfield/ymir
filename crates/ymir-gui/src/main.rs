@@ -642,6 +642,10 @@ struct AppState {
     /// Whether the viewport shows the live preview or the cached build result. A view preference,
     /// toggled from the Display flyout when a build is available; see [`ViewportSource`].
     viewport_source: ViewportSource,
+    /// Whether a build-resolution result exists for the previewed node, from a stat rather than a
+    /// read (#301). The Source toggle needs only this; the blob itself is read when the user
+    /// actually switches to Build.
+    build_available: bool,
     /// A transient status line shown in the menu bar (e.g. the result of a save or
     /// open). Replaced by the next action.
     status: Option<String>,
@@ -938,6 +942,7 @@ impl AppState {
             field_store: None,
             viewport_build: None,
             viewport_source: ViewportSource::default(),
+            build_available: false,
             status: None,
             history,
             saved_snapshot: initial,
@@ -8443,17 +8448,28 @@ fn refresh_viewport_build(state: &mut AppState) {
     {
         return; // already loaded for this key
     }
-    let loaded = state.field_store.as_ref().and_then(|store| store.load(key));
-    let probe = (key << 1) | u64::from(loaded.is_some());
+    // Only read the blob when the viewport is actually showing the build. `load` pulls a whole
+    // build-resolution result off disk and deserializes it on this thread, tens of megabytes at
+    // 4K, and it was running on every change of previewed node even while the viewport was showing
+    // the preview (#301). Availability, which is all the Source toggle needs, is a stat.
+    let wants_data = state.viewport_source == ViewportSource::Build;
+    let loaded = state
+        .field_store
+        .as_ref()
+        .and_then(|store| if wants_data { store.load(key) } else { None });
+    state.build_available = state
+        .field_store
+        .as_ref()
+        .is_some_and(|store| store.contains(key));
+    // The probe reports availability, not whether a blob was read: in Preview the answer is
+    // "there is one, and we deliberately did not read it", which is different from a miss.
+    let probe = (key << 1) | u64::from(state.build_available);
     if LAST_PROBE.swap(probe, Ordering::Relaxed) != probe {
         log::debug!(
-            "viewport build lookup: key={key:016x} store_open={} -> {}",
+            "viewport build lookup: key={key:016x} store_open={} available={} read={}",
             state.field_store.is_some(),
-            if loaded.is_some() {
-                "HIT (showing build)"
-            } else {
-                "miss (showing preview)"
-            },
+            state.build_available,
+            loaded.is_some(),
         );
     }
     state.viewport_build = loaded.map(|fields| (key, fields));
@@ -8674,7 +8690,7 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // The viewport source (preview vs build) and whether a build is available to switch to. The
     // Source toggle in the Display flyout mutates this local; it is applied back after the flyout.
     let mut viewport_source = state.viewport_source;
-    let build_available = state.viewport_build.is_some();
+    let build_available = state.build_available;
     let display_output_before = display_output;
     // Draw the cluster only when the viewport is tall enough to hold it, so a short viewport shows
     // only the render rather than chrome overflowing it.
