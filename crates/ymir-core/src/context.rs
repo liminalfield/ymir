@@ -149,6 +149,13 @@ impl EvalContext {
         self.compute.as_deref()
     }
 
+    /// The compute handle itself, for the one caller that has to pass it on rather than use it: a
+    /// subgraph container, which builds a request for its inner graph and must carry the device
+    /// across that boundary or every node inside silently takes its CPU path.
+    pub(crate) fn compute_handle(&self) -> Option<Arc<dyn ComputeContext>> {
+        self.compute.clone()
+    }
+
     /// Sets the world's physical size along x, in world units (meters) across the
     /// full `UNIT` region. Defaults to `1.0` (a unit-sized world). Cells are kept
     /// square, so the y extent follows from the grid aspect.
