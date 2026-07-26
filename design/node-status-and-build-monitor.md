@@ -54,8 +54,10 @@ Trailing slot, capped at **two marks**, in precedence order:
 
 1. A **status word** when one applies (`stale`, `queued`, `cached`, `written`, `no input`,
    `bypassed`, `skipped`, `excluded`, or an elapsed time).
-2. The **view chip**, collapsed to the highest fidelity held. A build result implies the preview
-   exists, so `4K` shows alone, and `2D` shows when there is no build result.
+2. The **view chip**, shown only when a *build* result is held, and naming the resolution it was
+   built at. A preview result is not worth a chip: every evaluated node has one, so it would
+   repeat what the state glyph already says. A build result is not implied by anything else on
+   the row, and a build covers only what fed its targets, so a side branch will not have one.
 3. The dashed **build mirror**, shown only when the status word is not already speaking about
    the build. `written` and `excluded` suppress it; `stale` does not.
 
@@ -83,7 +85,7 @@ stripe is the weakest possible sample of a hue, so it reinforces and never infor
 | `·` queued | In this build, not started. | evaluator progress sink |
 | cached | Skipped: the memo cache already held it. | evaluator progress sink |
 | excluded | An endpoint left out of this build. | endpoint `build` param |
-| `4K` / `2D` | The highest fidelity held. | `FieldStore`, `output_key` |
+| `2048` | A build result is held at that resolution, so the viewport can show this node at build quality. | `FieldStore`, `output_key` |
 | `build` | Included in the next build; a mirror, dashed. | endpoint `build` param |
 | `⊙` pinned | The display flag, in the glyph cell. | `preview_pin` |
 

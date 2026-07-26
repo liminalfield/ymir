@@ -516,12 +516,12 @@
             <div class="row s-current">
               <div class="stripe"></div><div class="pip">●</div>
               <div class="label"><span class="name">Base noise</span><span class="kind">generator.fbm</span></div>
-              <div class="tail"><span class="chip on">4K</span></div>
+              <div class="tail"><span class="chip on">2048</span></div>
             </div>
             <div class="row s-current">
               <div class="stripe"></div><div class="pip">●</div>
               <div class="label"><span class="name">Domain warp</span><span class="kind">modifier.warp</span></div>
-              <div class="tail"><span class="chip on">4K</span></div>
+              <div class="tail"><span class="chip on">2048</span></div>
             </div>
             <div class="row s-stale sel">
               <div class="stripe"></div><div class="pip pin">⊙</div>
@@ -536,7 +536,7 @@
             <div class="row s-current">
               <div class="stripe"></div><div class="pip">●</div>
               <div class="label"><span class="name">Steep faces</span><span class="kind">selector.slope</span></div>
-              <div class="tail"><span class="chip on">2D</span></div>
+              <div class="tail"></div>
             </div>
             <div class="row s-stale">
               <div class="stripe"></div><div class="pip">◐</div>
@@ -658,32 +658,32 @@
             <div class="row s-current">
               <div class="stripe"></div><div class="pip">●</div>
               <div class="label"><span class="name">Base noise</span><span class="kind">generator.fbm</span></div>
-              <div class="tail"><span class="chip on">4K</span></div>
+              <div class="tail"><span class="chip on">2048</span></div>
             </div>
             <div class="row s-current">
               <div class="stripe"></div><div class="pip">●</div>
               <div class="label"><span class="name">Domain warp</span><span class="kind">modifier.warp</span></div>
-              <div class="tail"><span class="chip on">4K</span></div>
+              <div class="tail"><span class="chip on">2048</span></div>
             </div>
             <div class="row s-current sel">
               <div class="stripe"></div><div class="pip pin">⊙</div>
               <div class="label"><span class="name">River carve</span><span class="kind">modifier.stream_erosion</span></div>
-              <div class="tail"><span class="word">current</span><span class="chip on">4K</span></div>
+              <div class="tail"><span class="word">current</span><span class="chip on">2048</span></div>
             </div>
             <div class="row s-current">
               <div class="stripe"></div><div class="pip">●</div>
               <div class="label"><span class="name">Talus</span><span class="kind">modifier.thermal_erosion</span></div>
-              <div class="tail"><span class="chip on">4K</span></div>
+              <div class="tail"><span class="chip on">2048</span></div>
             </div>
             <div class="row s-current">
               <div class="stripe"></div><div class="pip">●</div>
               <div class="label"><span class="name">Steep faces</span><span class="kind">selector.slope</span></div>
-              <div class="tail"><span class="chip on">4K</span></div>
+              <div class="tail"><span class="chip on">2048</span></div>
             </div>
             <div class="row s-current">
               <div class="stripe"></div><div class="pip">●</div>
               <div class="label"><span class="name">Rock blend</span><span class="kind">modifier.blend</span></div>
-              <div class="tail"><span class="chip on">4K</span></div>
+              <div class="tail"><span class="chip on">2048</span></div>
             </div>
             <div class="group g-error">
               <span class="caret">▸</span><span class="gstripe"></span><span class="gpip">▲</span>
@@ -845,7 +845,7 @@
           <tr><td class="g"><b>·</b> queued</td><td>In this build, not started.</td><td class="src">evaluator progress sink</td></tr>
           <tr><td class="g">cached</td><td>Skipped: the memo cache already held it. Says so rather than flicking past.</td><td class="src">evaluator progress sink</td></tr>
           <tr><td class="g">— excluded</td><td>An endpoint left out of this build, or a branch feeding nothing being built.</td><td class="src">endpoint "build" param</td></tr>
-          <tr><td class="g"><span class="tag">4K</span></td><td>The highest fidelity held. A build result implies the preview, so only one chip ever shows.</td><td class="src">FieldStore + output_key</td></tr>
+          <tr><td class="g"><span class="tag">2048</span></td><td>A build result is held, at that resolution: the viewport can show this node at build quality. A preview result gets no chip, since every evaluated node has one and the glyph already says so.</td><td class="src">FieldStore + output_key</td></tr>
           <tr><td class="g"><span class="tag">build</span></td><td>Included in the next build. Dashed: a mirror of the World panel's Outputs list, which owns it.</td><td class="src">endpoint "build" param</td></tr>
           <tr><td class="g" style="color:#1fa0c4">⊙ pinned</td><td>The display flag. It takes the glyph cell, so a pinned row always spells its state out in the trailing slot.</td><td class="src">preview_pin</td></tr>
         </tbody>

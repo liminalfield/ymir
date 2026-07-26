@@ -3588,10 +3588,12 @@ fn node_row(
                 } else if node.fidelity == status::Fidelity::Build && word.is_none() {
                     // Only a *build* result is worth a chip: it says the viewport can show this
                     // node at build quality, which nothing else on the row tells you. A chip on
-                    // every evaluated row would repeat what the glyph already says. Nothing
-                    // reports a build result yet, so this stays silent until #285.
+                    // every evaluated row would repeat what the glyph already says. It names the
+                    // resolution the result was built at rather than a size like "4K", which is
+                    // wrong the moment the build resolution is anything else. Nothing reports a
+                    // build result yet, so this stays silent until #285.
                     ui.label(
-                        egui::RichText::new("4K")
+                        egui::RichText::new(state.build_res.to_string())
                             .size(10.5)
                             .monospace()
                             .color(theme::ACCENT_PRIMARY),
@@ -3655,6 +3657,11 @@ fn nodes_pane(ui: &mut egui::Ui, state: &mut AppState) {
         .inner_margin(egui::Margin::symmetric(8, 6))
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
+            // Every label here is a row's content, not editable text. Without this they are
+            // text-selectable, so the pointer becomes an I-beam over a row that is really a
+            // button. The canvas turns it off on node titles for the same reason. The filter
+            // field is a TextEdit and keeps its own I-beam.
+            ui.style_mut().interaction.selectable_labels = false;
             if total == 0 {
                 ui.weak("No nodes in this graph.");
                 return;
