@@ -4143,6 +4143,7 @@ dependencies = [
  "glam",
  "inventory",
  "log",
+ "naga",
  "png 0.17.16",
  "rfd",
  "serde",

@@ -466,3 +466,17 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     return vec4<f32>(srgb_to_linear(col.r), srgb_to_linear(col.g), srgb_to_linear(col.b), 1.0);
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_hillshade_shader_is_valid_wgsl() {
+        // #272: the 2D map's shader is compiled at run time like the viewport's, so it is checked
+        // the same way.
+        if let Err(err) = crate::wgsl::validate(SHADER) {
+            panic!("the 2D map hillshade shader {err}");
+        }
+    }
+}
