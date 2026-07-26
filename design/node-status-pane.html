@@ -1,5 +1,5 @@
-<!-- Design record, not user documentation. A mockup captured for the node status pane
-     review (supersedes the open questions in #44 and #45). Fake data, no engine state.
+<!-- Design record, not user documentation. The node status pane as settled in review
+     (supersedes the open questions in #44 and #45). Fake data, no engine state.
      Open it from a local checkout: the typefaces load from the GUI crate's own assets. -->
 <title>Ymir — node status pane mockup</title>
 
@@ -44,7 +44,6 @@
     --node-ink: #373f4b;
     --node-ink-mid: #5d6674;
 
-    /* Page chrome: a slate neutral pulled toward the same cyan, so the surround reads as chosen. */
     --page-bg: #eef2f5;
     --page-panel: #ffffff;
     --page-ink: #1b2027;
@@ -148,7 +147,6 @@
   .state-name { font-weight: 600; font-size: 15px; }
   .state-note { font-size: 13.5px; color: var(--page-ink-lo); }
 
-  /* ---- the pane ---- */
   .pane {
     width: 100%;
     background: var(--chrome-1);
@@ -195,7 +193,6 @@
   }
   .btn.stop { border-color: #7d3a46; color: #ffb3c0; }
 
-  /* toolbar: the sort is the user's, never the state's */
   .tools {
     display: flex;
     align-items: center;
@@ -237,20 +234,37 @@
 
   .rows { display: flex; flex-direction: column; }
 
-  /* group header for a subgraph */
   .group {
-    display: flex;
+    display: grid;
+    grid-template-columns: 10px 3px 13px minmax(0, 1fr) auto;
     align-items: center;
-    gap: 6px;
+    gap: 0 5px;
     padding: 5px 10px 5px 6px;
     background: var(--chrome-2);
     border-bottom: 1px solid rgb(76 82 92 / 0.5);
     font-size: 11.5px;
     color: var(--ink-mid);
   }
-  .group .caret { color: var(--ink-lo); font-size: 10px; width: 10px; }
-  .group .gname { font-weight: 600; color: var(--ink-hi); }
-  .group .gcount { font-family: "Plex Mono", ui-monospace, monospace; font-size: 10.5px; color: var(--ink-lo); margin-left: auto; }
+  .group .caret { color: var(--ink-lo); font-size: 10px; }
+  .group .gstripe { align-self: stretch; border-radius: 1px; background: transparent; }
+  .group.g-error .gstripe { background: var(--error); }
+  .group.g-stale .gstripe { background: var(--warning); }
+  .group.g-current .gstripe { background: var(--success); }
+  .group .gpip { font-family: "Plex Mono", ui-monospace, monospace; font-size: 11px; text-align: center; }
+  .group.g-error .gpip { color: var(--error); }
+  .group.g-stale .gpip { color: var(--warning); }
+  .group.g-current .gpip { color: var(--success); }
+  .group .gname { font-weight: 600; color: var(--ink-hi); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .group .gtail {
+    display: flex;
+    gap: 8px;
+    font-family: "Plex Mono", ui-monospace, monospace;
+    font-size: 10.5px;
+    color: var(--ink-lo);
+    font-variant-numeric: tabular-nums;
+  }
+  .group.g-error .gcount { color: var(--error); }
+  .group.g-stale .gcount { color: var(--warning); }
 
   .row {
     display: grid;
@@ -277,10 +291,13 @@
   .s-stale .pip { color: var(--warning); }
   .s-error .pip { color: var(--error); }
   .s-active .pip { color: var(--accent); }
+  /* the pin takes the pip cell: an identity flag is the more specific fact about a row */
+  .pip.pin, .s-current .pip.pin, .s-stale .pip.pin, .s-active .pip.pin { color: var(--accent); }
 
   .label { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
   .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12.5px; color: var(--ink-hi); }
   .s-off .name { color: var(--ink-lo); }
+  .suffix { font-family: "Plex Mono", ui-monospace, monospace; font-size: 10.5px; color: var(--ink-lo); }
   .kind {
     font-family: "Plex Mono", ui-monospace, monospace;
     font-size: 10.5px;
@@ -290,7 +307,6 @@
     text-overflow: ellipsis;
   }
 
-  /* the trailing slot: the only part that changes between states */
   .tail {
     display: flex;
     align-items: center;
@@ -307,19 +323,42 @@
   .chip { padding: 1px 5px; border: 1px solid var(--line-strong); border-radius: 3px; color: var(--ink-mid); }
   .chip.on { border-color: var(--accent); color: #9fdcef; }
   .chip.mirror { border-style: dashed; }
-  .flag.pin { color: var(--accent); font-size: 11px; }
 
   .bar { width: 46px; height: 5px; border-radius: 3px; background: var(--chrome-0); overflow: hidden; }
   .bar > i { display: block; height: 100%; background: var(--accent); }
-  .bar.indet > i { width: 38%; background: repeating-linear-gradient(115deg, var(--line-strong) 0 5px, var(--chrome-2) 5px 10px); }
+  .bar.indet > i {
+    width: 38%;
+    background: repeating-linear-gradient(115deg, var(--line-strong) 0 5px, var(--chrome-2) 5px 10px);
+    animation: pole 1.15s linear infinite;
+  }
+  @keyframes pole {
+    from { transform: translateX(-30%); }
+    to { transform: translateX(160%); }
+  }
+  /* Motion was never load-bearing: the elapsed counter says "working" on its own. With the flag
+     set the hatch fills the whole track, which reads as unknown extent rather than 38% done. */
+  .bar.indet.still > i,
+  .rm .bar.indet > i {
+    width: 100%;
+    animation: none;
+    background: repeating-linear-gradient(115deg, var(--line-strong) 0 5px, var(--chrome-0) 5px 10px);
+  }
+  .rm .elapsed, .row .elapsed.up { color: var(--ink-mid); }
+  @media (prefers-reduced-motion: reduce) {
+    .bar.indet > i {
+      width: 100%;
+      animation: none;
+      background: repeating-linear-gradient(115deg, var(--line-strong) 0 5px, var(--chrome-0) 5px 10px);
+    }
+    .elapsed { color: var(--ink-mid); }
+  }
 
-  /* compact density: one line, type_id dropped to a tooltip */
-  .compact .row { padding: 3px 10px 3px 0; grid-template-columns: 3px 15px minmax(0, 1fr) auto; }
+  .compact .row { padding: 3px 10px 3px 0; }
   .compact .kind { display: none; }
   .compact .name { font-size: 12px; }
-  .compact .group { padding-top: 3px; padding-bottom: 3px; }
+  .compact .label { flex-direction: row; align-items: baseline; gap: 5px; }
 
-  /* ---- canvas vignette: the other rendering of the same model ---- */
+  /* ---- canvas + rail vignettes ---- */
   .canvas-demo {
     display: flex;
     gap: 14px;
@@ -343,6 +382,37 @@
   }
   .cnode .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
   .cnode .body { padding: 6px 7px; font-family: "Plex Mono", ui-monospace, monospace; font-size: 10px; color: var(--node-ink-mid); }
+
+  .rail {
+    display: inline-flex;
+    gap: 6px;
+    padding: 8px;
+    background: var(--chrome-1);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+  }
+  .rail span {
+    width: 26px;
+    height: 24px;
+    display: grid;
+    place-items: center;
+    border-radius: 3px;
+    border: 1px solid transparent;
+    color: var(--ink-lo);
+    font-size: 14px;
+  }
+  .rail span.on { background: #23515f; border-color: var(--accent); color: #bfe8f5; }
+
+  .figure { display: flex; flex-direction: column; gap: 8px; }
+  .figure .cap {
+    font-family: "Plex Mono", ui-monospace, monospace;
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--page-ink-lo);
+  }
+  .pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 18px; align-items: start; }
+  .slab { background: var(--chrome-1); border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
 
   .legend-wrap { overflow-x: auto; }
   table { border-collapse: collapse; width: 100%; font-size: 14.5px; }
@@ -399,7 +469,7 @@
 <div class="wrap">
 
   <header class="masthead">
-    <div class="eyebrow">Ymir · design review · not built</div>
+    <div class="eyebrow">Ymir · design record · not built</div>
     <h1>One node pane, three states</h1>
     <p class="standfirst">
       A single dock pane listing every node in the graph and what each one is doing. It replaces two planned
@@ -446,17 +516,17 @@
             <div class="row s-current">
               <div class="stripe"></div><div class="pip">●</div>
               <div class="label"><span class="name">Base noise</span><span class="kind">generator.fbm</span></div>
-              <div class="tail"><span class="chip on">2D</span><span class="chip on">4K</span></div>
+              <div class="tail"><span class="chip on">4K</span></div>
             </div>
             <div class="row s-current">
               <div class="stripe"></div><div class="pip">●</div>
               <div class="label"><span class="name">Domain warp</span><span class="kind">modifier.warp</span></div>
-              <div class="tail"><span class="chip on">2D</span><span class="chip on">4K</span></div>
+              <div class="tail"><span class="chip on">4K</span></div>
             </div>
             <div class="row s-stale sel">
-              <div class="stripe"></div><div class="pip">◐</div>
+              <div class="stripe"></div><div class="pip pin">⊙</div>
               <div class="label"><span class="name">River carve</span><span class="kind">modifier.stream_erosion</span></div>
-              <div class="tail"><span class="flag pin">⊙</span><span class="word">stale</span></div>
+              <div class="tail"><span class="word">stale</span></div>
             </div>
             <div class="row s-stale">
               <div class="stripe"></div><div class="pip">◐</div>
@@ -473,7 +543,7 @@
               <div class="label"><span class="name">Rock blend</span><span class="kind">modifier.blend</span></div>
               <div class="tail"><span class="word">stale</span></div>
             </div>
-            <div class="group"><span class="caret">▾</span><span class="gname">Coast</span><span class="gcount">2</span></div>
+            <div class="group"><span class="caret">▾</span><span class="gstripe"></span><span class="gpip"></span><span class="gname">Coast</span><span class="gtail"><span>2</span></span></div>
             <div class="row nested s-off">
               <div class="stripe"></div><div class="pip">⏸</div>
               <div class="label"><span class="name">Shoreline</span><span class="kind">modifier.coastal</span></div>
@@ -487,7 +557,7 @@
             <div class="row s-stale">
               <div class="stripe"></div><div class="pip">◐</div>
               <div class="label"><span class="name">Heightmap</span><span class="kind">endpoint.export</span></div>
-              <div class="tail"><span class="chip on mirror">build</span></div>
+              <div class="tail"><span class="word">stale</span><span class="chip on mirror">build</span></div>
             </div>
             <div class="row s-none">
               <div class="stripe"></div><div class="pip">○</div>
@@ -526,14 +596,14 @@
               <div class="tail"><span class="word">0.4s</span></div>
             </div>
             <div class="row s-active sel">
-              <div class="stripe"></div><div class="pip">◗</div>
+              <div class="stripe"></div><div class="pip pin">⊙</div>
               <div class="label"><span class="name">River carve</span><span class="kind">modifier.stream_erosion</span></div>
               <div class="tail"><span class="bar"><i style="width:62%"></i></span><span>62%</span></div>
             </div>
             <div class="row s-active">
               <div class="stripe"></div><div class="pip">◗</div>
               <div class="label"><span class="name">Talus</span><span class="kind">modifier.thermal_erosion</span></div>
-              <div class="tail"><span class="bar indet"><i></i></span><span>00:09</span></div>
+              <div class="tail"><span class="bar indet"><i></i></span><span class="elapsed">00:09</span></div>
             </div>
             <div class="row s-none">
               <div class="stripe"></div><div class="pip">·</div>
@@ -545,7 +615,7 @@
               <div class="label"><span class="name">Rock blend</span><span class="kind">modifier.blend</span></div>
               <div class="tail"><span class="word">queued</span></div>
             </div>
-            <div class="group"><span class="caret">▾</span><span class="gname">Coast</span><span class="gcount">2</span></div>
+            <div class="group"><span class="caret">▾</span><span class="gstripe"></span><span class="gpip"></span><span class="gname">Coast</span><span class="gtail"><span>2</span></span></div>
             <div class="row nested s-off">
               <div class="stripe"></div><div class="pip">⏸</div>
               <div class="label"><span class="name">Shoreline</span><span class="kind">modifier.coastal</span></div>
@@ -574,7 +644,7 @@
       <div class="state">
         <div class="state-head">
           <span class="state-name">After a build</span>
-          <span class="state-note">Which nodes you can inspect at build quality, which is what the viewport's source toggle reads.</span>
+          <span class="state-note">Coast is collapsed here: a closed group answers "is anything wrong in there" without opening.</span>
         </div>
         <div class="pane">
           <div class="pane-title"><strong>Nodes</strong><span class="glyph">▤</span></div>
@@ -588,43 +658,37 @@
             <div class="row s-current">
               <div class="stripe"></div><div class="pip">●</div>
               <div class="label"><span class="name">Base noise</span><span class="kind">generator.fbm</span></div>
-              <div class="tail"><span class="chip on">2D</span><span class="chip on">4K</span></div>
+              <div class="tail"><span class="chip on">4K</span></div>
             </div>
             <div class="row s-current">
               <div class="stripe"></div><div class="pip">●</div>
               <div class="label"><span class="name">Domain warp</span><span class="kind">modifier.warp</span></div>
-              <div class="tail"><span class="chip on">2D</span><span class="chip on">4K</span></div>
+              <div class="tail"><span class="chip on">4K</span></div>
             </div>
             <div class="row s-current sel">
-              <div class="stripe"></div><div class="pip">●</div>
+              <div class="stripe"></div><div class="pip pin">⊙</div>
               <div class="label"><span class="name">River carve</span><span class="kind">modifier.stream_erosion</span></div>
-              <div class="tail"><span class="flag pin">⊙</span><span class="chip on">2D</span><span class="chip on">4K</span></div>
+              <div class="tail"><span class="word">current</span><span class="chip on">4K</span></div>
             </div>
             <div class="row s-current">
               <div class="stripe"></div><div class="pip">●</div>
               <div class="label"><span class="name">Talus</span><span class="kind">modifier.thermal_erosion</span></div>
-              <div class="tail"><span class="chip on">2D</span><span class="chip on">4K</span></div>
+              <div class="tail"><span class="chip on">4K</span></div>
             </div>
             <div class="row s-current">
               <div class="stripe"></div><div class="pip">●</div>
               <div class="label"><span class="name">Steep faces</span><span class="kind">selector.slope</span></div>
-              <div class="tail"><span class="chip on">2D</span><span class="chip on">4K</span></div>
+              <div class="tail"><span class="chip on">4K</span></div>
             </div>
             <div class="row s-current">
               <div class="stripe"></div><div class="pip">●</div>
               <div class="label"><span class="name">Rock blend</span><span class="kind">modifier.blend</span></div>
-              <div class="tail"><span class="chip on">2D</span><span class="chip on">4K</span></div>
+              <div class="tail"><span class="chip on">4K</span></div>
             </div>
-            <div class="group"><span class="caret">▾</span><span class="gname">Coast</span><span class="gcount">2</span></div>
-            <div class="row nested s-off">
-              <div class="stripe"></div><div class="pip">⏸</div>
-              <div class="label"><span class="name">Shoreline</span><span class="kind">modifier.coastal</span></div>
-              <div class="tail"><span class="word">bypassed</span></div>
-            </div>
-            <div class="row nested s-error">
-              <div class="stripe"></div><div class="pip">▲</div>
-              <div class="label"><span class="name">Smooth</span><span class="kind">modifier.blur</span></div>
-              <div class="tail"><span class="word">no input</span></div>
+            <div class="group g-error">
+              <span class="caret">▸</span><span class="gstripe"></span><span class="gpip">▲</span>
+              <span class="gname">Coast</span>
+              <span class="gtail"><span class="gcount">1 failed</span><span>2</span></span>
             </div>
             <div class="row s-current">
               <div class="stripe"></div><div class="pip">✓</div>
@@ -634,7 +698,7 @@
             <div class="row s-off">
               <div class="stripe"></div><div class="pip">—</div>
               <div class="label"><span class="name">Metres EXR</span><span class="kind">endpoint.export_exr</span></div>
-              <div class="tail"><span class="chip mirror">build</span></div>
+              <div class="tail"><span class="word">excluded</span></div>
             </div>
           </div>
         </div>
@@ -644,35 +708,40 @@
       <div class="state">
         <div class="state-head">
           <span class="state-name">Compact, filtered</span>
-          <span class="state-note">One line per node for a large graph, with the stale chip active. Same order, same states.</span>
+          <span class="state-note">One line per node. Names disambiguate only where they collide, so density is not paid for by noise.</span>
         </div>
         <div class="pane compact">
           <div class="pane-title"><strong>Nodes</strong><span class="glyph">▤</span></div>
-          <div class="summary"><span><b>4</b> of 10 shown</span><span>filter: stale</span></div>
+          <div class="summary"><span><b>5</b> of 96 shown</span><span class="spacer"></span><span class="btn">Clear</span></div>
           <div class="tools">
-            <span class="field typed">ero</span>
+            <span class="field typed">smo</span>
             <span class="sel-ctl">Dependency ▾</span>
           </div>
           <div class="quick"><span class="qchip on">stale</span><span class="qchip">failed</span><span class="qchip">endpoints</span></div>
           <div class="rows">
             <div class="row s-stale">
               <div class="stripe"></div><div class="pip">◐</div>
-              <div class="label"><span class="name">River carve</span></div>
+              <div class="label"><span class="name">Smooth</span><span class="suffix">·blur 1</span></div>
               <div class="tail"><span class="word">stale</span></div>
             </div>
             <div class="row s-stale">
               <div class="stripe"></div><div class="pip">◐</div>
-              <div class="label"><span class="name">Talus</span></div>
+              <div class="label"><span class="name">Smooth</span><span class="suffix">·blur 2</span></div>
               <div class="tail"><span class="word">stale</span></div>
             </div>
             <div class="row s-stale">
               <div class="stripe"></div><div class="pip">◐</div>
-              <div class="label"><span class="name">Rock blend</span></div>
+              <div class="label"><span class="name">Smooth</span><span class="suffix">·directional_blur</span></div>
               <div class="tail"><span class="word">stale</span></div>
             </div>
             <div class="row s-stale">
               <div class="stripe"></div><div class="pip">◐</div>
-              <div class="label"><span class="name">Heightmap</span></div>
+              <div class="label"><span class="name">Smoothed ridges</span></div>
+              <div class="tail"><span class="word">stale</span></div>
+            </div>
+            <div class="row s-stale">
+              <div class="stripe"></div><div class="pip">◐</div>
+              <div class="label"><span class="name">Smooth coast</span></div>
               <div class="tail"><span class="word">stale</span></div>
             </div>
           </div>
@@ -711,6 +780,46 @@
         <div class="body">endpoint.export_exr</div>
       </div>
     </div>
+    <div class="figure">
+      <span class="cap">the dock rail · World, Library, Nodes</span>
+      <div class="rail"><span>⚙</span><span>❐</span><span class="on">▤</span></div>
+    </div>
+  </section>
+
+  <hr>
+
+  <section class="section">
+    <div>
+      <h2>Working, with no percentage and no motion</h2>
+      <p class="lede">
+        Motion was never load-bearing here. A node that reports no fraction is described by its elapsed
+        counter, and a number changing every second is data, not decoration, so it survives a reduced-motion
+        setting. The hatch then fills the whole track, which reads as unknown extent rather than 38 per cent
+        done.
+      </p>
+    </div>
+    <div class="pair">
+      <div class="figure">
+        <span class="cap">default</span>
+        <div class="slab">
+          <div class="row s-active">
+            <div class="stripe"></div><div class="pip">◗</div>
+            <div class="label"><span class="name">Talus</span><span class="kind">modifier.thermal_erosion</span></div>
+            <div class="tail"><span class="bar indet"><i></i></span><span class="elapsed">00:09</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="figure rm">
+        <span class="cap">reduced motion</span>
+        <div class="slab">
+          <div class="row s-active">
+            <div class="stripe"></div><div class="pip">◗</div>
+            <div class="label"><span class="name">Talus</span><span class="kind">modifier.thermal_erosion</span></div>
+            <div class="tail"><span class="bar indet still"><i></i></span><span class="elapsed up">00:09</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
   </section>
 
   <hr>
@@ -736,9 +845,9 @@
           <tr><td class="g"><b>·</b> queued</td><td>In this build, not started.</td><td class="src">evaluator progress sink</td></tr>
           <tr><td class="g">cached</td><td>Skipped: the memo cache already held it. Says so rather than flicking past.</td><td class="src">evaluator progress sink</td></tr>
           <tr><td class="g">— excluded</td><td>An endpoint left out of this build, or a branch feeding nothing being built.</td><td class="src">endpoint "build" param</td></tr>
-          <tr><td class="g"><span class="tag">2D</span> <span class="tag">4K</span></td><td>Where this node can be viewed: preview result, build result, or both.</td><td class="src">FieldStore + output_key</td></tr>
-          <tr><td class="g"><span class="tag">build</span></td><td>Included in the next build. A dashed chip: a mirror of the World panel's Outputs list, which owns it.</td><td class="src">endpoint "build" param</td></tr>
-          <tr><td class="g" style="color:#1fa0c4">⊙ pinned</td><td>The display flag: the viewport stays on this node while you work elsewhere.</td><td class="src">preview_pin</td></tr>
+          <tr><td class="g"><span class="tag">4K</span></td><td>The highest fidelity held. A build result implies the preview, so only one chip ever shows.</td><td class="src">FieldStore + output_key</td></tr>
+          <tr><td class="g"><span class="tag">build</span></td><td>Included in the next build. Dashed: a mirror of the World panel's Outputs list, which owns it.</td><td class="src">endpoint "build" param</td></tr>
+          <tr><td class="g" style="color:#1fa0c4">⊙ pinned</td><td>The display flag. It takes the glyph cell, so a pinned row always spells its state out in the trailing slot.</td><td class="src">preview_pin</td></tr>
         </tbody>
       </table>
     </div>
@@ -749,15 +858,21 @@
   <section class="section">
     <div>
       <h2>Settled</h2>
-      <p class="lede">Decided in review, and drawn above rather than described.</p>
+      <p class="lede">Six structural decisions, then a visual pass over the detail. All of it is drawn above.</p>
     </div>
     <ol class="q">
       <li><b>One pane, not two.</b> Rows never reorder, and a row's left half is identical in every state. Only the trailing slot changes, so nothing moves under you when a build starts.</li>
       <li><b>Canvas and pane both, at different fidelity.</b> Node headers keep the dot alone; the pane carries glyph, word and detail.</li>
       <li><b>Outputs stays the source of truth</b> for build inclusion. The pane's build chip mirrors it, on the same two-controls-one-value pattern as the viewport's output picker.</li>
-      <li><b>Dependency order always</b>, in every state, with an explicit user sort for canvas order, alphabetical, or stale first. Sorting is a choice you make, never one the state makes for you.</li>
-      <li><b>Large graphs</b> get collapsible subgraph groups, a filter field with stale, failed and endpoint quick chips, and a compact one-line density.</li>
+      <li><b>Dependency order always</b>, with an explicit user sort for canvas order, alphabetical, or stale first. Sorting is a choice you make, never one the state makes for you.</li>
+      <li><b>Large graphs</b> get collapsible subgraph groups, a filter field with quick chips, and a compact one-line density.</li>
       <li><b>Elapsed time only</b>, plus a percentage for the nodes that report one. No build-level estimate, because it would be extrapolation and wrong exactly when it matters.</li>
+      <li><b>Names disambiguate on collision only.</b> A dimmed type suffix appears on the colliding rows alone, computed over the rows currently visible. Two nodes of the same type and name take a trailing ordinal in canvas order, since a type suffix cannot separate them.</li>
+      <li><b>A collapsed group reports its worst state</b>, as pip and stripe, with the count in that state and then the total. Precedence is failed, stale, active, not evaluated, current. An all-current group shows the total alone, so a phrase appearing is itself the signal.</li>
+      <li><b>The pin leaves the trailing slot</b> for the glyph cell, since it is an identity flag rather than a status, and the slot caps at two marks: a status word first, then the single highest-fidelity view chip, with the dashed build mirror suppressed when the word already speaks to the build. Because the pin displaces the glyph, <b>a pinned row always spells its state out in the trailing slot</b>, as a word, or as the progress bar and its number when it is building. No row is ever left resting on stripe colour alone.</li>
+      <li><b>Sort persists with the project; the filter does not.</b> A filter is a momentary question, and restoring one means opening to a list that hides most of the graph with no memory of why. While a filter is active the summary states the hidden count and offers a way out.</li>
+      <li><b>Reduced motion keeps the meaning.</b> The indeterminate hatch fills the whole track and stops moving, and the elapsed time brightens to carry more of the signal. Determinate bars are untouched, because they move only when the value moves.</li>
+      <li><b>The pane gets the third rail icon</b>, after World and the Subgraph Library, using the same list mark as its title.</li>
     </ol>
   </section>
 
@@ -782,25 +897,13 @@
       </div>
       <div class="card">
         <h3>Percentage within a node <span class="tag">operators opt in</span></h3>
-        <p>A bar inside a node means the operator reports fractional progress, such as erosion's iteration <code>i / N</code>. Nodes that do not report show elapsed time and a barber pole, never an invented percentage.</p>
+        <p>A bar inside a node means the operator reports fractional progress, such as erosion's iteration <code>i / N</code>. Nodes that do not report show elapsed time, never an invented percentage.</p>
+      </div>
+      <div class="card">
+        <h3>Where the small pieces live <span class="tag">plumbing</span></h3>
+        <p>The rail icon is one <code>DockPane</code> registration at order 20. The saved sort is a <code>ViewState</code> field with a serde default, the additive pattern frames and camera used. Reduced motion has no query through egui, so it reads an application preference.</p>
       </div>
     </div>
-  </section>
-
-  <hr>
-
-  <section class="section">
-    <div>
-      <h2>Left for the design pass</h2>
-      <p class="lede">Smaller than it was, and all of it visual rather than structural.</p>
-    </div>
-    <ul class="q">
-      <li><b>What the compact row drops.</b> It hides the type id here, which makes two nodes of the same name harder to tell apart. Hover, a suffix, or something else.</li>
-      <li><b>What a collapsed group summarises.</b> A count is the minimum; the worst state inside it may matter more than the number.</li>
-      <li><b>How the trailing slot handles crowding.</b> A pinned, built, stale endpoint wants four marks in a slot about ninety pixels wide.</li>
-      <li><b>Whether the filter and sort persist</b> across sessions, or reset with each project open.</li>
-      <li><b>How the active row reads without motion.</b> The barber pole is the only animated thing here, and it should still work for a viewer with reduced motion set.</li>
-    </ul>
   </section>
 
   <hr>
