@@ -54,11 +54,24 @@ jobs:
           (cd dist && sha256sum ymir-* > SHA256SUMS)
 
       # Create the Release via the preinstalled gh CLI (no third-party action), attaching the
-      # binaries and checksums and auto-generating notes from the commits since the last tag.
+      # binaries and checksums.
+      #
+      # Written notes when `release-notes/<tag>.md` exists, generated ones otherwise. Generated
+      # notes list the pull requests since the previous tag, which is serviceable for a routine
+      # release and useless for one with no predecessor: the first release would have published a
+      # wall of every PR ever merged. Prose that says what the thing is beats a commit dump
+      # whenever someone has taken the trouble to write it.
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --title "$GITHUB_REF_NAME" \
-            --generate-notes
+          notes="release-notes/${GITHUB_REF_NAME}.md"
+          if [ -f "$notes" ]; then
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --title "$GITHUB_REF_NAME" \
+              --notes-file "$notes"
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes
+          fi
