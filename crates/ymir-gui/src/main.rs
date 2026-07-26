@@ -66,6 +66,8 @@ mod history;
 mod wgsl;
 // The one per-node status model the canvas and the node pane both read (#279).
 mod status;
+// What each node is doing during a build: the overlay over that model (#285).
+mod build_progress;
 use build::BuildRunner;
 use history::EditHistory;
 
@@ -409,6 +411,10 @@ struct AppState {
     /// report or the pin actually change: deriving it per frame would walk and hash the whole
     /// graph every frame, which is what the canvas used to do and what #254 was about.
     node_status: Vec<status::NodeStatus>,
+    /// What the running build is doing with each node (#285). Deliberately separate from the
+    /// status model: this changes many times a second and must never trigger the graph walk that
+    /// derives the model.
+    build_progress: build_progress::BuildProgress,
     node_status_key: Option<(u64, usize, Option<Handle>)>,
     /// The node pane's filter text and quick chips (#281). Deliberately not persisted: a filter
     /// is a momentary question, and restoring one means opening a project to a list that hides
@@ -840,6 +846,7 @@ impl AppState {
             search: String::new(),
             node_menu: None,
             node_status: Vec::new(),
+            build_progress: build_progress::BuildProgress::default(),
             node_status_key: None,
             node_filter: String::new(),
             node_chips: status::Chips::default(),
@@ -966,6 +973,8 @@ impl AppState {
         self.graph = restored.graph;
         self.snarl = restored.snarl;
         self.frames = restored.frames;
+        // The previous project's build states describe nodes that are no longer here.
+        self.build_progress.clear();
         self.node_sort = restored.node_sort;
         self.node_density = restored.node_density;
         // The filter is not restored on purpose: see `node_filter`.
@@ -3026,7 +3035,18 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // Build the selected outputs at the world-tab resolution, off-thread.
                     state.build.poll(ui.ctx());
+                    // Drain the evaluator's progress into the overlay: cost proportional to the
+                    // events, never to the graph (#285). Applied here, beside the poll, so it
+                    // happens once a frame however many panes are showing.
+                    for event in state.build.drain_progress() {
+                        state.build_progress.apply(event);
+                    }
                     let building = state.build.is_building();
+                    // A finished build leaves its states on screen until the next one starts, so
+                    // the last thing you saw is what happened rather than an empty list.
+                    if !building && state.build_progress.is_active() {
+                        state.build_progress.finish();
+                    }
                     // The one prominent element: an accent-filled button with dark text (per the
                     // Frost spec), so Build reads as the primary action against the dark chrome.
                     let build_btn = egui::Button::new(
@@ -3067,6 +3087,9 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
                             if let Some(gpu) = &state.gpu {
                                 request = request.with_compute(gpu.clone());
                             }
+                            // Every node the build will touch, walked once so they read as
+                            // queued from the first frame (#285).
+                            state.build_progress.begin(&status::cone(&top, &targets));
                             state
                                 .build
                                 .start(top, targets, request, kind, ui.ctx().clone());
@@ -3589,6 +3612,12 @@ fn node_row(
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // While a build touches this node, the trailing slot is about the build: that is
+                // the whole point of the slot being the only part of the row that changes (#285).
+                if let Some(build) = state.build_progress.get(node.handle) {
+                    build_slot(ui, build);
+                    return;
+                }
                 // Trailing slot, capped at two marks. A pinned row always spells its state out
                 // here, because the pin took the glyph that would otherwise carry it.
                 let word = node.state.word().or_else(|| {
@@ -3655,6 +3684,57 @@ fn node_row(
         // not drag the selection along with it.
         select: response.clicked() && !toggle_build,
         toggle_build,
+    }
+}
+
+/// A row's trailing slot while a build touches its node (#285).
+///
+/// A percentage appears only for a node that reported one. Everything else shows how long it has
+/// been running, which is data rather than decoration: a number changing every second says
+/// "working" without anything animating, so nothing here needs a reduced-motion variant.
+fn build_slot(ui: &mut egui::Ui, build: build_progress::NodeBuild) {
+    let mono = |text: String, size: f32, color: egui::Color32| {
+        egui::RichText::new(text)
+            .size(size)
+            .monospace()
+            .color(color)
+    };
+    match build {
+        build_progress::NodeBuild::Queued => {
+            ui.label(mono("queued".to_string(), 10.5, theme::TEXT_TERTIARY));
+        }
+        build_progress::NodeBuild::Cached => {
+            // Named rather than animated: memoization means most of a rebuild is skipped, and
+            // nodes flicking past would read as broken instead of fast.
+            ui.label(mono("cached".to_string(), 10.5, theme::TEXT_TERTIARY));
+        }
+        build_progress::NodeBuild::Done { took } => {
+            ui.label(mono(
+                build_progress::format_duration(took),
+                10.5,
+                theme::TEXT_SECONDARY,
+            ));
+        }
+        build_progress::NodeBuild::Active { percent, started } => match percent {
+            Some(percent) => {
+                ui.label(mono(format!("{percent}%"), 10.5, theme::ACCENT_PRIMARY));
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(34.0, 4.0), egui::Sense::hover());
+                let painter = ui.painter();
+                painter.rect_filled(rect, 2.0, theme::BG_ABYSS);
+                let filled = egui::Rect::from_min_size(
+                    rect.min,
+                    egui::vec2(rect.width() * f32::from(percent) / 100.0, rect.height()),
+                );
+                painter.rect_filled(filled, 2.0, theme::ACCENT_PRIMARY);
+            }
+            None => {
+                ui.label(mono(
+                    build_progress::format_duration(started.elapsed()),
+                    10.5,
+                    theme::ACCENT_PRIMARY,
+                ));
+            }
+        },
     }
 }
 
@@ -3740,6 +3820,40 @@ fn nodes_summary(
     total: usize,
     filtering: bool,
 ) {
+    // A build owns the summary while it runs: how far along, and how long. No estimate of what
+    // is left, which would be extrapolation over nodes whose costs differ by orders of magnitude
+    // and would be most wrong exactly when it mattered.
+    if state.build_progress.is_shown() {
+        let (settled, expected) = state.build_progress.counts();
+        let (label, colour) = match state.build_progress.elapsed() {
+            Some(elapsed) => (
+                format!(
+                    "building {settled}/{expected} \u{b7} {}",
+                    build_progress::format_duration(elapsed)
+                ),
+                theme::ACCENT_PRIMARY,
+            ),
+            None => (
+                match state.build_progress.total() {
+                    Some(total) => format!(
+                        "built {expected} \u{b7} {}",
+                        build_progress::format_duration(total)
+                    ),
+                    None => format!("built {expected}"),
+                },
+                theme::TEXT_SECONDARY,
+            ),
+        };
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(label)
+                    .size(11.5)
+                    .monospace()
+                    .color(colour),
+            );
+        });
+        return;
+    }
     ui.horizontal(|ui| {
         if filtering {
             ui.label(

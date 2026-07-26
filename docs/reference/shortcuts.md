@@ -52,6 +52,8 @@ Each row states what its node is doing as a stripe, a glyph and a word, so no st
 
 The list is in dependency order unless you change the sort, and the sort you choose is saved with the project. A filter is not: opening a project always shows the whole graph.
 
+While a build runs, each row it touches reports what the build is doing with that node: queued, how far along it is, how long it took, or that a cached result was reused. Nodes report a percentage only where they can measure one; the rest show how long they have been running.
+
 ## 3D viewport
 
 The viewport has two navigation modes.
