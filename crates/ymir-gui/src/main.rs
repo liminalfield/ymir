@@ -512,9 +512,12 @@ struct AppState {
     water_wave: f32,
     water_reflectivity: f32,
     water_specular: f32,
-    /// Gerstner wave shaping (#155): crest steepness and wavelength scale.
+    /// Gerstner wave shaping (#155): crest steepness and wavelength scale, plus the prevailing
+    /// wave bearing in degrees and the fan's spread around it (#251).
     water_steepness: f32,
     water_wavelength: f32,
+    water_direction: f32,
+    water_spread: f32,
     /// Shoreline foam controls (ephemeral): amount and band width (#156).
     water_foam: f32,
     water_foam_width: f32,
@@ -857,6 +860,8 @@ impl AppState {
             water_specular: water_defaults.specular,
             water_steepness: water_defaults.steepness,
             water_wavelength: water_defaults.wavelength,
+            water_direction: water_defaults.direction,
+            water_spread: water_defaults.spread,
             water_foam: water_defaults.foam,
             water_foam_width: water_defaults.foam_width,
             water_wet_on: water_defaults.wet_on,
@@ -1070,6 +1075,8 @@ impl AppState {
             specular: self.water_specular,
             steepness: self.water_steepness,
             wavelength: self.water_wavelength,
+            direction: self.water_direction,
+            spread: self.water_spread,
             foam: self.water_foam,
             foam_width: self.water_foam_width,
             wet_on: self.water_wet_on,
@@ -1093,6 +1100,8 @@ impl AppState {
         self.water_specular = w.specular;
         self.water_steepness = w.steepness;
         self.water_wavelength = w.wavelength;
+        self.water_direction = w.direction;
+        self.water_spread = w.spread;
         self.water_foam = w.foam;
         self.water_foam_width = w.foam_width;
         self.water_wet_on = w.wet_on;
@@ -4870,22 +4879,7 @@ fn slider_row<Num: egui::emath::Numeric>(
     let h = ui.spacing().interact_size.y;
     let span = range.end().to_f64() - range.start().to_f64();
     ui.horizontal(|ui| {
-        // Left-aligned label in a column reserved at an exact width (drawn via the painter, so the
-        // column never grows or shrinks with the label's length). This keeps every slider starting
-        // at the same x and coming out the same width. Dimmed when the group is disabled.
-        let (label_rect, _) = ui.allocate_exact_size(egui::vec2(76.0, h), egui::Sense::hover());
-        let label_colour = if ui.is_enabled() {
-            theme::TEXT_SECONDARY
-        } else {
-            theme::TEXT_SECONDARY.gamma_multiply(0.5)
-        };
-        ui.painter().text(
-            egui::pos2(label_rect.left(), label_rect.center().y),
-            egui::Align2::LEFT_CENTER,
-            label,
-            egui::FontId::proportional(11.5),
-            label_colour,
-        );
+        row_label(ui, label);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_sized(
                 [44.0, h],
@@ -4904,6 +4898,72 @@ fn slider_row<Num: egui::emath::Numeric>(
         });
     });
     *value = x;
+}
+
+/// The label column shared by every water settings row: left-aligned in a column reserved at an
+/// exact width (drawn via the painter, so the column never grows or shrinks with the label's
+/// length). This keeps every control starting at the same x and coming out the same width. Dimmed
+/// when the group is disabled.
+fn row_label(ui: &mut egui::Ui, label: &str) {
+    let h = ui.spacing().interact_size.y;
+    let (label_rect, _) = ui.allocate_exact_size(egui::vec2(76.0, h), egui::Sense::hover());
+    let colour = if ui.is_enabled() {
+        theme::TEXT_SECONDARY
+    } else {
+        theme::TEXT_SECONDARY.gamma_multiply(0.5)
+    };
+    ui.painter().text(
+        egui::pos2(label_rect.left(), label_rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::proportional(11.5),
+        colour,
+    );
+}
+
+/// One labelled row for a compass bearing in degrees: the same grammar as [`slider_row`], but the
+/// value box scrubs *infinitely* and wraps at the full turn (#251). A bearing is cyclic, so a box
+/// that clamps at either end strands you at 360 needing to travel all the way back for a heading a
+/// few degrees the other side of it. The scrub is the inspector's own wrapping one
+/// ([`param_ui::scrub_drag`]), so the pointer is locked and the screen edge never ends a drag. The
+/// slider below it still spans one turn, and its knob jumps across when the value rolls.
+fn angle_row(ui: &mut egui::Ui, label: &str, value: &mut f32) {
+    /// Degrees per pixel of scrub, matching the inspector's feel for a direction.
+    const SCRUB_SPEED: f64 = 0.5;
+    let mut x = f64::from(*value);
+    let h = ui.spacing().interact_size.y;
+    ui.horizontal(|ui| {
+        row_label(ui, label);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // DragValue supplies display, click-to-type, and formatting; its own edge-limited drag
+            // is made inert (speed 0) so the wrapping scrub is the only thing that moves the value.
+            // It carries no range: a bearing rolls, so there is no bound to type against.
+            let resp = ui
+                .add_sized(
+                    [52.0, h],
+                    egui::DragValue::new(&mut x)
+                        .speed(0.0)
+                        .fixed_decimals(0)
+                        .suffix("\u{b0}"),
+                )
+                .on_hover_text(
+                    "Drag to scrub \u{b7} click to type\n\
+                     The bearing the swell travels: 0\u{b0} toward the right of the map, \
+                     90\u{b0} toward the bottom",
+                );
+            let scrubbed = param_ui::scrub_drag(ui, &resp, &mut x, SCRUB_SPEED, |v| {
+                param_ui::finalize_value(v, Some(360.0), None)
+            });
+            if resp.changed() || scrubbed {
+                x = param_ui::finalize_value(x, Some(360.0), None);
+            }
+            let mut v = x;
+            if param_ui::slider(ui, &mut v, 0.0, 360.0, false).changed() {
+                x = v;
+            }
+        });
+    });
+    *value = x as f32;
 }
 
 /// A subtle full-width divider between water setting groups, so the groups read as distinct bands.
@@ -5090,6 +5150,8 @@ fn world_settings(ui: &mut egui::Ui, state: &mut AppState) {
             slider_row(ui, "Amplitude", &mut state.water_wave, 0.0..=1.0, 2);
             slider_row(ui, "Steepness", &mut state.water_steepness, 0.0..=1.0, 2);
             slider_row(ui, "Wavelength", &mut state.water_wavelength, 0.3..=3.0, 2);
+            angle_row(ui, "Direction", &mut state.water_direction);
+            slider_row(ui, "Spread", &mut state.water_spread, 0.0..=1.0, 2);
         });
         water_group(ui, "Reflection", &mut state.water_reflection, |ui| {
             slider_row(
@@ -7720,6 +7782,8 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 water_specular: state.water_specular,
                 water_steepness: state.water_steepness,
                 water_wavelength: state.water_wavelength,
+                water_direction: state.water_direction,
+                water_spread: state.water_spread,
                 water_foam: state.water_foam,
                 water_foam_width: state.water_foam_width,
                 // The wet-shore toggle gates the effect by passing zero strength when off.
@@ -10177,6 +10241,18 @@ mod tests {
     }
 
     #[test]
+    fn drawing_the_angle_row_leaves_the_value_alone() {
+        // #251: the wrapping row must not rewrite its value just by being drawn. Normalizing on
+        // entry would look harmless, but it would rewrite the session's water settings on the
+        // first frame after opening a project, which the dirty check reads as an unsaved edit.
+        let mut bearing = 200.0_f32;
+        egui::__run_test_ui(|ui| {
+            angle_row(ui, "Direction", &mut bearing);
+        });
+        assert!((bearing - 200.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
     fn dismissing_the_preview_blanks_it_instead_of_the_sink_fallback() {
         let mut state = AppState::new();
         state.graph = Graph::new();
@@ -10538,6 +10614,8 @@ mod tests {
                     specular: 0.1,
                     steepness: 0.4,
                     wavelength: 1.5,
+                    direction: 120.0,
+                    spread: 0.25,
                     foam: 0.8,
                     foam_width: 0.02,
                     wet_on: false,

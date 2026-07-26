@@ -131,7 +131,7 @@ fn reset_icon(ui: &mut egui::Ui) -> egui::Response {
 
 /// Clamps or wraps a scrubbed value to its bounds: `wrap` (e.g. 360 for degrees) rolls the value
 /// around that period; otherwise `clamp` bounds it to `[lo, hi]`; with neither it passes through.
-fn finalize_value(v: f64, wrap: Option<f64>, clamp: Option<(f64, f64)>) -> f64 {
+pub(crate) fn finalize_value(v: f64, wrap: Option<f64>, clamp: Option<(f64, f64)>) -> f64 {
     if let Some(period) = wrap {
         v.rem_euclid(period)
     } else if let Some((lo, hi)) = clamp {
@@ -174,7 +174,7 @@ fn metric_decimals(max: f64) -> usize {
 /// Wayland — "cursor position can be set only for locked cursor"). On X11 Locked is unsupported and
 /// winit logs it once per drag; the scrub still runs from raw XInput2 motion, only the pointer is
 /// not pinned.
-fn scrub_drag(
+pub(crate) fn scrub_drag(
     ui: &egui::Ui,
     resp: &egui::Response,
     value: &mut f64,
