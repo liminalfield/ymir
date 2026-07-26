@@ -320,6 +320,13 @@ pub(crate) struct ViewState {
     /// snapshot (panning is not an edit); set only when the project is written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera: Option<Camera>,
+    /// The node pane's ordering and row density (#281): how the user likes to read this graph,
+    /// so it travels with the project. The pane's *filter* deliberately does not, since restoring
+    /// one means opening a project to a list that hides most of its nodes with no memory of why.
+    #[serde(default)]
+    pub node_sort: crate::status::NodeSort,
+    #[serde(default)]
+    pub node_density: crate::status::Density,
     /// Canvas frames (#94), in creation order. Optional and defaulted, so a project saved
     /// before frames existed opens with none (no format bump, like `world_height`). Kept
     /// last so adding or moving a frame localizes its diff.
@@ -361,6 +368,9 @@ pub(crate) struct RestoredProject {
     pub camera: Option<TSTransform>,
     /// The restored canvas frames (#94).
     pub frames: Vec<Frame>,
+    /// The restored node-pane ordering and density (#281).
+    pub node_sort: crate::status::NodeSort,
+    pub node_density: crate::status::Density,
     /// The restored interior layouts of subgraph containers, flattened to a path-keyed map
     /// (the container `stable_id`s from the top) for the editor's in-session layout cache.
     pub subgraph_layouts: HashMap<Vec<u64>, BTreeMap<u64, [f32; 2]>>,
@@ -411,6 +421,10 @@ impl ProjectFile {
                 // it is injected only when the project is written to disk.
                 camera: None,
                 frames: frames.to_vec(),
+                // Pane preferences are set by the caller that has them (`AppState::snapshot`);
+                // a capture from a test or the headless path takes the defaults.
+                node_sort: crate::status::NodeSort::default(),
+                node_density: crate::status::Density::default(),
                 subgraphs: subgraph_view(graph, &[], layouts),
             },
         }
@@ -488,6 +502,8 @@ impl ProjectFile {
             water: self.world.water,
             camera: self.view.camera.map(Camera::to_transform),
             frames: self.view.frames.clone(),
+            node_sort: self.view.node_sort,
+            node_density: self.view.node_density,
             subgraph_layouts,
             warnings,
         })
@@ -572,6 +588,9 @@ fn subgraph_view(
                     // Subgraph interior cameras are not persisted yet; they fit on first dive.
                     camera: None,
                     frames: Vec::new(),
+                    // The pane's ordering is a property of the project, not of each interior.
+                    node_sort: crate::status::NodeSort::default(),
+                    node_density: crate::status::Density::default(),
                     subgraphs: nested,
                 },
             );
@@ -897,6 +916,52 @@ mod tests {
             WaterSettings::default().spread,
             crate::viewport::WAVE_SPREAD_DEFAULT
         );
+    }
+
+    #[test]
+    fn the_node_pane_sort_persists_but_a_project_without_it_takes_the_default() {
+        // #281: how you like to read a graph travels with it. A filter deliberately does not, so
+        // there is nothing here to restore for one; opening a project must never present a list
+        // that hides most of its nodes.
+        let mut graph = Graph::new();
+        let mut snarl = Snarl::<Handle>::new();
+        add_node(&mut graph, &mut snarl, "generator.fbm", Pos2::ZERO).expect("fbm");
+
+        let mut file = ProjectFile::capture(
+            &graph,
+            &snarl,
+            WorldSettings {
+                seed: 1,
+                world_extent: 2048.0,
+                world_height: 256.0,
+                build_res: 1024,
+                preview_res: 384,
+                sea_level: 0.3,
+                show_water: false,
+                water: WaterSettings::default(),
+            },
+            &[],
+        );
+        file.view.node_sort = crate::status::NodeSort::StaleFirst;
+        file.view.node_density = crate::status::Density::Compact;
+        let json = serde_json::to_string(&file).expect("serialize");
+        let back: ProjectFile = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.view.node_sort, crate::status::NodeSort::StaleFirst);
+        assert_eq!(back.view.node_density, crate::status::Density::Compact);
+        let restored = back.restore().expect("restore");
+        assert_eq!(restored.node_sort, crate::status::NodeSort::StaleFirst);
+        assert_eq!(restored.node_density, crate::status::Density::Compact);
+
+        // A project saved before the pane existed opens in dependency order at full density.
+        let older = r#"{
+            "format_version": 1,
+            "world": { "seed": 0, "world_extent": 2048.0 },
+            "graph": { "format_version": 1, "next_stable_id": 0, "nodes": [] },
+            "view": { "nodes": {} }
+        }"#;
+        let older: ProjectFile = serde_json::from_str(older).expect("deserialize older");
+        assert_eq!(older.view.node_sort, crate::status::NodeSort::Dependency);
+        assert_eq!(older.view.node_density, crate::status::Density::Comfortable);
     }
 
     #[test]

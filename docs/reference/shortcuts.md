@@ -44,8 +44,13 @@ The left dock's list of every node in the graph, in dependency order.
 | Action | Input |
 |---|---|
 | Select a node | Click its row |
+| Include or exclude an output from the next build | Click its `build` chip |
+| Narrow the list | Type in the filter, or click a `stale`, `failed` or `endpoints` chip |
+| Clear the filter | Clear, beside the count |
 
 Each row states what its node is doing as a stripe, a glyph and a word, so no state is told apart by colour alone.
+
+The list is in dependency order unless you change the sort, and the sort you choose is saved with the project. A filter is not: opening a project always shows the whole graph.
 
 ## 3D viewport
 
