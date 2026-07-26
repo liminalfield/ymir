@@ -3743,65 +3743,73 @@ fn nodes_summary(
 
 /// The filter field, the sort control, the density toggle, and the quick chips.
 fn nodes_toolbar(ui: &mut egui::Ui, state: &mut AppState) {
-    // Laid out right to left: the fixed controls claim their space first and the filter field
-    // takes whatever is left. Sizing the field by arithmetic on `available_width` instead makes
-    // the row jump the moment a scrollbar appears or disappears, which happens every time the
-    // filter changes how many rows there are.
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        let compact = state.node_density == status::Density::Compact;
-        if ui
-            .selectable_label(compact, egui::RichText::new("\u{2261}").size(12.0))
-            .on_hover_text("Compact rows")
-            .clicked()
-        {
-            state.node_density = if compact {
-                status::Density::Comfortable
-            } else {
-                status::Density::Compact
-            };
-        }
-        const SORTS: [(status::NodeSort, &str); 4] = [
-            (status::NodeSort::Dependency, "Dependency"),
-            (status::NodeSort::Canvas, "Canvas"),
-            (status::NodeSort::Alphabetical, "A-Z"),
-            (status::NodeSort::StaleFirst, "Stale first"),
-        ];
-        let sort_label = SORTS
-            .iter()
-            .find(|(order, _)| *order == state.node_sort)
-            .map_or("Dependency", |(_, label)| *label);
-        // A plain menu popup, not an egui ComboBox, for the reason the output picker above
-        // documents: the ComboBox wraps its items in a scroll area whose auto-shrink makes the
-        // viewport equal the content height, so rounding flickers a scrollbar in and out and the
-        // box twitches as the pointer moves down the list. Four sorts need no scrolling.
-        let button = ui.button(
-            egui::RichText::new(format!(
-                "{sort_label}   {}",
-                egui_phosphor::regular::CARET_DOWN
-            ))
-            .size(11.0),
-        );
-        button
-            .clone()
-            .on_hover_text("How the list is ordered. Your choice, never the build's.");
-        egui::Popup::menu(&button).show(|ui| {
-            ui.set_min_width(button.rect.width());
-            for (order, label) in SORTS {
-                if ui
-                    .selectable_label(state.node_sort == order, label)
-                    .clicked()
-                {
-                    state.node_sort = order;
-                    ui.close();
-                }
+    // Laid out right to left in a row of its own height: the fixed controls claim their space
+    // first and the filter field takes whatever is left. Sizing the field by arithmetic on
+    // `available_width` instead makes the row jump the moment a scrollbar appears or disappears,
+    // which happens every time the filter changes how many rows there are.
+    //
+    // The row's height is allocated explicitly, as the preview pane's dial row does. A bare
+    // `with_layout` here takes the pane's whole remaining height, which leaves the toolbar sitting
+    // at the bottom of the pane and pushes every node row below the visible area.
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| {
+            let compact = state.node_density == status::Density::Compact;
+            if ui
+                .selectable_label(compact, egui::RichText::new("\u{2261}").size(12.0))
+                .on_hover_text("Compact rows")
+                .clicked()
+            {
+                state.node_density = if compact {
+                    status::Density::Comfortable
+                } else {
+                    status::Density::Compact
+                };
             }
-        });
-        ui.add(
-            egui::TextEdit::singleline(&mut state.node_filter)
-                .hint_text("Filter\u{2026}")
-                .desired_width(f32::INFINITY),
-        );
-    });
+            const SORTS: [(status::NodeSort, &str); 4] = [
+                (status::NodeSort::Dependency, "Dependency"),
+                (status::NodeSort::Canvas, "Canvas"),
+                (status::NodeSort::Alphabetical, "A-Z"),
+                (status::NodeSort::StaleFirst, "Stale first"),
+            ];
+            let sort_label = SORTS
+                .iter()
+                .find(|(order, _)| *order == state.node_sort)
+                .map_or("Dependency", |(_, label)| *label);
+            // A plain menu popup, not an egui ComboBox, for the reason the output picker above
+            // documents: the ComboBox wraps its items in a scroll area whose auto-shrink makes the
+            // viewport equal the content height, so rounding flickers a scrollbar in and out and the
+            // box twitches as the pointer moves down the list. Four sorts need no scrolling.
+            let button = ui.button(
+                egui::RichText::new(format!(
+                    "{sort_label}   {}",
+                    egui_phosphor::regular::CARET_DOWN
+                ))
+                .size(11.0),
+            );
+            button
+                .clone()
+                .on_hover_text("How the list is ordered. Your choice, never the build's.");
+            egui::Popup::menu(&button).show(|ui| {
+                ui.set_min_width(button.rect.width());
+                for (order, label) in SORTS {
+                    if ui
+                        .selectable_label(state.node_sort == order, label)
+                        .clicked()
+                    {
+                        state.node_sort = order;
+                        ui.close();
+                    }
+                }
+            });
+            ui.add(
+                egui::TextEdit::singleline(&mut state.node_filter)
+                    .hint_text("Filter\u{2026}")
+                    .desired_width(f32::INFINITY),
+            );
+        },
+    );
     ui.horizontal(|ui| {
         let chips = &mut state.node_chips;
         for (on, label) in [
