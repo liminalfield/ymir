@@ -27,6 +27,7 @@ use crate::graph::{Graph, NodeId};
 use crate::hash::Fnv1a64;
 use crate::operator::{ContextDeps, Inputs};
 use crate::param::Params;
+use crate::progress::{Progress, ProgressSink};
 use crate::region::Region;
 
 /// The global parameters of one evaluation request: resolution, region, the
@@ -68,6 +69,11 @@ pub struct EvalRequest {
     /// determinism stance treats a GPU result as visually equivalent to the CPU one, so a
     /// result computed on either path is interchangeable in the cache.
     compute: Option<Arc<dyn ComputeContext>>,
+    /// Optional progress sink (#283), told as each node starts, finishes, or is served from the
+    /// cache. Purely observational: an evaluation with a sink attached produces byte-identical
+    /// results to one without, and it is deliberately not part of any cache key, since watching a
+    /// build must not change what the build produces.
+    progress: Option<Arc<dyn ProgressSink>>,
 }
 
 impl EvalRequest {
@@ -85,6 +91,7 @@ impl EvalRequest {
             depth: 0,
             cancel: CancelToken::new(),
             compute: None,
+            progress: None,
         }
     }
 
@@ -96,6 +103,22 @@ impl EvalRequest {
     pub fn with_compute(mut self, compute: Arc<dyn ComputeContext>) -> Self {
         self.compute = Some(compute);
         self
+    }
+
+    /// Attaches a progress sink (#283). The evaluator reports each node starting, finishing, or
+    /// being served from the cache; nothing it does depends on the sink being there.
+    #[must_use]
+    pub fn with_progress(mut self, progress: Arc<dyn ProgressSink>) -> Self {
+        self.progress = Some(progress);
+        self
+    }
+
+    /// Reports `progress` if a sink is attached. Inlined at each call site's cost of one
+    /// `Option` check when none is.
+    fn report(&self, progress: Progress) {
+        if let Some(sink) = &self.progress {
+            sink.report(progress);
+        }
     }
 
     /// Sets the subgraph nesting depth this request evaluates at. The top level is 0; a
@@ -498,6 +521,9 @@ impl Graph {
 
         // Reuse a persistent result if its key still matches.
         if !is_endpoint && let Some(outputs) = cache.get(id, key) {
+            request.report(Progress::Cached {
+                node: node.stable_id,
+            });
             computed.insert(id, (key, Arc::clone(&outputs)));
             in_progress.remove(&id);
             return Ok(outputs);
@@ -543,8 +569,19 @@ impl Graph {
         if let Some(compute) = &request.compute {
             ctx = ctx.with_compute(Arc::clone(compute));
         }
+        // Bind the sink to this node, so an operator reporting its own progress never has to know
+        // its identity (#284).
+        if let Some(sink) = &request.progress {
+            ctx = ctx.with_progress(Arc::clone(sink), node.stable_id);
+        }
         let inputs = Inputs::new(&required, &optional);
+        request.report(Progress::Started {
+            node: node.stable_id,
+        });
         let outputs = Arc::new(node.operator.eval(inputs, &node.params, &ctx)?);
+        request.report(Progress::Finished {
+            node: node.stable_id,
+        });
 
         // Endpoints are neither pinned nor flushed to the persistent cache, so
         // they re-execute on every pull.
@@ -1725,6 +1762,139 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir); // shortcut-ok: best-effort test cleanup
+    }
+
+    /// Records every event, so a test can assert on the sequence the evaluator produced.
+    #[derive(Debug, Default)]
+    struct Recorder(std::sync::Mutex<Vec<Progress>>);
+
+    impl ProgressSink for Recorder {
+        fn report(&self, progress: Progress) {
+            if let Ok(mut events) = self.0.lock() {
+                events.push(progress);
+            }
+        }
+    }
+
+    impl Recorder {
+        fn events(&self) -> Vec<Progress> {
+            self.0.lock().expect("not poisoned").clone()
+        }
+    }
+
+    #[test]
+    fn attaching_a_progress_sink_changes_nothing_about_the_result() {
+        // #283: the sink is observational. If watching a build could change what it produces, the
+        // determinism contract would depend on whether anyone was looking.
+        let mut graph = Graph::new();
+        let head = graph.add_op(
+            Box::new(CountingGen {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new(),
+        );
+        let tail = graph.add_op(
+            Box::new(CountingAdd {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new(),
+        );
+        graph.connect(head, 0, tail, 0).unwrap();
+
+        let mut plain_cache = EvalCache::new(16);
+        let plain = graph.evaluate(tail, &request(), &mut plain_cache).unwrap();
+
+        let recorder = Arc::new(Recorder::default());
+        let watched_request =
+            request().with_progress(Arc::clone(&recorder) as Arc<dyn ProgressSink>);
+        let mut watched_cache = EvalCache::new(16);
+        let watched = graph
+            .evaluate(tail, &watched_request, &mut watched_cache)
+            .unwrap();
+
+        assert_eq!(
+            plain[0].content_hash(),
+            watched[0].content_hash(),
+            "the same evaluation, watched or not"
+        );
+        assert!(!recorder.events().is_empty(), "and it was actually watched");
+    }
+
+    #[test]
+    fn progress_reports_each_node_once_in_dependency_order() {
+        let mut graph = Graph::new();
+        let head = graph.add_op(
+            Box::new(CountingGen {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new(),
+        );
+        let tail = graph.add_op(
+            Box::new(CountingAdd {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new(),
+        );
+        graph.connect(head, 0, tail, 0).unwrap();
+        let (head_id, tail_id) = (
+            graph.stable_id(head).unwrap(),
+            graph.stable_id(tail).unwrap(),
+        );
+
+        let recorder = Arc::new(Recorder::default());
+        let req = request().with_progress(Arc::clone(&recorder) as Arc<dyn ProgressSink>);
+        let mut cache = EvalCache::new(16);
+        graph.evaluate(tail, &req, &mut cache).unwrap();
+
+        // A node is bracketed by its own start and finish, and an upstream node completes before
+        // the node that reads it starts.
+        assert_eq!(
+            recorder.events(),
+            vec![
+                Progress::Started { node: head_id },
+                Progress::Finished { node: head_id },
+                Progress::Started { node: tail_id },
+                Progress::Finished { node: tail_id },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_reused_result_reports_cached_rather_than_running() {
+        // Memoization means most of a rebuild is skipped. A monitor that showed those nodes
+        // flicking past would read as broken, so the evaluator says they were reused.
+        let mut graph = Graph::new();
+        let head = graph.add_op(
+            Box::new(CountingGen {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new(),
+        );
+        let tail = graph.add_op(
+            Box::new(CountingAdd {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new(),
+        );
+        graph.connect(head, 0, tail, 0).unwrap();
+        let head_id = graph.stable_id(head).unwrap();
+        let tail_id = graph.stable_id(tail).unwrap();
+
+        let mut cache = EvalCache::new(16);
+        graph.evaluate(tail, &request(), &mut cache).unwrap();
+
+        let recorder = Arc::new(Recorder::default());
+        let req = request().with_progress(Arc::clone(&recorder) as Arc<dyn ProgressSink>);
+        graph.evaluate(tail, &req, &mut cache).unwrap();
+
+        assert_eq!(
+            recorder.events(),
+            vec![
+                Progress::Cached { node: head_id },
+                Progress::Cached { node: tail_id },
+            ],
+            "nothing ran the second time, and the report says so"
+        );
     }
 
     #[test]
