@@ -58,6 +58,17 @@ pub(crate) const THUMB_MIN_SCALE: f32 = 0.6;
 /// whose top-left is just off-screen but whose body is visible still gets one.
 pub(crate) const THUMB_CULL_MARGIN: f32 = 384.0;
 
+/// Whether dropping a node onto a wire splices it into that connection (#124).
+///
+/// Off (#265). The hit-test in the vendored patch matches the dragged node's *centre*
+/// against every wire it is not already part of, with a tolerance of half the node's
+/// smaller dimension, so repositioning a node during ordinary layout work silently
+/// rewired the graph. Gating the record here keeps the splice path
+/// ([`splice_node_into_wire`] and its caller in `main.rs`) live and tested, so turning
+/// the behaviour back on is this flag alone. It becomes a user preference once the
+/// settings system can carry one.
+const SPLICE_ON_WIRE_DROP: bool = false;
+
 /// Constant width for the right-click context menus, so they do not resize with
 /// their longest item (the wider node menu vs the narrow "Add node" graph menu).
 const CONTEXT_MENU_WIDTH: f32 = 200.0;
@@ -239,6 +250,7 @@ pub(crate) struct GraphViewer<'a> {
     pub(crate) dropped_wire: Option<(egui::Pos2, ArmedWire)>,
     /// A node dropped on a wire this frame (#124, via `on_node_dropped_on_wire`): the node
     /// and the wire's endpoints. The canvas splices the node into that connection. Output.
+    /// Stays `None` while [`SPLICE_ON_WIRE_DROP`] is off (#265).
     pub(crate) node_dropped_on_wire: Option<(SnarlNodeId, OutPinId, InPinId)>,
     /// Set by the canvas to ask snarl to drop the armed wire (after it created a node and
     /// connected the wire to it), so the rubber-band clears. Returned from
@@ -1078,7 +1090,9 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
 
     fn on_node_dropped_on_wire(&mut self, node: SnarlNodeId, out_pin: OutPinId, in_pin: InPinId) {
         // A node dropped on a wire (#124); the canvas splices it into that connection.
-        self.node_dropped_on_wire = Some((node, out_pin, in_pin));
+        if SPLICE_ON_WIRE_DROP {
+            self.node_dropped_on_wire = Some((node, out_pin, in_pin));
+        }
     }
 
     fn connect(&mut self, from: &OutPin, to: &InPin, snarl: &mut Snarl<Handle>) {
@@ -1563,6 +1577,37 @@ mod tests {
         assert!(!viewer.wire_click, "flag starts clear");
         viewer.on_wire_click();
         assert!(viewer.wire_click, "the hook sets the flag");
+    }
+
+    #[test]
+    fn a_node_dropped_on_a_wire_is_ignored_while_splicing_is_off() {
+        // #265: the drop hook records nothing while SPLICE_ON_WIRE_DROP is off, so the
+        // splice in `main.rs` never runs and layout work cannot rewire the graph. Turning
+        // the behaviour back on is expected to flip this assertion with it.
+        let mut graph = Graph::new();
+        let mut snarl = Snarl::<Handle>::new();
+        let a = add_node(&mut graph, &mut snarl, FBM, Pos2::ZERO).expect("fbm");
+        let b = add_node(&mut graph, &mut snarl, THERMAL, Pos2::ZERO).expect("thermal b");
+        let mid = add_node(&mut graph, &mut snarl, THERMAL, Pos2::ZERO).expect("thermal mid");
+        let (sa, sb, smid) = (
+            snarl_id(&snarl, &graph, a),
+            snarl_id(&snarl, &graph, b),
+            snarl_id(&snarl, &graph, mid),
+        );
+
+        let mut viewer = GraphViewer::for_test(&mut graph);
+        viewer.on_node_dropped_on_wire(
+            smid,
+            OutPinId {
+                node: sa,
+                output: 0,
+            },
+            InPinId { node: sb, input: 0 },
+        );
+        assert!(
+            viewer.node_dropped_on_wire.is_none(),
+            "the drop is not recorded while splicing is off"
+        );
     }
 
     #[test]
