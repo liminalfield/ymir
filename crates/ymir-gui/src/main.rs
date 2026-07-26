@@ -6239,7 +6239,8 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     state.pending_wire = pending_wire;
     state.consume_wire = false;
     // Splice a node dropped on a wire into that connection (#124). snarl reports the exact
-    // node and wire on the drop frame, so this is just the splice.
+    // node and wire on the drop frame, so this is just the splice. Unreachable while
+    // `canvas::SPLICE_ON_WIRE_DROP` is off (#265), which never records a drop.
     if let Some((node, out_pin, in_pin)) = node_dropped_on_wire {
         canvas::splice_node_into_wire(&mut state.graph, &mut state.snarl, node, out_pin, in_pin);
     }
