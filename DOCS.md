@@ -51,6 +51,10 @@ status: draft   # draft | stable
 current build and that the page is complete for what it covers. A page becomes `stable`
 only after someone has verified it against a running Ymir.
 
+The site's home page is the one exception to `title`: the theme appends the site name to every
+page title, so a home page titled "Ymir" renders as "Ymir - Ymir" in the browser tab and in link
+previews. It omits `title` and keeps `status`.
+
 ## Voice
 
 Honest and non-performative. Plain language. Treat the reader as capable.

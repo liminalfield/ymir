@@ -1,5 +1,8 @@
 ---
-title: Ymir
+# No `title` here on purpose: Material renders `<title>{page title} - {site_name}</title>`, so a
+# homepage titled "Ymir" on a site named "Ymir" comes out as "Ymir - Ymir" in the browser tab and
+# in every link preview. Omitting it falls through to the site name alone. Every other page keeps
+# its title, per DOCS.md.
 status: draft
 ---
 
