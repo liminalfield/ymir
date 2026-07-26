@@ -125,6 +125,46 @@ preference the hatch fills the whole track and stops moving, which reads as unkn
 rather than 38 per cent done. Determinate bars are untouched, because they move only when the
 value moves.
 
+## Two layers, updated at different rates
+
+The pane shows two kinds of fact, and they must not share a mechanism.
+
+**The model** carries what changes when the *graph* changes: identity, dependency order, wiring,
+bypass, build inclusion, preview freshness. It is derived by walking and keying the graph, which
+is `O(nodes × depth)`, so it is rebuilt only when the graph, the worker's report or the pin
+moves. During a build none of those move, so it rebuilds about twice per build rather than
+continuously.
+
+**The progress overlay** is a separate map from node to `Queued`, `Active { fraction, started }`,
+`Done { duration }`, `Cached` or `Skipped`. The UI drains the evaluator's progress channel each
+frame and updates that map. Its cost is proportional to the number of events, never to the size
+of the graph.
+
+A row draws its left half from the model and its trailing slot from the overlay when the node
+appears there. That is the mechanical reason the left half is fixed and only the trailing slot
+changes: the two halves come from sources that update at completely different rates, and keeping
+them apart is what lets a build tick along without touching the graph walk.
+
+**Elapsed time needs no updates at all.** Store an `Instant` when a node goes active and subtract
+at draw time. It is arithmetic per visible row, and it is why the reduced-motion answer holds:
+the counter is live because time passes, not because anything is being recomputed.
+
+### Three things that would undo this
+
+All three are tempting, and the first has already been made twice during the pane's own
+construction:
+
+1. **Do not put progress into the model's cache key.** That rebuilds the graph walk on every
+   event, which is exactly the per-frame derivation this design exists to avoid.
+2. **Do not recompute `cache_status` during a build.** The worker's report describes the
+   *preview*; the build has its own cache and reports its own events.
+3. **Do not let progress reorder rows.** Order comes from the model and stays put, whatever the
+   overlay says.
+
+Open, for the build-states step: whether progress events drive repaints directly, or the pane
+repaints on a fixed cadence while a build runs. A percentage bar does not need two hundred frames
+a second, and the build already repaints continuously for its own spinner.
+
 ## Where the data comes from
 
 **Available today, no engine change.** `Graph::cache_status` returns current-versus-stale for
