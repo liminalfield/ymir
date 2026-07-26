@@ -20,22 +20,79 @@ fn make_op(type_id: &str) -> Result<Box<dyn ymir_core::Operator>, Box<dyn Error>
     make(type_id).ok_or_else(|| format!("operator {type_id:?} is not registered").into())
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
-    // `--version`/`-V` prints the build-stamped version and exits before any work, so it
-    // stays usable for provenance even if a render would fail.
-    if std::env::args()
-        .skip(1)
-        .any(|a| a == "--version" || a == "-V")
-    {
-        println!("ymir {}", ymir_build_info::version_string());
-        return Ok(());
-    }
+/// What the command line asked for. Parsed apart from `main` so the dispatch is unit-tested
+/// rather than exercised only by running the binary.
+#[derive(Debug, PartialEq, Eq)]
+enum Command {
+    /// No arguments: render the built-in sample graph.
+    Sample,
+    /// `docs …`, with the arguments after it passed through.
+    Docs(Vec<String>),
+    /// `--version` / `-V`.
+    Version,
+    /// `--help` / `-h`.
+    Help,
+    /// Something unrecognised, which is a mistake rather than a request.
+    Unknown(String),
+}
 
-    // `docs [--format json]`: emit the node reference as JSON from the running binary and exit,
-    // before any logging or render work.
+/// Maps the arguments after the binary name onto a [`Command`].
+///
+/// An unrecognised argument is [`Command::Unknown`], never a silent fall-through to the sample
+/// render (#276). Rendering on a typo writes files, prints success and exits zero, so a mistyped
+/// subcommand was indistinguishable from asking for the sample, including to a script checking
+/// the exit status.
+fn parse(args: &[String]) -> Command {
+    // Version and help win wherever they appear: they are questions about the binary, and a user
+    // who types one alongside anything else wants the answer, not the work.
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        return Command::Version;
+    }
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        return Command::Help;
+    }
+    match args.split_first() {
+        None => Command::Sample,
+        Some((first, rest)) if first == "docs" => Command::Docs(rest.to_vec()),
+        Some((first, _)) => Command::Unknown(first.clone()),
+    }
+}
+
+/// What the CLI can do, in the order it is likely to be wanted.
+const USAGE: &str = "\
+ymir-cli, the headless runner for Ymir.
+
+Usage:
+  ymir-cli                     Render the built-in sample graph to out/, exercising the
+                               full save and reload path.
+  ymir-cli docs [--format json]
+                               Print the node reference as JSON, generated from this
+                               binary's own registry.
+  ymir-cli --version, -V       Print the version, with the commit it was built from.
+  ymir-cli --help, -h          Print this.
+
+Rendering a project of your own is not implemented yet; see
+https://github.com/liminalfield/ymir/issues/30.";
+
+fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) == Some("docs") {
-        return docs::run(&args[1..]);
+    match parse(&args) {
+        // Printed before any work, so it stays usable for provenance even if a render would fail.
+        Command::Version => {
+            println!("ymir {}", ymir_build_info::version_string());
+            return Ok(());
+        }
+        Command::Help => {
+            println!("{USAGE}");
+            return Ok(());
+        }
+        // Emitted before any logging or render work.
+        Command::Docs(rest) => return docs::run(&rest),
+        Command::Unknown(arg) => {
+            eprintln!("ymir-cli: unrecognised argument {arg:?}\n\n{USAGE}");
+            std::process::exit(2);
+        }
+        Command::Sample => {}
     }
 
     // Headless diagnostics go to stderr (a toolchain captures it); load degradations are logged
@@ -93,7 +150,59 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 #[cfg(test)]
 mod tests {
+    use super::{Command, parse};
     use ymir_core::registry;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn no_arguments_renders_the_sample() {
+        assert_eq!(parse(&args(&[])), Command::Sample);
+    }
+
+    #[test]
+    fn an_unrecognised_argument_is_not_a_request_to_render() {
+        // #276: falling through to the sample meant a typo wrote files, printed success and
+        // exited zero, so a mistyped subcommand was indistinguishable from asking for a render.
+        assert_eq!(
+            parse(&args(&["dcos"])),
+            Command::Unknown("dcos".to_string())
+        );
+        assert_eq!(
+            parse(&args(&["--hepl"])),
+            Command::Unknown("--hepl".to_string())
+        );
+        assert_eq!(
+            parse(&args(&["render", "project.ymir"])),
+            Command::Unknown("render".to_string()),
+            "a command that does not exist yet is refused, not silently ignored"
+        );
+    }
+
+    #[test]
+    fn docs_passes_the_rest_through() {
+        assert_eq!(parse(&args(&["docs"])), Command::Docs(Vec::new()));
+        assert_eq!(
+            parse(&args(&["docs", "--format", "json"])),
+            Command::Docs(args(&["--format", "json"]))
+        );
+    }
+
+    #[test]
+    fn version_and_help_win_wherever_they_appear() {
+        // They are questions about the binary, so someone who types one alongside anything else
+        // wants the answer rather than the work.
+        for form in ["--version", "-V"] {
+            assert_eq!(parse(&args(&[form])), Command::Version);
+            assert_eq!(parse(&args(&["docs", form])), Command::Version);
+        }
+        for form in ["--help", "-h"] {
+            assert_eq!(parse(&args(&[form])), Command::Help);
+            assert_eq!(parse(&args(&["docs", form])), Command::Help);
+        }
+    }
 
     // Link-anchor smoke test: proves the `use ymir_nodes as _` above actually pulls
     // ymir-nodes' operator registrations into *this binary*. Without the anchor the

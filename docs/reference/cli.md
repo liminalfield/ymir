@@ -18,3 +18,11 @@ With no arguments, the runner builds a sample graph (fBm noise through thermal e
 ## Version
 
 `ymir-cli --version` (or `-V`) prints the build-stamped version and exits.
+
+## Help
+
+`ymir-cli --help` (or `-h`) prints the usage: what the runner does with no arguments, the `docs`
+command, and these two flags.
+
+An argument the runner does not recognise is an error. It prints the usage to standard error and
+exits with status 2, so a mistyped command cannot be mistaken for a request to render.
