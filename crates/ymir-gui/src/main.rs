@@ -1798,7 +1798,7 @@ impl AppState {
     /// The key is the graph's content hash, the size of the worker's cache report, and the pin.
     /// One graph hash a frame replaces the per-node key computation the canvas ran for every node
     /// on every frame, so this is cheaper than what it replaces even before the pane reads it too.
-    fn node_status(&mut self) -> &[status::NodeStatus] {
+    fn refresh_node_status(&mut self) {
         let key = (
             self.graph.content_hash(),
             self.preview.cache_report().len(),
@@ -1816,7 +1816,6 @@ impl AppState {
             self.node_status = status::statuses(&self.graph, &report);
             self.node_status_key = Some(key);
         }
-        &self.node_status
     }
 
     /// Whether `handle` resolves to a live node that can be previewed in the 2D pane: one
@@ -3665,27 +3664,29 @@ fn node_row(
 /// cache report rather than recomputed here, so listing a large graph costs a walk and not a
 /// hash of every node every frame.
 fn nodes_pane(ui: &mut egui::Ui, state: &mut AppState) {
-    let report = status::StatusReport {
-        cache: state.preview.cache_report().clone(),
-        failed: state.preview.failed_node().into_iter().collect(),
-        // Which nodes hold a *build* result is not known here yet: it needs the build to report
-        // what it wrote, which arrives with the build states (#285). Until then a row reports the
-        // preview fidelity only, rather than guessing.
-        built: std::collections::HashSet::new(),
-        pinned: state.preview_pin,
+    // Refresh the shared model, then read it. Deriving it here instead would walk and key the
+    // whole graph on every frame, and a build repaints continuously, so that cost lands many
+    // times a second exactly when the machine is busiest (#282).
+    state.refresh_node_status();
+    let total = state.node_status.len();
+    // Canvas order is the only sort that needs positions, so the map is built only for it rather
+    // than allocated every frame for a sort that ignores it.
+    let positions = if state.node_sort == status::NodeSort::Canvas {
+        project_file::snarl_positions(&state.snarl)
+    } else {
+        BTreeMap::new()
     };
-    let mut nodes = status::statuses(&state.graph, &report);
-    let total = nodes.len();
-    status::sort(
-        &mut nodes,
-        state.node_sort,
-        &project_file::snarl_positions(&state.snarl),
-    );
+    // Moved out for the frame, so the rows can be borrowed while the drawing below edits the
+    // state, and put back untouched afterwards. The alternative is cloning the derived list every
+    // frame, which is the cost this whole cache exists to avoid.
+    let derived = std::mem::take(&mut state.node_status);
+    let mut rows: Vec<&status::NodeStatus> = derived.iter().collect();
+    status::sort(&mut rows, state.node_sort, &positions);
     let filtering = !state.node_filter.trim().is_empty() || state.node_chips.any();
-    nodes.retain(|n| status::matches(n, &state.node_filter, state.node_chips));
+    rows.retain(|n| status::matches(n, &state.node_filter, state.node_chips));
     // Computed over the rows that survived the filter, so a suffix appears only where two rows
     // you can actually see share a name.
-    let suffixes = status::suffixes(&nodes);
+    let suffixes = status::suffixes(&rows);
 
     egui::Frame::new()
         .inner_margin(egui::Margin::symmetric(8, 6))
@@ -3700,16 +3701,16 @@ fn nodes_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 ui.weak("No nodes in this graph.");
                 return;
             }
-            nodes_summary(ui, state, &nodes, total, filtering);
+            nodes_summary(ui, state, &rows, total, filtering);
             nodes_toolbar(ui, state);
             ui.add_space(4.0);
-            if nodes.is_empty() {
+            if rows.is_empty() {
                 ui.weak("No nodes match.");
                 return;
             }
             let mut select = None;
             let mut toggle = None;
-            for (node, suffix) in nodes.iter().zip(&suffixes) {
+            for (node, suffix) in rows.iter().zip(&suffixes) {
                 let action = node_row(ui, state, node, suffix.as_deref(), state.node_density);
                 if action.select {
                     select = Some(node.handle);
@@ -3726,6 +3727,8 @@ fn nodes_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 toggle_build_inclusion(state, handle);
             }
         });
+    drop(rows);
+    state.node_status = derived;
 }
 
 /// The counts above the list. While a filter is active it states the hidden count and offers a way
@@ -3733,7 +3736,7 @@ fn nodes_pane(ui: &mut egui::Ui, state: &mut AppState) {
 fn nodes_summary(
     ui: &mut egui::Ui,
     state: &mut AppState,
-    shown: &[status::NodeStatus],
+    shown: &[&status::NodeStatus],
     total: usize,
     filtering: bool,
 ) {
@@ -6561,8 +6564,9 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // Every node's dot colour, from the one status model the node pane reads (#282). Derived
     // before the disjoint borrow below, and only rebuilt when the graph, the worker's report or
     // the pin move.
+    state.refresh_node_status();
     let statuses: HashMap<canvas::Handle, egui::Color32> = state
-        .node_status()
+        .node_status
         .iter()
         .map(|n| (n.handle, status_color(n.state)))
         .collect();

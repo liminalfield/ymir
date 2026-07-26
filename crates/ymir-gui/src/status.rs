@@ -262,7 +262,7 @@ impl Chips {
 /// Every order is total and deterministic: ties fall back to the dependency order the list already
 /// carries, so an unrelated edit never reshuffles rows.
 pub(crate) fn sort(
-    nodes: &mut [NodeStatus],
+    nodes: &mut [&NodeStatus],
     order: NodeSort,
     positions: &BTreeMap<Handle, [f32; 2]>,
 ) {
@@ -333,7 +333,7 @@ pub(crate) fn matches(node: &NodeStatus, query: &str, chips: Chips) -> bool {
 /// only on the rows that collide, computed over the list as filtered. Colliding rows of different
 /// types separate on the type's last segment (`·blur` against `·directional_blur`); rows sharing
 /// a name *and* a type cannot, so they take an ordinal in list order instead.
-pub(crate) fn suffixes(nodes: &[NodeStatus]) -> Vec<Option<String>> {
+pub(crate) fn suffixes(nodes: &[&NodeStatus]) -> Vec<Option<String>> {
     let mut by_name: HashMap<&str, Vec<usize>> = HashMap::new();
     for (i, node) in nodes.iter().enumerate() {
         by_name.entry(node.name.as_str()).or_default().push(i);
@@ -676,31 +676,34 @@ mod tests {
         report.cache.insert(handle(&g, invert), false);
         let base = statuses(&g, &report);
         let names =
-            |list: &[NodeStatus]| -> Vec<String> { list.iter().map(|n| n.name.clone()).collect() };
+            |list: &[&NodeStatus]| -> Vec<String> { list.iter().map(|n| n.name.clone()).collect() };
+        fn borrowed(list: &[NodeStatus]) -> Vec<&NodeStatus> {
+            list.iter().collect()
+        }
 
         // Canvas order reads down the layout, not across it; a node with no position sorts last
         // rather than vanishing.
         let mut positions = BTreeMap::new();
         positions.insert(handle(&g, blend), [0.0, 10.0]);
         positions.insert(handle(&g, fbm), [500.0, 90.0]);
-        let mut list = base.clone();
+        let mut list = borrowed(&base);
         sort(&mut list, NodeSort::Canvas, &positions);
         assert_eq!(names(&list), vec!["Mango", "Zebra", "apple"]);
 
-        let mut list = base.clone();
+        let mut list = borrowed(&base);
         sort(&mut list, NodeSort::Alphabetical, &BTreeMap::new());
         assert_eq!(names(&list), vec!["apple", "Mango", "Zebra"]);
 
         // Stale first puts what needs attention at the top, and holds dependency order inside
         // each bucket.
-        let mut list = base.clone();
+        let mut list = borrowed(&base);
         sort(&mut list, NodeSort::StaleFirst, &BTreeMap::new());
         assert_eq!(names(&list), vec!["apple", "Mango", "Zebra"]);
 
         // Dependency order is the derivation's own order, left alone.
-        let mut list = base.clone();
+        let mut list = borrowed(&base);
         sort(&mut list, NodeSort::Dependency, &BTreeMap::new());
-        assert_eq!(names(&list), names(&base));
+        assert_eq!(names(&list), names(&borrowed(&base)));
     }
 
     #[test]
@@ -780,7 +783,7 @@ mod tests {
         g.set_name(c, Some("Smooth".into())).expect("name");
 
         let list = statuses(&g, &StatusReport::default());
-        let out = suffixes(&list);
+        let out = suffixes(&list.iter().collect::<Vec<_>>());
         let suffix_of = |name_index: usize| out[name_index].clone();
 
         let unique = list.iter().position(|n| n.name == "Base").expect("listed");
