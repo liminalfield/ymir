@@ -404,6 +404,12 @@ struct AppState {
     /// Set after wire-to-create makes a node, to ask snarl (via the viewer) to drop the
     /// armed wire next frame so its rubber-band clears (#123). One-shot.
     consume_wire: bool,
+    /// The derived per-node status, and the inputs it was derived from (#282). Both the canvas
+    /// dots and the node pane read this, and it is rebuilt only when the graph, the worker's
+    /// report or the pin actually change: deriving it per frame would walk and hash the whole
+    /// graph every frame, which is what the canvas used to do and what #254 was about.
+    node_status: Vec<status::NodeStatus>,
+    node_status_key: Option<(u64, usize, Option<Handle>)>,
     /// The node pane's filter text and quick chips (#281). Deliberately not persisted: a filter
     /// is a momentary question, and restoring one means opening a project to a list that hides
     /// most of its nodes with no memory of why.
@@ -833,6 +839,8 @@ impl AppState {
             active_tab: None,
             search: String::new(),
             node_menu: None,
+            node_status: Vec::new(),
+            node_status_key: None,
             node_filter: String::new(),
             node_chips: status::Chips::default(),
             node_sort: status::NodeSort::default(),
@@ -1783,6 +1791,32 @@ impl AppState {
             self.modified = snapshot != self.saved_snapshot;
             self.history.record(&snapshot);
         }
+    }
+
+    /// Rebuilds the per-node status if anything it depends on has moved, and returns it (#282).
+    ///
+    /// The key is the graph's content hash, the size of the worker's cache report, and the pin.
+    /// One graph hash a frame replaces the per-node key computation the canvas ran for every node
+    /// on every frame, so this is cheaper than what it replaces even before the pane reads it too.
+    fn node_status(&mut self) -> &[status::NodeStatus] {
+        let key = (
+            self.graph.content_hash(),
+            self.preview.cache_report().len(),
+            self.preview_pin,
+        );
+        if self.node_status_key != Some(key) {
+            let report = status::StatusReport {
+                cache: self.preview.cache_report().clone(),
+                failed: self.preview.failed_node().into_iter().collect(),
+                // Which nodes hold a *build* result needs the build to report what it wrote,
+                // which arrives with #285. Empty rather than guessed.
+                built: HashSet::new(),
+                pinned: self.preview_pin,
+            };
+            self.node_status = status::statuses(&self.graph, &report);
+            self.node_status_key = Some(key);
+        }
+        &self.node_status
     }
 
     /// Whether `handle` resolves to a live node that can be previewed in the 2D pane: one
@@ -5910,6 +5944,18 @@ fn preview_2d_pane(ui: &mut egui::Ui, state: &mut AppState) {
         }
         match id {
             Some(id) => {
+                // The preview's own stoplight, which used to ride the previewed node's canvas dot.
+                // That dot now shows the node's *state*, like every other node (#282), and an
+                // evaluation being in flight is a fact about the preview rather than about the
+                // node, so it belongs on the preview's header.
+                let diameter = ui.text_style_height(&egui::TextStyle::Body) * 0.5;
+                let (dot, _) =
+                    ui.allocate_exact_size(egui::vec2(diameter, diameter), egui::Sense::hover());
+                ui.painter().circle_filled(
+                    dot.center(),
+                    diameter * 0.5,
+                    state.preview.status_color(ui.visuals()),
+                );
                 ui.label(
                     egui::RichText::new(node_display_name(&state.graph, id))
                         .family(egui::FontFamily::Name("plex-semibold".into()))
@@ -6512,9 +6558,14 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // The previewed node's status dot, drawn on the node the preview is showing (the
     // pinned node if any, else the selection). The pinned node also gets a ring
     // marker. Both computed before the disjoint borrow below, from read-only fields.
-    let status = state
-        .preview_target()
-        .map(|h| (h, state.preview.status_color(ui.visuals())));
+    // Every node's dot colour, from the one status model the node pane reads (#282). Derived
+    // before the disjoint borrow below, and only rebuilt when the graph, the worker's report or
+    // the pin move.
+    let statuses: HashMap<canvas::Handle, egui::Color32> = state
+        .node_status()
+        .iter()
+        .map(|n| (n.handle, status_color(n.state)))
+        .collect();
     let pinned = state.preview_pin.filter(|&h| state.is_previewable(h));
     // A one-shot "zoom to graph" view to apply this frame (#65), Copy, read before
     // the disjoint borrow.
@@ -6615,7 +6666,7 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
         dropped_wire: None,
         node_dropped_on_wire: None,
         consume_wire,
-        status,
+        statuses: &statuses,
         pinned,
         add_node_at: None,
         add_frame_at: None,

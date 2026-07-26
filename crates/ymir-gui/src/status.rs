@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use ymir_core::{Graph, NodeId};
+use ymir_core::{EvalRequest, Graph, NodeId, Region};
 
 use crate::canvas::Handle;
 
@@ -141,7 +141,7 @@ fn status_of(graph: &Graph, id: NodeId, report: &StatusReport) -> Option<NodeSta
     // cannot run, so how fresh its last result was is not what the reader needs to know.
     let state = if required_input_missing(graph, id, &spec) {
         NodeState::NoInput
-    } else if report.failed.contains(&handle) {
+    } else if report.failed.contains(&handle) || structurally_broken(graph, id) {
         NodeState::Failed
     } else if graph.is_bypassed(id) {
         NodeState::Bypassed
@@ -179,6 +179,18 @@ fn status_of(graph: &Graph, id: NodeId, report: &StatusReport) -> Option<NodeSta
         build_included,
         fidelity,
     })
+}
+
+/// Whether a node cannot produce a key at all, which means something structural is wrong that
+/// reading its own ports does not reveal: a cycle through it, most of all. Probed at one pixel,
+/// since only the *ability* to key the node is in question, never the result.
+///
+/// This is the check the canvas used to run for every node on every frame. It runs here instead,
+/// when the status list is rebuilt, which is the whole point of having a model.
+fn structurally_broken(graph: &Graph, id: NodeId) -> bool {
+    graph
+        .output_key(id, &EvalRequest::new(1, 1, Region::UNIT, 0))
+        .is_err()
 }
 
 /// Whether any *required* input port of `id` is unwired. Optional ports degrade gracefully by the

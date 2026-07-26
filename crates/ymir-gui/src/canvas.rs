@@ -18,8 +18,7 @@ use egui_snarl::{InPin, InPinId, NodeId as SnarlNodeId, OutPin, OutPinId, Snarl}
 use crate::project_file::{Frame, LabelPlacement};
 
 use ymir_core::{
-    EvalRequest, Graph, INPUT_TYPE_ID, NodeId, OUTPUT_TYPE_ID, Params, Region, marker_port_label,
-    registry,
+    Graph, INPUT_TYPE_ID, NodeId, OUTPUT_TYPE_ID, Params, marker_port_label, registry,
 };
 use ymir_nodes::tr;
 
@@ -146,6 +145,12 @@ pub(crate) fn style_context_menu(ui: &mut egui::Ui) {
 /// reload, and keeps the snarl structure a pure view with no copy of node data.
 pub(crate) type Handle = u64;
 
+/// The empty status map a test-constructed viewer borrows, so [`GraphViewer::statuses`] can be a
+/// plain borrow rather than an option the drawing code has to unwrap on every node.
+#[cfg(test)]
+static EMPTY_STATUSES: std::sync::LazyLock<HashMap<Handle, egui::Color32>> =
+    std::sync::LazyLock::new(HashMap::new);
+
 /// The source pin of an armed (in-progress) wire, reported by snarl each frame for
 /// wire-to-create (#123). `from_output` says which side it is: a wire pulled from an
 /// output wants the new node's first input; one pulled from an input wants its first
@@ -259,7 +264,7 @@ pub(crate) struct GraphViewer<'a> {
     /// The previewed node's handle and its preview-status colour, drawn as a small
     /// dot at the left of that node's header. Only the previewed node has a status,
     /// since the preview evaluates a single target. Input, read-only.
-    pub(crate) status: Option<(Handle, egui::Color32)>,
+    pub(crate) statuses: &'a HashMap<Handle, egui::Color32>,
     /// The node pinned as the preview target, if any (#39). It gets a ring around its
     /// status dot so it reads as locked. Input, read-only.
     pub(crate) pinned: Option<Handle>,
@@ -327,7 +332,7 @@ impl<'a> GraphViewer<'a> {
             dropped_wire: None,
             node_dropped_on_wire: None,
             consume_wire: false,
-            status: None,
+            statuses: &EMPTY_STATUSES,
             pinned: None,
             add_node_at: None,
             add_frame_at: None,
@@ -374,15 +379,6 @@ impl GraphViewer<'_> {
         let spec = self.graph.spec(id)?;
         let ports = if input { &spec.inputs } else { &spec.outputs };
         ports.get(index).map(|p| p.name.clone())
-    }
-
-    /// Whether `id` is structurally broken (a disconnected required input or a cycle).
-    /// A cheap check via the graph's output key, whose `Ok`/`Err` outcome is
-    /// independent of resolution and seed, so a throwaway request suffices.
-    fn is_broken(&self, id: NodeId) -> bool {
-        self.graph
-            .output_key(id, &EvalRequest::new(1, 1, Region::UNIT, 0))
-            .is_err()
     }
 
     /// A node's display name: its per-instance override if set (#59), else its type's
@@ -708,21 +704,14 @@ impl SnarlViewer<Handle> for GraphViewer<'_> {
                 let diameter = ui.text_style_height(&egui::TextStyle::Body) * 0.55;
                 let (rect, _) =
                     ui.allocate_exact_size(egui::vec2(diameter, diameter), egui::Sense::hover());
-                // The dot's colour: the previewed node shows the preview status; any other
-                // structurally-broken node shows red, so a broken node (e.g. a Blend with
-                // a disconnected input) is visible even while the preview is pinned
-                // elsewhere (#43; a fuller per-node status is #44).
-                let dot = handle.and_then(|h| {
-                    if let Some((status_handle, color)) = self.status
-                        && status_handle == h
-                    {
-                        Some(color)
-                    } else if self.core_id(h).is_some_and(|id| self.is_broken(id)) {
-                        Some(ui.visuals().error_fg_color)
-                    } else {
-                        None
-                    }
-                });
+                // Every node shows its own state now, from the one status model the node pane
+                // also reads (#282). The canvas carries the dot alone: a glance says which parts
+                // of the graph are current, stale or broken, and the pane beside it spells the
+                // same state out in words for whichever row you are reading.
+                //
+                // Deriving it here, per node per frame, is what this replaced: the previous
+                // version keyed every node on every frame to find the broken ones.
+                let dot = handle.and_then(|h| self.statuses.get(&h).copied());
                 if let Some(color) = dot {
                     let r = diameter * 0.5;
                     let painter = ui.painter();
