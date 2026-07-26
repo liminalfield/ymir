@@ -32,6 +32,13 @@ const SAMPLE_COUNT: u32 = 4;
 /// shader hardcodes the same value; keep the two in sync.
 const WATER_GRID: u32 = 192;
 
+/// Bearing (degrees, measured in the XZ plane from `+x` toward `+z`) that the `vs_water` shader's
+/// baked wave fan already travels along: the mean of its three component directions. The wave
+/// direction control (#251) is an absolute bearing, so the shader is sent the *difference* from
+/// this, and a project set to this bearing renders exactly the fan as it was authored. It is also
+/// the default direction, so projects saved before the control existed are unchanged.
+pub(crate) const WAVE_FAN_BEARING_DEG: f32 = 60.5;
+
 /// Initial mesh grid resolution (vertices per side), used for the flat startup mesh. The live
 /// mesh then follows the previewed field's own resolution (see [`mesh_res`]), so raising the
 /// preview resolution shows finer terrain instead of resampling back down to a fixed grid.
@@ -99,7 +106,8 @@ struct Uniforms {
     /// w = reflective finish (sky Fresnel + specular). Off falls back toward plain translucent water.
     flags: [f32; 4],
     /// Gerstner wave shaping (#155): x = steepness (crest sharpness, `[0, 1]`), y = wavelength scale
-    /// (multiplies the base wavelengths); z/w reserved.
+    /// (multiplies the base wavelengths), z = the rotation applied to the wave fan in radians
+    /// (#251, see [`WAVE_FAN_BEARING_DEG`]); w reserved.
     waves: [f32; 4],
     /// Painted-mask overlay (#145): xyz = the tint colour (linear RGB), w = enabled (`1.0`)
     /// or off (`0.0`). On, the terrain fragment shader mixes the surface colour toward the
@@ -746,9 +754,11 @@ struct ViewportCallback {
     water_wave: f32,
     water_reflectivity: f32,
     water_specular: f32,
-    /// Gerstner wave shaping (#155): crest steepness and wavelength scale.
+    /// Gerstner wave shaping (#155): crest steepness and wavelength scale, plus the prevailing
+    /// wave bearing in degrees (#251).
     water_steepness: f32,
     water_wavelength: f32,
+    water_direction: f32,
     /// Shoreline foam controls: amount and band width (in normalized depth).
     water_foam: f32,
     water_foam_width: f32,
@@ -832,7 +842,14 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                     if self.water_foam_on { 1.0 } else { 0.0 },
                     if self.water_reflection { 1.0 } else { 0.0 },
                 ],
-                waves: [self.water_steepness, self.water_wavelength, 0.0, 0.0],
+                waves: [
+                    self.water_steepness,
+                    self.water_wavelength,
+                    // The shader rotates its baked fan, so it wants the offset from that fan's
+                    // own bearing rather than the absolute one the user set (#251).
+                    (self.water_direction - WAVE_FAN_BEARING_DEG).to_radians(),
+                    0.0,
+                ],
                 paint: self.paint,
             };
             queue.write_buffer(&res.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
@@ -1089,6 +1106,9 @@ pub(crate) struct ViewSettings {
     /// Gerstner wave shaping (#155): crest steepness (`[0, 1]`) and wavelength scale.
     pub water_steepness: f32,
     pub water_wavelength: f32,
+    /// The bearing the swell travels along, in degrees from `+x` toward `+z` (#251). See
+    /// [`WAVE_FAN_BEARING_DEG`] for what the value is measured against.
+    pub water_direction: f32,
     /// Shoreline foam amount and band width (normalized depth).
     pub water_foam: f32,
     pub water_foam_width: f32,
@@ -1302,6 +1322,7 @@ pub(crate) fn show(
             water_specular: settings.water_specular,
             water_steepness: settings.water_steepness,
             water_wavelength: settings.water_wavelength,
+            water_direction: settings.water_direction,
             water_foam: settings.water_foam,
             water_foam_width: settings.water_foam_width,
             water_wet: settings.water_wet,
@@ -1985,12 +2006,17 @@ struct Gerstner {
 // overall amplitude (the Waves control, already damped at the shore), `steep` the crest steepness in
 // [0,1]. Each wave's steepness is clamped by 1/(w*a*n) so the summed steepness cannot exceed `steep`
 // and the surface never self-intersects (the classic Gerstner blow-up).
-fn gerstner(p0: vec2<f32>, y0: f32, t: f32, amp: f32, steep: f32, wavelen: f32) -> Gerstner {
+// `turn` rotates the whole fan (radians, #251), so the swell can be pointed at a chosen bearing
+// while the components keep their relative spread: real waves are never perfectly parallel, and
+// replacing the directions outright would flatten the sum into one ridge.
+fn gerstner(p0: vec2<f32>, y0: f32, t: f32, amp: f32, steep: f32, wavelen: f32, turn: f32) -> Gerstner {
     var dirs = array<vec2<f32>, 3>(
         normalize(vec2<f32>(1.0, 0.25)),
         normalize(vec2<f32>(0.6, 0.8)),
         normalize(vec2<f32>(-0.5, 0.9)),
     );
+    let turn_c = cos(turn);
+    let turn_s = sin(turn);
     var lens = array<f32, 3>(0.55, 0.32, 0.19);     // base wavelength, footprint units
     var amps = array<f32, 3>(0.008, 0.005, 0.0025); // amplitude, mesh units
     var spds = array<f32, 3>(0.8, 1.1, 1.5);
@@ -1999,7 +2025,8 @@ fn gerstner(p0: vec2<f32>, y0: f32, t: f32, amp: f32, steep: f32, wavelen: f32) 
     var pos = vec3<f32>(p0.x, y0, p0.y);
     var nrm = vec3<f32>(0.0, 1.0, 0.0);
     for (var k = 0; k < 3; k = k + 1) {
-        let d = dirs[k];
+        let d0 = dirs[k];
+        let d = vec2<f32>(d0.x * turn_c - d0.y * turn_s, d0.x * turn_s + d0.y * turn_c);
         // Wavelength scale stretches every wave together; longer waves are lower frequency.
         let w = 6.2831853 / (lens[k] * wavelen);
         let base_a = amps[k];
@@ -2059,7 +2086,7 @@ fn vs_water(@builtin(vertex_index) vi: u32) -> WaterOut {
     // so the sideways slide dies before the shore's damping gradient and cannot shear the grid into
     // a comb at the waterline; open water keeps the full trochoidal crest.
     let steep = u.waves.x * smoothstep(0.0, 0.08, depth);
-    let g = gerstner(p0, u.water.x, u.surface.x, amp, steep, u.waves.y);
+    let g = gerstner(p0, u.water.x, u.surface.x, amp, steep, u.waves.y, u.waves.z);
 
     var out: WaterOut;
     out.clip = u.mvp * vec4<f32>(g.pos, 1.0);

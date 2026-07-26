@@ -512,9 +512,11 @@ struct AppState {
     water_wave: f32,
     water_reflectivity: f32,
     water_specular: f32,
-    /// Gerstner wave shaping (#155): crest steepness and wavelength scale.
+    /// Gerstner wave shaping (#155): crest steepness and wavelength scale, plus the prevailing
+    /// wave bearing in degrees (#251).
     water_steepness: f32,
     water_wavelength: f32,
+    water_direction: f32,
     /// Shoreline foam controls (ephemeral): amount and band width (#156).
     water_foam: f32,
     water_foam_width: f32,
@@ -857,6 +859,7 @@ impl AppState {
             water_specular: water_defaults.specular,
             water_steepness: water_defaults.steepness,
             water_wavelength: water_defaults.wavelength,
+            water_direction: water_defaults.direction,
             water_foam: water_defaults.foam,
             water_foam_width: water_defaults.foam_width,
             water_wet_on: water_defaults.wet_on,
@@ -1070,6 +1073,7 @@ impl AppState {
             specular: self.water_specular,
             steepness: self.water_steepness,
             wavelength: self.water_wavelength,
+            direction: self.water_direction,
             foam: self.water_foam,
             foam_width: self.water_foam_width,
             wet_on: self.water_wet_on,
@@ -1093,6 +1097,7 @@ impl AppState {
         self.water_specular = w.specular;
         self.water_steepness = w.steepness;
         self.water_wavelength = w.wavelength;
+        self.water_direction = w.direction;
         self.water_foam = w.foam;
         self.water_foam_width = w.foam_width;
         self.water_wet_on = w.wet_on;
@@ -5090,6 +5095,7 @@ fn world_settings(ui: &mut egui::Ui, state: &mut AppState) {
             slider_row(ui, "Amplitude", &mut state.water_wave, 0.0..=1.0, 2);
             slider_row(ui, "Steepness", &mut state.water_steepness, 0.0..=1.0, 2);
             slider_row(ui, "Wavelength", &mut state.water_wavelength, 0.3..=3.0, 2);
+            slider_row(ui, "Direction", &mut state.water_direction, 0.0..=360.0, 0);
         });
         water_group(ui, "Reflection", &mut state.water_reflection, |ui| {
             slider_row(
@@ -7720,6 +7726,7 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 water_specular: state.water_specular,
                 water_steepness: state.water_steepness,
                 water_wavelength: state.water_wavelength,
+                water_direction: state.water_direction,
                 water_foam: state.water_foam,
                 water_foam_width: state.water_foam_width,
                 // The wet-shore toggle gates the effect by passing zero strength when off.
@@ -10538,6 +10545,7 @@ mod tests {
                     specular: 0.1,
                     steepness: 0.4,
                     wavelength: 1.5,
+                    direction: 120.0,
                     foam: 0.8,
                     foam_width: 0.02,
                     wet_on: false,

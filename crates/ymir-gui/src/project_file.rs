@@ -134,6 +134,12 @@ fn default_steepness() -> f32 {
     0.6
 }
 
+/// Prevailing wave bearing for a project saved before the control existed (#251): the bearing the
+/// shader's baked fan already travelled along, so such a project renders exactly as it did.
+fn default_wave_direction() -> f32 {
+    crate::viewport::WAVE_FAN_BEARING_DEG
+}
+
 /// Gerstner wavelength scale for a project saved before the control existed (#155).
 fn default_wavelength() -> f32 {
     1.0
@@ -179,6 +185,9 @@ pub(crate) struct WaterSettings {
     pub steepness: f32,
     #[serde(default = "default_wavelength")]
     pub wavelength: f32,
+    /// The bearing the swell travels along, in degrees (#251).
+    #[serde(default = "default_wave_direction")]
+    pub direction: f32,
     /// Foam amount and band width (in normalized depth).
     pub foam: f32,
     pub foam_width: f32,
@@ -210,6 +219,7 @@ impl Default for WaterSettings {
             specular: 0.5,
             steepness: 0.6,
             wavelength: 1.0,
+            direction: default_wave_direction(),
             foam: 0.5,
             foam_width: 0.015,
             wet_on: true,
@@ -839,6 +849,36 @@ mod tests {
             "old `surface: false` carries to `waves`"
         );
         assert!(file.world.water.reflection, "`reflection` defaults on");
+    }
+
+    #[test]
+    fn wave_direction_defaults_to_the_shader_fan_for_an_older_project() {
+        // #251: a project saved before the direction control must render exactly as it did, which
+        // means loading with the bearing the shader's baked fan already travelled along. Any other
+        // default would silently swing the swell on every existing project.
+        let json = r#"{
+            "format_version": 1,
+            "world": {
+                "seed": 0, "world_extent": 2048.0,
+                "water": { "depth": true, "waves": true, "foam_on": true,
+                    "extinction": 5.0, "color": [0.1, 0.28, 0.42],
+                    "wave": 0.5, "reflectivity": 0.6, "specular": 0.5,
+                    "steepness": 0.6, "wavelength": 1.0,
+                    "foam": 0.5, "foam_width": 0.015, "speed": 0.4 }
+            },
+            "graph": { "format_version": 1, "next_stable_id": 0, "nodes": [] }
+        }"#;
+        let file: ProjectFile =
+            serde_json::from_str(json).expect("deserialize pre-direction water");
+        assert_eq!(
+            file.world.water.direction,
+            crate::viewport::WAVE_FAN_BEARING_DEG
+        );
+        // A fresh project agrees with the migrated one, so both render the same swell.
+        assert_eq!(
+            WaterSettings::default().direction,
+            crate::viewport::WAVE_FAN_BEARING_DEG
+        );
     }
 
     #[test]
