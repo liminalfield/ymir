@@ -3585,9 +3585,13 @@ fn node_row(
                     {
                         toggle_build = true;
                     }
-                } else if node.fidelity != status::Fidelity::None && word.is_none() {
+                } else if node.fidelity == status::Fidelity::Build && word.is_none() {
+                    // Only a *build* result is worth a chip: it says the viewport can show this
+                    // node at build quality, which nothing else on the row tells you. A chip on
+                    // every evaluated row would repeat what the glyph already says. Nothing
+                    // reports a build result yet, so this stays silent until #285.
                     ui.label(
-                        egui::RichText::new("2D")
+                        egui::RichText::new("4K")
                             .size(10.5)
                             .monospace()
                             .color(theme::ACCENT_PRIMARY),
@@ -3756,10 +3760,14 @@ fn nodes_toolbar(ui: &mut egui::Ui, state: &mut AppState) {
         egui::Layout::right_to_left(egui::Align::Center),
         |ui| {
             let compact = state.node_density == status::Density::Compact;
-            if ui
-                .selectable_label(compact, egui::RichText::new("\u{2261}").size(12.0))
-                .on_hover_text("Compact rows")
-                .clicked()
+            if pill_toggle(
+                ui,
+                compact,
+                egui_phosphor::regular::ARROWS_IN_LINE_VERTICAL,
+                egui::FontId::proportional(13.0),
+            )
+            .on_hover_text("Compact rows")
+            .clicked()
             {
                 state.node_density = if compact {
                     status::Density::Comfortable
@@ -3832,10 +3840,20 @@ fn nodes_toolbar(ui: &mut egui::Ui, state: &mut AppState) {
 /// the hover moves along it, which is the same reason the settings rows paint their labels into an
 /// exactly-allocated column. Returns whether it was clicked.
 fn quick_chip(ui: &mut egui::Ui, on: bool, label: &str) -> bool {
-    /// Horizontal padding either side of the chip's text, and the height of its box.
+    pill_toggle(ui, on, label, egui::FontId::monospace(10.5)).clicked()
+}
+
+/// A fixed-size pill toggle: the shared shape behind the filter chips and the density button.
+///
+/// The size comes from the text alone, measured and allocated before anything is drawn, so
+/// hovering or selecting changes only what is painted inside a rect that was already reserved.
+/// Letting a widget size itself from its interaction state makes the whole row shift under the
+/// pointer as the hover moves along it, which is why the settings rows paint their labels into an
+/// exactly-allocated column too.
+fn pill_toggle(ui: &mut egui::Ui, on: bool, label: &str, font: egui::FontId) -> egui::Response {
+    /// Horizontal padding either side of the text, and the height of the box.
     const PAD_X: f32 = 7.0;
     const HEIGHT: f32 = 17.0;
-    let font = egui::FontId::monospace(10.5);
     let galley = ui.painter().layout_no_wrap(
         label.to_string(),
         font,
@@ -3870,7 +3888,7 @@ fn quick_chip(ui: &mut egui::Ui, on: bool, label: &str) -> bool {
         galley,
         ink,
     );
-    response.clicked()
+    response
 }
 
 /// Flips an endpoint's inclusion in the next build, which is the same value the World panel's
