@@ -194,7 +194,8 @@ is a native output of the transport-capacity erosion models (already emitted as
 
 | Proposed node | Status | Category | What it would do |
 |---|---|---|---|
-| **Texture / TextureSet** | proposed (least specified) | material | Blends *materials* by selection for an in-app 3D material preview; continuous counterpart of Biome classify. Consumes canonical erosion byproduct layers (`wear`, `slope`, `flow`). No dedicated design note yet. |
+| **Material** | designed ([texturing.md](texturing.md)) | material | Binds a preview colour to a selection as a named `material.<name>` weight layer, composited by the node chain. Drives the in-app colour preview and the splat export (#78); continuous counterpart of Biome classify. Consumes canonical erosion byproduct layers (`wear`, `slope`, `flow`). Supersedes the earlier Texture / TextureSet sketch. |
+| **Export Splat** | designed ([texturing.md](texturing.md)) | endpoint | Writes the `material.*` weight layers as weight maps plus a manifest naming them (#78). Reads the same layers the preview composites, so the two cannot disagree. |
 
 ## Masking / selection & utility
 
