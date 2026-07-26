@@ -4,7 +4,7 @@
 
 Status: design only, not yet built. Captured from a design discussion (2026-07-26) that
 settled the shape of the feature and superseded the earlier Texture / TextureSet sketch
-recorded in [`node-inventory.md`](node-inventory.md).
+recorded in [`node-inventory.md`](node-inventory.md). Tracked as epic #267.
 
 ## The idea in one line
 
@@ -138,8 +138,8 @@ A/B works through the mechanics the editor already has:
 - **Bypass** on a material subgraph gives the untextured comparison in one toggle.
 - **Which set exports** is decided by wiring: the export endpoint is connected to one branch.
   A general Switch node (N inputs, an index parameter) would flip preview and export
-  together, and is worth having for terrain variants generally. It is filed separately and is
-  not part of this feature.
+  together, and is worth having for terrain variants generally. It is filed separately as
+  #268 and is not part of this feature.
 
 Two material sets meeting on one field is defined behaviour: chained, the second composites
 over the first under the same rule the stack uses. Sets are kept in parallel branches when
