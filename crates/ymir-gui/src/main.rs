@@ -60,6 +60,10 @@ mod viewport2d;
 mod viewport2d_gpu;
 // Snapshot-based undo/redo over the session (#82).
 mod history;
+// Test-only: validates the WGSL the viewport modules ship, which wgpu would otherwise only
+// compile at run time (#272).
+#[cfg(test)]
+mod wgsl;
 use build::BuildRunner;
 use history::EditHistory;
 

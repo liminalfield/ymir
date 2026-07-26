@@ -63,3 +63,10 @@ glam = "0.33"
 # Plain-old-data casting for the viewport's wgpu vertex and uniform buffers. Already in the
 # tree via wgpu; declared here for the derive on our buffer structs.
 bytemuck = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+# Parses and validates the viewport's WGSL in a unit test (#272). The shaders are compiled by
+# wgpu at run time, so a malformed edit would otherwise first show up as a broken viewport.
+# naga is wgpu's own shader front end and already in the tree through it; this only makes the
+# dependency explicit for the test, and pins the same major version the graphics stack resolves.
+naga = { version = "29", features = ["wgsl-in"] }

@@ -2269,6 +2269,17 @@ mod tests {
     use std::sync::Arc;
     use ymir_core::Region;
 
+    #[test]
+    fn the_scene_and_blit_shaders_are_valid_wgsl() {
+        // #272: wgpu compiles these at run time, so without this a malformed edit reaches the
+        // maintainer as a viewport that fails to start rather than as a failing test.
+        for (label, src) in [("scene", SHADER), ("blit", BLIT_SHADER)] {
+            if let Err(err) = crate::wgsl::validate(src) {
+                panic!("the viewport {label} shader {err}");
+            }
+        }
+    }
+
     /// A field whose height layer (the painted mask in paint mode) and backdrop layer hold
     /// distinct constant values, so a read of the wrong layer is visible.
     fn paint_field() -> Field {
