@@ -3743,33 +3743,11 @@ fn nodes_summary(
 
 /// The filter field, the sort control, the density toggle, and the quick chips.
 fn nodes_toolbar(ui: &mut egui::Ui, state: &mut AppState) {
-    ui.horizontal(|ui| {
-        ui.add(
-            egui::TextEdit::singleline(&mut state.node_filter)
-                .hint_text("Filter…")
-                .desired_width(ui.available_width() - 96.0),
-        );
-        let sort_label = match state.node_sort {
-            status::NodeSort::Dependency => "Dependency",
-            status::NodeSort::Canvas => "Canvas",
-            status::NodeSort::Alphabetical => "A-Z",
-            status::NodeSort::StaleFirst => "Stale first",
-        };
-        egui::ComboBox::from_id_salt("nodes-sort")
-            .selected_text(egui::RichText::new(sort_label).size(11.0))
-            .width(78.0)
-            .show_ui(ui, |ui| {
-                for (order, label) in [
-                    (status::NodeSort::Dependency, "Dependency"),
-                    (status::NodeSort::Canvas, "Canvas"),
-                    (status::NodeSort::Alphabetical, "A-Z"),
-                    (status::NodeSort::StaleFirst, "Stale first"),
-                ] {
-                    ui.selectable_value(&mut state.node_sort, order, label);
-                }
-            })
-            .response
-            .on_hover_text("How the list is ordered. Your choice, never the build's.");
+    // Laid out right to left: the fixed controls claim their space first and the filter field
+    // takes whatever is left. Sizing the field by arithmetic on `available_width` instead makes
+    // the row jump the moment a scrollbar appears or disappears, which happens every time the
+    // filter changes how many rows there are.
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         let compact = state.node_density == status::Density::Compact;
         if ui
             .selectable_label(compact, egui::RichText::new("\u{2261}").size(12.0))
@@ -3782,6 +3760,47 @@ fn nodes_toolbar(ui: &mut egui::Ui, state: &mut AppState) {
                 status::Density::Compact
             };
         }
+        const SORTS: [(status::NodeSort, &str); 4] = [
+            (status::NodeSort::Dependency, "Dependency"),
+            (status::NodeSort::Canvas, "Canvas"),
+            (status::NodeSort::Alphabetical, "A-Z"),
+            (status::NodeSort::StaleFirst, "Stale first"),
+        ];
+        let sort_label = SORTS
+            .iter()
+            .find(|(order, _)| *order == state.node_sort)
+            .map_or("Dependency", |(_, label)| *label);
+        // A plain menu popup, not an egui ComboBox, for the reason the output picker above
+        // documents: the ComboBox wraps its items in a scroll area whose auto-shrink makes the
+        // viewport equal the content height, so rounding flickers a scrollbar in and out and the
+        // box twitches as the pointer moves down the list. Four sorts need no scrolling.
+        let button = ui.button(
+            egui::RichText::new(format!(
+                "{sort_label}   {}",
+                egui_phosphor::regular::CARET_DOWN
+            ))
+            .size(11.0),
+        );
+        button
+            .clone()
+            .on_hover_text("How the list is ordered. Your choice, never the build's.");
+        egui::Popup::menu(&button).show(|ui| {
+            ui.set_min_width(button.rect.width());
+            for (order, label) in SORTS {
+                if ui
+                    .selectable_label(state.node_sort == order, label)
+                    .clicked()
+                {
+                    state.node_sort = order;
+                    ui.close();
+                }
+            }
+        });
+        ui.add(
+            egui::TextEdit::singleline(&mut state.node_filter)
+                .hint_text("Filter\u{2026}")
+                .desired_width(f32::INFINITY),
+        );
     });
     ui.horizontal(|ui| {
         let chips = &mut state.node_chips;
@@ -3790,14 +3809,60 @@ fn nodes_toolbar(ui: &mut egui::Ui, state: &mut AppState) {
             (&mut chips.failed, "failed"),
             (&mut chips.endpoints, "endpoints"),
         ] {
-            if ui
-                .selectable_label(*on, egui::RichText::new(label).size(10.5).monospace())
-                .clicked()
-            {
+            if quick_chip(ui, *on, label) {
                 *on = !*on;
             }
         }
     });
+}
+
+/// One filter chip: a fixed-size toggle that reads its state from its fill.
+///
+/// The size comes from the text alone, allocated before anything is drawn, so hovering or
+/// selecting a chip changes only what is painted inside a rect that was already reserved. Letting
+/// a widget size itself from its interaction state makes the whole row shift under the pointer as
+/// the hover moves along it, which is the same reason the settings rows paint their labels into an
+/// exactly-allocated column. Returns whether it was clicked.
+fn quick_chip(ui: &mut egui::Ui, on: bool, label: &str) -> bool {
+    /// Horizontal padding either side of the chip's text, and the height of its box.
+    const PAD_X: f32 = 7.0;
+    const HEIGHT: f32 = 17.0;
+    let font = egui::FontId::monospace(10.5);
+    let galley = ui.painter().layout_no_wrap(
+        label.to_string(),
+        font,
+        // Colour is chosen below; the galley is laid out only to measure it.
+        theme::TEXT_SECONDARY,
+    );
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(galley.size().x + PAD_X * 2.0, HEIGHT),
+        egui::Sense::click(),
+    );
+    let (fill, stroke, ink) = if on {
+        (theme::SELECTION, theme::ACCENT_PRIMARY, theme::TEXT_PRIMARY)
+    } else if response.hovered() {
+        (theme::BG_HOVER, theme::LINE_STRONG, theme::TEXT_SECONDARY)
+    } else {
+        (
+            egui::Color32::TRANSPARENT,
+            theme::LINE_STRONG,
+            theme::TEXT_TERTIARY,
+        )
+    };
+    let painter = ui.painter();
+    painter.rect_filled(rect, HEIGHT / 2.0, fill);
+    painter.rect_stroke(
+        rect,
+        HEIGHT / 2.0,
+        egui::Stroke::new(1.0, stroke),
+        egui::StrokeKind::Inside,
+    );
+    painter.galley(
+        egui::pos2(rect.left() + PAD_X, rect.center().y - galley.size().y / 2.0),
+        galley,
+        ink,
+    );
+    response.clicked()
 }
 
 /// Flips an endpoint's inclusion in the next build, which is the same value the World panel's
