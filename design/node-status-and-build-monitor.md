@@ -31,9 +31,9 @@ clicking through the canvas node by node:
 Building the model once, then drawing it as a pip on a node header and as a row in the pane, is
 what makes this worth doing as a single piece of work.
 
-It also removes #135's cause for the right reason. Thumbnails flash status frames today because
-thumbnail evaluation drives the status colour; an explicit model separates "what state is this
-node in" from "something is being recomputed for the canvas".
+(An earlier draft claimed this also fixed #135, the thumbnail toggle flashing status frames. It
+does not: that flash is egui's own, raised by toggling the thumbnail images, and has nothing to
+do with this status model. #135 stands on its own.)
 
 ## Two renderings, two fidelities
 
@@ -224,7 +224,6 @@ build picture.
 
 - **#44** (per-node stale status on the canvas) is step 4 of this note.
 - **#45** (build monitor pane) is steps 5 to 7.
-- **#135** (thumbnail toggle flashes status frames) has its cause removed by step 4.
 - **[Subgraphs](subgraphs.md)**: the grouping follows the container structure the canvas already
   navigates.
 - **#37** (settings infrastructure): the reduced-motion preference is one more setting on the
