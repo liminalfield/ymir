@@ -331,6 +331,12 @@ pub(crate) fn toggle(ui: &mut egui::Ui, on: bool) -> egui::Response {
     resp.on_hover_text(if on { "On" } else { "Off" })
 }
 
+/// How far an integer scrub travels per point of pointer motion (#246). Deliberately flat rather
+/// than derived from the parameter's range: a range-proportional speed, as the sliders use, would
+/// be millions per point on fbm's seed (`0..=i32::MAX`) and a whole step per point on octaves
+/// (`1..=12`). Two points per step suits both, and typing covers the long jumps.
+const SCRUB_UNITS_PER_POINT: f64 = 0.5;
+
 /// Where an integer scrub settles: rounded to a whole step, then held inside the bounds the
 /// schema declared (#246). Both halves matter. Without the round a drag would leave a fraction
 /// that the box shows and the graph stores as a truncated value; without the clamp a scrub could
@@ -338,6 +344,16 @@ pub(crate) fn toggle(ui: &mut egui::Ui, on: bool) -> egui::Response {
 /// the range is the node author's declared intent. Pure, so it is unit-tested.
 fn settle_int(v: f64, min: i64, max: i64) -> i64 {
     v.round().clamp(min as f64, max as f64) as i64
+}
+
+/// Splits a scrubbed position into the whole step it settles on and the sub-step remainder to carry
+/// into the next frame (#246). The position is bounded first, so the remainder is always within half
+/// a step: pushing on against a limit cannot bank an ever-growing carry that a drag back the other
+/// way would have to unwind before the value moved. Pure, so it is unit-tested.
+fn split_scrub(v: f64, min: i64, max: i64) -> (i64, f64) {
+    let bounded = v.clamp(min as f64, max as f64);
+    let settled = settle_int(bounded, min, max);
+    (settled, bounded - settled as f64)
 }
 
 /// An integer stepper: a deep field with a minus button, the value in the centre, and a plus button.
@@ -437,14 +453,34 @@ fn stepper(ui: &mut egui::Ui, value: &mut i64, min: i64, max: i64) -> bool {
         .inner;
     changed |= value_resp.changed();
     // The scrub runs on a float mirror (that is what `scrub_drag` drives) and lands back on the
-    // integer each frame. At one unit per pixel every step is whole, so nothing is lost rounding.
-    let mut scrubbed_value = *value as f64;
-    if scrub_drag(ui, &value_resp, &mut scrubbed_value, 1.0, |v| {
-        settle_int(v, min, max) as f64
-    }) {
-        *value = settle_int(scrubbed_value, min, max);
-        changed = true;
+    // integer, keeping the sub-step remainder across frames in this widget's own temp state. That
+    // carry is what makes a slow drag work: rounding every frame and re-seeding from the stored
+    // integer would throw away a third of a pixel of motion each time, so the value would sit
+    // still until the pointer moved fast enough and then jump.
+    let carry_id = value_resp.id.with("scrub-carry");
+    let mut carry: f64 = if value_resp.drag_started() {
+        0.0
+    } else {
+        ui.data(|d| d.get_temp(carry_id)).unwrap_or(0.0)
+    };
+    let mut scrubbed_value = *value as f64 + carry;
+    if scrub_drag(
+        ui,
+        &value_resp,
+        &mut scrubbed_value,
+        SCRUB_UNITS_PER_POINT,
+        |v| v.clamp(min as f64, max as f64),
+    ) {
+        let (settled, remainder) = split_scrub(scrubbed_value, min, max);
+        carry = remainder;
+        // Only a real move counts: reporting a change on every dragged frame would rewrite the
+        // parameter (and re-key the preview) while the value stood still.
+        if settled != *value {
+            *value = settled;
+            changed = true;
+        }
     }
+    ui.data_mut(|d| d.insert_temp(carry_id, carry));
     changed
 }
 
@@ -584,12 +620,21 @@ pub(crate) fn edit(
         }
         (Widget::IntDrag { min, max }, ParamValue::Int(v)) => {
             let mut x = *v;
+            let default = match &spec.default {
+                ParamValue::Int(d) => *d,
+                _ => x,
+            };
             let mut result = None;
             ui.horizontal(|ui| {
                 param_label(ui, type_id, name);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if stepper(ui, &mut x, min, max) {
                         result = Some(ParamValue::Int(x));
+                    }
+                    // The same revert affordance the float rows carry, so an integer is not the
+                    // one parameter kind you cannot put back (#246).
+                    if x != default && reset_icon(ui).clicked() {
+                        result = Some(ParamValue::Int(default));
                     }
                 });
             });
@@ -726,6 +771,36 @@ mod tests {
         // A signed range keeps both ends.
         assert_eq!(settle_int(-10_500.0, -10_000, 10_000), -10_000);
         assert_eq!(settle_int(-2.5, -10_000, 10_000), -3);
+    }
+
+    #[test]
+    fn split_scrub_carries_the_sub_step_remainder_and_keeps_it_bounded() {
+        // #246: the remainder is what makes a slow drag work. Rounding each frame and dropping it
+        // would ignore motion below half a step, so the value would stall and then jump.
+        let (settled, carry) = split_scrub(3.3, 0, 12);
+        assert_eq!(settled, 3);
+        assert!((carry - 0.3).abs() < 1e-9);
+
+        // Three frames of a third of a step each cross one whole step, carrying the remainder.
+        let mut value = 3_i64;
+        let mut carry = 0.0;
+        for _ in 0..3 {
+            let (next, remainder) = split_scrub(value as f64 + carry + 0.34, 0, 12);
+            value = next;
+            carry = remainder;
+        }
+        assert_eq!(value, 4);
+
+        // Pushing well past a limit banks no runaway carry, so a drag back the other way moves the
+        // value at once instead of unwinding a debt first.
+        let (settled, carry) = split_scrub(500.0, 0, 12);
+        assert_eq!(settled, 12);
+        assert!(
+            carry.abs() <= 0.5,
+            "carry stayed within half a step: {carry}"
+        );
+        let (settled, _) = split_scrub(settled as f64 + carry - 0.6, 0, 12);
+        assert_eq!(settled, 11, "reversing moves immediately");
     }
 
     #[test]

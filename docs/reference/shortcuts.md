@@ -33,6 +33,7 @@ In the inspector, for the selected node.
 | Scrub a value | Drag the value box |
 | Type a value | Click the value box, then type |
 | Step an integer by one | The − and + buttons beside it |
+| Reset a number to its default | The revert arrow, which appears once the value differs from it |
 
 A scrub keeps going while you drag, so the pointer reaching the edge of the screen does not end it. Values stay within the range the node declares, so a scrub or a typed number stops at the limit. A direction is the exception: it rolls, so scrubbing past 360° carries on from 0°.
 
