@@ -12,7 +12,9 @@
 //!
 //! See `design/node-status-and-build-monitor.md`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+use serde::{Deserialize, Serialize};
 
 use ymir_core::{Graph, NodeId};
 
@@ -82,10 +84,16 @@ pub(crate) enum Fidelity {
 }
 
 /// One node's status: its state, plus the flags that are true *about* it rather than states of it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NodeStatus {
     /// The node's persistent id, the same key the canvas and the project file use.
     pub handle: Handle,
+    /// The name shown on the row: the node's own name if it has one, else its type's display
+    /// name. Carried here rather than re-derived per row so ordering, filtering and
+    /// disambiguation are pure functions over this list.
+    pub name: String,
+    /// The registered `type_id`, shown under the name and used to disambiguate a collision.
+    pub type_id: &'static str,
     /// What it is doing.
     pub state: NodeState,
     /// Whether it is the pinned preview target (the display flag).
@@ -161,6 +169,11 @@ fn status_of(graph: &Graph, id: NodeId, report: &StatusReport) -> Option<NodeSta
 
     Some(NodeStatus {
         handle,
+        name: graph.name(id).map_or_else(
+            || ymir_nodes::tr(&format!("node-{}", spec.type_id)).to_string(),
+            ToString::to_string,
+        ),
+        type_id: spec.type_id,
         state,
         pinned: report.pinned == Some(handle),
         build_included,
@@ -175,6 +188,172 @@ fn required_input_missing(graph: &Graph, id: NodeId, spec: &ymir_core::NodeSpec)
         .iter()
         .enumerate()
         .any(|(port, p)| !p.optional && graph.input_source(id, port).is_none())
+}
+
+/// How the pane orders its rows. The user's choice, never the state's: a build starting must not
+/// reshuffle the list under the pointer, so nothing here changes without the user changing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum NodeSort {
+    /// Dependency order: a node follows everything it reads. The default, and the order a build
+    /// works in.
+    #[default]
+    Dependency,
+    /// As laid out on the canvas, reading top to bottom then left to right.
+    Canvas,
+    /// By name.
+    Alphabetical,
+    /// The nodes that need attention first: blocked, then stale, then the rest, each group
+    /// holding its dependency order so the list stays legible.
+    StaleFirst,
+}
+
+/// How much of each row is drawn. A preference like the sort, not a state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Density {
+    /// Name over type id, two lines.
+    #[default]
+    Comfortable,
+    /// One line per node, the type id dropped except where names collide.
+    Compact,
+}
+
+/// Which states a quick chip narrows the list to. Chips are additive: with none active every node
+/// passes, with several the union passes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct Chips {
+    pub stale: bool,
+    pub failed: bool,
+    pub endpoints: bool,
+}
+
+impl Chips {
+    /// Whether any chip is narrowing the list.
+    pub(crate) fn any(self) -> bool {
+        self.stale || self.failed || self.endpoints
+    }
+
+    fn admits(self, node: &NodeStatus) -> bool {
+        if !self.any() {
+            return true;
+        }
+        (self.stale && node.state == NodeState::Stale)
+            || (self.failed && matches!(node.state, NodeState::Failed | NodeState::NoInput))
+            || (self.endpoints && node.build_included.is_some())
+    }
+}
+
+/// Reorders `nodes` in place. `positions` supplies canvas coordinates by `stable_id`, used only by
+/// [`NodeSort::Canvas`]; a node missing from it sorts last rather than being dropped.
+///
+/// Every order is total and deterministic: ties fall back to the dependency order the list already
+/// carries, so an unrelated edit never reshuffles rows.
+pub(crate) fn sort(
+    nodes: &mut [NodeStatus],
+    order: NodeSort,
+    positions: &BTreeMap<Handle, [f32; 2]>,
+) {
+    // The incoming order is the dependency order; remembering each row's place keeps it as the
+    // tie-break for every other sort.
+    let depth: HashMap<Handle, usize> = nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.handle, i))
+        .collect();
+    let rank = |n: &NodeStatus| depth.get(&n.handle).copied().unwrap_or(usize::MAX);
+    match order {
+        NodeSort::Dependency => {}
+        NodeSort::Canvas => nodes.sort_by(|a, b| {
+            let key = |n: &NodeStatus| {
+                positions
+                    .get(&n.handle)
+                    .map_or((1, ordered_bits(f32::MAX), ordered_bits(f32::MAX)), |p| {
+                        (0, ordered_bits(p[1]), ordered_bits(p[0]))
+                    })
+            };
+            key(a).cmp(&key(b)).then_with(|| rank(a).cmp(&rank(b)))
+        }),
+        NodeSort::Alphabetical => nodes.sort_by(|a, b| {
+            a.name
+                .to_lowercase()
+                .cmp(&b.name.to_lowercase())
+                .then_with(|| rank(a).cmp(&rank(b)))
+        }),
+        NodeSort::StaleFirst => nodes.sort_by(|a, b| {
+            let bucket = |n: &NodeStatus| match n.state {
+                NodeState::NoInput | NodeState::Failed => 0,
+                NodeState::Stale => 1,
+                NodeState::NotEvaluated => 2,
+                NodeState::Current | NodeState::Bypassed => 3,
+            };
+            bucket(a)
+                .cmp(&bucket(b))
+                .then_with(|| rank(a).cmp(&rank(b)))
+        }),
+    }
+}
+
+/// A total, order-preserving key for an `f32` coordinate, so sorting canvas positions needs no
+/// partial-comparison unwrap and a NaN cannot make the order inconsistent.
+fn ordered_bits(v: f32) -> u32 {
+    let bits = v.to_bits();
+    if bits & 0x8000_0000 == 0 {
+        bits ^ 0x8000_0000
+    } else {
+        !bits
+    }
+}
+
+/// Whether a row survives the filter: a case-insensitive substring of its name or type id, and
+/// the quick chips.
+pub(crate) fn matches(node: &NodeStatus, query: &str, chips: Chips) -> bool {
+    let query = query.trim().to_lowercase();
+    let text = query.is_empty()
+        || node.name.to_lowercase().contains(&query)
+        || node.type_id.to_lowercase().contains(&query);
+    text && chips.admits(node)
+}
+
+/// A disambiguating suffix per row, for the rows that need one and no others.
+///
+/// Hiding the type id costs nothing until two *visible* rows share a name, so the suffix appears
+/// only on the rows that collide, computed over the list as filtered. Colliding rows of different
+/// types separate on the type's last segment (`·blur` against `·directional_blur`); rows sharing
+/// a name *and* a type cannot, so they take an ordinal in list order instead.
+pub(crate) fn suffixes(nodes: &[NodeStatus]) -> Vec<Option<String>> {
+    let mut by_name: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, node) in nodes.iter().enumerate() {
+        by_name.entry(node.name.as_str()).or_default().push(i);
+    }
+    let mut out = vec![None; nodes.len()];
+    for indices in by_name.values().filter(|v| v.len() > 1) {
+        // Within a colliding name, the type's last segment separates what it can; whatever is
+        // still duplicated after that is numbered.
+        let mut seen: HashMap<&str, usize> = HashMap::new();
+        let leaf = |i: usize| {
+            nodes[i]
+                .type_id
+                .rsplit('.')
+                .next()
+                .unwrap_or(nodes[i].type_id)
+        };
+        for &i in indices {
+            *seen.entry(leaf(i)).or_insert(0) += 1;
+        }
+        let mut ordinal: HashMap<&str, usize> = HashMap::new();
+        for &i in indices {
+            let l = leaf(i);
+            out[i] = Some(if seen.get(l).copied().unwrap_or(0) > 1 {
+                let n = ordinal.entry(l).or_insert(0);
+                *n += 1;
+                format!("\u{b7}{l} {n}")
+            } else {
+                format!("\u{b7}{l}")
+            });
+        }
+    }
+    out
 }
 
 /// The graph's result nodes: those whose output no other node reads. Every node is upstream of at
@@ -458,13 +637,163 @@ mod tests {
         report.pinned = Some(handle(&g, previewed));
 
         let list = statuses(&g, &report);
-        let of = |h: Handle| *list.iter().find(|s| s.handle == h).expect("listed");
+        let of = |h: Handle| list.iter().find(|s| s.handle == h).expect("listed");
         assert_eq!(of(handle(&g, built)).fidelity, Fidelity::Build);
         assert_eq!(of(handle(&g, previewed)).fidelity, Fidelity::Preview);
         assert_eq!(of(handle(&g, neither)).fidelity, Fidelity::None);
 
         assert!(of(handle(&g, previewed)).pinned);
         assert!(!of(handle(&g, built)).pinned);
+    }
+
+    #[test]
+    fn sorts_are_total_and_fall_back_to_dependency_order() {
+        let (mut g, mut s) = graph();
+        let fbm = add(&mut g, &mut s, FBM);
+        let invert = add(&mut g, &mut s, INVERT);
+        let blend = add(&mut g, &mut s, BLEND);
+        g.connect(fbm, 0, invert, 0).expect("fbm -> invert");
+        g.connect(fbm, 0, blend, 0).expect("fbm -> blend");
+        g.connect(invert, 0, blend, 1).expect("invert -> blend");
+        g.set_name(fbm, Some("Zebra".into())).expect("name");
+        g.set_name(invert, Some("apple".into())).expect("name");
+        g.set_name(blend, Some("Mango".into())).expect("name");
+
+        let mut report = StatusReport::default();
+        report.cache.insert(handle(&g, fbm), true);
+        report.cache.insert(handle(&g, invert), false);
+        let base = statuses(&g, &report);
+        let names =
+            |list: &[NodeStatus]| -> Vec<String> { list.iter().map(|n| n.name.clone()).collect() };
+
+        // Canvas order reads down the layout, not across it; a node with no position sorts last
+        // rather than vanishing.
+        let mut positions = BTreeMap::new();
+        positions.insert(handle(&g, blend), [0.0, 10.0]);
+        positions.insert(handle(&g, fbm), [500.0, 90.0]);
+        let mut list = base.clone();
+        sort(&mut list, NodeSort::Canvas, &positions);
+        assert_eq!(names(&list), vec!["Mango", "Zebra", "apple"]);
+
+        let mut list = base.clone();
+        sort(&mut list, NodeSort::Alphabetical, &BTreeMap::new());
+        assert_eq!(names(&list), vec!["apple", "Mango", "Zebra"]);
+
+        // Stale first puts what needs attention at the top, and holds dependency order inside
+        // each bucket.
+        let mut list = base.clone();
+        sort(&mut list, NodeSort::StaleFirst, &BTreeMap::new());
+        assert_eq!(names(&list), vec!["apple", "Mango", "Zebra"]);
+
+        // Dependency order is the derivation's own order, left alone.
+        let mut list = base.clone();
+        sort(&mut list, NodeSort::Dependency, &BTreeMap::new());
+        assert_eq!(names(&list), names(&base));
+    }
+
+    #[test]
+    fn the_filter_matches_name_or_type_and_the_chips_narrow_by_state() {
+        let (mut g, mut s) = graph();
+        let fbm = add(&mut g, &mut s, FBM);
+        let invert = add(&mut g, &mut s, INVERT);
+        let export = add(&mut g, &mut s, EXPORT);
+        g.connect(fbm, 0, invert, 0).expect("wire");
+        g.connect(invert, 0, export, 0).expect("wire");
+        g.set_name(fbm, Some("Base noise".into())).expect("name");
+
+        let mut report = StatusReport::default();
+        report.cache.insert(handle(&g, invert), false);
+        let list = statuses(&g, &report);
+        let of = |name: &str| {
+            list.iter()
+                .find(|n| n.name == name)
+                .expect("listed")
+                .clone()
+        };
+
+        let none = Chips::default();
+        assert!(matches(&of("Base noise"), "", none));
+        assert!(
+            matches(&of("Base noise"), "NOISE", none),
+            "case-insensitive"
+        );
+        assert!(
+            matches(&of("Base noise"), "generator.", none),
+            "type id too"
+        );
+        assert!(!matches(&of("Base noise"), "erosion", none));
+
+        let stale = Chips {
+            stale: true,
+            ..Chips::default()
+        };
+        assert!(
+            !matches(&of("Base noise"), "", stale),
+            "current is not stale"
+        );
+        assert!(
+            list.iter()
+                .any(|n| n.state == NodeState::Stale && matches(n, "", stale))
+        );
+
+        // Chips are additive, and endpoints is about the kind of node, not its state.
+        let endpoints = Chips {
+            endpoints: true,
+            ..Chips::default()
+        };
+        assert!(list.iter().filter(|n| matches(n, "", endpoints)).count() == 1);
+        let both = Chips {
+            stale: true,
+            endpoints: true,
+            ..Chips::default()
+        };
+        assert!(list.iter().filter(|n| matches(n, "", both)).count() == 2);
+    }
+
+    #[test]
+    fn only_colliding_names_take_a_suffix_and_a_shared_type_takes_an_ordinal() {
+        let (mut g, mut s) = graph();
+        let fbm = add(&mut g, &mut s, FBM);
+        let a = add(&mut g, &mut s, INVERT);
+        let b = add(&mut g, &mut s, INVERT);
+        let c = add(&mut g, &mut s, BLEND);
+        g.connect(fbm, 0, a, 0).expect("wire");
+        g.connect(fbm, 0, b, 0).expect("wire");
+        g.connect(a, 0, c, 0).expect("wire");
+        g.connect(b, 0, c, 1).expect("wire");
+        g.set_name(fbm, Some("Base".into())).expect("name");
+        // Two of these three share a name; two of those share a type as well.
+        g.set_name(a, Some("Smooth".into())).expect("name");
+        g.set_name(b, Some("Smooth".into())).expect("name");
+        g.set_name(c, Some("Smooth".into())).expect("name");
+
+        let list = statuses(&g, &StatusReport::default());
+        let out = suffixes(&list);
+        let suffix_of = |name_index: usize| out[name_index].clone();
+
+        let unique = list.iter().position(|n| n.name == "Base").expect("listed");
+        assert_eq!(suffix_of(unique), None, "a unique name stays clean");
+
+        let colliding: Vec<String> = list
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.name == "Smooth")
+            .filter_map(|(i, _)| out[i].clone())
+            .collect();
+        assert_eq!(colliding.len(), 3, "every colliding row is marked");
+        assert!(
+            colliding.contains(&"\u{b7}blend".to_string()),
+            "a lone type separates on its own: {colliding:?}"
+        );
+        // The two sharing both name and type cannot separate on type, so they are numbered.
+        assert!(
+            colliding.contains(&"\u{b7}invert 1".to_string()),
+            "{colliding:?}"
+        );
+        assert!(
+            colliding.contains(&"\u{b7}invert 2".to_string()),
+            "{colliding:?}"
+        );
     }
 
     #[test]

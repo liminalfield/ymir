@@ -404,6 +404,15 @@ struct AppState {
     /// Set after wire-to-create makes a node, to ask snarl (via the viewer) to drop the
     /// armed wire next frame so its rubber-band clears (#123). One-shot.
     consume_wire: bool,
+    /// The node pane's filter text and quick chips (#281). Deliberately not persisted: a filter
+    /// is a momentary question, and restoring one means opening a project to a list that hides
+    /// most of its nodes with no memory of why.
+    node_filter: String,
+    node_chips: status::Chips,
+    /// How the node pane orders and draws its rows. Persisted with the project, since it is how
+    /// the user likes to read this graph rather than a passing question.
+    node_sort: status::NodeSort,
+    node_density: status::Density,
     /// The node pinned as the preview target, if any (GUI view-state, not core graph
     /// data — issue #39). When set and still previewable, the 2D preview shows this
     /// node instead of the selection, so selection can move upstream to edit while the
@@ -824,6 +833,10 @@ impl AppState {
             active_tab: None,
             search: String::new(),
             node_menu: None,
+            node_filter: String::new(),
+            node_chips: status::Chips::default(),
+            node_sort: status::NodeSort::default(),
+            node_density: status::Density::default(),
             preview_pin: None,
             preview_dismissed: false,
             rename: None,
@@ -945,6 +958,11 @@ impl AppState {
         self.graph = restored.graph;
         self.snarl = restored.snarl;
         self.frames = restored.frames;
+        self.node_sort = restored.node_sort;
+        self.node_density = restored.node_density;
+        // The filter is not restored on purpose: see `node_filter`.
+        self.node_filter.clear();
+        self.node_chips = status::Chips::default();
         self.subgraph_layouts = restored.subgraph_layouts;
         self.selected_frame = None;
         self.frame_drag = None;
@@ -1124,6 +1142,17 @@ impl AppState {
     /// frames come from the outermost suspended context. So save, dirty tracking, and undo
     /// all operate on the whole project regardless of how deep the user is editing.
     fn snapshot(&self) -> project_file::ProjectFile {
+        let mut file = self.captured();
+        // Set here rather than threaded through `capture_with`: these are the editor's pane
+        // preferences, and every other caller of that constructor (tests, the headless path) has
+        // no opinion on them and would only be passing defaults through.
+        file.view.node_sort = self.node_sort;
+        file.view.node_density = self.node_density;
+        file
+    }
+
+    /// The graph, layout and world as a project file, before the pane preferences are set.
+    fn captured(&self) -> project_file::ProjectFile {
         let layouts = self.all_known_layouts();
         if self.nav.is_empty() {
             project_file::ProjectFile::capture_with(
@@ -1691,6 +1720,10 @@ impl AppState {
                 self.graph = restored.graph;
                 self.snarl = restored.snarl;
                 self.frames = restored.frames;
+                self.node_sort = restored.node_sort;
+                self.node_density = restored.node_density;
+                self.node_filter.clear();
+                self.node_chips = status::Chips::default();
                 self.subgraph_layouts = restored.subgraph_layouts;
                 self.selected_frame = None;
                 self.frame_drag = None;
@@ -3434,10 +3467,24 @@ fn status_color(state: status::NodeState) -> egui::Color32 {
     }
 }
 
+/// What a drawn row is asking the pane to do this frame.
+struct NodeRowAction {
+    /// The row was clicked: select its node.
+    select: bool,
+    /// The build chip was clicked: flip this endpoint's inclusion.
+    toggle_build: bool,
+}
+
 /// One node's row: the state stripe, the glyph cell, the name over its type id, and the trailing
 /// slot. The left half is identical whatever the graph is doing; only the trailing slot changes
 /// (#278), so nothing moves under the pointer when a build starts.
-fn node_row(ui: &mut egui::Ui, state: &AppState, node: &status::NodeStatus) -> egui::Response {
+fn node_row(
+    ui: &mut egui::Ui,
+    state: &AppState,
+    node: &status::NodeStatus,
+    suffix: Option<&str>,
+    density: status::Density,
+) -> NodeRowAction {
     let id = state.graph.node_id_of(node.handle);
     let name = id.map_or_else(
         || "(removed)".to_string(),
@@ -3448,6 +3495,7 @@ fn node_row(ui: &mut egui::Ui, state: &AppState, node: &status::NodeStatus) -> e
         .map_or_else(String::new, |spec| spec.type_id.to_string());
     let colour = status_color(node.state);
     let selected = state.selection.contains(&node.handle);
+    let mut toggle_build = false;
 
     let row = ui.scope(|ui| {
         ui.horizontal(|ui| {
@@ -3471,33 +3519,72 @@ fn node_row(ui: &mut egui::Ui, state: &AppState, node: &status::NodeStatus) -> e
                 egui::FontId::monospace(11.0),
                 glyph_colour,
             );
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 0.0;
-                ui.label(
-                    egui::RichText::new(name)
-                        .size(12.5)
-                        .color(theme::TEXT_PRIMARY),
-                );
-                ui.label(
-                    egui::RichText::new(type_id)
-                        .size(10.5)
-                        .monospace()
-                        .color(theme::TEXT_TERTIARY),
-                );
-            });
+            // Compact drops the type id to one line, and shows the disambiguating suffix inline
+            // where one is needed: density is paid for by dropping what is redundant, never by
+            // making two rows indistinguishable.
+            match density {
+                status::Density::Compact => {
+                    ui.label(
+                        egui::RichText::new(name)
+                            .size(12.0)
+                            .color(theme::TEXT_PRIMARY),
+                    );
+                    if let Some(suffix) = suffix {
+                        ui.label(
+                            egui::RichText::new(suffix)
+                                .size(10.5)
+                                .monospace()
+                                .color(theme::TEXT_TERTIARY),
+                        );
+                    }
+                }
+                status::Density::Comfortable => {
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        ui.label(
+                            egui::RichText::new(name)
+                                .size(12.5)
+                                .color(theme::TEXT_PRIMARY),
+                        );
+                        ui.label(
+                            egui::RichText::new(type_id)
+                                .size(10.5)
+                                .monospace()
+                                .color(theme::TEXT_TERTIARY),
+                        );
+                    });
+                }
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Trailing slot, capped at two marks. A pinned row always spells its state out
                 // here, because the pin took the glyph that would otherwise carry it.
                 let word = node.state.word().or_else(|| {
                     (node.pinned && node.state == status::NodeState::Current).then_some("current")
                 });
-                if node.build_included == Some(true) {
-                    ui.label(
+                if let Some(included) = node.build_included {
+                    // A mirror of the World panel's Outputs list, which owns inclusion: clicking
+                    // either moves the one value, on the same pattern as the viewport's output
+                    // picker. Dimmed when excluded, so the row states the fact either way.
+                    let chip =
                         egui::RichText::new("build")
                             .size(10.5)
                             .monospace()
-                            .color(theme::TEXT_SECONDARY),
-                    );
+                            .color(if included {
+                                theme::ACCENT_PRIMARY
+                            } else {
+                                theme::TEXT_TERTIARY
+                            });
+                    if ui
+                        .add(egui::Label::new(chip).sense(egui::Sense::click()))
+                        .on_hover_text(if included {
+                            "Included in the next build"
+                        } else {
+                            "Excluded from the next build"
+                        })
+                        .clicked()
+                    {
+                        toggle_build = true;
+                    }
                 } else if node.fidelity != status::Fidelity::None && word.is_none() {
                     ui.label(
                         egui::RichText::new("2D")
@@ -3524,7 +3611,12 @@ fn node_row(ui: &mut egui::Ui, state: &AppState, node: &status::NodeStatus) -> e
         ui.painter()
             .rect_filled(rect, 2.0, theme::SELECTION.gamma_multiply(0.55));
     }
-    response
+    NodeRowAction {
+        // A click on the build chip is not also a click on the row: toggling inclusion should
+        // not drag the selection along with it.
+        select: response.clicked() && !toggle_build,
+        toggle_build,
+    }
 }
 
 /// The node pane (#280): every node in the graph and what it is doing, in dependency order.
@@ -3542,65 +3634,184 @@ fn nodes_pane(ui: &mut egui::Ui, state: &mut AppState) {
         built: std::collections::HashSet::new(),
         pinned: state.preview_pin,
     };
-    let nodes = status::statuses(&state.graph, &report);
+    let mut nodes = status::statuses(&state.graph, &report);
+    let total = nodes.len();
+    status::sort(
+        &mut nodes,
+        state.node_sort,
+        &project_file::snarl_positions(&state.snarl),
+    );
+    let filtering = !state.node_filter.trim().is_empty() || state.node_chips.any();
+    nodes.retain(|n| status::matches(n, &state.node_filter, state.node_chips));
+    // Computed over the rows that survived the filter, so a suffix appears only where two rows
+    // you can actually see share a name.
+    let suffixes = status::suffixes(&nodes);
 
     egui::Frame::new()
         .inner_margin(egui::Margin::symmetric(8, 6))
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            if nodes.is_empty() {
+            if total == 0 {
                 ui.weak("No nodes in this graph.");
                 return;
             }
-            let stale = nodes
-                .iter()
-                .filter(|n| n.state == status::NodeState::Stale)
-                .count();
-            let blocked = nodes
-                .iter()
-                .filter(|n| {
-                    matches!(
-                        n.state,
-                        status::NodeState::NoInput | status::NodeState::Failed
-                    )
-                })
-                .count();
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(format!("{} nodes", nodes.len()))
-                        .size(11.5)
-                        .monospace()
-                        .color(theme::TEXT_SECONDARY),
-                );
-                if stale > 0 {
-                    ui.label(
-                        egui::RichText::new(format!("{stale} stale"))
-                            .size(11.5)
-                            .monospace()
-                            .color(theme::WARNING),
-                    );
-                }
-                if blocked > 0 {
-                    ui.label(
-                        egui::RichText::new(format!("{blocked} blocked"))
-                            .size(11.5)
-                            .monospace()
-                            .color(theme::ERROR),
-                    );
-                }
-            });
+            nodes_summary(ui, state, &nodes, total, filtering);
+            nodes_toolbar(ui, state);
             ui.add_space(4.0);
-            let mut clicked = None;
-            for node in &nodes {
-                if node_row(ui, state, node).clicked() {
-                    clicked = Some(node.handle);
+            if nodes.is_empty() {
+                ui.weak("No nodes match.");
+                return;
+            }
+            let mut select = None;
+            let mut toggle = None;
+            for (node, suffix) in nodes.iter().zip(&suffixes) {
+                let action = node_row(ui, state, node, suffix.as_deref(), state.node_density);
+                if action.select {
+                    select = Some(node.handle);
+                }
+                if action.toggle_build {
+                    toggle = Some(node.handle);
                 }
             }
             // Selecting from the pane selects on the canvas: one selection, two places to make it.
-            if let Some(handle) = clicked {
+            if let Some(handle) = select {
                 state.select_only(handle);
             }
+            if let Some(handle) = toggle {
+                toggle_build_inclusion(state, handle);
+            }
         });
+}
+
+/// The counts above the list. While a filter is active it states the hidden count and offers a way
+/// out instead, so a filtered list can never be mistaken for the whole graph (#281).
+fn nodes_summary(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    shown: &[status::NodeStatus],
+    total: usize,
+    filtering: bool,
+) {
+    ui.horizontal(|ui| {
+        if filtering {
+            ui.label(
+                egui::RichText::new(format!("{} of {total} shown", shown.len()))
+                    .size(11.5)
+                    .monospace()
+                    .color(theme::TEXT_PRIMARY),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("Clear").clicked() {
+                    state.node_filter.clear();
+                    state.node_chips = status::Chips::default();
+                }
+            });
+            return;
+        }
+        let count = |f: fn(&status::NodeStatus) -> bool| shown.iter().filter(|n| f(n)).count();
+        let stale = count(|n| n.state == status::NodeState::Stale);
+        let blocked = count(|n| {
+            matches!(
+                n.state,
+                status::NodeState::NoInput | status::NodeState::Failed
+            )
+        });
+        ui.label(
+            egui::RichText::new(format!("{total} nodes"))
+                .size(11.5)
+                .monospace()
+                .color(theme::TEXT_SECONDARY),
+        );
+        if stale > 0 {
+            ui.label(
+                egui::RichText::new(format!("{stale} stale"))
+                    .size(11.5)
+                    .monospace()
+                    .color(theme::WARNING),
+            );
+        }
+        if blocked > 0 {
+            ui.label(
+                egui::RichText::new(format!("{blocked} blocked"))
+                    .size(11.5)
+                    .monospace()
+                    .color(theme::ERROR),
+            );
+        }
+    });
+}
+
+/// The filter field, the sort control, the density toggle, and the quick chips.
+fn nodes_toolbar(ui: &mut egui::Ui, state: &mut AppState) {
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut state.node_filter)
+                .hint_text("Filter…")
+                .desired_width(ui.available_width() - 96.0),
+        );
+        let sort_label = match state.node_sort {
+            status::NodeSort::Dependency => "Dependency",
+            status::NodeSort::Canvas => "Canvas",
+            status::NodeSort::Alphabetical => "A-Z",
+            status::NodeSort::StaleFirst => "Stale first",
+        };
+        egui::ComboBox::from_id_salt("nodes-sort")
+            .selected_text(egui::RichText::new(sort_label).size(11.0))
+            .width(78.0)
+            .show_ui(ui, |ui| {
+                for (order, label) in [
+                    (status::NodeSort::Dependency, "Dependency"),
+                    (status::NodeSort::Canvas, "Canvas"),
+                    (status::NodeSort::Alphabetical, "A-Z"),
+                    (status::NodeSort::StaleFirst, "Stale first"),
+                ] {
+                    ui.selectable_value(&mut state.node_sort, order, label);
+                }
+            })
+            .response
+            .on_hover_text("How the list is ordered. Your choice, never the build's.");
+        let compact = state.node_density == status::Density::Compact;
+        if ui
+            .selectable_label(compact, egui::RichText::new("\u{2261}").size(12.0))
+            .on_hover_text("Compact rows")
+            .clicked()
+        {
+            state.node_density = if compact {
+                status::Density::Comfortable
+            } else {
+                status::Density::Compact
+            };
+        }
+    });
+    ui.horizontal(|ui| {
+        let chips = &mut state.node_chips;
+        for (on, label) in [
+            (&mut chips.stale, "stale"),
+            (&mut chips.failed, "failed"),
+            (&mut chips.endpoints, "endpoints"),
+        ] {
+            if ui
+                .selectable_label(*on, egui::RichText::new(label).size(10.5).monospace())
+                .clicked()
+            {
+                *on = !*on;
+            }
+        }
+    });
+}
+
+/// Flips an endpoint's inclusion in the next build, which is the same value the World panel's
+/// Outputs list edits. One value, two places to reach it.
+fn toggle_build_inclusion(state: &mut AppState, handle: canvas::Handle) {
+    let Some(id) = state.graph.node_id_of(handle) else {
+        return;
+    };
+    let mut params = state.graph.params(id).cloned().unwrap_or_default();
+    let included = params.get_bool("build", true);
+    params = params.with("build", ymir_core::ParamValue::Bool(!included));
+    if let Err(err) = state.graph.set_params(id, params) {
+        state.status = Some(format!("Could not change build inclusion: {err}"));
+    }
 }
 inventory::submit! {
     dock::DockPane {
