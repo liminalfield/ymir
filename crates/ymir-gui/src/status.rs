@@ -368,6 +368,30 @@ pub(crate) fn suffixes(nodes: &[&NodeStatus]) -> Vec<Option<String>> {
     out
 }
 
+/// Every node a pull of `targets` would touch: the targets and everything upstream of them.
+///
+/// Walked once when a build starts, so its nodes read as queued before anything reaches them. A
+/// build that filled up from an empty list would say nothing about how much was left.
+pub(crate) fn cone(graph: &Graph, targets: &[Handle]) -> HashSet<Handle> {
+    let mut seen: HashSet<NodeId> = HashSet::new();
+    let mut stack: Vec<NodeId> = targets
+        .iter()
+        .filter_map(|&handle| graph.node_id_of(handle))
+        .collect();
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let ports = graph.spec(id).map_or(0, |s| s.inputs.len());
+        for port in 0..ports {
+            if let Some((src, _)) = graph.input_source(id, port) {
+                stack.push(src);
+            }
+        }
+    }
+    seen.iter().filter_map(|&id| graph.stable_id(id)).collect()
+}
+
 /// The graph's result nodes: those whose output no other node reads. Every node is upstream of at
 /// least one of these, so walking each one's cone covers the whole graph. Used to report cache
 /// state for every node rather than only for the cone of whatever happens to be previewed.

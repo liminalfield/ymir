@@ -2,11 +2,14 @@
 //! build resolution on a worker thread, so a slow build (high-res erosion) never
 //! freezes the UI. One-shot per click — unlike the debounced, latest-wins preview.
 
-use std::sync::mpsc::{Receiver, TryRecvError, channel};
+use std::sync::Arc;
+use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::thread;
 
 use eframe::egui;
-use ymir_core::{CancelToken, Error, EvalCache, EvalRequest, FieldStore, Graph};
+use ymir_core::{
+    CancelToken, Error, EvalCache, EvalRequest, FieldStore, Graph, Progress, ProgressSink,
+};
 
 /// Memory budget for the build cache's hot tier: holds a typical build in RAM, while larger
 /// builds spill to the disk tier. (Will become a user setting.)
@@ -46,12 +49,31 @@ enum Status {
     Failed(String),
 }
 
+/// Forwards the evaluator's progress to the UI thread (#285).
+///
+/// A channel send per event, which is what [`ProgressSink`] asks for: this is called from inside
+/// the evaluation walk, so anything slower here would slow the build it describes. A closed
+/// receiver means the UI is gone, and the build is on its way out too, so the send is dropped
+/// rather than propagated into the walk.
+#[derive(Debug)]
+struct ChannelSink(Sender<Progress>);
+
+impl ProgressSink for ChannelSink {
+    fn report(&self, progress: Progress) {
+        // shortcut-ok: a closed receiver means the app is exiting; there is nothing to recover.
+        let _ = self.0.send(progress);
+    }
+}
+
 /// Drives one off-thread build at a time. The UI calls [`start`](Self::start) on a
 /// Build click, [`poll`](Self::poll) each frame to collect the result, and
 /// [`show`](Self::show) to render the status.
 pub(crate) struct BuildRunner {
     /// The in-flight build's result channel, if any.
     rx: Option<Receiver<Outcome>>,
+    /// Progress events from the evaluator, drained each frame (#285). Separate from the outcome
+    /// channel because they arrive throughout the build rather than at its end.
+    progress_rx: Option<Receiver<Progress>>,
     /// The current build's cancellation flag. The worker's request holds a clone; the
     /// Cancel button sets it, and the erosion (and the evaluator between nodes) polls it.
     cancel: CancelToken,
@@ -65,6 +87,7 @@ impl BuildRunner {
     pub(crate) fn new() -> Self {
         Self {
             rx: None,
+            progress_rx: None,
             cancel: CancelToken::new(),
             status: Status::Idle,
             kind: BuildKind::Outputs,
@@ -95,6 +118,9 @@ impl BuildRunner {
         let request = request.with_cancel(cancel);
         let (tx, rx) = channel();
         self.rx = Some(rx);
+        let (progress_tx, progress_rx) = channel();
+        self.progress_rx = Some(progress_rx);
+        let request = request.with_progress(Arc::new(ChannelSink(progress_tx)));
         self.status = Status::Building;
         self.kind = kind;
         thread::spawn(move || {
@@ -107,6 +133,18 @@ impl BuildRunner {
             // interaction (otherwise a build done while idle shows only after an unrelated click).
             ctx.request_repaint();
         });
+    }
+
+    /// Every progress event that has arrived since the last call, in order.
+    ///
+    /// Draining is proportional to the number of events, never to the size of the graph: the node
+    /// pane's status model is derived on change and must not be rebuilt because a build ticked
+    /// (see `design/node-status-and-build-monitor.md`).
+    pub(crate) fn drain_progress(&mut self) -> Vec<Progress> {
+        let Some(rx) = &self.progress_rx else {
+            return Vec::new();
+        };
+        rx.try_iter().collect()
     }
 
     /// Requests cancellation of the in-flight build. The worker aborts within one erosion
