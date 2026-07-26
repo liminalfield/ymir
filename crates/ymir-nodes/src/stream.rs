@@ -196,12 +196,14 @@ impl Operator for StreamErosion {
             vec![0.0_f32; bed.len()],
             vec![0.0_f32; bed.len()],
         );
-        for _ in 0..iterations {
+        for pass_index in 0..iterations {
             // Erosion is the slow node; poll cancellation each pass so a superseded preview
-            // aborts instead of running to completion.
+            // aborts instead of running to completion, and report progress from the same place
+            // (#284). The context emits only when the whole percent changes.
             if ctx.is_cancelled() {
                 return Err(Error::Cancelled);
             }
+            ctx.report_progress(pass_index as f32 / iterations as f32);
             // Fill pits, then resolve the resulting flats so filled basins drain across their
             // real geometry rather than along grid-aligned spokes.
             let filled = resolve_flats(&fill_depressions(&z, &grid, max_fill), &grid);

@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::cancel::CancelToken;
 use crate::compute::ComputeContext;
+use crate::progress::{Progress, ProgressSink};
 use crate::region::Region;
 
 /// The context an operator receives for one evaluation.
@@ -44,6 +45,14 @@ pub struct EvalContext {
     /// so a pathologically deep stack reports rather than overflows.
     depth: u32,
     cancel: CancelToken,
+    /// Where to report this node's own progress, already bound to its identity by the evaluator
+    /// so an operator never needs to know its `stable_id` (#284). `None` when nothing is
+    /// watching, which is the normal case and costs one `Option` check per report.
+    ///
+    /// The last percent reported rides alongside so a loop that calls this every iteration emits
+    /// at most a hundred events: the caller reports as often as is convenient, and this decides
+    /// what is worth saying.
+    progress: Option<(Arc<dyn ProgressSink>, u64, Arc<AtomicU8>)>,
     /// Test-only recorder of which world fields an evaluation actually reads, an OR of the
     /// [`ACCESS_WORLD_EXTENT`](Self::ACCESS_WORLD_EXTENT) / `_HEIGHT` / `_SEA_LEVEL` bits. `None`
     /// in production, so every accessor does a single null check and nothing more; the cache-key
@@ -75,6 +84,7 @@ impl EvalContext {
             cancel: CancelToken::new(),
             access_log: None,
             compute: None,
+            progress: None,
         }
     }
 
@@ -261,6 +271,39 @@ impl EvalContext {
     pub fn is_cancelled(&self) -> bool {
         self.cancel.is_cancelled()
     }
+
+    /// Attaches a progress sink bound to `node`. Called by the evaluator, which knows the node's
+    /// identity; operators only ever call [`report_progress`](Self::report_progress).
+    #[must_use]
+    pub fn with_progress(mut self, sink: Arc<dyn ProgressSink>, node: u64) -> Self {
+        self.progress = Some((sink, node, Arc::new(AtomicU8::new(u8::MAX))));
+        self
+    }
+
+    /// Reports how far through its work this node is, as a fraction in `0.0..=1.0`.
+    ///
+    /// A long operator should call this beside its cancellation poll: the same loop, the same
+    /// cadence, and no need to rate-limit at the call site, since an event is emitted only when
+    /// the whole percent changes. A value outside the range is clamped rather than rejected: a
+    /// misreported fraction should not fail an evaluation that is otherwise fine.
+    ///
+    /// Reporting nothing is a valid choice, and the honest one for a node that cannot say how far
+    /// along it is. The pane shows elapsed time for those, never an invented bar.
+    pub fn report_progress(&self, fraction: f32) {
+        let Some((sink, node, last)) = &self.progress else {
+            return;
+        };
+        // Truncated, not rounded: rounding reaches 100 while the last half-percent of the work is
+        // still running, and a bar that sits full while a node keeps going is worse than one that
+        // arrives late. Only an explicit 1.0 reads as 100. A NaN saturates to 0 through the cast.
+        let percent = (fraction.clamp(0.0, 1.0) * 100.0) as u8;
+        if last.swap(percent, Ordering::Relaxed) != percent {
+            sink.report(Progress::Fraction {
+                node: *node,
+                percent,
+            });
+        }
+    }
 }
 
 #[cfg(test)]
@@ -381,6 +424,82 @@ mod tests {
         let ctx = EvalContext::new(64, 64, Region::UNIT, 0).with_sea_level(0.3);
         assert_eq!(ctx.sea_level(), 0.3);
         assert!(ctx.real_slope_scale().is_finite());
+    }
+
+    /// Collects reported progress, so a test can assert on what a loop actually emitted.
+    #[derive(Debug, Default)]
+    struct Recorder(std::sync::Mutex<Vec<Progress>>);
+
+    impl ProgressSink for Recorder {
+        fn report(&self, progress: Progress) {
+            if let Ok(mut events) = self.0.lock() {
+                events.push(progress);
+            }
+        }
+    }
+
+    #[test]
+    fn progress_is_reported_only_when_the_whole_percent_moves() {
+        // #284: a loop calls this every iteration, so the context decides what is worth saying.
+        // Ten thousand passes must not become ten thousand events.
+        let recorder = Arc::new(Recorder::default());
+        let ctx = EvalContext::new(8, 8, Region::UNIT, 0)
+            .with_progress(Arc::clone(&recorder) as Arc<dyn ProgressSink>, 7);
+        for i in 0..10_000 {
+            ctx.report_progress(i as f32 / 10_000.0);
+        }
+        let events = recorder.0.lock().expect("not poisoned").clone();
+        assert_eq!(events.len(), 100, "one per whole percent, 0 through 99");
+        assert_eq!(
+            events[0],
+            Progress::Fraction {
+                node: 7,
+                percent: 0
+            }
+        );
+        assert_eq!(
+            events[99],
+            Progress::Fraction {
+                node: 7,
+                percent: 99
+            }
+        );
+    }
+
+    #[test]
+    fn a_misreported_fraction_is_clamped_rather_than_fatal() {
+        // A wrong fraction should never fail an evaluation that is otherwise fine.
+        let recorder = Arc::new(Recorder::default());
+        let ctx = EvalContext::new(8, 8, Region::UNIT, 0)
+            .with_progress(Arc::clone(&recorder) as Arc<dyn ProgressSink>, 1);
+        ctx.report_progress(-5.0);
+        ctx.report_progress(4.2);
+        ctx.report_progress(f32::NAN);
+        let events = recorder.0.lock().expect("not poisoned").clone();
+        assert_eq!(
+            events,
+            vec![
+                Progress::Fraction {
+                    node: 1,
+                    percent: 0
+                },
+                Progress::Fraction {
+                    node: 1,
+                    percent: 100
+                },
+                Progress::Fraction {
+                    node: 1,
+                    percent: 0
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn reporting_without_a_sink_is_a_no_op() {
+        // The normal case: nothing is watching, and an operator's reporting costs one check.
+        let ctx = EvalContext::new(8, 8, Region::UNIT, 0);
+        ctx.report_progress(0.5);
     }
 
     #[test]

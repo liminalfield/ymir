@@ -198,11 +198,14 @@ fn cpu_erode(
     // Reused per-cell scratch for the two-phase pass, overwritten each pass rather than reallocated.
     let mut moved = vec![0.0_f32; heights.len()];
     let mut total_excess = vec![0.0_f32; heights.len()];
-    for _ in 0..iterations {
-        // Erosion is the slow node; poll cancellation each pass so a superseded preview aborts.
+    for pass_index in 0..iterations {
+        // Erosion is the slow node; poll cancellation each pass so a superseded preview aborts,
+        // and report how far along it is from the same place (#284). The context emits only when
+        // the whole percent changes, so reporting every pass costs nothing.
         if ctx.is_cancelled() {
             return Err(Error::Cancelled);
         }
+        ctx.report_progress(pass_index as f32 / iterations as f32);
         talus::relax_pass(&heights, &mut moved, &mut total_excess, &mut delta, pass);
         // Each cell is independent, so the parallel add is byte-identical to a sequential one.
         heights

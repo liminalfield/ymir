@@ -569,6 +569,11 @@ impl Graph {
         if let Some(compute) = &request.compute {
             ctx = ctx.with_compute(Arc::clone(compute));
         }
+        // Bind the sink to this node, so an operator reporting its own progress never has to know
+        // its identity (#284).
+        if let Some(sink) = &request.progress {
+            ctx = ctx.with_progress(Arc::clone(sink), node.stable_id);
+        }
         let inputs = Inputs::new(&required, &optional);
         request.report(Progress::Started {
             node: node.stable_id,

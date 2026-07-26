@@ -36,6 +36,18 @@ pub enum Progress {
         /// The node's persistent id.
         node: u64,
     },
+    /// How far through its own work a node is, in whole percent. Only nodes that choose to
+    /// report get this: a bar is a claim about progress, and a node that cannot make that claim
+    /// honestly shows elapsed time instead of an invented fraction.
+    ///
+    /// Whole percent rather than a float so the event is cheap, comparable, and bounded: a node
+    /// reports at most a hundred of these however many iterations it runs.
+    Fraction {
+        /// The node's persistent id.
+        node: u64,
+        /// Completion in percent, `0..=100`.
+        percent: u8,
+    },
     /// The node was not run: a cached result still keyed to what it would produce now was
     /// reused. Reported because memoization means most nodes in a rebuild are skipped, and a
     /// monitor that showed them flicking past would read as broken rather than as fast.
