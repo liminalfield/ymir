@@ -5573,15 +5573,23 @@ fn world_settings(ui: &mut egui::Ui, state: &mut AppState) {
                         .speed(8.0)
                         .range(16..=8192),
                 );
-                egui::ComboBox::from_id_salt("build-res-presets")
-                    .selected_text("presets")
-                    .show_ui(ui, |ui| {
-                        for &preset in BUILD_RES_PRESETS {
-                            if ui.selectable_label(false, preset.to_string()).clicked() {
-                                state.build_res = preset;
-                            }
+                // A plain menu popup, not an egui ComboBox, for the reason the output picker
+                // documents: the ComboBox's scroll area auto-shrinks to its content height, so
+                // rounding flickers a scrollbar in and out and the box twitches as the pointer
+                // moves down the list. Ten presets need no scrolling.
+                let button = ui.button(format!("presets   {}", egui_phosphor::regular::CARET_DOWN));
+                egui::Popup::menu(&button).show(|ui| {
+                    ui.set_min_width(button.rect.width());
+                    for &preset in BUILD_RES_PRESETS {
+                        if ui
+                            .selectable_label(state.build_res == preset, preset.to_string())
+                            .clicked()
+                        {
+                            state.build_res = preset;
+                            ui.close();
                         }
-                    });
+                    }
+                });
             });
             ui.add_space(4.0);
             ui.horizontal(|ui| {
