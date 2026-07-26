@@ -9957,7 +9957,13 @@ impl YmirApp {
                 |n| n.to_string_lossy().into_owned(),
             );
         let marker = if self.state.modified { " *" } else { "" };
-        let title = format!("Ymir — {name}{marker}");
+        // A build's state rides the title because the title is the only signal that survives Ymir
+        // not being the focused window, which for a build of any length is most of the time
+        // (#302). It shows in the taskbar and the window list.
+        let title = match self.state.build.title_note() {
+            Some(note) => format!("Ymir — {name}{marker} — {note}"),
+            None => format!("Ymir — {name}{marker}"),
+        };
         if title != self.window_title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.window_title = title;

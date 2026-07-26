@@ -5,6 +5,7 @@
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 use ymir_core::{
@@ -39,6 +40,12 @@ pub(crate) enum BuildKind {
         res: usize,
     },
 }
+
+/// How long a finished build stays prominent before settling into its quiet form (#302).
+///
+/// Long enough to catch an eye that was elsewhere when it landed, short enough not to become
+/// another permanent element in the ribbon. The node pane keeps the durable record.
+const CELEBRATE: Duration = Duration::from_secs(6);
 
 /// The build's coarse state, for the status shown beside the Build button.
 enum Status {
@@ -81,6 +88,10 @@ pub(crate) struct BuildRunner {
     /// What the current (or last) build was asked to produce, so the finished status can
     /// distinguish written outputs from a viewport-only build (#253).
     kind: BuildKind,
+    /// When the running build started, and when it stopped, so the status can report how long it
+    /// took and how recently it landed (#302).
+    started: Option<Instant>,
+    settled: Option<(Instant, Duration)>,
 }
 
 impl BuildRunner {
@@ -91,6 +102,8 @@ impl BuildRunner {
             cancel: CancelToken::new(),
             status: Status::Idle,
             kind: BuildKind::Outputs,
+            started: None,
+            settled: None,
         }
     }
 
@@ -123,6 +136,8 @@ impl BuildRunner {
         let request = request.with_progress(Arc::new(ChannelSink(progress_tx)));
         self.status = Status::Building;
         self.kind = kind;
+        self.started = Some(Instant::now());
+        self.settled = None;
         thread::spawn(move || {
             let mut cache = build_cache();
             let outcome = run(&graph, &targets, &request, &mut cache);
@@ -168,21 +183,53 @@ impl BuildRunner {
         match rx.try_recv() {
             Ok(Outcome::Done(n)) => {
                 self.status = Status::Done(n);
-                self.rx = None;
+                self.finish();
             }
             Ok(Outcome::Cancelled) => {
                 self.status = Status::Cancelled;
-                self.rx = None;
+                self.finish();
             }
             Ok(Outcome::Failed(message)) => {
                 self.status = Status::Failed(message);
-                self.rx = None;
+                self.finish();
             }
             Err(TryRecvError::Empty) => ctx.request_repaint(),
             Err(TryRecvError::Disconnected) => {
                 self.status = Status::Failed("build worker stopped".to_string());
-                self.rx = None;
+                self.finish();
             }
+        }
+    }
+
+    /// Records when a build stopped and how long it ran, and closes its result channel.
+    fn finish(&mut self) {
+        let took = self.started.take().map_or(Duration::ZERO, |t| t.elapsed());
+        self.settled = Some((Instant::now(), took));
+        self.rx = None;
+    }
+
+    /// Draws a finished status, prominent while it is fresh. `timed` states the duration.
+    fn announce(&self, ui: &mut egui::Ui, text: &str, colour: egui::Color32, timed: bool) {
+        announce_impl(
+            ui,
+            timed.then(|| self.just_settled()).flatten(),
+            text,
+            colour,
+        );
+    }
+
+    /// Whether a build finished recently enough to still be announced (#302).
+    fn just_settled(&self) -> Option<Duration> {
+        let (at, took) = self.settled?;
+        (at.elapsed() < CELEBRATE).then_some(took)
+    }
+
+    /// Whether a build is running or has just finished, for the window title (#302). The title is
+    /// the only signal here that works when Ymir is not the focused window.
+    pub(crate) fn title_note(&self) -> Option<&'static str> {
+        match self.status {
+            Status::Building => Some("building\u{2026}"),
+            _ => None,
         }
     }
 
@@ -203,25 +250,62 @@ impl BuildRunner {
                 ui.spinner();
                 ui.weak("Building…");
             }
-            Status::Done(n) => match self.kind {
-                BuildKind::Outputs => {
-                    let plural = if *n == 1 { "" } else { "s" };
-                    ui.weak(format!("Built {n} output{plural}"));
-                }
-                // A viewport-only build wrote no file, so the status says the resolution it
-                // reached and that nothing was exported (#253).
-                BuildKind::Preview { res } => {
-                    ui.weak(format!("Built preview at {res}px (no output exported)"));
-                }
-            },
+            Status::Done(n) => {
+                let what = match self.kind {
+                    BuildKind::Outputs => {
+                        let plural = if *n == 1 { "" } else { "s" };
+                        format!("Built {n} output{plural}")
+                    }
+                    // A viewport-only build wrote no file, so the status says the resolution it
+                    // reached and that nothing was exported (#253).
+                    BuildKind::Preview { res } => {
+                        format!("Built preview at {res}px (no output exported)")
+                    }
+                };
+                self.announce(ui, &what, crate::theme::SUCCESS, true);
+            }
             Status::Cancelled => {
-                ui.weak("Cancelled");
+                self.announce(ui, "Cancelled", crate::theme::TEXT_SECONDARY, true);
             }
             Status::Failed(message) => {
-                ui.colored_label(ui.visuals().error_fg_color, message);
+                // A failure never fades: it is the one ending you must not miss, and it stays
+                // until the next build replaces it.
+                ui.label(
+                    egui::RichText::new(message)
+                        .color(crate::theme::ERROR)
+                        .strong(),
+                );
             }
         }
     }
+}
+
+/// Draws a finished build's status, prominently for a few seconds and then quietly (#302).
+///
+/// The old version was `ui.weak` before and after, so the only thing that marked completion was a
+/// spinner disappearing, which is the weakest signal available. This states the ending, in colour,
+/// with what it cost, and then gets out of the way.
+fn announce_impl(
+    ui: &mut egui::Ui,
+    fresh: Option<std::time::Duration>,
+    text: &str,
+    colour: egui::Color32,
+) {
+    let Some(took) = fresh else {
+        ui.weak(text);
+        return;
+    };
+    ui.label(
+        egui::RichText::new(format!(
+            "\u{2713} {text} \u{b7} {}",
+            crate::build_progress::format_duration(took)
+        ))
+        .color(colour)
+        .strong(),
+    );
+    // Repaint when the announcement is due to settle, so it does not sit prominent until some
+    // unrelated interaction happens to redraw the frame.
+    ui.ctx().request_repaint_after(CELEBRATE);
 }
 
 /// Builds the cache for one build: a byte-bounded memory tier over the on-disk warm tier in
@@ -299,6 +383,52 @@ mod tests {
                     Arc::new(Layer::filled(ctx.width, ctx.height, 0.5)),
                 ),
             ])
+        }
+    }
+
+    #[test]
+    fn a_finished_build_is_announced_briefly_and_then_settles() {
+        // #302: the old status was dim text before and after, so the only thing marking completion
+        // was a spinner disappearing. A finish is now an event with a lifetime.
+        let mut runner = BuildRunner::new();
+        assert_eq!(runner.just_settled(), None, "nothing has finished yet");
+
+        runner.settled = Some((Instant::now(), Duration::from_secs(41)));
+        assert_eq!(
+            runner.just_settled(),
+            Some(Duration::from_secs(41)),
+            "a fresh finish reports how long it took"
+        );
+
+        // Far enough in the past to have settled into the quiet form.
+        runner.settled = Some((
+            Instant::now() - CELEBRATE - Duration::from_secs(1),
+            Duration::from_secs(41),
+        ));
+        assert_eq!(
+            runner.just_settled(),
+            None,
+            "an old finish stops shouting, and the pane keeps the durable record"
+        );
+    }
+
+    #[test]
+    fn the_window_title_says_building_only_while_a_build_runs() {
+        // The title is the only signal that works when Ymir is not the focused window, so it must
+        // be accurate: present while running, gone the moment it stops, whatever the ending.
+        let mut runner = BuildRunner::new();
+        assert_eq!(runner.title_note(), None);
+
+        runner.status = Status::Building;
+        assert_eq!(runner.title_note(), Some("building\u{2026}"));
+
+        for ending in [
+            Status::Done(3),
+            Status::Cancelled,
+            Status::Failed("boom".to_string()),
+        ] {
+            runner.status = ending;
+            assert_eq!(runner.title_note(), None, "a stopped build is not building");
         }
     }
 
