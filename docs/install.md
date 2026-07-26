@@ -5,7 +5,24 @@ status: draft
 
 # Install
 
-Ymir is a native Linux application that you build from source. There are no binary releases yet.
+Ymir is a native Linux application. Download a released binary, or build it from source.
+
+## Download a binary
+
+Each release attaches a `ymir-gui` binary for Linux on x86_64, alongside the headless
+`ymir-cli` and a `SHA256SUMS` file. Take the newest from the
+[releases page](https://github.com/liminalfield/ymir/releases), make it executable, and run it:
+
+```bash
+chmod +x ymir-gui-linux-x86_64
+./ymir-gui-linux-x86_64
+```
+
+The requirements below still apply: the binary needs a Vulkan-capable GPU, and it does not remove
+the need for working drivers.
+
+Build from source instead if you are on another architecture, want to follow `main`, or intend to
+change something.
 
 ## Requirements
 
