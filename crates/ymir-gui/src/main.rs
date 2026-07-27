@@ -5595,21 +5595,6 @@ fn materials_pane(ui: &mut egui::Ui, state: &mut AppState) {
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             materials_body(ui, state, &available);
-
-            // What is actually showing, which a mute or a solo changes. Worth stating rather than
-            // leaving you to count rows: with something soloed most of the list is struck through.
-            if let Some(set) = state.material_sets.active() {
-                let total = set.entries.len();
-                let showing = state.material_sets.showing().len();
-                if total > 0 {
-                    ui.add_space(4.0);
-                    ui.weak(if showing == total {
-                        format!("{total} showing")
-                    } else {
-                        format!("{showing} of {total} showing")
-                    });
-                }
-            }
         });
 }
 
