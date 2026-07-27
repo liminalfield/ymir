@@ -110,7 +110,7 @@ piece of DX12 risk that can be retired before anyone touches a Windows machine.
 Everything above is verifiable without a Windows machine. This is not. Compiling is not
 running, and these are unexamined:
 
-- **The GPU path, when it falls to DX12.** Vulkan is the likely backend (above), so the DX12
+- **The GPU path, when it falls to DX12** (largely settled, see below). Vulkan is the likely backend (above), so the DX12
   path only appears where Vulkan enumerates nothing: an older Intel iGPU, a stripped OEM driver
   install, a VM, or an explicit `WGPU_BACKEND=dx12`. There the risk is not DX12 but its shader
   compiler. wgpu 29 defaults to `Dx12Compiler::Auto`, which tries static DXC (feature off),
@@ -123,10 +123,15 @@ running, and these are unexamined:
   (`thermal.rs`), so the worst realistic outcome is a slow build rather than wrong terrain.
   And the CPU-versus-GPU agreement is guarded at `1e-4` per cell over 40 passes.
 
-  That guard skips when no adapter is present, so whether it runs on Windows CI depends on the
-  Microsoft Basic Render Driver (WARP), a software DX12 adapter usually available on
-  `windows-latest`. If it enumerates, CI exercises the DX12 and FXC path for free, which is the
-  best guard available; worth establishing rather than assuming.
+  **Settled, and better than hoped.** The Windows CI job (#311) reports its adapter, and
+  `windows-latest` enumerates the Microsoft Basic Render Driver (WARP) **via DX12**. Both GPU
+  tests run there and pass, so the `1e-4` agreement with the CPU reference holds through the
+  DX12 backend and naga's HLSL output, checked on every pull request at no cost. Which shader
+  compiler `Dx12Compiler::Auto` settles on for that runner is not recorded, so this covers the
+  DX12 code path rather than FXC specifically.
+
+  What remains unverified is DX12 on a *real* driver rather than WARP, which is worth one
+  deliberate `WGPU_BACKEND=dx12` run on hardware.
 - **File dialogs**, through rfd's Win32 backend rather than the XDG portal.
 - **HiDPI scaling**, which Windows reports differently from Wayland.
 - **The log file and the field store**, where Windows refuses to delete or overwrite a file
