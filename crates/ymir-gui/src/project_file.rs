@@ -1,7 +1,7 @@
 //! The GUI project file: one git-friendly JSON file holding everything needed to
 //! reopen a session.
 //!
-//! It wraps `ymir-core`'s headless [`ProjectDocument`] (the engine truth: nodes,
+//! It wraps `ymir-core`'s headless [`ymir_core::ProjectDocument`] (the engine truth: nodes,
 //! params, wiring) with the view-state the engine deliberately does not know about:
 //! the canvas position of each node, plus world settings (seed, world extent). Both
 //! the document and the positions are keyed by the persistent `stable_id`, so a
