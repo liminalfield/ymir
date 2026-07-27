@@ -6018,18 +6018,18 @@ fn material_row(
     // A soloed row carries an accent edge down its left, full height. The mark in a 24 px box at
     // the far right makes "what is soloed" a column of small boxes to read; this is findable in
     // peripheral vision at any list length, and survives greyscale.
-    let pad = if soloed {
+    if soloed {
         painter.rect_filled(
             egui::Rect::from_min_size(rect.left_top(), egui::vec2(m::SOLO_EDGE, rect.height())),
             m::RADIUS,
             theme::ACCENT_PRIMARY,
         );
-        m::ROW_PAD - m::SOLO_EDGE
-    } else {
-        m::ROW_PAD
-    };
+    }
 
-    let mut x = rect.left() + pad;
+    // The edge paints inside the row's left padding rather than displacing it, so soloing does not
+    // shift the row's contents. Same reasoning as reserving the hover stroke's width: a state
+    // change should change how a row reads, never where its parts are.
+    let mut x = rect.left() + m::ROW_PAD;
     let mid = rect.center().y;
 
     painter.text(
