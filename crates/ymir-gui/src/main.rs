@@ -16,8 +16,8 @@ use egui_snarl::{NodeId as SnarlNodeId, Snarl};
 use ymir_core::registry;
 use ymir_core::{
     BrushShape, EvalCache, EvalRequest, Extraction, Field, FieldStore, Graph, INPUT_TYPE_ID,
-    NodeId, OUTPUT_TYPE_ID, ParamKind, ParamValue, Params, ProjectDocument, Region,
-    SUBGRAPH_TYPE_ID, Stroke, StrokeMode, StrokePoint, Strokes, marker_port_label,
+    NodeId, OUTPUT_TYPE_ID, ParamKind, ParamValue, Params, ProjectDocument, SUBGRAPH_TYPE_ID,
+    Stroke, StrokeMode, StrokePoint, Strokes, marker_port_label,
 };
 use ymir_nodes::{CategoryDef, categories, find_category, node_group, tr};
 
@@ -2031,10 +2031,7 @@ impl AppState {
             return;
         };
         let res = self.preview_res;
-        let mut request = EvalRequest::new(res, res, Region::UNIT, self.seed)
-            .with_world_extent(self.world_extent)
-            .with_world_height(self.world_height)
-            .with_sea_level(self.sea_level);
+        let mut request = EvalRequest::from_world(&self.world_settings(), res);
         // Run the preview on the GPU when the device is shared, so the tweak-adjust loop stays fast
         // at higher resolutions. The handle is not part of a node's cache key, so a GPU and a CPU
         // result are interchangeable in the cache.
@@ -3122,10 +3119,7 @@ fn ribbon_pane(ui: &mut egui::Ui, state: &mut AppState) {
                             ));
                         } else {
                             let res = state.build_res;
-                            let mut request = EvalRequest::new(res, res, Region::UNIT, state.seed)
-                                .with_world_extent(state.world_extent)
-                                .with_world_height(state.world_height)
-                                .with_sea_level(state.sea_level);
+                            let mut request = EvalRequest::from_world(&state.world_settings(), res);
                             if let Some(gpu) = &state.gpu {
                                 request = request.with_compute(gpu.clone());
                             }
@@ -6863,15 +6857,7 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
 
     // Per-node thumbnails (#42): evaluate every output-producing node at thumbnail
     // resolution off-thread, and draw each result in its node body below.
-    let thumb_request = EvalRequest::new(
-        thumbnails::THUMB_RES,
-        thumbnails::THUMB_RES,
-        Region::UNIT,
-        state.seed,
-    )
-    .with_world_extent(state.world_extent)
-    .with_world_height(state.world_height)
-    .with_sea_level(state.sea_level);
+    let thumb_request = EvalRequest::from_world(&state.world_settings(), thumbnails::THUMB_RES);
     // The working set is culled to the last-frame view (#74): off-screen nodes and a
     // zoomed-out canvas (where a thumbnail is too small to read) are skipped, so a
     // large graph evaluates only what is on screen. Disabled entirely from the View
@@ -8448,10 +8434,7 @@ fn refresh_viewport_build(state: &mut AppState) {
         // against a different selection.
         let id = state.graph.node_id_of(state.preview_target()?)?;
         let res = state.build_res;
-        let request = EvalRequest::new(res, res, Region::UNIT, state.seed)
-            .with_world_extent(state.world_extent)
-            .with_world_height(state.world_height)
-            .with_sea_level(state.sea_level);
+        let request = EvalRequest::from_world(&state.world_settings(), res);
         state.graph.output_key(id, &request).ok()
     })();
     // Diagnostic (logged, so it shows headless too): report the lookup once per distinct
@@ -10583,7 +10566,7 @@ mod tests {
 
         // Inside, the lone Input marker binds to the fbm feeding the container.
         let inputs = state.subgraph_inputs().expect("bound inputs exist");
-        let request = EvalRequest::new(16, 16, Region::UNIT, state.seed);
+        let request = EvalRequest::new(16, 16, ymir_core::Region::UNIT, state.seed);
         let bound = inputs.bound_fields(&state.graph, &request);
         assert_eq!(bound.len(), 1, "one input marker is bound");
         let (_, field) = &bound[0];

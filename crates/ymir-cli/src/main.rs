@@ -15,6 +15,7 @@ use ymir_core::{EvalCache, EvalRequest, Graph, ParamValue, Params, Region};
 use ymir_nodes as _;
 
 mod docs;
+mod render;
 
 fn make_op(type_id: &str) -> Result<Box<dyn ymir_core::Operator>, Box<dyn Error>> {
     make(type_id).ok_or_else(|| format!("operator {type_id:?} is not registered").into())
@@ -26,6 +27,8 @@ fn make_op(type_id: &str) -> Result<Box<dyn ymir_core::Operator>, Box<dyn Error>
 enum Command {
     /// No arguments: render the built-in sample graph.
     Sample,
+    /// `render …`, with the arguments after it passed through.
+    Render(Vec<String>),
     /// `docs …`, with the arguments after it passed through.
     Docs(Vec<String>),
     /// `--version` / `-V`.
@@ -53,6 +56,7 @@ fn parse(args: &[String]) -> Command {
     }
     match args.split_first() {
         None => Command::Sample,
+        Some((first, rest)) if first == "render" => Command::Render(rest.to_vec()),
         Some((first, rest)) if first == "docs" => Command::Docs(rest.to_vec()),
         Some((first, _)) => Command::Unknown(first.clone()),
     }
@@ -63,18 +67,41 @@ const USAGE: &str = "\
 ymir-cli, the headless runner for Ymir.
 
 Usage:
+  ymir-cli render PROJECT [--res N] [--out FILE] [--node NAME]
+                               Build a saved project. The seed, world size, and build
+                               resolution come from the project itself, so the result
+                               matches what the editor shows.
+
+                               --res N     Build at N cells square instead of the
+                                           project's own build resolution.
+                               --out FILE  Write the result here, as .png, .r16, or
+                                           .exr. Required when the project ends in an
+                                           ordinary node; refused when it ends in
+                                           export nodes, which write their own paths.
+                               --node NAME Build one node, by its editor name or its
+                                           stable id, instead of every result node.
+
   ymir-cli                     Render the built-in sample graph to out/, exercising the
                                full save and reload path.
   ymir-cli docs [--format json]
                                Print the node reference as JSON, generated from this
                                binary's own registry.
   ymir-cli --version, -V       Print the version, with the commit it was built from.
-  ymir-cli --help, -h          Print this.
+  ymir-cli --help, -h          Print this.";
 
-Rendering a project of your own is not implemented yet; see
-https://github.com/liminalfield/ymir/issues/30.";
+/// Runs the command and reports a failure as a plain sentence.
+///
+/// `main` does not return the `Result` itself: Rust's own reporting prints it through `Debug`, so
+/// a message that reads "no node named X in this project" arrives quoted and backslash-escaped.
+/// What someone typing a command wants is the sentence.
+fn main() {
+    if let Err(err) = run() {
+        eprintln!("ymir-cli: {err}");
+        std::process::exit(1);
+    }
+}
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn run() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match parse(&args) {
         // Printed before any work, so it stays usable for provenance even if a render would fail.
@@ -88,6 +115,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         // Emitted before any logging or render work.
         Command::Docs(rest) => return docs::run(&rest),
+        Command::Render(rest) => {
+            // Load degradations go to stderr rather than being swallowed, the same as the sample.
+            ymir_core::logging::init(None, log::LevelFilter::Info);
+            return render::run(&rest);
+        }
         Command::Unknown(arg) => {
             eprintln!("ymir-cli: unrecognised argument {arg:?}\n\n{USAGE}");
             std::process::exit(2);
@@ -175,9 +207,19 @@ mod tests {
             Command::Unknown("--hepl".to_string())
         );
         assert_eq!(
-            parse(&args(&["render", "project.ymir"])),
-            Command::Unknown("render".to_string()),
-            "a command that does not exist yet is refused, not silently ignored"
+            parse(&args(&["renderr", "project.ymir"])),
+            Command::Unknown("renderr".to_string()),
+            "a near-miss on a real command is refused, not silently ignored"
+        );
+    }
+
+    #[test]
+    fn render_passes_the_rest_through() {
+        // The subcommand parses its own arguments (see `render::parse`), so this only has to
+        // route them there intact.
+        assert_eq!(
+            parse(&args(&["render", "p.ymir", "--res", "512"])),
+            Command::Render(args(&["p.ymir", "--res", "512"]))
         );
     }
 

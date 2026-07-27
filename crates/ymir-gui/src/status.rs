@@ -487,25 +487,12 @@ pub(crate) fn cone(graph: &Graph, targets: &[Handle]) -> HashSet<Handle> {
 /// The graph's result nodes: those whose output no other node reads. Every node is upstream of at
 /// least one of these, so walking each one's cone covers the whole graph. Used to report cache
 /// state for every node rather than only for the cone of whatever happens to be previewed.
+///
+/// Thin over [`Graph::sinks`], which the headless renderer uses to decide what a build covers.
+/// The same definition on both sides is the point: what the pane calls a result node and what a
+/// build renders must not be two different answers.
 pub(crate) fn sinks(graph: &Graph) -> Vec<NodeId> {
-    let ids: Vec<NodeId> = graph
-        .to_document()
-        .nodes
-        .iter()
-        .filter_map(|n| graph.node_id_of(n.stable_id))
-        .collect();
-    let mut consumed: HashSet<NodeId> = HashSet::new();
-    for &id in &ids {
-        let ports = graph.spec(id).map_or(0, |s| s.inputs.len());
-        for port in 0..ports {
-            if let Some((src, _)) = graph.input_source(id, port) {
-                consumed.insert(src);
-            }
-        }
-    }
-    ids.into_iter()
-        .filter(|id| !consumed.contains(id))
-        .collect()
+    graph.sinks()
 }
 
 /// Every node in `graph`, ordered so a node follows all the nodes it reads.

@@ -64,12 +64,14 @@ The node editor is the `ymir-gui` binary:
 cargo run -p ymir-gui --release
 ```
 
-The CLI renders a sample terrain headlessly, running fBm through thermal erosion into a
-PNG export and writing the result to `out/heightmap.png`:
+The CLI builds a saved project headlessly. The seed, world size, and build resolution
+come from the project file, so the result matches what the editor shows:
 
 ```bash
-cargo run -p ymir-cli
+cargo run -p ymir-cli --release -- render examples/terraced_beach.ymir --out beach.png
 ```
+
+With no arguments it renders a built-in sample instead, writing `out/heightmap.png`.
 
 If the build fails on your distribution, please open an issue with the error and the
 distro you are on. The exact system packages needed for the Wayland and X11 backends

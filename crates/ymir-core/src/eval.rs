@@ -28,6 +28,7 @@ use crate::hash::Fnv1a64;
 use crate::operator::{ContextDeps, Inputs};
 use crate::param::Params;
 use crate::progress::{Progress, ProgressSink};
+use crate::project::WorldSettings;
 use crate::region::Region;
 
 /// The global parameters of one evaluation request: resolution, region, the
@@ -93,6 +94,23 @@ impl EvalRequest {
             compute: None,
             progress: None,
         }
+    }
+
+    /// Creates a square request over the unit region from a project's
+    /// [`WorldSettings`](crate::WorldSettings), at `res` cells a side.
+    ///
+    /// The one place the world settings become an evaluation. Every consumer goes through it, so
+    /// a headless render and the editor cannot drift into building the same project under
+    /// different worlds; that they agree is what makes a saved project mean something.
+    ///
+    /// `res` is a parameter rather than read from `build_res` because a preview and a
+    /// full build differ in resolution and in nothing else.
+    #[must_use]
+    pub fn from_world(world: &WorldSettings, res: usize) -> Self {
+        Self::new(res, res, Region::UNIT, world.seed)
+            .with_world_extent(world.world_extent)
+            .with_world_height(world.world_height)
+            .with_sea_level(world.sea_level)
     }
 
     /// Attaches a compute-device handle, threaded into each node's [`EvalContext`] so a

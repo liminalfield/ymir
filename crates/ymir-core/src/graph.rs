@@ -743,6 +743,39 @@ impl Graph {
         ids.into_iter().map(|(id, _)| id).collect()
     }
 
+    /// Every node's runtime id, in ascending `stable_id` order.
+    ///
+    /// Ordered rather than raw slotmap order so anything that walks the whole graph (a listing,
+    /// a build's target set) reads the same on every run. The slotmap's own order depends on
+    /// insertion and removal history, which a saved and reloaded project does not reproduce.
+    #[must_use]
+    pub fn node_ids(&self) -> Vec<NodeId> {
+        let mut ids: Vec<(NodeId, u64)> =
+            self.nodes.iter().map(|(id, n)| (id, n.stable_id)).collect();
+        ids.sort_by_key(|&(_, stable_id)| stable_id);
+        ids.into_iter().map(|(id, _)| id).collect()
+    }
+
+    /// The graph's sinks: every node whose output nothing consumes, in ascending `stable_id`
+    /// order.
+    ///
+    /// These are what "build this project" means. An export endpoint is always a sink (it has no
+    /// outputs at all), but so is the last modifier in a chain that was only ever previewed, which
+    /// is what a project authored in the editor usually ends in.
+    #[must_use]
+    pub fn sinks(&self) -> Vec<NodeId> {
+        let consumed: HashSet<NodeId> = self
+            .nodes
+            .values()
+            .flat_map(|node| node.inputs.iter().flatten())
+            .map(|conn| conn.source)
+            .collect();
+        self.node_ids()
+            .into_iter()
+            .filter(|id| !consumed.contains(id))
+            .collect()
+    }
+
     /// A canonical, machine-independent content hash of the graph's output-determining
     /// state: each node's `stable_id`, `type_id`, params, bypass, and connections, in
     /// deterministic order (built from the canonical [`to_document`](Self::to_document)).
@@ -1929,5 +1962,71 @@ mod tests {
         assert!(!g.would_create_cycle(a, c));
         let d = add(&mut g, "test.head", 0, 1);
         assert!(!g.would_create_cycle(d, a));
+    }
+
+    #[test]
+    fn node_ids_are_ordered_by_stable_id_not_insertion_history() {
+        // The slotmap's own order depends on what was added and removed, which a saved and
+        // reloaded project does not reproduce. Anything that walks the whole graph would then
+        // read differently run to run.
+        let mut g = Graph::new();
+        let a = add(&mut g, "test.a", 0, 1);
+        let b = add(&mut g, "test.b", 1, 1);
+        let c = add(&mut g, "test.c", 1, 1);
+        g.remove_node(b);
+        let d = add(&mut g, "test.d", 1, 1); // reuses b's slot, but takes a fresh stable id
+
+        let ids = g.node_ids();
+        let stable: Vec<u64> = ids.iter().filter_map(|&id| g.stable_id(id)).collect();
+        assert_eq!(stable, vec![0, 2, 3], "ascending stable id");
+        assert_eq!(ids, vec![a, c, d]);
+    }
+
+    #[test]
+    fn sinks_are_the_nodes_nothing_consumes() {
+        //     a -> b -> c        c is a sink
+        //     a -> e            e is a sink too (a feeds both)
+        //     d                 an unwired node is its own sink
+        let mut g = Graph::new();
+        let a = add(&mut g, "test.a", 0, 1);
+        let b = add(&mut g, "test.b", 1, 1);
+        let c = add(&mut g, "test.c", 1, 1);
+        let d = add(&mut g, "test.d", 0, 1);
+        let e = add(&mut g, "test.e", 1, 1);
+        g.connect(a, 0, b, 0).expect("a -> b");
+        g.connect(b, 0, c, 0).expect("b -> c");
+        g.connect(a, 0, e, 0).expect("a -> e");
+
+        assert_eq!(g.sinks(), vec![c, d, e], "ascending stable id");
+    }
+
+    #[test]
+    fn an_endpoint_is_a_sink_and_so_is_a_chain_that_merely_ends() {
+        // The distinction the CLI depends on: a project ending in an export endpoint writes its
+        // own file, while one ending in a modifier (what an editor session usually leaves behind)
+        // is just as much the thing to build, and needs somewhere to be written.
+        let mut g = Graph::new();
+        let source = add(&mut g, "test.gen", 0, 1);
+        let modifier = add(&mut g, "test.mod", 1, 1);
+        let endpoint = add(&mut g, "test.endpoint", 1, 0);
+        g.connect(source, 0, modifier, 0).expect("gen -> mod");
+
+        assert_eq!(
+            g.sinks(),
+            vec![modifier, endpoint],
+            "an unwired endpoint and a terminal modifier are both sinks"
+        );
+        g.connect(modifier, 0, endpoint, 0)
+            .expect("mod -> endpoint");
+        assert_eq!(
+            g.sinks(),
+            vec![endpoint],
+            "wiring the modifier into the endpoint leaves one sink"
+        );
+    }
+
+    #[test]
+    fn an_empty_graph_has_no_sinks() {
+        assert!(Graph::new().sinks().is_empty());
     }
 }
