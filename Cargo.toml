@@ -11,7 +11,7 @@ members = ["crates/*"]
 # release steps are in design/versioning.md. This is the app version, distinct
 # from the save-format versions (project::FORMAT_VERSION and the GUI's PROJECT_ /
 # SUBGRAPH_FORMAT_VERSION), which bump only when the serialized schema changes.
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 license = "GPL-3.0-only"
 authors = ["Oluf Andrews <oluf@oandrews.com>"]
