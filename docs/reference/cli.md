@@ -7,6 +7,8 @@ status: draft
 
 `ymir-cli` is the headless runner. Run it with `cargo run -p ymir-cli`, or from the built binary at `target/release/ymir-cli` after `cargo build --release`.
 
+On Windows it is `ymir-cli.exe`, either from that same build or from the `ymir-windows-x86_64.zip` attached to a [release](https://github.com/liminalfield/ymir/releases). Everything below applies unchanged; the examples write `\` paths where a Linux one would write `/`.
+
 ## render
 
 `ymir-cli render PROJECT` builds a saved project.
