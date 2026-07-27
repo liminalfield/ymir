@@ -1,6 +1,6 @@
 # <img src="ymir-icon-512.png" alt="" height="30" align="middle"> Ymir
 
-Ymir is an open-source, node-based procedural terrain generator for Linux. Everything
+Ymir is an open-source, node-based procedural terrain generator for Linux and Windows. Everything
 in it is a layered field, and every node is something that transforms one. You compose
 terrain by wiring small, single-purpose nodes into a graph, where each node reads the
 fields coming into it and passes on what it has changed.
@@ -13,7 +13,7 @@ It is named for the primordial giant of Norse myth, whose body the world is shap
 ## Status
 
 Ymir is in early development and is already usable. It has a working node editor, a 3D
-terrain viewport, 32 nodes covering noise, shapes, selectors, filters, and three erosion
+terrain viewport, 49 nodes covering noise, shapes, selectors, filters, and three erosion
 models, along with subgraphs and export to 16-bit PNG, raw R16, and 32-bit EXR. The
 internals are still changing and there are rough edges, so feedback and issues are
 welcome.
@@ -46,11 +46,17 @@ between them make possible.
 
 ## Building and running
 
-Ymir is a native Linux application. You will need a Rust toolchain via
+Ymir runs on Linux and Windows. You will need a Rust toolchain via
 [rustup](https://rustup.rs), which fetches the pinned compiler version recorded in
-`rust-toolchain.toml` automatically, and a Vulkan-capable GPU with working drivers for
-the 3D viewport, since the GUI is built on wgpu. The editor targets both Wayland and
-X11.
+`rust-toolchain.toml` automatically, and a GPU with working drivers for the 3D
+viewport, since the GUI is built on wgpu: Vulkan on Linux, and Vulkan or DX12 on
+Windows. The editor targets both Wayland and X11 on Linux, and building on Windows
+also needs the Visual Studio build tools for the MSVC linker.
+
+Released binaries are on the [releases
+page](https://github.com/liminalfield/ymir/releases) if you would rather not build:
+bare binaries for Linux, and a zip for Windows. The Windows binaries are unsigned, so
+SmartScreen warns on first run.
 
 A release build of the whole workspace is the usual starting point:
 
@@ -75,7 +81,8 @@ With no arguments it renders a built-in sample instead, writing `out/heightmap.p
 
 If the build fails on your distribution, please open an issue with the error and the
 distro you are on. The exact system packages needed for the Wayland and X11 backends
-vary between them.
+vary between them. On Windows, a failure at the link step usually means the Visual
+Studio build tools are missing.
 
 ## Documentation
 

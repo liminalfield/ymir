@@ -13,8 +13,9 @@ You need:
 
 - A Rust toolchain via [rustup](https://rustup.rs). The pinned compiler version lives
   in `rust-toolchain.toml` and is fetched automatically.
-- For the GUI, a Vulkan-capable GPU and drivers (the viewport uses wgpu); the editor
-  targets Wayland and X11.
+- For the GUI, a GPU with working drivers (the viewport uses wgpu): Vulkan on Linux,
+  and Vulkan or DX12 on Windows. On Linux the editor targets Wayland and X11; on
+  Windows, building also needs the Visual Studio build tools for the MSVC linker.
 
 Enable the repository git hooks once, so the shortcut scanner runs before each commit:
 

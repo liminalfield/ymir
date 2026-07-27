@@ -5,7 +5,7 @@ status: draft
 
 # Keyboard and mouse
 
-Every modifier is Ctrl. Ymir is a Linux application and uses Ctrl throughout, never a Cmd key.
+Every modifier is Ctrl, on both Linux and Windows. There is no Cmd key anywhere.
 
 ## Canvas
 
