@@ -222,7 +222,8 @@ The division of labour between the panels follows from materials being nodes: co
 edited in the right inspector like any node's parameters, and the left panel arranges which
 materials are in the set. Clicking a row selects its node, so the two work as a pair.
 
-Mockup: <https://claude.ai/code/artifact/750d1de8-8553-428b-8e21-b078e0a7063d>
+Mockup: [`materials-panel.html`](materials-panel.html), which composites with the same over
+rule the application does, so its mute and solo toggles show real behaviour.
 
 ## Decisions settled
 

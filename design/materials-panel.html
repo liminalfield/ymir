@@ -1,0 +1,357 @@
+<!-- Design record, not user documentation. The Materials pane as agreed in review (#267):
+     material sets, ordering, and the mute/solo rule. Fake data, no engine state.
+     The compositing in the script is the same over rule the application implements, so the
+     live toggles show real behaviour rather than an illustration of it. -->
+<title>Ymir Materials panel</title>
+<style>
+  :root {
+    --abyss:#2b3038; --base:#2b3038; --surface:#363b44; --raised:#3f444d; --hover:#484e57;
+    --line:#4c525c; --line-strong:#5a616b;
+    --ink:#e9edf2; --ink-2:#b2b9c2; --ink-3:#878f99;
+    --accent:#1fa0c4; --warning:#ffbf47; --selection:#2f596a;
+    --sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --panel: 260px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin:0; background:var(--abyss); color:var(--ink); font-family:var(--sans);
+    font-size:15px; line-height:1.55; padding:32px 24px 64px;
+  }
+  .wrap { max-width:1180px; margin:0 auto; }
+  h1 { font-size:22px; font-weight:600; margin:0 0 4px; letter-spacing:-0.01em; }
+  .sub { color:var(--ink-3); margin:0 0 28px; font-size:14px; }
+  h2 {
+    font-size:11px; font-weight:600; letter-spacing:0.12em; text-transform:uppercase;
+    color:var(--ink-3); margin:36px 0 12px; padding-bottom:8px; border-bottom:1px solid var(--line);
+  }
+  p { color:var(--ink-2); max-width:62ch; font-size:14px; }
+  code { font-family:var(--mono); font-size:0.9em; color:var(--ink); background:var(--surface);
+         padding:1px 5px; border-radius:3px; }
+
+  .cols { display:flex; gap:28px; align-items:flex-start; flex-wrap:wrap; }
+  .note { flex:1 1 300px; min-width:280px; }
+
+  /* ---- the panel, at its true 260px ---- */
+  .panel {
+    width:var(--panel); flex:0 0 var(--panel);
+    background:var(--base); border:1px solid var(--line); border-radius:4px;
+    padding:10px 10px 12px; font-size:13px;
+  }
+  .panel-caption { color:var(--ink-3); font-size:11px; font-family:var(--mono); margin:8px 0 0; }
+  .sect {
+    display:flex; align-items:center; gap:6px; color:var(--ink-3);
+    font-size:10.5px; font-weight:600; letter-spacing:0.12em; text-transform:uppercase;
+    margin:0 0 10px;
+  }
+  .sect::after { content:""; flex:1; height:1px; background:var(--line); }
+
+  .setbar { display:flex; gap:6px; margin-bottom:10px; align-items:center; }
+  .setlabel { font-size:12px; color:var(--ink-2); flex:0 0 auto; }
+  select.set {
+    flex:1; min-width:0; background:var(--raised); color:var(--ink); font-family:var(--sans);
+    font-size:12.5px; border:1px solid var(--line); border-radius:3px; padding:4px 6px;
+  }
+  .iconbtn {
+    width:26px; height:26px; flex:0 0 26px; display:grid; place-items:center;
+    background:var(--raised); border:1px solid var(--line); border-radius:3px;
+    color:var(--ink-2); font-size:14px; cursor:pointer; font-family:var(--sans); padding:0;
+  }
+  .iconbtn:hover { background:var(--hover); color:var(--ink); }
+
+  ul.rows { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:2px; }
+  li.row {
+    display:grid; grid-template-columns:12px 16px 1fr 22px 22px; align-items:center; gap:6px;
+    padding:5px 4px; border-radius:3px; background:var(--surface); border:1px solid transparent;
+  }
+  li.row:hover { background:var(--raised); border-color:var(--line); }
+  .grip { color:var(--ink-3); cursor:grab; font-size:11px; line-height:1; letter-spacing:-1px; }
+  .swatch { width:16px; height:16px; border-radius:3px; border:1px solid rgba(0,0,0,.45); }
+  .mname { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12.5px; }
+  .tog {
+    width:22px; height:20px; display:grid; place-items:center; border-radius:3px; cursor:pointer;
+    font-size:10px; font-weight:700; font-family:var(--mono); letter-spacing:0;
+    color:var(--ink-3); background:transparent; border:1px solid transparent; user-select:none;
+  }
+  .tog:hover { border-color:var(--line-strong); color:var(--ink-2); }
+  .tog.on-m { background:var(--ink-3); color:var(--base); border-color:var(--ink-3); }
+  .tog.on-s { background:var(--accent); color:#08222b; border-color:var(--accent); }
+  li.row.silent .swatch, li.row.silent .mname { opacity:.34; }
+  li.row.silent .mname { text-decoration:line-through; text-decoration-thickness:1px; }
+
+  .orphan .swatch { background:repeating-linear-gradient(45deg,#5a616b 0 3px,#3f444d 3px 6px); }
+  .orphan .mname { color:var(--warning); font-style:italic; }
+
+  .empty { color:var(--ink-3); font-size:12px; padding:14px 6px; text-align:center; line-height:1.5; }
+  .empty b { display:block; color:var(--ink-2); font-weight:500; font-style:normal; margin-bottom:3px; }
+
+  .addmenu { margin-top:6px; background:var(--raised); border:1px solid var(--line-strong);
+             border-radius:3px; padding:4px; }
+  .addmenu .hd { font-size:10px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-3);
+                 padding:3px 6px 5px; }
+  .addmenu .opt { display:flex; align-items:center; gap:7px; padding:4px 6px; border-radius:2px;
+                  font-size:12.5px; cursor:pointer; }
+  .addmenu .opt:hover { background:var(--selection); }
+  .addmenu .tick { width:12px; flex:0 0 12px; color:var(--accent); font-size:11px; text-align:center; }
+  .addmenu .opt.used .tick::before { content:"✓"; }
+  .ctx { margin-top:6px; background:var(--raised); border:1px solid var(--line-strong);
+         border-radius:3px; padding:3px; width:150px; }
+  .ctx .opt { padding:4px 8px; font-size:12.5px; border-radius:2px; cursor:pointer; }
+  .ctx .opt:hover { background:var(--selection); }
+  .ctx .sep { height:1px; background:var(--line); margin:3px 2px; }
+
+  /* ---- live preview ---- */
+  .stage { display:flex; gap:24px; align-items:flex-start; flex-wrap:wrap; }
+  canvas { background:#12161c; border:1px solid var(--line); border-radius:4px;
+           image-rendering:pixelated; width:340px; height:340px; }
+  .legend { font-size:12px; color:var(--ink-3); font-family:var(--mono); margin-top:8px; }
+  .rule { background:var(--surface); border-left:2px solid var(--accent); padding:10px 14px;
+          border-radius:0 3px 3px 0; font-size:13.5px; color:var(--ink-2); max-width:62ch; }
+  .rule b { color:var(--ink); font-weight:600; }
+  ul.plain { color:var(--ink-2); font-size:14px; max-width:62ch; padding-left:20px; }
+  ul.plain li { margin:5px 0; }
+  .q { color:var(--warning); font-weight:600; }
+</style>
+
+<div class="wrap">
+  <h1>Materials panel</h1>
+  <p class="sub">Mockup for the left panel, drawn at its real width of 260&nbsp;px. Toggle M and S to see the composite change.</p>
+
+  <h2>Live: the set drives the terrain</h2>
+  <div class="stage">
+    <div>
+      <div class="panel">
+        <div class="sect">Materials</div>
+        <div class="setbar">
+          <span class="setlabel">Set</span>
+          <select class="set" id="setpick">
+            <option>Alpine</option>
+            <option>Alpine, snow low</option>
+            <option>Arid</option>
+          </select>
+          <button class="iconbtn" title="New set">+</button>
+          <button class="iconbtn" title="Set actions">⋯</button>
+        </div>
+        <ul class="rows" id="rows"></ul>
+        <button class="iconbtn" style="width:100%;margin-top:6px;font-size:12px;gap:6px;">Materials in this set&hellip;</button>
+      </div>
+      <p class="panel-caption">260 px, true scale</p>
+    </div>
+
+    <div>
+      <canvas id="cv" width="170" height="170"></canvas>
+      <div class="legend" id="legend">3 of 3 showing</div>
+    </div>
+
+    <div class="note">
+      <div class="rule">
+        <b>Mute wins, solo narrows.</b> A material shows if nothing is soloed and it isn&rsquo;t muted, or
+        something is soloed and it is one of them and isn&rsquo;t muted. Soloing a muted material shows
+        nothing, and the lit M beside it says why.
+      </div>
+      <p style="margin-top:14px">Rows are bottom&#8209;of&#8209;stack last, matching how you read a layer stack
+      in an engine: <code>rock</code> at the bottom of the list is underneath. Drag the grip to reorder.</p>
+      <p><b style="color:var(--ink)">Mute persists</b> with the project. <b style="color:var(--ink)">Solo does
+      not</b> &mdash; it is something you do for ten seconds, and reopening a project to find one material
+      showing with no memory of why is the trap the node pane&rsquo;s filter already avoids.</p>
+    </div>
+  </div>
+
+  <h2>Adding a material</h2>
+  <div class="cols">
+    <div>
+      <div class="panel">
+        <div class="sect">Materials</div>
+        <div class="setbar"><span class="setlabel">Set</span>
+          <select class="set"><option>Alpine</option></select>
+          <button class="iconbtn">+</button><button class="iconbtn">⋯</button>
+        </div>
+        <ul class="rows">
+          <li class="row"><span class="grip">⣿</span><span class="swatch" style="background:#8a7a5e"></span><span class="mname">rock</span><span class="tog">M</span><span class="tog">S</span></li>
+          <li class="row"><span class="grip">⣿</span><span class="swatch" style="background:#6f8f5a"></span><span class="mname">grass</span><span class="tog">M</span><span class="tog">S</span></li>
+        </ul>
+        <button class="iconbtn" style="width:100%;margin-top:6px;font-size:12px;">Materials in this set&hellip;</button>
+        <div class="addmenu">
+          <div class="hd">Material nodes in the graph</div>
+          <div class="opt"><span class="tick"></span><span class="swatch" style="background:#e8eef4"></span>snow</div>
+          <div class="opt"><span class="tick"></span><span class="swatch" style="background:#8d6a52"></span>scree</div>
+          <div class="opt used"><span class="tick"></span><span class="swatch" style="background:#8a7a5e"></span>rock</div>
+          <div class="opt used"><span class="tick"></span><span class="swatch" style="background:#6f8f5a"></span>grass</div>
+        </div>
+      </div>
+    </div>
+    <div>
+      <div class="panel">
+        <div class="sect">Materials</div>
+        <div class="setbar"><span class="setlabel">Set</span>
+          <select class="set"><option>Alpine</option></select>
+          <button class="iconbtn">+</button><button class="iconbtn">⋯</button></div>
+        <ul class="rows">
+          <li class="row" style="background:var(--selection);border-color:var(--line-strong)"><span class="grip">⣿</span><span class="swatch" style="background:#6f8f5a"></span><span class="mname">grass</span><span class="tog">M</span><span class="tog">S</span></li>
+        </ul>
+        <div class="ctx">
+          <div class="opt">Remove from set</div>
+        </div>
+      </div>
+      <p class="panel-caption">right-click a row</p>
+    </div>
+    <div class="note">
+      <p>The list is every Material node in the graph, so the panel never invents materials &mdash; it only
+      arranges ones you made. A tick means it is in this set, and clicking toggles it, so one menu owns
+      membership in both directions.</p>
+      <p>That is deliberate: a delete control on every row would cost width the 260&nbsp;px does not have,
+      and would sit permanently under your cursor for an action you take rarely. Right-click on a row is
+      the fast path when you already know which one to drop.</p>
+      <p><b style="color:var(--ink)">Clicking a row selects its node on the canvas</b>, so the right
+      inspector shows that material. The two panels divide the work: the material is a node, so its colour
+      and name are edited on the right like any node&rsquo;s parameters, and the left arranges which
+      materials are in the set and in what order. The swatch and name here identify the node; they are not
+      a second place to edit it.</p>
+      <p>A material can sit in several sets at once. That is what makes A/B cheap: two sets over the same
+      materials, different order, flip the dropdown.</p>
+    </div>
+  </div>
+
+  <h2>The states that are easy to forget</h2>
+  <div class="cols">
+    <div>
+      <div class="panel">
+        <div class="sect">Materials</div>
+        <div class="empty"><b>No material sets</b>Create one to arrange the materials in your graph.</div>
+        <button class="iconbtn" style="width:100%;font-size:12px;">+ New material set</button>
+      </div>
+      <p class="panel-caption">no sets yet</p>
+    </div>
+    <div>
+      <div class="panel">
+        <div class="sect">Materials</div>
+        <div class="setbar"><select class="set"><option>Alpine</option></select>
+          <button class="iconbtn">+</button><button class="iconbtn">⋯</button></div>
+        <div class="empty"><b>Set is empty</b>Add a material node from the graph.</div>
+        <button class="iconbtn" style="width:100%;font-size:12px;">Materials in this set&hellip;</button>
+      </div>
+      <p class="panel-caption">set with nothing in it</p>
+    </div>
+    <div>
+      <div class="panel">
+        <div class="sect">Materials</div>
+        <div class="setbar"><select class="set"><option>Alpine</option></select>
+          <button class="iconbtn">+</button><button class="iconbtn">⋯</button></div>
+        <ul class="rows">
+          <li class="row"><span class="grip">⣿</span><span class="swatch" style="background:#8a7a5e"></span><span class="mname">rock</span><span class="tog">M</span><span class="tog">S</span></li>
+          <li class="row orphan"><span class="grip">⣿</span><span class="swatch"></span><span class="mname">snow</span><span class="tog">M</span><span class="tog">S</span></li>
+        </ul>
+      </div>
+      <p class="panel-caption">its node was deleted</p>
+    </div>
+    <div class="note">
+      <p>A row whose Material node no longer exists is kept and marked rather than dropped silently. You
+      deleted a node, not a set; being told is better than the set quietly getting shorter.</p>
+      <p>It contributes nothing to the composite &mdash; no node means no selection, so there is nothing to
+      draw. The terrain simply shows one material fewer. Remove the row when you are ready, from the
+      right-click menu or the membership list.</p>
+    </div>
+  </div>
+
+  <h2>Still open</h2>
+  <ul class="plain">
+    <li><b>Solo colour is the Frost accent</b> rather than a hue, so nothing depends on red versus green.
+      Muted rows dim and strike through, so mute reads without colour at all.</li>
+    <li><b>Is one active set right</b>, or would you want two shown side by side to compare?</li>
+  </ul>
+</div>
+
+<script>
+  const MATERIALS = [
+    { name:'rock',  color:[0x8a,0x7a,0x5e], sel:'base'  },
+    { name:'grass', color:[0x6f,0x8f,0x5a], sel:'flat'  },
+    { name:'snow',  color:[0xe8,0xee,0xf4], sel:'high'  },
+  ];
+  const state = MATERIALS.map(() => ({ mute:false, solo:false }));
+
+  // A small fake terrain: value-noise height, plus slope, so the selections mean something.
+  const N = 170;
+  const H = new Float32Array(N*N), SLOPE = new Float32Array(N*N);
+  (function build(){
+    const G = 9, g = [];
+    for (let i=0;i<(G+1)*(G+1);i++) g.push(Math.sin(i*12.9898)*43758.5453 % 1);
+    const at = (gx,gy) => Math.abs(g[(gy%(G+1))*(G+1)+(gx%(G+1))]);
+    const sm = t => t*t*(3-2*t);
+    for (let y=0;y<N;y++) for (let x=0;x<N;x++) {
+      let v=0, amp=0.55, f=1;
+      for (let o=0;o<3;o++){
+        const fx=x/N*G*f, fy=y/N*G*f;
+        const x0=Math.floor(fx), y0=Math.floor(fy), tx=sm(fx-x0), ty=sm(fy-y0);
+        const a=at(x0,y0), b=at(x0+1,y0), c=at(x0,y0+1), d=at(x0+1,y0+1);
+        v += (a+(b-a)*tx + (c+(d-c)*tx - (a+(b-a)*tx))*ty) * amp;
+        amp*=0.5; f*=2;
+      }
+      H[y*N+x]=v;
+    }
+    for (let y=0;y<N;y++) for (let x=0;x<N;x++){
+      const l=H[y*N+Math.max(x-1,0)], r=H[y*N+Math.min(x+1,N-1)];
+      const u=H[Math.max(y-1,0)*N+x], d=H[Math.min(y+1,N-1)*N+x];
+      SLOPE[y*N+x]=Math.min(1,Math.hypot(r-l,d-u)*14);
+    }
+  })();
+
+  const clamp = v => v<0?0:v>1?1:v;
+  function weight(kind,i){
+    if (kind==='base') return 1;
+    if (kind==='flat') return clamp(1 - SLOPE[i]*2.6);          // grass on gentle ground
+    return clamp((H[i]-0.42)*7) * clamp(1 - SLOPE[i]*1.5);      // snow high and not on cliffs
+  }
+
+  function visible(){
+    const anySolo = state.some(s => s.solo);
+    return state.map(s => (anySolo ? s.solo : true) && !s.mute);
+  }
+
+  const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+  function draw(){
+    const show = visible();
+    const img = ctx.createImageData(N,N);
+    for (let y=0;y<N;y++) for (let x=0;x<N;x++){
+      const i=y*N+x;
+      const lit = clamp(0.42 + (H[i]-0.45)*1.1 - SLOPE[i]*0.55);   // stand-in hillshade
+      let rgb=[0,0,0], cov=0;
+      MATERIALS.forEach((m,k)=>{                                    // over composite, bottom first
+        if (!show[k]) return;
+        const a = clamp(weight(m.sel,i));
+        if (a<=0) return;
+        for (let c=0;c<3;c++) rgb[c] = rgb[c]*(1-a) + (m.color[c]/255)*a;
+        cov = cov*(1-a) + a;
+      });
+      const o=i*4;
+      for (let c=0;c<3;c++){
+        const tinted = lit*rgb[c];                                  // multiply, so relief survives
+        img.data[o+c] = Math.round(255*(lit + (tinted-lit)*cov));
+      }
+      img.data[o+3]=255;
+    }
+    ctx.putImageData(img,0,0);
+    const n = show.filter(Boolean).length;
+    document.getElementById('legend').textContent =
+      n === 0 ? 'nothing showing — bare terrain' : `${n} of ${MATERIALS.length} showing`;
+  }
+
+  function render(){
+    const show = visible();
+    document.getElementById('rows').innerHTML = MATERIALS.map((m,k)=>{
+      const s = state[k];
+      const hex = '#'+m.color.map(c=>c.toString(16).padStart(2,'0')).join('');
+      return `<li class="row ${show[k]?'':'silent'}">
+        <span class="grip">⣿</span>
+        <span class="swatch" style="background:${hex}"></span>
+        <span class="mname">${m.name}</span>
+        <span class="tog ${s.mute?'on-m':''}" data-k="${k}" data-t="mute" title="Mute">M</span>
+        <span class="tog ${s.solo?'on-s':''}" data-k="${k}" data-t="solo" title="Solo">S</span>
+      </li>`;
+    }).reverse().join('');   // top of the list is top of the stack
+    document.querySelectorAll('.tog[data-k]').forEach(el=>{
+      el.onclick = () => { const s=state[+el.dataset.k]; s[el.dataset.t]=!s[el.dataset.t]; render(); };
+    });
+    draw();
+  }
+  render();
+</script>
