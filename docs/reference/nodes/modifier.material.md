@@ -27,7 +27,6 @@ Names a selection as a material and gives it a colour, so it can be shown on the
 
 | Parameter | Type | Range | Default | Unit | Description | Field-driven |
 |---|---|---|---|---|---|---|
-| Name (`name`) | text |  | material |  | The material's name. It names the weight layer, the exported map, and the layer you assign it to in an engine, so it is the part worth choosing deliberately. | no |
 | Colour (`color`) | color |  | #808080 |  | The colour this material previews as. Preview only: it is never exported and no engine reads it. | no |
 
 ## Layer contract
@@ -40,4 +39,4 @@ Wire a selection into it: a Slope selector for rock on steep ground, a Height se
 
 It takes no terrain. A material says where something is, not what the ground does. Which materials are shown together, in what order, and which are muted is a material set, and that lives in the Materials panel rather than in the graph.
 
-The name and the colour are read by the panel. The colour is for previewing: it is never exported, and no engine reads it.
+The material takes its name from the node itself, so rename the node to rename the material. The colour is for previewing: it is never exported, and no engine reads it. Both are read by the Materials panel, which is where materials are arranged into sets.

@@ -5574,12 +5574,9 @@ fn materials_pane(ui: &mut egui::Ui, state: &mut AppState) {
         .filter_map(|id| {
             let stable_id = state.graph.stable_id(id)?;
             let params = state.graph.params(id)?;
-            let name = params.get_str("name", "").trim().to_string();
-            let name = if name.is_empty() {
-                node_display_name(&state.graph, id)
-            } else {
-                name
-            };
+            // The node's own display name. A material has no separate name of its own: a second
+            // name field would leave two places to change one thing.
+            let name = node_display_name(&state.graph, id);
             let [r, g, b] = params.get_color("color", [0.5, 0.5, 0.5]);
             let to_byte = |c: f64| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
             Some((
@@ -5697,65 +5694,65 @@ fn materials_body(
         let muted = state.material_sets.is_muted(node);
         let soloed = state.material_sets.soloed.contains(&node);
 
-        ui.horizontal(|ui| {
-            // Swatch, then name, then the two toggles. At the panel's width that is all that fits,
-            // which is why mute and solo are single letters rather than icons with labels.
-            match found {
-                Some((_, _, name, color)) => {
-                    let (rect, _) =
-                        ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
-                    ui.painter().rect_filled(rect, 2.0, *color);
-                    let text = if showing {
-                        egui::RichText::new(name)
-                    } else {
-                        egui::RichText::new(name).weak().strikethrough()
-                    };
-                    if ui.selectable_label(false, text).clicked() {
-                        action = Some(MaterialRowAction::Select(node));
+        // Each row is both a drag source and a drop target, so dragging one onto another moves it
+        // there. The payload is the entry index, which is the set's own bottom-first order rather
+        // than the top-first order the rows are drawn in, so the reorder needs no translation.
+        let (_, dropped) = ui.dnd_drop_zone::<usize, _>(egui::Frame::NONE, |ui| {
+            ui.dnd_drag_source(egui::Id::new(("material_row", node)), index, |ui| {
+                ui.horizontal(|ui| {
+                    // A grip, because a row that drags should look like one.
+                    ui.label(egui::RichText::new(egui_phosphor::regular::DOTS_SIX_VERTICAL).weak());
+                    // Swatch, then name, then the two toggles. At the pane's width that is all
+                    // that fits, which is why mute and solo are single letters and not icons
+                    // with labels.
+                    match found {
+                        Some((_, _, name, color)) => {
+                            let (rect, _) = ui
+                                .allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                            ui.painter().rect_filled(rect, 2.0, *color);
+                            let text = if showing {
+                                egui::RichText::new(name)
+                            } else {
+                                egui::RichText::new(name).weak().strikethrough()
+                            };
+                            if ui.selectable_label(false, text).clicked() {
+                                action = Some(MaterialRowAction::Select(node));
+                            }
+                        }
+                        // Its node was deleted. Kept and marked rather than dropped silently: you
+                        // deleted a node, not a set entry, and it contributes nothing until you
+                        // remove it.
+                        None => {
+                            ui.label(egui::RichText::new("\u{26a0}").color(theme::WARNING));
+                            ui.label(
+                                egui::RichText::new(format!("missing node {node}"))
+                                    .italics()
+                                    .color(theme::WARNING),
+                            );
+                        }
                     }
-                }
-                // Its node was deleted. Kept and marked rather than dropped silently: you deleted
-                // a node, not a set entry, and it contributes nothing until you remove it.
-                None => {
-                    ui.label(egui::RichText::new("\u{26a0}").color(theme::WARNING));
-                    ui.label(
-                        egui::RichText::new(format!("missing node {node}"))
-                            .italics()
-                            .color(theme::WARNING),
-                    );
-                }
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .selectable_label(soloed, "S")
-                    .on_hover_text("Solo: show only this. Not saved with the project.")
-                    .clicked()
-                {
-                    action = Some(MaterialRowAction::Solo(node));
-                }
-                if ui
-                    .selectable_label(muted, "M")
-                    .on_hover_text("Mute: leave this out of the composite.")
-                    .clicked()
-                {
-                    action = Some(MaterialRowAction::Mute(node));
-                }
-                if ui
-                    .small_button("\u{25b2}")
-                    .on_hover_text("Move up")
-                    .clicked()
-                {
-                    action = Some(MaterialRowAction::Move(index, index + 1));
-                }
-                if ui
-                    .small_button("\u{25bc}")
-                    .on_hover_text("Move down")
-                    .clicked()
-                {
-                    action = Some(MaterialRowAction::Move(index, index.saturating_sub(1)));
-                }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .selectable_label(soloed, "S")
+                            .on_hover_text("Solo: show only this. Not saved with the project.")
+                            .clicked()
+                        {
+                            action = Some(MaterialRowAction::Solo(node));
+                        }
+                        if ui
+                            .selectable_label(muted, "M")
+                            .on_hover_text("Mute: leave this out of the composite.")
+                            .clicked()
+                        {
+                            action = Some(MaterialRowAction::Mute(node));
+                        }
+                    });
+                });
             });
         });
+        if let Some(from) = dropped {
+            action = Some(MaterialRowAction::Move(*from, index));
+        }
     }
 
     // Applied after the loop so the row closure never holds a mutable borrow of the sets.

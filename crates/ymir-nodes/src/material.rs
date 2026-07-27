@@ -28,9 +28,6 @@ use ymir_core::{
 /// Stable type identifier and registry key.
 const TYPE_ID: &str = "modifier.material";
 
-/// The material name a new node starts with.
-const DEFAULT_NAME: &str = "material";
-
 /// The default colour of a new Material node: a mid neutral.
 ///
 /// Deliberately not a hue. Assigning distinct default colours is worth doing (a set of materials
@@ -51,14 +48,15 @@ impl Operator for Material {
             category: "material",
             inputs: vec![PortSpec::new("selection")],
             outputs: vec![PortSpec::new("out")],
-            params: vec![
-                ParamSpec::new(
-                    "name",
-                    ParamKind::Text,
-                    ParamValue::Text(DEFAULT_NAME.into()),
-                ),
-                ParamSpec::new("color", ParamKind::Color, ParamValue::Color(DEFAULT_COLOR)),
-            ],
+            // No name parameter. Every node already carries a display-name override, which is
+            // editable in the inspector, serialized with the graph, and deliberately outside every
+            // cache key because it is cosmetic. A material's name is exactly that, and a second
+            // name field would leave the inspector showing two.
+            params: vec![ParamSpec::new(
+                "color",
+                ParamKind::Color,
+                ParamValue::Color(DEFAULT_COLOR),
+            )],
             emitted_layers: Vec::new(),
             mask_aware: false,
         }
@@ -173,11 +171,13 @@ mod tests {
     }
 
     #[test]
-    fn it_carries_a_name_and_a_colour_for_the_editor_to_read() {
-        // The node does not use either: they are what a MaterialSet shows and composites with.
+    fn colour_is_its_only_parameter() {
+        // The material's name is the node's own display name, which every node already has. A
+        // `name` parameter beside it would show the inspector two name fields, and leave two
+        // places to change one thing.
         let spec = Material.spec();
         let names: Vec<&str> = spec.params.iter().map(|p| p.name.as_str()).collect();
-        assert!(names.contains(&"name") && names.contains(&"color"));
+        assert_eq!(names, ["color"]);
     }
 
     #[test]
