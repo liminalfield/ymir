@@ -99,7 +99,7 @@ enum Status {
 /// The identity a preview texture was built from: field hash, output index, shading mode and
 /// scale, relief light bits, sea-level bits, and whether water is shown. The texture is rebuilt
 /// when any of these change.
-type TextureKey = (u64, usize, ShadeMode, HeightScale, [u32; 3], u32, bool);
+type TextureKey = (u64, usize, ShadeMode, HeightScale, [u32; 3], u32, bool, u64);
 
 /// Drives background preview evaluation. The UI calls [`sync`](Self::sync) (submit
 /// if changed), [`poll`](Self::poll) (collect results), then [`show`](Self::show)
@@ -371,7 +371,7 @@ impl PreviewEngine {
     /// Collects worker results, keeping only the newest, and requests a repaint
     /// while a result is still in flight so the async update shows promptly even
     /// when the UI would otherwise be idle.
-    pub(crate) fn poll(&mut self, ctx: &egui::Context) {
+    pub(crate) fn poll(&mut self, ctx: &egui::Context, graph: &Graph) {
         loop {
             match self.result_rx.try_recv() {
                 Ok(outcome) => self.apply(outcome),
@@ -384,7 +384,7 @@ impl PreviewEngine {
         }
         // Build/refresh the texture for the latest field and shading mode (a no-op
         // when neither changed), so a mode toggle re-renders without re-evaluating.
-        self.refresh_texture(ctx);
+        self.refresh_texture(ctx, graph);
         // Keep ticking while a result is in flight or a debounced submit is due, so
         // the async update and the trailing submit both happen promptly even when
         // the UI would otherwise be idle.
@@ -431,7 +431,7 @@ impl PreviewEngine {
 
     /// Rebuilds the preview texture from the last field when the field or the shading
     /// mode has changed since the texture was uploaded. Cheap to call every frame.
-    fn refresh_texture(&mut self, ctx: &egui::Context) {
+    fn refresh_texture(&mut self, ctx: &egui::Context, graph: &Graph) {
         let index = self
             .display_output
             .min(self.last_outputs.len().saturating_sub(1));
@@ -453,6 +453,11 @@ impl PreviewEngine {
             self.light.map(f32::to_bits),
             water_bits,
             self.show_water,
+            // A Material node's colour does not change the field it produces, so a recolour would
+            // slip past a key built only from the field. The graph's hash is memoized, so reading
+            // it costs nothing; the price is a rebuild on graph edits that changed no colour,
+            // which is the same shade pass the preview already pays when a field changes.
+            graph.content_hash(),
         );
         if self.texture_key == Some(key) {
             return;
@@ -467,6 +472,13 @@ impl PreviewEngine {
                 &WaterStyle::default(),
             );
         }
+        // Materials last, over the shading and the water, so a material reads on top of the
+        // relief the way it will in the viewport.
+        crate::materials::apply(
+            &mut image,
+            field,
+            &crate::materials::materials_on(field, graph),
+        );
         self.texture = Some(ctx.load_texture("preview", image, egui::TextureOptions::LINEAR));
         self.texture_key = Some(key);
     }

@@ -34,6 +34,7 @@ use ymir_nodes::{CategoryDef, categories, find_category, node_group, tr};
 mod canvas;
 use canvas::Handle;
 // The parameter inspector: ParamSpec-driven widgets, no per-node code.
+mod materials;
 mod param_ui;
 // The visual curve editor widget (GUI step A2), rendered for ParamKind::Curve.
 mod curve_edit;
@@ -2052,7 +2053,7 @@ impl AppState {
         let binding = self.subgraph_inputs();
         self.preview
             .sync(&self.graph, id, request, now, binding.as_ref());
-        self.preview.poll(ctx);
+        self.preview.poll(ctx, &self.graph);
     }
 }
 
