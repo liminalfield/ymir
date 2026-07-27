@@ -5,8 +5,9 @@
 //! here, separate from a project, because it follows the user across every project and is edited
 //! once in Settings rather than per file.
 //!
-//! Stored as pretty JSON at `$XDG_CONFIG_HOME/ymir/preferences.json` (configuration, so the XDG
-//! config base). Every field is optional and defaults to empty, so the file evolves additively
+//! Stored as pretty JSON as `preferences.json` in the platform's configuration directory (see
+//! [`ymir_core::app_dirs`]), since this is configuration rather than data or cache. Every field
+//! is optional and defaults to empty, so the file evolves additively
 //! (a new setting is a new `#[serde(default)]` field) without a format version or migration; the
 //! app always rewrites the whole file, so there is no older-writer to guard against.
 
@@ -53,15 +54,11 @@ pub(crate) struct Preferences {
     pub author: AuthorProfile,
 }
 
-/// The preferences file path (`$XDG_CONFIG_HOME/ymir/preferences.json`, or the `$HOME/.config`
-/// fallback). `None` if no config base can be resolved, in which case preferences are in-memory
-/// only for the session rather than an error.
+/// The preferences file path, in the platform's configuration directory (see
+/// [`ymir_core::app_dirs`]). `None` if no configuration directory can be resolved, in which case
+/// preferences are in-memory for the session rather than an error.
 pub(crate) fn preferences_path() -> Option<PathBuf> {
-    crate::config_path(
-        std::env::var_os("XDG_CONFIG_HOME"),
-        std::env::var_os("HOME"),
-        "preferences.json",
-    )
+    ymir_core::app_dirs::config_path("preferences.json")
 }
 
 /// Reads preferences from `path`. Missing fields fall back to their defaults, so an older file

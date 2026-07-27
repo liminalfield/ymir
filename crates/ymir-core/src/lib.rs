@@ -25,6 +25,7 @@
 //!
 //! Concrete operators live in `ymir-nodes`, which depends on this crate.
 
+pub mod app_dirs;
 pub mod export;
 pub mod import;
 pub mod layers;

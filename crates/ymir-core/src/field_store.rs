@@ -9,7 +9,6 @@
 //! file, or a write failure degrades to a cache miss, never a panic, so a full or read-only
 //! disk can never break a build.
 
-use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -40,14 +39,16 @@ impl FieldStore {
         Some(Self { dir, budget_bytes })
     }
 
-    /// The default cache directory, `<cache>/ymir/fields/build-<tag>`, reading the real
-    /// environment. `None` if neither `XDG_CACHE_HOME` nor `HOME` is set. The `build-<tag>`
-    /// segment (see `build_tag`) isolates the cache per executable, so fields computed by an
-    /// older build of the operators are never served to a newer one that reuses their keys.
+    /// The default cache directory, `<platform cache dir>/fields/build-<tag>`. `None` when the
+    /// platform's cache directory cannot be resolved, in which case the disk tier is simply
+    /// unavailable. See [`crate::app_dirs`] for where each platform puts it.
+    ///
+    /// The `build-<tag>` segment (see `build_tag`) isolates the cache per executable, so fields
+    /// computed by an older build of the operators are never served to a newer one that reuses
+    /// their keys.
     #[must_use]
     pub fn default_dir() -> Option<PathBuf> {
-        cache_dir_from(std::env::var_os("XDG_CACHE_HOME"), std::env::var_os("HOME"))
-            .map(|d| d.join(build_tag()))
+        crate::app_dirs::cache_path("fields").map(|d| d.join(build_tag()))
     }
 
     fn path(&self, key: u64) -> PathBuf {
@@ -129,22 +130,6 @@ impl FieldStore {
             }
         }
     }
-}
-
-/// Pure resolver for the cache directory, testable without touching the real environment:
-/// prefer `$XDG_CACHE_HOME`, else `$HOME/.cache`, then `ymir/fields` under it. Empty values
-/// are treated as unset.
-fn cache_dir_from(xdg: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
-    if let Some(xdg) = xdg.filter(|s| !s.is_empty()) {
-        return Some(PathBuf::from(xdg).join("ymir").join("fields"));
-    }
-    let home = home.filter(|s| !s.is_empty())?;
-    Some(
-        PathBuf::from(home)
-            .join(".cache")
-            .join("ymir")
-            .join("fields"),
-    )
 }
 
 /// A cache tag that changes whenever the executable changes, derived from its length and
@@ -297,24 +282,11 @@ mod tests {
     }
 
     #[test]
-    fn cache_dir_resolution() {
-        // XDG set wins.
-        let xdg = cache_dir_from(
-            Some(OsString::from("/x/cache")),
-            Some(OsString::from("/home/u")),
-        );
-        assert_eq!(xdg, Some(PathBuf::from("/x/cache/ymir/fields")));
-        // Empty XDG falls back to HOME/.cache.
-        let home = cache_dir_from(Some(OsString::new()), Some(OsString::from("/home/u")));
-        assert_eq!(home, Some(PathBuf::from("/home/u/.cache/ymir/fields")));
-        // Neither set: no directory.
-        assert_eq!(cache_dir_from(None, None), None);
-    }
-
-    #[test]
-    fn default_dir_is_build_tagged() {
-        // Under the real environment (HOME is set in CI), the default dir gains a build-<tag>
-        // segment under `fields`, isolating the cache per executable.
+    fn default_dir_is_build_tagged_under_the_platform_cache_dir() {
+        // Where the platform's cache directory *is* belongs to `app_dirs`, which tests all three
+        // platforms' rules. What this module still decides is the two segments below: `fields`,
+        // and a build-<tag> that isolates the cache per executable so fields computed by an older
+        // build of the operators are never served to a newer one that reuses their keys.
         if let Some(dir) = FieldStore::default_dir() {
             let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
             assert!(

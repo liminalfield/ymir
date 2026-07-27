@@ -8,10 +8,10 @@
 //! reproduce the same terrain everywhere.
 //!
 //! Files reuse the same serde types as a project (so they stay diffable and forward
-//! compatible via a format version) and live in the user library directory
-//! (`$XDG_DATA_HOME/ymir/subgraphs/`, the XDG data base since they are user-authored content,
-//! not configuration or cache); built-in entries shipped with the app are a later addition on
-//! the same format.
+//! compatible via a format version) and live in `subgraphs/` under the platform's data
+//! directory (see [`ymir_core::app_dirs`]), which is where user-authored content belongs, as
+//! opposed to configuration or cache; built-in entries shipped with the app are a later addition
+//! on the same format.
 
 use std::path::{Path, PathBuf};
 
@@ -82,16 +82,12 @@ pub(crate) struct SubgraphFile {
     pub view: ViewState,
 }
 
-/// The user library directory (`$XDG_DATA_HOME/ymir/subgraphs/`, or the `$HOME/.local/share`
-/// fallback), where saved subgraphs live. This is user-authored *data*, not configuration or
-/// cache, so it follows the XDG data base per convention. `None` if neither base is set (the
-/// feature is then unavailable). Does not create the directory; callers do that on save.
+/// The user library directory, where saved subgraphs live. This is user-authored *data*, not
+/// configuration or cache, so it goes in the platform's data directory (see
+/// [`ymir_core::app_dirs`]). `None` when that cannot be resolved, in which case the feature is
+/// unavailable. Does not create the directory; callers do that on save.
 pub(crate) fn library_dir() -> Option<PathBuf> {
-    crate::data_path(
-        std::env::var_os("XDG_DATA_HOME"),
-        std::env::var_os("HOME"),
-        "subgraphs",
-    )
+    ymir_core::app_dirs::data_path("subgraphs")
 }
 
 /// Writes a subgraph to `path` as pretty JSON (git-diffable), creating or truncating it. The
