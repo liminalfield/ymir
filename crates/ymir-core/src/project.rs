@@ -16,13 +16,149 @@
 //! is deterministically ordered (nodes by `stable_id`, params by name, connections by
 //! input port), so a project diffs cleanly in version control.
 
+use std::fs::File;
+use std::io::{BufReader, BufWriter};
+use std::path::Path;
+
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+
+use crate::error::{Error, Result};
 
 use crate::param::Params;
 
 /// The current on-disk format version. Bumped on a breaking schema change, paired
 /// with a migration path so existing projects still load.
 pub const FORMAT_VERSION: u32 = 1;
+
+/// The current on-disk version of the whole project *file*, distinct from
+/// [`FORMAT_VERSION`], which versions the graph document nested inside it.
+///
+/// Starts at 2: version 1 was the editor's own envelope, which kept the world settings on the
+/// GUI side where nothing headless could reach them. That shape is not readable by this version,
+/// which is a deliberate break rather than a migration (see `design/project-format.md`).
+pub const PROJECT_FILE_VERSION: u32 = 2;
+
+/// The settings that describe the world a graph builds, as opposed to how an editor displays it.
+///
+/// Every field here reaches an operator: the first four through
+/// [`EvalRequest`](crate::EvalRequest) into each node's [`EvalContext`](crate::EvalContext), and
+/// the resolution as the request's own grid size. That is the test for belonging here. How the
+/// viewport draws water, where the nodes sit on a canvas, and what resolution the interactive
+/// preview runs at are all presentation, and live in the file's `view` section instead.
+///
+/// The consequence that matters: a project's terrain is reproducible from the graph plus this,
+/// with nothing else needed. That is what lets something headless render exactly what the editor
+/// shows, rather than the same node network under invented settings.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct WorldSettings {
+    /// The global seed. Each node derives its own from this and its `stable_id`.
+    pub seed: u64,
+    /// World extent along x, in metres, across the full unit region.
+    pub world_extent: f64,
+    /// The real elevation in metres that a normalized height of `1.0` represents.
+    pub world_height: f64,
+    /// The sea or base level, as a normalized height. Coastal shaping bevels to it and stream
+    /// erosion grades toward it.
+    pub sea_level: f64,
+    /// The square resolution a full build evaluates at.
+    ///
+    /// It sits with the physical extents because it is the one value a headless render cannot
+    /// invent: rebuilding a project at a different resolution produces genuinely different
+    /// terrain wherever an iterative simulation is involved.
+    pub build_res: usize,
+}
+
+impl Default for WorldSettings {
+    /// A unit world at the default build resolution: the same values a fresh project starts from.
+    fn default() -> Self {
+        Self {
+            seed: 0,
+            world_extent: 1.0,
+            world_height: 1.0,
+            sea_level: 0.0,
+            build_res: 1024,
+        }
+    }
+}
+
+/// A whole project on disk: the world it describes, the graph that builds it, and whatever an
+/// editor wants to remember about showing it.
+///
+/// The view section is a type parameter rather than an opaque blob so an editor keeps its own
+/// typed state, comparable and cheap, while anything headless takes the default and ignores it.
+/// Opaque JSON here would push a serialization into the editor's undo comparison, which runs
+/// every settled frame.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectFile<V = serde_json::Value> {
+    /// On-disk version of this envelope; see [`PROJECT_FILE_VERSION`].
+    pub format_version: u32,
+    /// What the graph builds.
+    pub world: WorldSettings,
+    /// The graph itself.
+    pub graph: ProjectDocument,
+    /// Editor state. Written and read by whoever owns `V`; the engine never interprets it.
+    #[serde(default)]
+    pub view: V,
+}
+
+impl<V: Default> ProjectFile<V> {
+    /// A project file at the current version, wrapping `world` and `graph` with default view
+    /// state.
+    #[must_use]
+    pub fn new(world: WorldSettings, graph: ProjectDocument) -> Self {
+        Self {
+            format_version: PROJECT_FILE_VERSION,
+            world,
+            graph,
+            view: V::default(),
+        }
+    }
+}
+
+impl<V> ProjectFile<V> {
+    /// Fails when this file is not a version this build understands.
+    ///
+    /// Checked explicitly rather than left to serde, so an older project reports what it is
+    /// instead of surfacing as a field-level parse error.
+    pub fn check_version(&self) -> Result<()> {
+        if self.format_version == PROJECT_FILE_VERSION {
+            return Ok(());
+        }
+        Err(Error::UnsupportedFormatVersion {
+            version: self.format_version,
+            expected: PROJECT_FILE_VERSION,
+        })
+    }
+}
+
+impl<V: Serialize> ProjectFile<V> {
+    /// Writes the project as pretty JSON, which keeps it diffable in version control.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be written or the value cannot be serialized.
+    pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
+        let file = File::create(path)?;
+        serde_json::to_writer_pretty(BufWriter::new(file), self)?;
+        Ok(())
+    }
+}
+
+impl<V: DeserializeOwned + Default> ProjectFile<V> {
+    /// Reads a project, rejecting a version this build does not understand.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read, is not valid JSON, or carries a format
+    /// version other than [`PROJECT_FILE_VERSION`].
+    pub fn load(path: impl AsRef<Path>) -> Result<Self> {
+        let file = File::open(path)?;
+        let project: Self = serde_json::from_reader(BufReader::new(file))?;
+        project.check_version()?;
+        Ok(project)
+    }
+}
 
 /// A serialized project: the persistent form of a [`Graph`](crate::Graph).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -183,5 +319,93 @@ mod tests {
         let messy = serde_json::json!([[1.0, 2.0], [0.5, -1.0], [0.0, 0.5]]);
         let curve: Curve = serde_json::from_value(messy).expect("deserialize");
         assert_eq!(curve.points(), &[(0.0, 0.5), (0.5, 0.0), (1.0, 1.0)]);
+    }
+
+    /// Stand-in for an editor's view state: typed, comparable, and meaningless to the engine.
+    #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+    struct FakeView {
+        note: String,
+    }
+
+    fn sample_world() -> WorldSettings {
+        WorldSettings {
+            seed: 42,
+            world_extent: 2048.0,
+            world_height: 512.0,
+            sea_level: 0.3,
+            build_res: 4096,
+        }
+    }
+
+    #[test]
+    fn a_project_file_round_trips_with_its_view_state() {
+        let file = ProjectFile {
+            format_version: PROJECT_FILE_VERSION,
+            world: sample_world(),
+            graph: sample_document(),
+            view: FakeView {
+                note: "canvas".to_string(),
+            },
+        };
+        let json = serde_json::to_string(&file).expect("serialize");
+        let back: ProjectFile<FakeView> = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, file);
+    }
+
+    #[test]
+    fn a_headless_reader_ignores_the_view_without_naming_its_type() {
+        // The point of the type parameter: something with no editor still reads the world and the
+        // graph, which is everything needed to reproduce the terrain.
+        let file = ProjectFile {
+            format_version: PROJECT_FILE_VERSION,
+            world: sample_world(),
+            graph: sample_document(),
+            view: FakeView {
+                note: "positions the engine does not care about".to_string(),
+            },
+        };
+        let json = serde_json::to_string(&file).expect("serialize");
+
+        let headless: ProjectFile = serde_json::from_str(&json).expect("deserialize headless");
+        assert_eq!(headless.world, sample_world());
+        assert_eq!(headless.graph, sample_document());
+    }
+
+    #[test]
+    fn an_older_project_reports_its_version_rather_than_a_parse_error() {
+        // Version 1 was the editor's envelope and is deliberately not readable. Someone opening
+        // one should be told what it is, not shown a missing-field error from serde.
+        let file = ProjectFile {
+            format_version: 1,
+            world: sample_world(),
+            graph: sample_document(),
+            view: FakeView::default(),
+        };
+        let dir = std::env::temp_dir().join(format!("ymir-projectfile-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("old.ymir");
+        file.save(&path).expect("write");
+
+        match ProjectFile::<FakeView>::load(&path) {
+            Err(Error::UnsupportedFormatVersion { version, expected }) => {
+                assert_eq!(version, 1);
+                assert_eq!(expected, PROJECT_FILE_VERSION);
+            }
+            other => panic!("expected an unsupported-version error, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir); // shortcut-ok: best-effort test cleanup
+    }
+
+    #[test]
+    fn a_saved_project_reloads_from_disk() {
+        let dir = std::env::temp_dir().join(format!("ymir-projectfile-rt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("project.ymir");
+        let file: ProjectFile<FakeView> = ProjectFile::new(sample_world(), sample_document());
+        file.save(&path).expect("write");
+        let back = ProjectFile::<FakeView>::load(&path).expect("read");
+        assert_eq!(back, file);
+        assert_eq!(back.format_version, PROJECT_FILE_VERSION);
+        let _ = std::fs::remove_dir_all(&dir); // shortcut-ok: best-effort test cleanup
     }
 }

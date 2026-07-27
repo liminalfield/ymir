@@ -2,8 +2,19 @@
 
 # Project file format
 
-How a Ymir graph is saved and loaded. This is the contributor-facing companion to
+How a Ymir project is saved and loaded. This is the contributor-facing companion to
 the `project` module in `ymir-core`.
+
+There are two nested things, each with its own version:
+
+- The **project file** (`ProjectFile`, `PROJECT_FILE_VERSION`), the whole `.ymir` file: the
+  world settings, the graph, and an editor's view state.
+- The **graph document** (`ProjectDocument`, `FORMAT_VERSION`) nested inside it: the nodes,
+  their parameters, and their wiring.
+
+They version separately because they change for different reasons. Adding a node parameter
+touches the graph schema; moving a setting between the world and the view touches only the
+envelope.
 
 ## Goals
 
@@ -73,28 +84,68 @@ serializable `ProjectDocument`. `Graph::save` / `Graph::load` (and the
 reports a typed error for each failure mode: an unsupported format version, an unknown
 node type, a duplicate stable id, a dangling connection, or malformed JSON.
 
-## Versioning and migration
+## The envelope
 
-`format_version` starts at 1. A loader rejects a version it does not understand rather
-than guessing. When a breaking schema change lands, bump the version and add a migration
-that recognizes the older shape and upgrades it before rebuild; the version check in
-`from_document` is the seam where that hook goes. Saved projects are something to
-preserve, not to silently break.
-
-## What is not stored (and where it will live)
-
-Canvas positions, pan/zoom, and the preview pin are GUI view-state, not engine truth, so
-they are absent from this document and `ymir-core` stays headless. The GUI save layer
-(issue #75) wraps this document in a single self-contained file with two sections:
+A `.ymir` file is a `ProjectFile`: the world the graph builds, the graph itself, and whatever
+an editor wants to remember about showing it.
 
 ```json
-{ "graph": { ...this document... }, "view": { "nodes": { "0": [x, y] }, "pan": [...], "zoom": 1.0 } }
+{
+  "format_version": 2,
+  "world": {
+    "seed": 0,
+    "world_extent": 1024.0,
+    "world_height": 256.0,
+    "sea_level": 0.3,
+    "build_res": 4096
+  },
+  "graph": { "...this document..." },
+  "view": {
+    "settings": { "preview_res": 1024, "show_water": true, "water": { "...": null } },
+    "canvas": { "nodes": { "0": [40.0, 40.0] }, "camera": { "...": null }, "frames": [] }
+  }
+}
 ```
 
-The `view` section is keyed by `stable_id` and kept last so layout-only edits localize
-their diff. The headless CLI reads only `graph`; a graph-only file (no `view`, such as
-one the CLI wrote or a fragment imported from a git repo) opens in the GUI and
-auto-lays-out.
+**`world` is what the graph builds.** Every field in it reaches an operator: the first four
+through `EvalRequest` into each node's `EvalContext`, and `build_res` as the request's grid size.
+That is the test for belonging there. The consequence is what matters: a project's terrain is
+reproducible from `world` plus `graph`, with nothing else needed, so a headless render produces
+what the editor shows rather than the same node network under invented settings.
+
+**`view` is how an editor shows it.** Node positions, the canvas camera, frames, the preview
+resolution, the water rendering look, the node pane's ordering. None of it reaches evaluation.
+
+The `view` section is a type parameter on `ProjectFile<V>` rather than opaque JSON. An editor
+keeps its own typed state, comparable and cheap to clone; anything headless writes
+`ProjectFile` (defaulting to `serde_json::Value`) and ignores it. The typing is not incidental:
+the GUI uses a `ProjectFile` as its per-settled-frame undo snapshot and compares snapshots for
+equality, and an opaque blob would push a JSON serialization into that comparison.
+
+Inside `view`, only `canvas` nests. A subgraph has its own node positions and camera, so
+`canvas.subgraphs` recurses; it has no preview resolution or pane ordering of its own, so
+`settings` sits above the recursion. Writing settings into every subgraph would be both noise in
+the diff and a claim that is not true.
+
+A graph-only file is valid: `view` defaults, so a file written by a headless tool, or a fragment
+shared without layout, opens with nodes cascaded onto the canvas.
+
+## Versioning and migration
+
+Both versions start at 1 and a loader rejects a version it does not understand rather than
+guessing. `ProjectFile::check_version` is the explicit check on the envelope, so an older project
+reports what it is instead of surfacing as a field-level parse error. `Graph::from_document` is
+the equivalent seam for the graph document, and where a migration hook goes.
+
+The envelope is at version 2. Version 1 kept the world settings in the GUI's own envelope, where
+nothing headless could reach them; the file said what the node network was but not what world it
+described, so a CLI render could only invent a seed and a resolution. That is not a shape a
+migration can rescue meaningfully, and Ymir was at 0.2 with no external users, so version 1 is a
+documented break rather than a migration: it is rejected on load with
+`Error::UnsupportedFormatVersion`.
+
+That is the exception, not the pattern. Saved projects are something to preserve, and a break
+needs both a reason the old shape cannot express and a version young enough to afford it.
 
 ## Default startup graph
 

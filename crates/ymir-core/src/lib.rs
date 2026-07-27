@@ -67,7 +67,10 @@ pub use operator::{ContextDeps, Inputs, Operator, OperatorClone};
 pub use paint::{BrushShape, Stroke, StrokeMode, StrokePoint, Strokes};
 pub use param::{Curve, ParamKind, ParamSpec, ParamValue, Params, Scale, Unit};
 pub use progress::{Progress, ProgressSink};
-pub use project::{Connection, FORMAT_VERSION, NodeDocument, ProjectDocument};
+pub use project::{
+    Connection, FORMAT_VERSION, NodeDocument, PROJECT_FILE_VERSION, ProjectDocument, ProjectFile,
+    WorldSettings,
+};
 pub use region::Region;
 pub use spec::{NodeKind, NodeSpec, PortSpec};
 pub use subgraph::{INPUT_TYPE_ID, OUTPUT_TYPE_ID, SUBGRAPH_TYPE_ID, marker_port_label};

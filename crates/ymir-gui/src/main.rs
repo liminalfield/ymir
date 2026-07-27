@@ -221,18 +221,26 @@ const MARQUEE_MIN_DRAG: f32 = 4.0;
 /// world-unit parameters (scale-aware nodes consume it via `EvalContext`).
 const DEFAULT_WORLD_EXTENT: f64 = 1024.0;
 
-/// The world settings for a fresh, untitled project: the app-level defaults, with the water plane
-/// shown. Used to anchor a new session's clean point and to reset on New/Close/open-default.
+/// The world settings for a fresh, untitled project: the app-level defaults. Used to anchor a
+/// new session's clean point and to reset on New/Close/open-default.
 fn fresh_world_settings() -> project_file::WorldSettings {
     project_file::WorldSettings {
         seed: 0,
         world_extent: DEFAULT_WORLD_EXTENT,
         world_height: project_file::DEFAULT_WORLD_HEIGHT,
         build_res: project_file::DEFAULT_BUILD_RES,
-        preview_res: PREVIEW_RES,
         sea_level: project_file::DEFAULT_SEA_LEVEL,
+    }
+}
+
+/// The editor settings for a fresh, untitled project: the defaults, with the water plane shown.
+/// A fresh project turns water on explicitly; the on-load default is off, so a project saved
+/// before the toggle existed still opens looking as it did.
+fn fresh_view_settings() -> project_file::ViewSettings {
+    project_file::ViewSettings {
+        preview_res: PREVIEW_RES,
         show_water: true,
-        water: project_file::WaterSettings::default(),
+        ..project_file::ViewSettings::default()
     }
 }
 
@@ -825,8 +833,13 @@ impl AppState {
         let (graph, snarl) = starter::starter_graph();
         // Anchor the undo history and the clean point at this initial session, so the
         // first edit records an undo step and marks the session modified.
-        let initial =
-            project_file::ProjectFile::capture(&graph, &snarl, fresh_world_settings(), &[]);
+        let initial = project_file::capture(
+            &graph,
+            &snarl,
+            fresh_world_settings(),
+            fresh_view_settings(),
+            &[],
+        );
         let history = EditHistory::new(initial.clone());
         // The water look/effect defaults, taken from one source so the fresh-session fields below
         // and the persisted `WaterSettings::default` (used for older project files) stay in step.
@@ -1026,6 +1039,7 @@ impl AppState {
         graph: Graph,
         snarl: Snarl<Handle>,
         world: project_file::WorldSettings,
+        view: project_file::ViewSettings,
         subgraph_layouts: HashMap<Vec<u64>, BTreeMap<u64, [f32; 2]>>,
     ) {
         self.nav.clear();
@@ -1040,10 +1054,12 @@ impl AppState {
         self.world_extent = world.world_extent;
         self.world_height = world.world_height;
         self.build_res = world.build_res;
-        self.preview_res = world.preview_res;
         self.sea_level = world.sea_level;
-        self.show_water = world.show_water;
-        self.apply_water_settings(world.water);
+        self.preview_res = view.preview_res;
+        self.show_water = view.show_water;
+        self.apply_water_settings(view.water);
+        self.node_sort = view.node_sort;
+        self.node_density = view.node_density;
         self.clear_selection();
         self.preview_pin = None;
         self.node_menu = None;
@@ -1064,6 +1080,7 @@ impl AppState {
             Graph::new(),
             Snarl::new(),
             fresh_world_settings(),
+            fresh_view_settings(),
             HashMap::new(),
         );
     }
@@ -1081,16 +1098,26 @@ impl AppState {
                     world_extent: r.world_extent,
                     world_height: r.world_height,
                     build_res: r.build_res,
-                    preview_res: r.preview_res,
                     sea_level: r.sea_level,
+                };
+                let view = project_file::ViewSettings {
+                    preview_res: r.preview_res,
                     show_water: r.show_water,
                     water: r.water,
+                    node_sort: r.node_sort,
+                    node_density: r.node_density,
                 };
-                self.install_fresh(r.graph, r.snarl, world, r.subgraph_layouts);
+                self.install_fresh(r.graph, r.snarl, world, view, r.subgraph_layouts);
             }
             None => {
                 let (graph, snarl) = starter::starter_graph();
-                self.install_fresh(graph, snarl, fresh_world_settings(), HashMap::new());
+                self.install_fresh(
+                    graph,
+                    snarl,
+                    fresh_world_settings(),
+                    fresh_view_settings(),
+                    HashMap::new(),
+                );
             }
         }
     }
@@ -1104,10 +1131,20 @@ impl AppState {
             world_extent: self.world_extent,
             world_height: self.world_height,
             build_res: self.build_res,
-            preview_res: self.preview_res,
             sea_level: self.sea_level,
+        }
+    }
+
+    /// The current editor settings (preview resolution, water display, pane ordering), bundled
+    /// for a [`project_file`] capture. Like the world settings these are part of the saved
+    /// project and the dirty check, so changing the water look marks the project modified.
+    fn view_settings(&self) -> project_file::ViewSettings {
+        project_file::ViewSettings {
+            preview_res: self.preview_res,
             show_water: self.show_water,
             water: self.water_settings(),
+            node_sort: self.node_sort,
+            node_density: self.node_density,
         }
     }
 
@@ -1169,31 +1206,22 @@ impl AppState {
     /// frames come from the outermost suspended context. So save, dirty tracking, and undo
     /// all operate on the whole project regardless of how deep the user is editing.
     fn snapshot(&self) -> project_file::ProjectFile {
-        let mut file = self.captured();
-        // Set here rather than threaded through `capture_with`: these are the editor's pane
-        // preferences, and every other caller of that constructor (tests, the headless path) has
-        // no opinion on them and would only be passing defaults through.
-        file.view.node_sort = self.node_sort;
-        file.view.node_density = self.node_density;
-        file
-    }
-
-    /// The graph, layout and world as a project file, before the pane preferences are set.
-    fn captured(&self) -> project_file::ProjectFile {
         let layouts = self.all_known_layouts();
         if self.nav.is_empty() {
-            project_file::ProjectFile::capture_with(
+            project_file::capture_with(
                 &self.graph,
                 project_file::snarl_positions(&self.snarl),
                 self.world_settings(),
+                self.view_settings(),
                 &self.frames,
                 &layouts,
             )
         } else {
-            project_file::ProjectFile::capture_with(
+            project_file::capture_with(
                 &self.top_graph(),
                 self.nav[0].positions.clone(),
                 self.world_settings(),
+                self.view_settings(),
                 &self.nav[0].frames,
                 &layouts,
             )
@@ -1206,7 +1234,7 @@ impl AppState {
     /// reopened project restores the exact view.
     fn project_for_save(&self) -> project_file::ProjectFile {
         let mut file = self.snapshot();
-        file.view.camera = self
+        file.view.canvas.camera = self
             .canvas_view
             .map(|v| project_file::Camera::from_transform(v.to_global));
         file
@@ -1739,7 +1767,7 @@ impl AppState {
     /// pin that the restored graph no longer contains. The history baseline already
     /// tracks this snapshot, so the end-of-frame record sees no change.
     fn apply_snapshot(&mut self, snapshot: &project_file::ProjectFile) {
-        match snapshot.restore() {
+        match project_file::restore(snapshot) {
             Ok(restored) => {
                 // Undo/redo restores the whole (top-level) project, so step back out of any
                 // subgraph rather than leave a stale navigation stack over a new graph.
@@ -2623,7 +2651,7 @@ fn read_project(path: &std::path::Path) -> Result<project_file::RestoredProject,
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     let file: project_file::ProjectFile =
         serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-    file.restore().map_err(|e| e.to_string())
+    project_file::restore(&file).map_err(|e| e.to_string())
 }
 
 /// Writes `file` to `path` as pretty JSON.
@@ -10424,7 +10452,7 @@ mod tests {
 
         // Snapshot (what Save writes) then restore (what Open reads): the interior layout
         // survives the round-trip rather than re-cascading.
-        let restored = state.snapshot().restore().expect("restore");
+        let restored = project_file::restore(&state.snapshot()).expect("restore");
         let positions = restored
             .subgraph_layouts
             .get(&vec![handle])
@@ -11432,7 +11460,7 @@ mod tests {
         // Exercises the real file I/O wrappers (the in-memory serde path is covered in
         // project_file): write a session to disk, read it back, confirm it matches.
         let (graph, snarl) = starter::starter_graph();
-        let file = project_file::ProjectFile::capture(
+        let file = project_file::capture(
             &graph,
             &snarl,
             project_file::WorldSettings {
@@ -11440,8 +11468,10 @@ mod tests {
                 world_extent: 2048.0,
                 world_height: 640.0,
                 build_res: 4096,
-                preview_res: 384,
                 sea_level: 0.55,
+            },
+            project_file::ViewSettings {
+                preview_res: 384,
                 show_water: true,
                 water: project_file::WaterSettings {
                     depth: false,
@@ -11464,6 +11494,7 @@ mod tests {
                     wet_width: 0.04,
                     speed: 0.9,
                 },
+                ..project_file::ViewSettings::default()
             },
             &[],
         );

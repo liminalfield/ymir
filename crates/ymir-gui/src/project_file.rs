@@ -16,141 +16,75 @@ use eframe::egui::Pos2;
 use eframe::egui::emath::TSTransform;
 use egui_snarl::{InPinId, NodeId as SnarlNodeId, OutPinId, Snarl};
 use serde::{Deserialize, Serialize};
-use ymir_core::{Graph, ProjectDocument};
+use ymir_core::Graph;
 
 use crate::canvas::Handle;
-
-/// Current GUI project-file version, distinct from the core graph document's own
-/// version: the envelope (view/world sections) evolves independently of the graph
-/// schema. Bumped on a breaking envelope change, paired with a migration.
-pub(crate) const PROJECT_FORMAT_VERSION: u32 = 1;
 
 /// Spacing of the fallback cascade for a node that has no saved position (a
 /// graph-only file). Kept small; the canvas frames to the graph on open anyway.
 const CASCADE_STEP: f32 = 36.0;
 
-/// The complete on-disk project: the engine graph plus the GUI's view-state.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) struct ProjectFile {
-    /// Envelope version; see [`PROJECT_FORMAT_VERSION`].
-    pub format_version: u32,
-    /// World-level evaluation settings restored with the project.
-    pub world: WorldSettings,
-    /// The engine graph (nodes, params, wiring), `ymir-core`'s headless document.
-    pub graph: ProjectDocument,
-    /// Canvas view-state. Optional, so a graph-only file still loads. Kept last so
-    /// layout-only edits localize their diff.
-    #[serde(default)]
-    pub view: ViewState,
-}
+/// The complete on-disk project: the engine's own file, with this editor's view state in its
+/// view slot.
+///
+/// The envelope, its version, and the world settings live in `ymir-core` (#30): they describe
+/// what a graph builds, so anything headless must be able to read them without knowing this
+/// editor exists. What stays here is what only an editor cares about.
+pub(crate) type ProjectFile = ymir_core::ProjectFile<View>;
 
-/// The world height (meters that a height of `1.0` represents) assumed for a project saved
-/// before the field existed, and the app-level default for a fresh project. Roughly a
+/// The world settings, re-exported so this module still reads as the project-file module.
+pub(crate) use ymir_core::WorldSettings;
+
+/// The world height (meters that a height of `1.0` represents) for a fresh project. Roughly a
 /// quarter of the default world extent, so the default world reads at natural proportions.
 pub(crate) const DEFAULT_WORLD_HEIGHT: f64 = 256.0;
 
-/// The world height for a project file that predates the field (format version 1 without it).
-fn default_world_height() -> f64 {
-    DEFAULT_WORLD_HEIGHT
-}
-
-/// The default full-Build resolution (square), and the value assumed for a project saved before
-/// the field was persisted.
+/// The default full-Build resolution (square) for a fresh project.
 pub(crate) const DEFAULT_BUILD_RES: usize = 1024;
 
-/// The build resolution for a project file that predates the field.
-fn default_build_res() -> usize {
-    DEFAULT_BUILD_RES
-}
-
-/// The preview resolution for a project file that predates the field being persisted. Reuses the
-/// app-level default so a fresh project and an older file agree.
+/// The preview resolution when a project's view section does not name one. Reuses the app-level
+/// default so a fresh project and a partial file agree.
 fn default_preview_res() -> usize {
     crate::PREVIEW_RES
 }
 
-/// The sea/base level (normalized height) for a fresh project, and the value assumed for a
-/// project saved before the field existed. Matches the app-level default so enabling water on an
-/// older project starts at a sensible level rather than the very base.
+/// The sea/base level (normalized height) for a fresh project. Above the very base, so enabling
+/// water starts at a sensible level.
 pub(crate) const DEFAULT_SEA_LEVEL: f64 = 0.3;
 
-/// The sea level for a project file that predates the field.
-fn default_sea_level() -> f64 {
-    DEFAULT_SEA_LEVEL
-}
-
-/// Whether to draw the water plane for a project that predates the toggle: off, so an older
-/// project opens looking as it did before water existed. A fresh project turns it on explicitly.
+/// Whether to draw the water plane when a project does not say: off. A fresh project turns it on
+/// explicitly, so the quiet default is the one that shows the terrain.
 fn default_show_water() -> bool {
     false
 }
 
-/// World settings restored with the project.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub(crate) struct WorldSettings {
-    /// The global seed.
-    pub seed: u64,
-    /// World extent along x, in meters: the footprint's physical width.
-    pub world_extent: f64,
-    /// World height, in meters: the real elevation a height value of `1.0` represents, the
-    /// vertical counterpart to `world_extent`. An interpretation of the normalized height
-    /// (for display proportion and export), not an input to evaluation. Defaulted on load so
-    /// projects saved before it existed still open.
-    #[serde(default = "default_world_height")]
-    pub world_height: f64,
-    /// The resolution a full Build evaluates at (square). Project intent (a UE5 export wants a
-    /// specific size), so it travels with the project. Defaulted on load for older files.
-    #[serde(default = "default_build_res")]
-    pub build_res: usize,
-    /// The resolution the interactive preview evaluates at (square). A per-project working choice
-    /// like `build_res`, so it travels with the project and reopens as the user left it. Defaulted
-    /// on load for files saved before it was persisted.
-    #[serde(default = "default_preview_res")]
-    pub preview_res: usize,
-    /// The sea/base level as a normalized height in `[0, 1]`: the 3D viewport draws water at it,
-    /// and it feeds evaluation as base level. A world global that travels with the project.
-    /// Defaulted on load for files saved before it existed.
-    #[serde(default = "default_sea_level")]
-    pub sea_level: f64,
-    /// Whether the 3D viewport draws the water plane. Saved so a world with a configured sea
-    /// reopens showing it. Defaulted off for files that predate the toggle.
-    #[serde(default = "default_show_water")]
-    pub show_water: bool,
-    /// How the water is rendered: the effect layers and their look controls (#157). Grouped into
-    /// one sub-object so it stays a tidy, git-diffable block and can move as a unit. Defaulted on
-    /// load, so a project saved before it existed opens with the standard look (no format bump,
-    /// like `world_height`).
-    #[serde(default)]
-    pub water: WaterSettings,
-}
-
-/// Default for a bool setting added after `WaterSettings` shipped (e.g. `reflection`): on.
+/// Default for a water bool that a partial block leaves out (e.g. `reflection`): on.
 fn default_true() -> bool {
     true
 }
 
-/// Gerstner crest steepness for a project saved before the control existed (#155).
+/// Gerstner crest steepness when a project does not say (#155).
 fn default_steepness() -> f32 {
     0.6
 }
 
-/// Prevailing wave bearing for a project saved before the control existed (#251): the bearing the
-/// shader's tallest component already travelled along, so such a project renders exactly as it did.
+/// Prevailing wave bearing when a project does not say (#251): the bearing the shader's tallest
+/// component travels along, so an unspecified swell matches the fan as authored.
 fn default_wave_direction() -> f32 {
     crate::viewport::WAVE_FAN_BEARING_DEG
 }
 
-/// Wave fan spread for a project saved before the control existed (#251): the fan as authored.
+/// Wave fan spread when a project does not say (#251): the fan as authored.
 fn default_wave_spread() -> f32 {
     crate::viewport::WAVE_SPREAD_DEFAULT
 }
 
-/// Gerstner wavelength scale for a project saved before the control existed (#155).
+/// Gerstner wavelength scale when a project does not say (#155).
 fn default_wavelength() -> f32 {
     1.0
 }
 
-/// Wet-shore strength / band width for a project saved before the control existed (#156).
+/// Wet-shore strength / band width when a project does not say (#156).
 fn default_wet() -> f32 {
     0.35
 }
@@ -166,12 +100,10 @@ fn default_wet_width() -> f32 {
 pub(crate) struct WaterSettings {
     /// Depth-shading layer (Tier 0): Beer-Lambert extinction tints and opaques with depth.
     pub depth: bool,
-    /// Gerstner wave layer (#155): geometric wave displacement. Aliased from the old `surface` key,
-    /// which used to gate both waves and reflection, so older projects keep their setting.
-    #[serde(alias = "surface")]
+    /// Gerstner wave layer (#155): geometric wave displacement.
     pub waves: bool,
-    /// Reflective surface finish: sky Fresnel reflection and sun specular. Split out from `surface`
-    /// so it toggles independently of the waves; defaulted on for projects saved before the split.
+    /// Reflective surface finish: sky Fresnel reflection and sun specular. Toggles independently
+    /// of the waves.
     #[serde(default = "default_true")]
     pub reflection: bool,
     /// Shoreline foam layer.
@@ -308,6 +240,61 @@ impl Camera {
     }
 }
 
+/// What this editor keeps in the project file's view slot: its own settings, plus the canvas
+/// layout.
+///
+/// Split in two because only the layout is recursive. A subgraph has its own node positions and
+/// camera, so [`ViewState`] nests; it has no preview resolution or pane ordering of its own, and
+/// writing one into every subgraph would be both noise in the diff and a claim that is not true.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) struct View {
+    /// Editor settings for the project as a whole.
+    #[serde(default)]
+    pub settings: ViewSettings,
+    /// Node positions, camera, frames, and subgraph interiors.
+    #[serde(default)]
+    pub canvas: ViewState,
+}
+
+/// Editor settings that travel with a project: how it is previewed and how its lists read.
+///
+/// None of these reach evaluation. They are what the user set up while working on this project
+/// and would have to set up again on reopening it.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ViewSettings {
+    /// The resolution the interactive preview evaluates at (square). A per-project working
+    /// choice, so it reopens as the user left it.
+    #[serde(default = "default_preview_res")]
+    pub preview_res: usize,
+    /// Whether the 3D viewport draws the water plane. Saved so a world with a configured sea
+    /// reopens showing it.
+    #[serde(default = "default_show_water")]
+    pub show_water: bool,
+    /// How the water is rendered: the effect layers and their look controls (#157). Grouped into
+    /// one sub-object so it stays a tidy, git-diffable block and can move as a unit.
+    #[serde(default)]
+    pub water: WaterSettings,
+    /// The node pane's ordering and row density (#281): how the user likes to read this graph,
+    /// so it travels with the project. The pane's *filter* deliberately does not, since restoring
+    /// one means opening a project to a list that hides most of its nodes with no memory of why.
+    #[serde(default)]
+    pub node_sort: crate::status::NodeSort,
+    #[serde(default)]
+    pub node_density: crate::status::Density,
+}
+
+impl Default for ViewSettings {
+    fn default() -> Self {
+        Self {
+            preview_res: default_preview_res(),
+            show_water: default_show_water(),
+            water: WaterSettings::default(),
+            node_sort: crate::status::NodeSort::default(),
+            node_density: crate::status::Density::default(),
+        }
+    }
+}
+
 /// GUI view-state: where each node sits on the canvas, keyed by `stable_id`, plus the canvas
 /// camera and any canvas frames.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -320,13 +307,6 @@ pub(crate) struct ViewState {
     /// snapshot (panning is not an edit); set only when the project is written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera: Option<Camera>,
-    /// The node pane's ordering and row density (#281): how the user likes to read this graph,
-    /// so it travels with the project. The pane's *filter* deliberately does not, since restoring
-    /// one means opening a project to a list that hides most of its nodes with no memory of why.
-    #[serde(default)]
-    pub node_sort: crate::status::NodeSort,
-    #[serde(default)]
-    pub node_density: crate::status::Density,
     /// Canvas frames (#94), in creation order. Optional and defaulted, so a project saved
     /// before frames existed opens with none (no format bump, like `world_height`). Kept
     /// last so adding or moving a frame localizes its diff.
@@ -380,134 +360,131 @@ pub(crate) struct RestoredProject {
     pub warnings: Vec<String>,
 }
 
-impl ProjectFile {
-    /// Captures the current session into a project file: the graph as a document,
-    /// every node's canvas position from `snarl`, and the world settings.
-    pub(crate) fn capture(
-        graph: &Graph,
-        snarl: &Snarl<Handle>,
-        world: WorldSettings,
-        frames: &[Frame],
-    ) -> Self {
-        Self::capture_with(
-            graph,
-            snarl_positions(snarl),
-            world,
-            frames,
-            &HashMap::new(),
-        )
-    }
+/// Captures the current session into a project file: the graph as a document, every node's
+/// canvas position from `snarl`, the world settings, and this editor's own view settings.
+///
+/// A free function rather than a method: the envelope is `ymir-core`'s type now, and capture is
+/// this editor filling in its slot.
+pub(crate) fn capture(
+    graph: &Graph,
+    snarl: &Snarl<Handle>,
+    world: WorldSettings,
+    settings: ViewSettings,
+    frames: &[Frame],
+) -> ProjectFile {
+    capture_with(
+        graph,
+        snarl_positions(snarl),
+        world,
+        settings,
+        frames,
+        &HashMap::new(),
+    )
+}
 
-    /// Captures a project from a graph, an explicit top-level node-position map, and the
-    /// interior layouts of its subgraphs (path-keyed by container `stable_id`s, #106).
-    ///
-    /// Used when diving into a subgraph: the active canvas shows the inner graph, so the
-    /// top-level snapshot is built from the folded top graph and the saved top-level
-    /// positions, and the subgraph interiors come from `layouts` rather than a live snarl.
-    pub(crate) fn capture_with(
-        graph: &Graph,
-        nodes: BTreeMap<u64, [f32; 2]>,
-        world: WorldSettings,
-        frames: &[Frame],
-        layouts: &HashMap<Vec<u64>, BTreeMap<u64, [f32; 2]>>,
-    ) -> Self {
-        Self {
-            format_version: PROJECT_FORMAT_VERSION,
-            world,
-            graph: graph.to_document(),
-            view: ViewState {
+/// Captures a project from a graph, an explicit top-level node-position map, and the
+/// interior layouts of its subgraphs (path-keyed by container `stable_id`s, #106).
+///
+/// Used when diving into a subgraph: the active canvas shows the inner graph, so the
+/// top-level snapshot is built from the folded top graph and the saved top-level
+/// positions, and the subgraph interiors come from `layouts` rather than a live snarl.
+pub(crate) fn capture_with(
+    graph: &Graph,
+    nodes: BTreeMap<u64, [f32; 2]>,
+    world: WorldSettings,
+    settings: ViewSettings,
+    frames: &[Frame],
+    layouts: &HashMap<Vec<u64>, BTreeMap<u64, [f32; 2]>>,
+) -> ProjectFile {
+    ProjectFile {
+        format_version: ymir_core::PROJECT_FILE_VERSION,
+        world,
+        graph: graph.to_document(),
+        view: View {
+            settings,
+            canvas: ViewState {
                 nodes,
                 // The camera is not captured in the snapshot (panning is not an undoable edit);
                 // it is injected only when the project is written to disk.
                 camera: None,
                 frames: frames.to_vec(),
-                // Pane preferences are set by the caller that has them (`AppState::snapshot`);
-                // a capture from a test or the headless path takes the defaults.
-                node_sort: crate::status::NodeSort::default(),
-                node_density: crate::status::Density::default(),
                 subgraphs: subgraph_view(graph, &[], layouts),
             },
-        }
+        },
     }
+}
 
-    /// If `self` and `other` describe the same graph and world and differ in the
-    /// position of exactly one node, returns that node's stable id. `None` for a
-    /// semantic change (graph or world), or a layout change touching no or several nodes
-    /// (an added/removed node, or a multi-node move). The undo history uses this to
-    /// coalesce a run of moves to a *single* node into one step, while a move of a
-    /// different node opens a fresh step (#82).
-    pub(crate) fn single_moved_node(&self, other: &Self) -> Option<u64> {
-        if self.world != other.world
-            || self.graph != other.graph
-            || self.view.frames != other.view.frames
-        {
-            return None;
-        }
-        let here = &self.view.nodes;
-        let there = &other.view.nodes;
-        if here.len() != there.len() {
-            return None;
-        }
-        let mut moved = None;
-        for (id, pos) in here {
-            match there.get(id) {
-                Some(other_pos) if other_pos == pos => {}
-                // A differing position: the moved node, unless a second one already was.
-                Some(_) => {
-                    if moved.is_some() {
-                        return None;
-                    }
-                    moved = Some(*id);
+/// If `before` and `after` describe the same graph and world and differ in the
+/// position of exactly one node, returns that node's stable id. `None` for a
+/// semantic change (graph or world), or a layout change touching no or several nodes
+/// (an added/removed node, or a multi-node move). The undo history uses this to
+/// coalesce a run of moves to a *single* node into one step, while a move of a
+/// different node opens a fresh step (#82).
+pub(crate) fn single_moved_node(before: &ProjectFile, after: &ProjectFile) -> Option<u64> {
+    if before.world != after.world
+        || before.graph != after.graph
+        || before.view.canvas.frames != after.view.canvas.frames
+    {
+        return None;
+    }
+    let here = &before.view.canvas.nodes;
+    let there = &after.view.canvas.nodes;
+    if here.len() != there.len() {
+        return None;
+    }
+    let mut moved = None;
+    for (id, pos) in here {
+        match there.get(id) {
+            Some(other_pos) if other_pos == pos => {}
+            // A differing position: the moved node, unless a second one already was.
+            Some(_) => {
+                if moved.is_some() {
+                    return None;
                 }
-                // A key present here but not there: the node sets differ, not a move.
-                None => return None,
+                moved = Some(*id);
             }
+            // A key present here but not there: the node sets differ, not a move.
+            None => return None,
         }
-        moved
     }
+    moved
+}
 
-    /// Rebuilds the session from this project file: the engine graph via the registry,
-    /// and the canvas with each node at its saved position (or a cascade fallback) and
-    /// its wires reattached from the document's connections.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::UnsupportedFormatVersion`](ymir_core::Error::UnsupportedFormatVersion)
-    /// if the envelope version is not understood, or any error from
-    /// [`Graph::from_document`].
-    pub(crate) fn restore(&self) -> Result<RestoredProject, ymir_core::Error> {
-        if self.format_version != PROJECT_FORMAT_VERSION {
-            return Err(ymir_core::Error::UnsupportedFormatVersion {
-                version: self.format_version,
-                expected: PROJECT_FORMAT_VERSION,
-            });
-        }
+/// Rebuilds the session from `file`: the engine graph via the registry, and the canvas with
+/// each node at its saved position (or a cascade fallback) and its wires reattached from the
+/// document's connections.
+///
+/// # Errors
+///
+/// Returns [`Error::UnsupportedFormatVersion`](ymir_core::Error::UnsupportedFormatVersion)
+/// if the envelope version is not understood, or any error from [`Graph::from_document`].
+pub(crate) fn restore(file: &ProjectFile) -> Result<RestoredProject, ymir_core::Error> {
+    file.check_version()?;
 
-        let (graph, warnings) = Graph::from_document_reporting(&self.graph)?;
-        let snarl = build_snarl(&graph, &self.view.nodes);
+    let (graph, warnings) = Graph::from_document_reporting(&file.graph)?;
+    let snarl = build_snarl(&graph, &file.view.canvas.nodes);
 
-        let mut subgraph_layouts = HashMap::new();
-        flatten_subgraphs(&self.view.subgraphs, &[], &mut subgraph_layouts);
+    let mut subgraph_layouts = HashMap::new();
+    flatten_subgraphs(&file.view.canvas.subgraphs, &[], &mut subgraph_layouts);
 
-        Ok(RestoredProject {
-            graph,
-            snarl,
-            seed: self.world.seed,
-            world_extent: self.world.world_extent,
-            world_height: self.world.world_height,
-            build_res: self.world.build_res,
-            preview_res: self.world.preview_res,
-            sea_level: self.world.sea_level,
-            show_water: self.world.show_water,
-            water: self.world.water,
-            camera: self.view.camera.map(Camera::to_transform),
-            frames: self.view.frames.clone(),
-            node_sort: self.view.node_sort,
-            node_density: self.view.node_density,
-            subgraph_layouts,
-            warnings,
-        })
-    }
+    Ok(RestoredProject {
+        graph,
+        snarl,
+        seed: file.world.seed,
+        world_extent: file.world.world_extent,
+        world_height: file.world.world_height,
+        build_res: file.world.build_res,
+        preview_res: file.view.settings.preview_res,
+        sea_level: file.world.sea_level,
+        show_water: file.view.settings.show_water,
+        water: file.view.settings.water,
+        camera: file.view.canvas.camera.map(Camera::to_transform),
+        frames: file.view.canvas.frames.clone(),
+        node_sort: file.view.settings.node_sort,
+        node_density: file.view.settings.node_density,
+        subgraph_layouts,
+        warnings,
+    })
 }
 
 /// A staggered fallback position for a node with no saved layout, so a graph-only
@@ -588,9 +565,6 @@ fn subgraph_view(
                     // Subgraph interior cameras are not persisted yet; they fit on first dive.
                     camera: None,
                     frames: Vec::new(),
-                    // The pane's ordering is a property of the project, not of each interior.
-                    node_sort: crate::status::NodeSort::default(),
-                    node_density: crate::status::Density::default(),
                     subgraphs: nested,
                 },
             );
@@ -677,7 +651,7 @@ mod tests {
         .expect("thermal");
         graph.connect(generator, 0, erosion, 0).expect("connect");
 
-        let file = ProjectFile::capture(
+        let file = capture(
             &graph,
             &snarl,
             WorldSettings {
@@ -685,10 +659,12 @@ mod tests {
                 world_extent: 4096.0,
                 world_height: 800.0,
                 build_res: 2048,
-                preview_res: 384,
                 sea_level: 0.42,
+            },
+            ViewSettings {
+                preview_res: 384,
                 show_water: true,
-                water: WaterSettings::default(),
+                ..ViewSettings::default()
             },
             &[],
         );
@@ -698,7 +674,7 @@ mod tests {
         let parsed: ProjectFile = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed, file);
 
-        let restored = parsed.restore().expect("restore");
+        let restored = restore(&parsed).expect("restore");
 
         // Engine graph round-trips (nodes, params, wiring).
         assert_eq!(restored.graph.to_document(), graph.to_document());
@@ -739,7 +715,7 @@ mod tests {
         let mut graph = Graph::new();
         let mut snarl = Snarl::<Handle>::new();
         add_node(&mut graph, &mut snarl, "generator.fbm", Pos2::new(0.0, 0.0)).expect("fbm");
-        let mut file = ProjectFile::capture(
+        let mut file = capture(
             &graph,
             &snarl,
             WorldSettings {
@@ -747,14 +723,12 @@ mod tests {
                 world_extent: 1024.0,
                 world_height: 256.0,
                 build_res: DEFAULT_BUILD_RES,
-                preview_res: crate::PREVIEW_RES,
                 sea_level: DEFAULT_SEA_LEVEL,
-                show_water: false,
-                water: WaterSettings::default(),
             },
+            ViewSettings::default(),
             &[],
         );
-        file.view.camera = Some(Camera {
+        file.view.canvas.camera = Some(Camera {
             translation: [12.0, -34.0],
             scale: 1.5,
         });
@@ -763,7 +737,7 @@ mod tests {
         let parsed: ProjectFile = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed, file);
 
-        let t = parsed.restore().expect("restore").camera.expect("camera");
+        let t = restore(&parsed).expect("restore").camera.expect("camera");
         assert_eq!((t.translation.x, t.translation.y), (12.0, -34.0));
         assert_eq!(t.scaling, 1.5);
     }
@@ -775,7 +749,7 @@ mod tests {
         add_node(&mut graph, &mut snarl, "generator.fbm", Pos2::ZERO).expect("fbm");
 
         // Drop the view section entirely, as a headless or fragment file would have.
-        let mut file = ProjectFile::capture(
+        let mut file = capture(
             &graph,
             &snarl,
             WorldSettings {
@@ -783,16 +757,14 @@ mod tests {
                 world_extent: 1024.0,
                 world_height: 256.0,
                 build_res: DEFAULT_BUILD_RES,
-                preview_res: crate::PREVIEW_RES,
                 sea_level: DEFAULT_SEA_LEVEL,
-                show_water: false,
-                water: WaterSettings::default(),
             },
+            ViewSettings::default(),
             &[],
         );
-        file.view.nodes.clear();
+        file.view.canvas.nodes.clear();
 
-        let restored = file.restore().expect("restore");
+        let restored = restore(&file).expect("restore");
         assert_eq!(restored.graph.node_count(), 1);
         // The lone node (stable_id 0 in a fresh graph) lands at the first cascade slot
         // rather than an undefined spot.
@@ -808,7 +780,7 @@ mod tests {
     fn restore_rejects_an_unknown_envelope_version() {
         let graph = Graph::new();
         let snarl = Snarl::<Handle>::new();
-        let mut file = ProjectFile::capture(
+        let mut file = capture(
             &graph,
             &snarl,
             WorldSettings {
@@ -816,106 +788,81 @@ mod tests {
                 world_extent: 1024.0,
                 world_height: 256.0,
                 build_res: DEFAULT_BUILD_RES,
-                preview_res: crate::PREVIEW_RES,
                 sea_level: DEFAULT_SEA_LEVEL,
-                show_water: false,
-                water: WaterSettings::default(),
             },
+            ViewSettings::default(),
             &[],
         );
-        file.format_version = PROJECT_FORMAT_VERSION + 1;
+        file.format_version = ymir_core::PROJECT_FILE_VERSION + 1;
         assert!(matches!(
-            file.restore(),
+            restore(&file),
             Err(ymir_core::Error::UnsupportedFormatVersion { .. })
         ));
     }
 
     #[test]
-    fn world_height_defaults_when_absent_from_an_older_file() {
-        // A version-1 project saved before world_height (and sea level) existed: its `world`
-        // section has only seed and world_extent. It must still load, taking the defaults rather
-        // than failing to deserialize, and open looking as it did before water existed.
+    fn a_version_one_project_is_rejected_rather_than_misread() {
+        // Version 1 kept the world settings in the editor's own envelope. Nothing headless could
+        // read them, which is why the shape changed; the file is deliberately not migrated. What
+        // matters is that opening one says so, rather than parsing partially and building the
+        // graph under invented settings.
         let json = r#"{
             "format_version": 1,
-            "world": { "seed": 3, "world_extent": 2048.0 },
+            "world": { "seed": 3, "world_extent": 2048.0, "world_height": 256.0,
+                "build_res": 1024, "sea_level": 0.3 },
             "graph": { "format_version": 1, "next_stable_id": 0, "nodes": [] }
         }"#;
-        let file: ProjectFile = serde_json::from_str(json).expect("deserialize legacy file");
-        assert_eq!(file.world.world_height, DEFAULT_WORLD_HEIGHT);
-        assert_eq!(file.world.sea_level, DEFAULT_SEA_LEVEL);
-        assert!(!file.world.show_water);
-        // Water settings, added later, default in on an older file that never stored them.
-        assert_eq!(file.world.water, WaterSettings::default());
-        // The preview resolution, persisted later, defaults on an older file too.
-        assert_eq!(file.world.preview_res, crate::PREVIEW_RES);
-        let restored = file.restore().expect("restore legacy file");
+        let file: ProjectFile = serde_json::from_str(json).expect("deserialize");
+        assert!(matches!(
+            restore(&file),
+            Err(ymir_core::Error::UnsupportedFormatVersion {
+                version: 1,
+                expected: _
+            })
+        ));
+    }
+
+    #[test]
+    fn a_file_with_no_view_section_opens_on_the_defaults() {
+        // A graph-only file (one a headless tool wrote, or a fragment shared without layout) is a
+        // valid project: the world and the graph are everything the terrain needs. It opens with
+        // nodes cascaded, water off so the terrain is what shows, and the pane in its default
+        // order.
+        let json = r#"{
+            "format_version": 2,
+            "world": { "seed": 3, "world_extent": 2048.0, "world_height": 256.0,
+                "build_res": 1024, "sea_level": 0.3 },
+            "graph": { "format_version": 1, "next_stable_id": 0, "nodes": [] }
+        }"#;
+        let file: ProjectFile = serde_json::from_str(json).expect("deserialize graph-only file");
+        let restored = restore(&file).expect("restore");
         assert_eq!(restored.world_extent, 2048.0);
-        assert_eq!(restored.world_height, DEFAULT_WORLD_HEIGHT);
         assert_eq!(restored.sea_level, DEFAULT_SEA_LEVEL);
+        assert_eq!(restored.preview_res, crate::PREVIEW_RES);
         assert!(!restored.show_water);
+        assert_eq!(restored.water, WaterSettings::default());
+        assert!(restored.camera.is_none());
+        assert!(restored.frames.is_empty());
     }
 
     #[test]
-    fn water_surface_key_migrates_to_waves_and_reflection_defaults_on() {
-        // Projects saved before the waves/reflection split stored a single `surface` bool. It must
-        // load with `waves` taking that value (via the serde alias) and `reflection` defaulting on,
-        // so an existing project keeps its wave setting rather than silently resetting.
+    fn a_partial_water_block_fills_in_the_look_it_does_not_name() {
+        // The file is meant to be hand-editable and diffable, so a `water` block that names only
+        // what someone cared about must not zero the rest. #251's direction and spread in
+        // particular have to land on the fan the shader was authored with, since any other value
+        // silently swings or narrows the swell.
         let json = r#"{
-            "format_version": 1,
-            "world": {
-                "seed": 0, "world_extent": 2048.0,
-                "water": { "depth": true, "surface": false, "foam_on": true,
-                    "extinction": 5.0, "color": [0.1, 0.28, 0.42],
-                    "wave": 0.5, "reflectivity": 0.6, "specular": 0.5,
-                    "foam": 0.5, "foam_width": 0.015, "speed": 0.4 }
-            },
-            "graph": { "format_version": 1, "next_stable_id": 0, "nodes": [] }
+            "depth": true, "waves": true, "foam_on": true,
+            "extinction": 5.0, "color": [0.1, 0.28, 0.42],
+            "wave": 0.5, "reflectivity": 0.6, "specular": 0.5,
+            "foam": 0.5, "foam_width": 0.015, "speed": 0.4
         }"#;
-        let file: ProjectFile = serde_json::from_str(json).expect("deserialize pre-split water");
-        assert!(
-            !file.world.water.waves,
-            "old `surface: false` carries to `waves`"
-        );
-        assert!(file.world.water.reflection, "`reflection` defaults on");
-    }
-
-    #[test]
-    fn wave_direction_defaults_to_the_shader_fan_for_an_older_project() {
-        // #251: a project saved before the direction and spread controls must render exactly as it
-        // did, which means loading with the bearing the shader's tallest component already
-        // travelled along, and with the fan at its authored width. Any other default would silently
-        // swing or narrow the swell on every existing project.
-        let json = r#"{
-            "format_version": 1,
-            "world": {
-                "seed": 0, "world_extent": 2048.0,
-                "water": { "depth": true, "waves": true, "foam_on": true,
-                    "extinction": 5.0, "color": [0.1, 0.28, 0.42],
-                    "wave": 0.5, "reflectivity": 0.6, "specular": 0.5,
-                    "steepness": 0.6, "wavelength": 1.0,
-                    "foam": 0.5, "foam_width": 0.015, "speed": 0.4 }
-            },
-            "graph": { "format_version": 1, "next_stable_id": 0, "nodes": [] }
-        }"#;
-        let file: ProjectFile =
-            serde_json::from_str(json).expect("deserialize pre-direction water");
-        assert_eq!(
-            file.world.water.direction,
-            crate::viewport::WAVE_FAN_BEARING_DEG
-        );
-        assert_eq!(
-            file.world.water.spread,
-            crate::viewport::WAVE_SPREAD_DEFAULT
-        );
-        // A fresh project agrees with the migrated one, so both render the same swell.
-        assert_eq!(
-            WaterSettings::default().direction,
-            crate::viewport::WAVE_FAN_BEARING_DEG
-        );
-        assert_eq!(
-            WaterSettings::default().spread,
-            crate::viewport::WAVE_SPREAD_DEFAULT
-        );
+        let water: WaterSettings = serde_json::from_str(json).expect("deserialize partial water");
+        assert!(water.reflection, "`reflection` fills in on");
+        assert_eq!(water.direction, crate::viewport::WAVE_FAN_BEARING_DEG);
+        assert_eq!(water.spread, crate::viewport::WAVE_SPREAD_DEFAULT);
+        assert_eq!(water.steepness, WaterSettings::default().steepness);
+        assert_eq!(water.wavelength, WaterSettings::default().wavelength);
     }
 
     #[test]
@@ -927,7 +874,7 @@ mod tests {
         let mut snarl = Snarl::<Handle>::new();
         add_node(&mut graph, &mut snarl, "generator.fbm", Pos2::ZERO).expect("fbm");
 
-        let mut file = ProjectFile::capture(
+        let mut file = capture(
             &graph,
             &snarl,
             WorldSettings {
@@ -935,33 +882,45 @@ mod tests {
                 world_extent: 2048.0,
                 world_height: 256.0,
                 build_res: 1024,
-                preview_res: 384,
                 sea_level: 0.3,
-                show_water: false,
-                water: WaterSettings::default(),
             },
+            ViewSettings::default(),
             &[],
         );
-        file.view.node_sort = crate::status::NodeSort::StaleFirst;
-        file.view.node_density = crate::status::Density::Compact;
+        file.view.settings.node_sort = crate::status::NodeSort::StaleFirst;
+        file.view.settings.node_density = crate::status::Density::Compact;
         let json = serde_json::to_string(&file).expect("serialize");
         let back: ProjectFile = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(back.view.node_sort, crate::status::NodeSort::StaleFirst);
-        assert_eq!(back.view.node_density, crate::status::Density::Compact);
-        let restored = back.restore().expect("restore");
+        assert_eq!(
+            back.view.settings.node_sort,
+            crate::status::NodeSort::StaleFirst
+        );
+        assert_eq!(
+            back.view.settings.node_density,
+            crate::status::Density::Compact
+        );
+        let restored = restore(&back).expect("restore");
         assert_eq!(restored.node_sort, crate::status::NodeSort::StaleFirst);
         assert_eq!(restored.node_density, crate::status::Density::Compact);
 
-        // A project saved before the pane existed opens in dependency order at full density.
+        // A project whose view section says nothing about the pane opens in dependency order at
+        // full density.
         let older = r#"{
-            "format_version": 1,
-            "world": { "seed": 0, "world_extent": 2048.0 },
+            "format_version": 2,
+            "world": { "seed": 0, "world_extent": 2048.0, "world_height": 256.0,
+                "build_res": 1024, "sea_level": 0.3 },
             "graph": { "format_version": 1, "next_stable_id": 0, "nodes": [] },
-            "view": { "nodes": {} }
+            "view": { "canvas": { "nodes": {} } }
         }"#;
         let older: ProjectFile = serde_json::from_str(older).expect("deserialize older");
-        assert_eq!(older.view.node_sort, crate::status::NodeSort::Dependency);
-        assert_eq!(older.view.node_density, crate::status::Density::Comfortable);
+        assert_eq!(
+            older.view.settings.node_sort,
+            crate::status::NodeSort::Dependency
+        );
+        assert_eq!(
+            older.view.settings.node_density,
+            crate::status::Density::Comfortable
+        );
     }
 
     #[test]
@@ -978,7 +937,7 @@ mod tests {
             label: "Generators".to_string(),
             label_placement: LabelPlacement::TopCenter,
         }];
-        let file = ProjectFile::capture(
+        let file = capture(
             &graph,
             &snarl,
             WorldSettings {
@@ -986,33 +945,32 @@ mod tests {
                 world_extent: 1024.0,
                 world_height: 256.0,
                 build_res: DEFAULT_BUILD_RES,
-                preview_res: crate::PREVIEW_RES,
                 sea_level: DEFAULT_SEA_LEVEL,
-                show_water: false,
-                water: WaterSettings::default(),
             },
+            ViewSettings::default(),
             &frames,
         );
 
         let json = serde_json::to_string(&file).expect("serialize");
         let parsed: ProjectFile = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed, file);
-        assert_eq!(parsed.restore().expect("restore").frames, frames);
+        assert_eq!(restore(&parsed).expect("restore").frames, frames);
     }
 
     #[test]
     fn a_file_without_a_frames_field_restores_with_none() {
-        // A project saved before frames existed has a `view` with only `nodes`. It must
-        // still load, with no frames, rather than failing to deserialize (the additive
-        // optional field, no format bump).
+        // A canvas section that names only `nodes` must still load, with no frames, rather than
+        // failing to deserialize. Every part of the view is individually optional, so a file
+        // written by hand or by an older editor opens on the defaults for what it omits.
         let json = r#"{
-            "format_version": 1,
-            "world": { "seed": 0, "world_extent": 1024.0, "world_height": 256.0 },
+            "format_version": 2,
+            "world": { "seed": 0, "world_extent": 1024.0, "world_height": 256.0,
+                "build_res": 1024, "sea_level": 0.3 },
             "graph": { "format_version": 1, "next_stable_id": 0, "nodes": [] },
-            "view": { "nodes": {} }
+            "view": { "canvas": { "nodes": {} } }
         }"#;
-        let file: ProjectFile = serde_json::from_str(json).expect("deserialize pre-frames file");
-        assert!(file.view.frames.is_empty());
-        assert!(file.restore().expect("restore").frames.is_empty());
+        let file: ProjectFile = serde_json::from_str(json).expect("deserialize partial view");
+        assert!(file.view.canvas.frames.is_empty());
+        assert!(restore(&file).expect("restore").frames.is_empty());
     }
 }

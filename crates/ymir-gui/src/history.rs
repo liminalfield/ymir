@@ -21,7 +21,7 @@
 
 use std::collections::VecDeque;
 
-use crate::project_file::ProjectFile;
+use crate::project_file::{ProjectFile, single_moved_node};
 
 /// Maximum number of undo steps retained. Snapshots are small, but the history is
 /// bounded so a long session cannot grow it without limit; the oldest step drops first.
@@ -79,11 +79,11 @@ impl EditHistory {
         // The node this change repositions (if it is a single-node move), and the node
         // the current step is already a run on (derived from the step's start state). The
         // run continues only when they are the same node.
-        let moved_node = current.single_moved_node(&self.baseline);
+        let moved_node = single_moved_node(current, &self.baseline);
         let run_node = self
             .undo
             .back()
-            .and_then(|start| self.baseline.single_moved_node(start));
+            .and_then(|start| single_moved_node(&self.baseline, start));
         if moved_node.is_some() && moved_node == run_node {
             self.baseline = current.clone();
         } else {
@@ -136,19 +136,17 @@ mod tests {
     /// A distinct snapshot per `seed` (an empty graph differing only in world seed), so
     /// the tests can drive the history without building real graphs.
     fn snap(seed: u64) -> ProjectFile {
-        ProjectFile::capture(
+        crate::project_file::capture(
             &Graph::new(),
             &Snarl::<Handle>::new(),
-            crate::project_file::WorldSettings {
+            ymir_core::WorldSettings {
                 seed,
                 world_extent: 1024.0,
                 world_height: 256.0,
                 build_res: crate::project_file::DEFAULT_BUILD_RES,
-                preview_res: crate::PREVIEW_RES,
                 sea_level: crate::project_file::DEFAULT_SEA_LEVEL,
-                show_water: false,
-                water: crate::project_file::WaterSettings::default(),
             },
+            crate::project_file::ViewSettings::default(),
             &[],
         )
     }
@@ -157,15 +155,15 @@ mod tests {
     /// position rather than adding a view entry (which a real move never does).
     fn base() -> ProjectFile {
         let mut f = snap(0);
-        f.view.nodes.insert(0, [0.0, 0.0]);
-        f.view.nodes.insert(1, [0.0, 0.0]);
+        f.view.canvas.nodes.insert(0, [0.0, 0.0]);
+        f.view.canvas.nodes.insert(1, [0.0, 0.0]);
         f
     }
 
     /// `from` with node `id` repositioned to `(x, 0)`: a single-node layout change.
     fn move_node(from: &ProjectFile, id: u64, x: f32) -> ProjectFile {
         let mut s = from.clone();
-        s.view.nodes.insert(id, [x, 0.0]);
+        s.view.canvas.nodes.insert(id, [x, 0.0]);
         s
     }
 
