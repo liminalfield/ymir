@@ -36,6 +36,8 @@ pub(crate) enum Widget {
     Dropdown { options: &'static [&'static str] },
     /// A visual transfer-curve editor.
     CurveEditor,
+    /// A colour swatch that opens a picker.
+    ColorPicker,
     /// A kind this build cannot edit yet. `ParamKind` is `#[non_exhaustive]`, so a
     /// future kind degrades to a read-only display rather than risk corrupting a
     /// value it does not understand.
@@ -68,6 +70,7 @@ pub(crate) fn widget_for(spec: &ParamSpec) -> Widget {
         ParamKind::Path => Widget::Path,
         ParamKind::Enum { options } => Widget::Dropdown { options },
         ParamKind::Curve => Widget::CurveEditor,
+        ParamKind::Color => Widget::ColorPicker,
         // ParamKind is #[non_exhaustive]; an unknown future kind degrades, never
         // panics. This is graceful degradation, not a swallowed case.
         _ => Widget::ReadOnly,
@@ -101,7 +104,27 @@ pub(crate) fn value_text(value: &ParamValue) -> String {
         ParamValue::Text(v) => v.clone(),
         ParamValue::Curve(c) => format!("curve ({} points)", c.points().len()),
         ParamValue::Strokes(s) => format!("painted ({} strokes)", s.len()),
+        // Hex, because that is how a colour is written down everywhere else a user will meet
+        // this one: a picker, a manifest, an engine's material settings.
+        ParamValue::Color(rgb) => {
+            let [r, g, b] = srgb_bytes(*rgb);
+            format!("#{r:02X}{g:02X}{b:02X}")
+        }
     }
+}
+
+/// A stored colour as the 0-255 channels egui works in.
+///
+/// The stored value is sRGB in `[0, 1]` (see [`ParamValue::Color`]), so this is a scale and a
+/// round, not a colour-space conversion. Rounding rather than truncating keeps a value that
+/// round-trips through the picker from drifting down a step each time.
+fn srgb_bytes(rgb: [f64; 3]) -> [u8; 3] {
+    rgb.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8)
+}
+
+/// The inverse of [`srgb_bytes`].
+fn srgb_from_bytes(bytes: [u8; 3]) -> [f64; 3] {
+    bytes.map(|c| f64::from(c) / 255.0)
 }
 
 /// Fixed width of a parameter row's value box.
@@ -732,6 +755,20 @@ pub(crate) fn edit(
             });
             result
         }
+        (Widget::ColorPicker, ParamValue::Color(rgb)) => {
+            let mut bytes = srgb_bytes(*rgb);
+            let mut changed = None;
+            ui.horizontal(|ui| {
+                ui.label(name);
+                // egui's own picker, so the interaction is the one a user already knows. It
+                // works in 8-bit sRGB, which is what the stored value scales to exactly.
+                if ui.color_edit_button_srgb(&mut bytes).changed() {
+                    changed = Some(ParamValue::Color(srgb_from_bytes(bytes)));
+                }
+                ui.weak(value_text(current));
+            });
+            changed
+        }
         (Widget::CurveEditor, ParamValue::Curve(curve)) => {
             ui.label(name);
             let result = crate::curve_edit::curve_editor(ui, curve, histogram);
@@ -1027,6 +1064,38 @@ mod tests {
         assert_eq!(
             current_value(&graph.params(id).cloned().unwrap_or_default(), pspec),
             ParamValue::Float(0.123)
+        );
+    }
+
+    #[test]
+    fn a_color_spec_gets_a_picker() {
+        assert_eq!(
+            widget_for(&spec(ParamKind::Color, ParamValue::Color([0.0, 0.0, 0.0]))),
+            Widget::ColorPicker,
+            "the widget comes from the spec, so a Material node needs no per-node UI code"
+        );
+    }
+
+    #[test]
+    fn a_color_survives_a_trip_through_the_pickers_byte_channels() {
+        // egui edits in 8-bit sRGB while the value is stored as floats, so every edit is a
+        // round trip through bytes. A value that came from the picker must come back unchanged,
+        // or a colour would drift a step every time the inspector redrew it.
+        for bytes in [[0, 0, 0], [255, 255, 255], [1, 128, 254], [77, 33, 200]] {
+            assert_eq!(srgb_bytes(srgb_from_bytes(bytes)), bytes);
+        }
+    }
+
+    #[test]
+    fn a_color_reads_as_hex() {
+        // Hex is how a colour is written everywhere else a user will meet this one: a picker,
+        // an exported manifest, an engine's material settings.
+        assert_eq!(value_text(&ParamValue::Color([1.0, 0.0, 0.0])), "#FF0000");
+        assert_eq!(value_text(&ParamValue::Color([0.0, 0.0, 0.0])), "#000000");
+        assert_eq!(
+            value_text(&ParamValue::Color([2.0, -1.0, 0.5])),
+            "#FF0080",
+            "an out-of-range channel clamps rather than wrapping to a nonsense colour"
         );
     }
 }

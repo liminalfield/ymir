@@ -313,6 +313,31 @@ mod tests {
     }
 
     #[test]
+    fn a_color_round_trips_through_a_saved_project() {
+        // The colour a material previews with has to survive save and reload, or a reopened
+        // project renders in different colours from the one that was authored.
+        let json = serde_json::to_value(ParamValue::Color([0.25, 0.5, 0.75])).expect("serialize");
+        assert_eq!(json, serde_json::json!({ "color": [0.25, 0.5, 0.75] }));
+
+        let doc = ProjectDocument {
+            format_version: FORMAT_VERSION,
+            next_stable_id: 1,
+            nodes: vec![NodeDocument {
+                stable_id: 0,
+                type_id: "test.material".into(),
+                name: None,
+                params: Params::new().with("tint", ParamValue::Color([0.25, 0.5, 0.75])),
+                connections: Vec::new(),
+                bypassed: false,
+                subgraph: None,
+            }],
+        };
+        let text = serde_json::to_string(&doc).expect("serialize");
+        let back: ProjectDocument = serde_json::from_str(&text).expect("deserialize");
+        assert_eq!(back, doc);
+    }
+
+    #[test]
     fn a_curve_round_trips_and_is_resanitized_on_load() {
         // A curve serializes as its points; loading an out-of-range, unsorted list
         // rebuilds through Curve::new, yielding the sanitized, sorted curve.
