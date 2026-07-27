@@ -10608,7 +10608,7 @@ mod tests {
     #[test]
     fn categories_are_sorted_by_sort_then_id() {
         let ids: Vec<&str> = categories_sorted().iter().map(|c| c.id).collect();
-        // sort 0, 10, 20, 25, 30, 40, 50, 90
+        // sort 0, 10, 20, 25, 30, 40, 45, 50, 90
         assert_eq!(
             ids,
             [
@@ -10618,6 +10618,7 @@ mod tests {
                 "filter",
                 "combine",
                 "geology",
+                "material",
                 "utility",
                 "output"
             ]
@@ -10758,6 +10759,7 @@ mod tests {
                 MenuRow::Category("filter"),
                 MenuRow::Category("combine"),
                 MenuRow::Category("geology"),
+                MenuRow::Category("material"),
                 MenuRow::Category("utility"),
                 MenuRow::Category("output"),
             ]

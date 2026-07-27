@@ -198,9 +198,9 @@ A recipe that needs its own walkthrough is a how-to, and should be one.
 
 **See also** (optional). Three links at most, curated. Not a category dump.
 
-Omit optional sections rather than filling them. Forty-six nodes each with a dutiful
-Behaviour section produces thirty pages of padding, and Null and Invert have nothing to say
-beyond their one-liner.
+Omit optional sections rather than filling them. Every node carrying a dutiful Behaviour
+section produces pages of padding, and Null and Invert have nothing to say beyond their
+one-liner.
 
 ## The string catalog
 

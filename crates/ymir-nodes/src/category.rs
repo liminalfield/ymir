@@ -45,6 +45,9 @@ inventory::submit! { CategoryDef { id: "adjust", icon: "sliders", sort: 20 } }
 inventory::submit! { CategoryDef { id: "filter", icon: "blur", sort: 25 } }
 inventory::submit! { CategoryDef { id: "combine", icon: "merge", sort: 30 } }
 inventory::submit! { CategoryDef { id: "geology", icon: "mountains", sort: 40 } }
+// Naming regions of the terrain for colour preview and weight-map export, rather than reshaping
+// it. Sits after the nodes that make the form, because that is the order the work happens in.
+inventory::submit! { CategoryDef { id: "material", icon: "palette", sort: 45 } }
 // Graph plumbing rather than terrain processing: pass-through, reroute, organizing anchors.
 inventory::submit! { CategoryDef { id: "utility", icon: "circle", sort: 50 } }
 inventory::submit! { CategoryDef { id: "output", icon: "export", sort: 90 } }

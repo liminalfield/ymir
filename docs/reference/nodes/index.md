@@ -59,6 +59,10 @@ Every node, grouped by category.
 - [Stream Erosion](modifier.stream_erosion.md). Carves drainage networks from flow accumulation; outputs the river/flow map.
 - [Thermal Erosion](modifier.thermal_erosion.md). Relaxes slopes steeper than the talus angle toward repose.
 
+## Materials
+
+- [Material](modifier.material.md). Names a region of the terrain as a material, so it can be shown in colour and exported as a weight map. Wire a selection into the mask to say where it goes; leave the mask empty for a base material that covers everything.
+
 ## Outputs
 
 - [Export PNG](endpoint.export.md). Writes the height layer to a 16-bit grayscale PNG.

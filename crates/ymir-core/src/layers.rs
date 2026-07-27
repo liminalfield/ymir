@@ -65,6 +65,34 @@ pub const ERODIBILITY: &str = "erodibility";
 /// below.
 pub const BEDROCK: &str = "bedrock";
 
+/// Prefix for a material's weight layer. A material named `rock` owns `material.rock`, holding
+/// its `[0, 1]` weight per cell; see [`material`] to build the name and `design/texturing.md` for
+/// the model.
+///
+/// A prefix rather than a fixed set of names because the materials in a project are the user's to
+/// choose. It is a constant so the two ends that must agree, the node that writes a weight and
+/// the export that reads it back, cannot drift on a string literal.
+pub const MATERIAL_PREFIX: &str = "material.";
+
+/// The layer name a material's weight is stored under: `material.<name>`.
+///
+/// ```
+/// assert_eq!(ymir_core::layers::material("rock"), "material.rock");
+/// ```
+#[must_use]
+pub fn material(name: &str) -> String {
+    format!("{MATERIAL_PREFIX}{name}")
+}
+
+/// Whether `layer` is a material weight layer, and if so the material's name.
+///
+/// The inverse of [`material`], for anything that has to find the materials on a field without
+/// being told which to expect: the viewport composite and the splat export both do.
+#[must_use]
+pub fn material_name(layer: &str) -> Option<&str> {
+    layer.strip_prefix(MATERIAL_PREFIX)
+}
+
 /// Backdrop terrain height, carried for display only: the terrain a Paint node is painted over, so
 /// the viewport can mesh the real surface (geometry) while the painted mask rides the height layer
 /// as a texture (not displacement). Never consumed by an operator; a pass-through for the editor.
@@ -73,6 +101,45 @@ pub const BACKDROP: &str = "backdrop";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_material_layer_name_round_trips() {
+        assert_eq!(material("rock"), "material.rock");
+        assert_eq!(material_name(&material("rock")), Some("rock"));
+        assert_eq!(
+            material_name("height"),
+            None,
+            "an ordinary layer is not a material"
+        );
+        assert_eq!(
+            material_name("materials.rock"),
+            None,
+            "a near-miss prefix does not match"
+        );
+    }
+
+    #[test]
+    fn no_canonical_layer_is_mistaken_for_a_material() {
+        // Every fixed layer name below has to stay outside the material namespace, or a
+        // consumer walking the materials would pick up terrain data as a weight map.
+        for name in [
+            HEIGHT,
+            MASK,
+            WATER,
+            FLOW,
+            FLOW_X,
+            FLOW_Y,
+            SEDIMENT,
+            DEBRIS,
+            WEAR,
+            DEPOSITION,
+            ERODIBILITY,
+            BEDROCK,
+            BACKDROP,
+        ] {
+            assert_eq!(material_name(name), None, "{name} reads as a material");
+        }
+    }
 
     #[test]
     fn canonical_names_are_unique() {

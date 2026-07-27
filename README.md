@@ -12,7 +12,7 @@ It is named for the primordial giant of Norse myth, whose body the world is shap
 ## Status
 
 Ymir is in early development and is already usable. It has a working node editor, a 3D
-terrain viewport, 46 nodes covering noise, shapes, selectors, filters, and three erosion
+terrain viewport, 47 nodes covering noise, shapes, selectors, filters, and three erosion
 models, along with subgraphs and export to 16-bit PNG, raw R16, and 32-bit EXR. The
 internals are still changing and there are rough edges, so feedback and issues are
 welcome.
