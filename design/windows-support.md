@@ -21,8 +21,12 @@ dependency choices already went the right way, mostly deliberately:
 
 - **rfd** for file dialogs uses Win32 on Windows, Cocoa on macOS, and the XDG portal on Linux.
   Its Linux-only portal dependencies are target-gated by the crate and never compile elsewhere.
-- **eframe/wgpu** is cross-platform, and wgpu picks DX12 or Vulkan on Windows from
-  `Instance::default()` with no backend selection on our side.
+- **eframe/wgpu** is cross-platform, and needs no backend selection on our side. wgpu registers
+  backends in the order Vulkan, Metal, DX12, GL, and `request_adapter` sorts only by device
+  type with a stable sort, so among adapters of one type the enumeration order survives:
+  **Vulkan wins on Windows whenever a Vulkan driver is present**, which NVIDIA, AMD and modern
+  Intel all ship. The usual Windows machine therefore runs the same backend, and the same
+  SPIR-V, as Linux.
 - **Fonts and the window icon** are `include_bytes!`, so there is no system font or theme
   lookup to differ.
 - The **eframe `x11` and `wayland` features** are enabled unconditionally in the workspace
@@ -77,6 +81,16 @@ transitive tree for one lookup.
 `cfg(target_os)` appears here and nowhere else. One module knows about platforms; nothing else
 does.
 
+## A gap that can be closed now
+
+`ymir-gui/src/wgsl.rs` statically validates the viewport shaders with naga (#272), turning a
+malformed edit into a test failure instead of a broken viewport at run time. The compute
+kernels, `thermal.wgsl` and `scalar_multiply.wgsl`, are covered by nothing.
+
+naga translates WGSL to HLSL with no Windows machine and no DX12 runtime involved, so a test on
+a Linux host can prove both compute kernels are expressible in HLSL at all. That is the one
+piece of DX12 risk that can be retired before anyone touches a Windows machine.
+
 ## Build hygiene
 
 - **`#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` on `ymir-gui`.**
@@ -96,10 +110,23 @@ does.
 Everything above is verifiable without a Windows machine. This is not. Compiling is not
 running, and these are unexamined:
 
-- **The GPU path.** wgpu will choose DX12 rather than Vulkan. The thermal kernel is written as
-  a deterministic gather to hold the determinism contract across devices, so it should hold
-  across backends too, but "should" is not "does". The CPU path is the reference and the
-  fallback, so the worst case is a slow build rather than a wrong one.
+- **The GPU path, when it falls to DX12.** Vulkan is the likely backend (above), so the DX12
+  path only appears where Vulkan enumerates nothing: an older Intel iGPU, a stripped OEM driver
+  install, a VM, or an explicit `WGPU_BACKEND=dx12`. There the risk is not DX12 but its shader
+  compiler. wgpu 29 defaults to `Dx12Compiler::Auto`, which tries static DXC (feature off),
+  then `dxcompiler.dll` on `PATH` (not shipped), then falls back to **FXC**, which wgpu's own
+  documentation calls old, slow and unmaintained.
+
+  Three things keep this small. `thermal.wgsl` is a pure gather with no atomics, barriers,
+  textures, subgroup operations or matrices, so there is little for a weak HLSL backend to get
+  wrong. A GPU failure already degrades to the CPU reference with a logged warning
+  (`thermal.rs`), so the worst realistic outcome is a slow build rather than wrong terrain.
+  And the CPU-versus-GPU agreement is guarded at `1e-4` per cell over 40 passes.
+
+  That guard skips when no adapter is present, so whether it runs on Windows CI depends on the
+  Microsoft Basic Render Driver (WARP), a software DX12 adapter usually available on
+  `windows-latest`. If it enumerates, CI exercises the DX12 and FXC path for free, which is the
+  best guard available; worth establishing rather than assuming.
 - **File dialogs**, through rfd's Win32 backend rather than the XDG portal.
 - **HiDPI scaling**, which Windows reports differently from Wayland.
 - **The log file and the field store**, where Windows refuses to delete or overwrite a file

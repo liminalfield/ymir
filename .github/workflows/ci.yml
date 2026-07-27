@@ -76,6 +76,46 @@ jobs:
       - name: Docs lint
         run: cargo xtask docs-lint
 
+  # Ymir is Linux-first but must not be Linux-only (#310). The workspace compiles for
+  # x86_64-pc-windows-msvc when cross-checked from Linux, but a cross-check does not link, does
+  # not run, and does not execute a test. This job does all three.
+  #
+  # Deliberately a separate job rather than a matrix over `check`: a Windows-only failure stays
+  # legible in the checks list, and the Linux gate keeps its exact current shape.
+  #
+  # It runs a narrower set than `check`. Format and the docs and shortcut checks are
+  # platform-independent, so running them twice buys nothing; what is Windows-specific is that the
+  # code compiles, links, and passes its tests against a different libc, filesystem and process
+  # model.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup component add clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      # Which GPU adapters the runner exposes, and therefore whether the ymir-gpu tests below
+      # actually ran or skipped. `windows-latest` has no physical GPU, but usually offers the
+      # Microsoft Basic Render Driver (WARP), a software DX12 adapter. If it enumerates, this job
+      # exercises the DX12 path, including its FXC shader compilation, for free. Printed either
+      # way so the answer is in the log rather than assumed.
+      - name: GPU adapters
+        run: |
+          dxdiag /t dxdiag.txt
+          Select-String -Path dxdiag.txt -Pattern 'Card name|Driver Model|Feature Levels' || $true
+        shell: pwsh
+      # The CLI's tests/render.rs spawns the real binary through CARGO_BIN_EXE, so this covers
+      # linking and process spawning, not just compilation. The ymir-gpu tests skip gracefully
+      # when no adapter is found, printing why; --nocapture keeps that visible.
+      - name: Test
+        run: cargo test --workspace --verbose -- --nocapture
+      # Same reasoning as the Linux job: the release profile is a different compilation, and
+      # `windows_subsystem` (#312) will apply only there, so a release-only break must not wait
+      # for a tag to surface.
+      - name: Check the release profile
+        run: cargo check --workspace --all-targets --release --verbose
+
   # Exercise the GPU compute path (ymir-gpu marshalling and the thermal erosion kernel) on Mesa
   # lavapipe, a software Vulkan implementation, so a runner with no physical GPU still runs the
   # kernels rather than skipping them. Separate from `check` so a lavapipe hiccup cannot break the
