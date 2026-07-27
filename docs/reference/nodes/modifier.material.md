@@ -7,18 +7,17 @@ status: draft
 
 # Material
 
-`modifier.material` · Materials · Mask-aware
+`modifier.material` · Materials
 
 Names a region of the terrain as a material, so it can be shown in colour and exported as a weight map. Wire a selection into the mask to say where it goes; leave the mask empty for a base material that covers everything.
 
 ## Purpose
 
-Names a region of the terrain as a material, so it can be shown in colour while you work and exported as a weight map for a game engine. Reach for it once the form is right and you want to say which parts are rock, grass, snow, or sand.
+Names a selection as a material and gives it a colour, so it can be shown on the terrain and arranged with other materials. Reach for it once the form is right and you want to say which parts are rock, grass, snow, or sand.
 
 ## Inputs
 
-- `in`
-- `mask` (optional)
+- `selection`
 
 ## Outputs
 
@@ -33,14 +32,12 @@ Names a region of the terrain as a material, so it can be shown in colour while 
 
 ## Layer contract
 
-Honours a mask on its input, applying everywhere the mask is absent.
-
-Emits `material.` alongside the height layer.
+Reads and writes the height layer.
 
 ## Behaviour
 
-Wire a selection into the mask to say where the material goes. The selection's values become the material's weight, so a Slope selector puts rock on steep ground and a Height selector puts snow above a line. Leave the mask empty and the material covers everything, which is how you make a base material that guarantees no part of the terrain is left unclaimed.
+Wire a selection into it: a Slope selector for rock on steep ground, a Height selector for snow above a line, a Constant at 1 for a material that covers everything. The selection's values become the material's weight, clamped to the range a weight is defined over, and that is what comes out. Tap it to preview that material's coverage, or run it into an export node to write the weight map to disk.
 
-Each Material node writes one layer and leaves the others alone. It does not take weight away from materials already on the terrain, so two materials can both claim the same ground at full strength, and the per-cell total can exceed one. That is deliberate. A game engine normalizes its landscape layers when it renders them, and takes the stacking order from its own material setup rather than from the maps you give it, so deciding the blend here would only overwrite a choice that belongs downstream.
+It takes no terrain. A material says where something is, not what the ground does. Which materials are shown together, in what order, and which are muted is a material set, and that lives in the Materials panel rather than in the graph.
 
-The colour is for previewing. It is never exported, and no engine reads it.
+The name and the colour are read by the panel. The colour is for previewing: it is never exported, and no engine reads it.

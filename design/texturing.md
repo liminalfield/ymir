@@ -187,6 +187,43 @@ ordering entity on the GUI side is legitimate. Where order lives inside the edit
 list on a node, a panel) is a pure presentation question with no engine consequence, and is best
 decided with a stack on screen to judge.
 
+## Materials name a selection; a set arranges them
+
+Settled 2026-07-27, replacing the chained-node arrangement above. The chain made the graph lie: a
+Material node passed the terrain through untouched, so the wire carried an accumulating field
+while looking like a transformation. Threading one heightfield through five nodes that do not
+change it invites the reasonable question of what happens when you thread five different ones, and
+the answer was bad: each node rebuilds its output from its own `in`, so a different terrain
+arriving silently discards every material before it.
+
+**A Material node takes a selection and nothing else.** One input, the selection saying where the
+material goes. Two parameters, its name and its colour. Its output is that selection as a weight,
+so it can still be tapped, previewed, or run onward into an export node.
+
+**A MaterialSet is an ordered list of materials, and it lives in the left panel.** Not a node and
+not on the canvas: it is a list, so it is presented as a list. It holds which materials are in
+play, in what order, and which are muted. Several sets can exist over the same materials; one is
+active at a time, chosen from a dropdown, which is what makes A/B a flip rather than a rewire.
+
+This removes the heightfield question rather than answering it. No material names a terrain, so
+materials cannot disagree about which one they are on, and changing the terrain being shown
+changes nothing about the materials.
+
+**Mute and solo, borrowed from a mixer.** Mute is a decision about the set and persists with the
+project. Solo is a look, and does not: reopening a project to find one material showing with no
+memory of why is the trap the node pane's filter already avoids by not persisting either. The rule
+is that mute wins and solo narrows, chosen for being explainable rather than clever.
+
+**The set is preview state.** No engine reads a stacking order, so it never needs to leave Ymir.
+Exporting a weight map is wiring a selection into an export node, which works today. Whether a
+future splat export should be driven by a set is open and deliberately not decided here.
+
+The division of labour between the panels follows from materials being nodes: colour and name are
+edited in the right inspector like any node's parameters, and the left panel arranges which
+materials are in the set. Clicking a row selects its node, so the two work as a pair.
+
+Mockup: <https://claude.ai/code/artifact/750d1de8-8553-428b-8e21-b078e0a7063d>
+
 ## Decisions settled
 
 1. Materials are named weight layers, written independently by one node each. No TextureSet
