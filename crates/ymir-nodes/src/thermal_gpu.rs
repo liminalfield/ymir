@@ -203,7 +203,18 @@ mod tests {
     /// skip honestly on a headless host rather than failing.
     fn context_or_skip(test: &str) -> Option<GpuContext> {
         match GpuContext::new_headless() {
-            Ok(gpu) => Some(gpu),
+            Ok(gpu) => {
+                // Which device and backend the assertions below actually ran against. A pass says
+                // little without it: on Windows the same test can run over Vulkan or over DX12,
+                // whose shader compiler is a different code path, and a CI log that does not say
+                // which cannot tell you what was covered.
+                let info = gpu.adapter();
+                eprintln!(
+                    "RUN {test} on {} ({:?}) via {:?}",
+                    info.name, info.device_type, info.backend
+                );
+                Some(gpu)
+            }
             Err(e) => {
                 eprintln!("SKIP {test}: no GPU adapter ({e})");
                 None
