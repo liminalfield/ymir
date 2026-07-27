@@ -1,0 +1,72 @@
+# A Windows build to try, on demand (#310).
+#
+# Testing the editor on Windows needs a Windows binary, and cross-linking one from Linux is not
+# practical (the MSVC toolchain is not available there). Building it from source on a Windows
+# machine means installing rustup and the Visual Studio build tools first, which is a real setup
+# cost just to look at a window.
+#
+# So this builds it here. Deliberately manual rather than part of CI: a release build of the wgpu
+# and egui tree is slow, and paying that on every pull request to produce an artifact nobody
+# downloads would be waste. Run it from the Actions tab, or with:
+#
+#   gh workflow run windows-build.yml --ref <branch>
+#
+# This is not the release path. Publishing a Windows archive to a release is #316, and comes
+# after someone has watched the editor actually open (#315).
+name: Windows build
+
+on:
+  workflow_dispatch:
+    inputs:
+      retention:
+        description: Days to keep the artifact
+        required: false
+        default: "14"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      # Full history so build.rs can stamp the commit into the binaries, which is how a tester's
+      # report can be tied back to exactly what they ran.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binaries
+        run: cargo build --release --workspace --bins
+      # A readme travels with the binaries, because the first thing Windows does with an unsigned
+      # executable is warn about it, and someone who does not expect that reasonably stops there.
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist | Out-Null
+          Copy-Item target/release/ymir-gui.exe dist/
+          Copy-Item target/release/ymir-cli.exe dist/
+          $sha = "$env:GITHUB_SHA".Substring(0,7)
+          @"
+          Ymir for Windows, test build $sha
+
+          ymir-gui.exe  The node editor.
+          ymir-cli.exe  The headless runner. Try: ymir-cli.exe render <project.ymir> --out out.png
+
+          These binaries are unsigned, so SmartScreen will warn the first time. "More info" then
+          "Run anyway" starts it. That warning is about the absence of a code-signing certificate,
+          not about anything found in the file.
+
+          Requires a GPU with working Vulkan or DX12 drivers. The editor will not start without one.
+
+          Ymir keeps its settings in %APPDATA%\Ymir and its build cache in %LOCALAPPDATA%\Ymir.
+          Deleting either is safe; the cache only costs rebuild time.
+
+          The session log is %APPDATA%\Ymir\ymir.log, and its first GPU line names the adapter and
+          backend that ran. That line is the useful thing to quote in a report.
+          "@ | Set-Content -Path dist/README.txt -Encoding utf8
+          Get-FileHash dist/*.exe -Algorithm SHA256 | ForEach-Object {
+            "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)"
+          } | Set-Content -Path dist/SHA256SUMS -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ymir-windows-x86_64
+          path: dist/
+          retention-days: ${{ inputs.retention }}
