@@ -105,6 +105,12 @@ pub fn dispatch_2d(pass: &mut wgpu::ComputePass<'_>, width: u32, height: u32) {
 pub struct GpuContext {
     device: wgpu::Device,
     queue: wgpu::Queue,
+    /// Which adapter and backend this context stood up, kept for [`Self::adapter`].
+    ///
+    /// The first question about any GPU result is which device produced it, and on Windows it is
+    /// also which backend: wgpu prefers Vulkan where a driver exposes it and falls back to DX12,
+    /// whose shader compiler is a different code path entirely. Recorded rather than inferred.
+    adapter: wgpu::AdapterInfo,
 }
 
 impl GpuContext {
@@ -138,7 +144,26 @@ impl GpuContext {
                 required_limits: adapter.limits(),
                 ..Default::default()
             }))?;
-        Ok(Self { device, queue })
+        let info = adapter.get_info();
+        // Logged once per context, at info, so a build report and a CI run both say what ran.
+        log::info!(
+            "GPU compute on {} ({:?}, {:?}) via {:?}",
+            info.name,
+            info.device_type,
+            info.driver,
+            info.backend
+        );
+        Ok(Self {
+            device,
+            queue,
+            adapter: info,
+        })
+    }
+
+    /// Which adapter and backend this context runs on.
+    #[must_use]
+    pub fn adapter(&self) -> &wgpu::AdapterInfo {
+        &self.adapter
     }
 
     /// The underlying `wgpu` device, for an operator building its own pipelines.

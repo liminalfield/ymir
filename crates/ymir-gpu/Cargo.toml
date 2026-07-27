@@ -28,3 +28,7 @@ pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
 # The single crate error type, matching the engine's thiserror convention.
 thiserror = "2"
+# The logging facade, so a context records which adapter and backend it stood up. Which device
+# ran a build is the first question of any GPU report, and without this nothing answers it. The
+# backend is installed by the application via `ymir_core::logging`.
+log = "0.4"

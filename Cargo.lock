@@ -4126,6 +4126,7 @@ name = "ymir-gpu"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "log",
  "pollster",
  "thiserror 2.0.18",
  "wgpu",
