@@ -5588,31 +5588,32 @@ fn materials_pane(ui: &mut egui::Ui, state: &mut AppState) {
         })
         .collect();
 
-    // The badge counts what is actually showing, not what is in the set, so a mute or a solo is
-    // visible from the collapsed header rather than only once it is opened.
-    let badge = state.material_sets.active().map(|set| {
-        let total = set.entries.len();
-        let showing = state.material_sets.showing().len();
-        if showing == total {
-            total.to_string()
-        } else {
-            format!("{showing}/{total}")
-        }
-    });
-    section(
-        ui,
-        "world_section_materials",
-        "Materials",
-        true,
-        true,
-        badge,
-        |ui| {
+    // The dock body does not inset its panes, so each pane pads its own content. The same margin
+    // the World and Library panes use, so the rail's panes line up with one another.
+    egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(8, 6))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
             materials_body(ui, state, &available);
-        },
-    );
+
+            // What is actually showing, which a mute or a solo changes. Worth stating rather than
+            // leaving you to count rows: with something soloed most of the list is struck through.
+            if let Some(set) = state.material_sets.active() {
+                let total = set.entries.len();
+                let showing = state.material_sets.showing().len();
+                if total > 0 {
+                    ui.add_space(4.0);
+                    ui.weak(if showing == total {
+                        format!("{total} showing")
+                    } else {
+                        format!("{showing} of {total} showing")
+                    });
+                }
+            }
+        });
 }
 
-/// The body of the Materials section, split out so the section closure stays readable.
+/// The body of the Materials pane, split out so the padded frame's closure stays readable.
 fn materials_body(
     ui: &mut egui::Ui,
     state: &mut AppState,
