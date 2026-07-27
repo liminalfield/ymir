@@ -20,7 +20,9 @@
 
 use std::collections::HashSet;
 
+use eframe::egui;
 use serde::{Deserialize, Serialize};
+use ymir_core::{Field, layers};
 
 /// One material in a set, by the `stable_id` of its Material node.
 ///
@@ -204,6 +206,96 @@ impl MaterialSets {
     }
 }
 
+/// One material ready to composite: its weight over the terrain, and the colour it shows as.
+pub(crate) struct Shown<'a> {
+    /// The material's `[0, 1]` weight, which rides on the field's height layer because that is
+    /// where a selection's values live.
+    pub weight: &'a Field,
+    /// Its preview colour, sRGB.
+    pub color: egui::Color32,
+}
+
+/// Composites `shown` over `image` in place, bottom first.
+///
+/// An **over** stack: each material paints onto what is beneath it in proportion to its weight, so
+/// one at full weight hides everything below. Order-dependent on purpose, because that is what
+/// makes a stack mean rock poking through grass and snow lying on top of both. A normalized
+/// weighted average was the alternative and is order-independent, which could not express "on top"
+/// at all.
+///
+/// The colour is **multiplied** into the shading rather than replacing it, so the relief still
+/// reads: a lit slope stays lighter than a shaded one under the same material. Replacing would
+/// give flat colour and throw away the shape, which is the thing being judged.
+///
+/// A cell no material claims is left alone, so bare terrain shows as terrain. That is the visible
+/// sign of a stack with no base material under it.
+///
+/// This predicts what a game engine will show. It does not constrain an export, which writes the
+/// raw independent weights and lets the engine do its own blending.
+pub(crate) fn composite(image: &mut egui::ColorImage, shown: &[Shown<'_>]) {
+    if shown.is_empty() {
+        return;
+    }
+    let [w, h] = image.size;
+    let weights: Vec<_> = shown
+        .iter()
+        .map(|s| (s.weight.layer_or(layers::HEIGHT, 0.0), s.color))
+        .collect();
+    // A material evaluated at a different resolution from the terrain cannot be lined up cell for
+    // cell, and stretching it would invent coverage. Skipping is the honest answer.
+    let aligned: Vec<_> = weights
+        .into_iter()
+        .filter(|(layer, _)| layer.width() == w && layer.height() == h)
+        .collect();
+    if aligned.is_empty() {
+        return;
+    }
+
+    for y in 0..h {
+        for x in 0..w {
+            let mut rgb = [0.0_f32; 3];
+            let mut covered = 0.0_f32;
+            for (layer, color) in &aligned {
+                let a = layer.get(x, y).unwrap_or(0.0).clamp(0.0, 1.0);
+                if a <= 0.0 {
+                    continue;
+                }
+                let over = [
+                    f32::from(color.r()) / 255.0,
+                    f32::from(color.g()) / 255.0,
+                    f32::from(color.b()) / 255.0,
+                ];
+                for (channel, tint) in rgb.iter_mut().zip(over) {
+                    *channel = channel.mul_add(1.0 - a, tint * a);
+                }
+                covered = covered.mul_add(1.0 - a, a);
+            }
+            if covered <= 0.0 {
+                continue;
+            }
+            // The accumulation above is premultiplied by coverage, so recover the straight colour
+            // before mixing by coverage below. Without this the coverage is counted twice and a
+            // partial weight darkens the terrain rather than tinting it.
+            for channel in &mut rgb {
+                *channel /= covered;
+            }
+            let pixel = &mut image.pixels[y * w + x];
+            let shaded = [pixel.r(), pixel.g(), pixel.b()];
+            let mut out = [0_u8; 3];
+            for ((slot, lit), tint) in out.iter_mut().zip(shaded).zip(rgb) {
+                let lit = f32::from(lit) / 255.0;
+                *slot = byte((lit * tint - lit).mul_add(covered, lit));
+            }
+            *pixel = egui::Color32::from_rgba_unmultiplied(out[0], out[1], out[2], pixel.a());
+        }
+    }
+}
+
+/// A `[0, 1]` channel as a byte, rounded so a value that came from a byte returns to it.
+fn byte(v: f32) -> u8 {
+    (v.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,5 +442,171 @@ mod tests {
         assert_eq!(s.fresh_name(), "Material set 2");
         s.add_set(s.fresh_name());
         assert_eq!(s.fresh_name(), "Material set 3");
+    }
+
+    use std::sync::Arc;
+    use ymir_core::{Layer, Region};
+
+    const RED: egui::Color32 = egui::Color32::from_rgb(255, 0, 0);
+    const BLUE: egui::Color32 = egui::Color32::from_rgb(0, 0, 255);
+
+    /// A weight field of `value` everywhere, which is the shape a Material node outputs.
+    fn weight(value: f32) -> Field {
+        Field::new(2, 2, Region::UNIT)
+            .with_layer(layers::HEIGHT, Arc::new(Layer::filled(2, 2, value)))
+    }
+
+    /// A flat shaded image, standing in for the hillshade.
+    fn shaded(level: u8) -> egui::ColorImage {
+        egui::ColorImage::from_rgba_unmultiplied([2, 2], &[level, level, level, 255].repeat(4))
+    }
+
+    fn first(image: &egui::ColorImage) -> [u8; 3] {
+        let p = image.pixels[0];
+        [p.r(), p.g(), p.b()]
+    }
+
+    #[test]
+    fn a_full_weight_material_hides_what_is_under_it() {
+        let (base, top) = (weight(1.0), weight(1.0));
+        let mut image = shaded(255);
+        composite(
+            &mut image,
+            &[
+                Shown {
+                    weight: &base,
+                    color: RED,
+                },
+                Shown {
+                    weight: &top,
+                    color: BLUE,
+                },
+            ],
+        );
+        assert_eq!(first(&image), [0, 0, 255], "the top material wins");
+    }
+
+    #[test]
+    fn order_decides_the_result() {
+        // The property the whole ordering design rests on. A normalized weighted average would
+        // give the same answer both ways round and could not express "snow on top".
+        let (a, b) = (weight(1.0), weight(1.0));
+        let mut up = shaded(255);
+        composite(
+            &mut up,
+            &[
+                Shown {
+                    weight: &a,
+                    color: RED,
+                },
+                Shown {
+                    weight: &b,
+                    color: BLUE,
+                },
+            ],
+        );
+        let mut down = shaded(255);
+        composite(
+            &mut down,
+            &[
+                Shown {
+                    weight: &b,
+                    color: BLUE,
+                },
+                Shown {
+                    weight: &a,
+                    color: RED,
+                },
+            ],
+        );
+        assert_ne!(first(&up), first(&down));
+        assert_eq!(first(&up), [0, 0, 255]);
+        assert_eq!(first(&down), [255, 0, 0]);
+    }
+
+    #[test]
+    fn the_relief_survives_the_tint() {
+        // Multiply, not replace: a lit cell under a material stays lighter than a shaded one, so
+        // the shape still reads. Replacing would give flat colour and throw the relief away.
+        let full = weight(1.0);
+        let (mut light, mut dark) = (shaded(200), shaded(60));
+        composite(
+            &mut light,
+            &[Shown {
+                weight: &full,
+                color: RED,
+            }],
+        );
+        composite(
+            &mut dark,
+            &[Shown {
+                weight: &full,
+                color: RED,
+            }],
+        );
+        assert_eq!(first(&light)[1], 0, "the tint removed the green channel");
+        assert!(
+            first(&light)[0] > first(&dark)[0],
+            "the lit cell stays lighter than the shaded one"
+        );
+    }
+
+    #[test]
+    fn an_unclaimed_cell_is_left_as_terrain() {
+        // The visible sign of a stack with no base material under it, and the reason coverage is
+        // tracked separately from colour.
+        let none = weight(0.0);
+        let mut image = shaded(128);
+        let before = image.pixels.clone();
+        composite(
+            &mut image,
+            &[Shown {
+                weight: &none,
+                color: RED,
+            }],
+        );
+        assert_eq!(image.pixels, before);
+    }
+
+    #[test]
+    fn a_partial_weight_tints_partway() {
+        let half = weight(0.5);
+        let mut image = shaded(200);
+        composite(
+            &mut image,
+            &[Shown {
+                weight: &half,
+                color: BLUE,
+            }],
+        );
+        let [r, _, b] = first(&image);
+        assert!(r > 0 && r < 200, "red is pulled down but not to zero");
+        assert_eq!(b, 200, "blue is untouched by a blue tint");
+    }
+
+    #[test]
+    fn a_material_at_another_resolution_is_skipped_rather_than_stretched() {
+        // Reachable while a rebuild is in flight. Stretching would invent coverage, and lining it
+        // up cell for cell is the only honest option.
+        let small = Field::new(1, 1, Region::UNIT)
+            .with_layer(layers::HEIGHT, Arc::new(Layer::filled(1, 1, 1.0)));
+        let mut image = shaded(128);
+        let before = image.pixels.clone();
+        composite(
+            &mut image,
+            &[Shown {
+                weight: &small,
+                color: RED,
+            }],
+        );
+        assert_eq!(image.pixels, before);
+    }
+
+    #[test]
+    fn nothing_to_composite_leaves_the_image_alone() {
+        let mut image = shaded(128);
+        let before = image.pixels.clone();
+        composite(&mut image, &[]);
+        assert_eq!(image.pixels, before);
     }
 }

@@ -2059,9 +2059,14 @@ impl AppState {
         // Inside a subgraph, bind the live input fields so the 2D preview shows real data
         // rather than the Input markers' zero stand-in (#106). `None` at the top level.
         let binding = self.subgraph_inputs();
+        // The active set's materials, bottom first, so the worker evaluates their weights
+        // alongside the previewed node and the composite has something to work with. Muted and
+        // solo-silenced ones are already filtered out, so the preview never evaluates a material
+        // it is not going to draw.
+        self.preview.set_materials(self.material_sets.showing());
         self.preview
             .sync(&self.graph, id, request, now, binding.as_ref());
-        self.preview.poll(ctx);
+        self.preview.poll(ctx, &self.graph);
     }
 }
 

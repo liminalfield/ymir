@@ -45,6 +45,10 @@ struct Job {
     /// markers so the preview shows real data instead of the zero stand-in. `None` at the
     /// top level.
     binding: Option<crate::SubgraphInputs>,
+    /// The Material nodes of the active set, bottom first, evaluated alongside the target so the
+    /// preview can composite them. Their weights come from the same worker and the same cache, so
+    /// a set of five costs five cache hits once the terrain they read is built.
+    materials: Vec<u64>,
 }
 
 /// The worker's reply for one job.
@@ -57,6 +61,8 @@ enum Outcome {
         /// Every output of the previewed node, so the pane can switch which one it shows
         /// without re-evaluating (the engine computes all outputs together).
         fields: Vec<Field>,
+        /// The active set's material weights, in the order they composite.
+        material_weights: Vec<Field>,
         /// Normalized bin heights of the node's *input* distribution (the field feeding
         /// it), for the editor histogram. `None` for a generator (no input) or a failed
         /// input eval.
@@ -99,7 +105,7 @@ enum Status {
 /// The identity a preview texture was built from: field hash, output index, shading mode and
 /// scale, relief light bits, sea-level bits, and whether water is shown. The texture is rebuilt
 /// when any of these change.
-type TextureKey = (u64, usize, ShadeMode, HeightScale, [u32; 3], u32, bool);
+type TextureKey = (u64, usize, ShadeMode, HeightScale, [u32; 3], u32, bool, u64);
 
 /// Drives background preview evaluation. The UI calls [`sync`](Self::sync) (submit
 /// if changed), [`poll`](Self::poll) (collect results), then [`show`](Self::show)
@@ -149,6 +155,10 @@ pub(crate) struct PreviewEngine {
     /// The most recent evaluated node's outputs, kept so switching the shown output or the
     /// shading mode re-renders without re-evaluating the graph. Empty when none.
     last_outputs: Vec<Field>,
+    /// The Material nodes of the active set, bottom first, carried to the next job.
+    materials: Vec<u64>,
+    /// Their evaluated weights, in the same order, from the last completed job.
+    material_weights: Vec<Field>,
     /// The worker's last cache report, by `stable_id` (#279): which nodes hold a result still
     /// keyed to what they would produce now. Held until the next report, so the node pane and the
     /// canvas read a settled fact instead of recomputing keys every frame.
@@ -190,6 +200,8 @@ impl PreviewEngine {
             show_water: false,
             display_output: 0,
             last_outputs: Vec::new(),
+            materials: Vec::new(),
+            material_weights: Vec::new(),
             cache_report: HashMap::new(),
             failed_node: None,
             last_histogram: None,
@@ -306,6 +318,12 @@ impl PreviewEngine {
     /// Submits a fresh evaluation if the previewed output would differ from the last
     /// one submitted. A structural error (disconnected input, cycle) is detected
     /// here, synchronously and cheaply, and shown instead of submitting work.
+    /// The Material nodes to evaluate with the next job, bottom first. Set by the caller, which
+    /// is what knows the active set; the preview only carries them to the worker.
+    pub(crate) fn set_materials(&mut self, materials: Vec<u64>) {
+        self.materials = materials;
+    }
+
     pub(crate) fn sync(
         &mut self,
         graph: &Graph,
@@ -362,6 +380,7 @@ impl PreviewEngine {
             request: request.with_cancel(cancel),
             generation: self.generation,
             binding: binding.cloned(),
+            materials: self.materials.clone(),
         };
         if self.job_tx.send(job).is_err() {
             self.eval_error = Some("preview worker stopped".to_string());
@@ -371,7 +390,7 @@ impl PreviewEngine {
     /// Collects worker results, keeping only the newest, and requests a repaint
     /// while a result is still in flight so the async update shows promptly even
     /// when the UI would otherwise be idle.
-    pub(crate) fn poll(&mut self, ctx: &egui::Context) {
+    pub(crate) fn poll(&mut self, ctx: &egui::Context, graph: &Graph) {
         loop {
             match self.result_rx.try_recv() {
                 Ok(outcome) => self.apply(outcome),
@@ -384,7 +403,7 @@ impl PreviewEngine {
         }
         // Build/refresh the texture for the latest field and shading mode (a no-op
         // when neither changed), so a mode toggle re-renders without re-evaluating.
-        self.refresh_texture(ctx);
+        self.refresh_texture(ctx, graph);
         // Keep ticking while a result is in flight or a debounced submit is due, so
         // the async update and the trailing submit both happen promptly even when
         // the UI would otherwise be idle.
@@ -401,6 +420,7 @@ impl PreviewEngine {
         match outcome {
             Outcome::Ready {
                 fields,
+                material_weights,
                 target,
                 histogram,
                 cache,
@@ -412,6 +432,7 @@ impl PreviewEngine {
                 // Keep all outputs; `refresh_texture` re-uploads only when the shown output
                 // or the shading mode changed.
                 self.last_outputs = fields;
+                self.material_weights = material_weights;
                 self.last_histogram = histogram;
                 self.histogram_target = Some(target);
             }
@@ -421,6 +442,7 @@ impl PreviewEngine {
                 self.eval_error = Some(message);
                 self.failed_node = Some(target);
                 self.last_outputs = Vec::new();
+                self.material_weights = Vec::new();
                 self.last_histogram = None;
                 self.histogram_target = None;
                 self.texture = None;
@@ -431,7 +453,7 @@ impl PreviewEngine {
 
     /// Rebuilds the preview texture from the last field when the field or the shading
     /// mode has changed since the texture was uploaded. Cheap to call every frame.
-    fn refresh_texture(&mut self, ctx: &egui::Context) {
+    fn refresh_texture(&mut self, ctx: &egui::Context, graph: &Graph) {
         let index = self
             .display_output
             .min(self.last_outputs.len().saturating_sub(1));
@@ -453,6 +475,10 @@ impl PreviewEngine {
             self.light.map(f32::to_bits),
             water_bits,
             self.show_water,
+            // A material's colour does not change the field it produces, so a recolour would slip
+            // past a key built only from the field. The graph's hash is memoized (#299), so
+            // reading it costs nothing.
+            graph.content_hash(),
         );
         if self.texture_key == Some(key) {
             return;
@@ -467,6 +493,22 @@ impl PreviewEngine {
                 &WaterStyle::default(),
             );
         }
+        // Materials last, over the shading and the water, so a material reads on top of the
+        // relief the way it will in the viewport. Colours are read off the graph rather than
+        // carried on the field: the editor has both, and a colour is preview-only, so nothing
+        // headless ever needs it.
+        let shown: Vec<crate::materials::Shown<'_>> = self
+            .materials
+            .iter()
+            .zip(&self.material_weights)
+            .filter_map(|(&node, weight)| {
+                Some(crate::materials::Shown {
+                    weight,
+                    color: material_color(graph, node)?,
+                })
+            })
+            .collect();
+        crate::materials::composite(&mut image, &shown);
         self.texture = Some(ctx.load_texture("preview", image, egui::TextureOptions::LINEAR));
         self.texture_key = Some(key);
     }
@@ -667,10 +709,24 @@ fn evaluate_job(job: &Job, cache: &mut EvalCache) -> Option<Outcome> {
                 // the cache from the eval above; this re-eval is a cheap hit.
                 None => input_histogram(&job.graph, target, &job.request, cache),
             };
+            // Each material in the set, in composite order. They share the worker's cache with
+            // the target, so a material reading terrain the target already built is a hit. One
+            // that fails to evaluate is skipped rather than failing the whole preview: a broken
+            // material should cost its own colour, not the picture.
+            let material_weights = job
+                .materials
+                .iter()
+                .filter_map(|&stable_id| {
+                    let node = job.graph.node_id_of(stable_id)?;
+                    let outputs = job.graph.evaluate(node, &job.request, cache).ok()?;
+                    outputs.first().cloned()
+                })
+                .collect();
             Outcome::Ready {
                 generation,
                 target: job.target,
                 fields: outputs,
+                material_weights,
                 histogram,
                 cache: cache_report(&job.graph, &job.request, cache),
             }
@@ -732,6 +788,14 @@ fn field_histogram(field: &Field, bins: usize) -> Vec<f32> {
     counts.iter().map(|&c| c as f32 / max as f32).collect()
 }
 
+/// The colour of the Material node with `stable_id`, or `None` when the graph no longer has it.
+fn material_color(graph: &Graph, stable_id: u64) -> Option<egui::Color32> {
+    let node = graph.node_id_of(stable_id)?;
+    let [r, g, b] = graph.params(node)?.get_color("color", [0.5, 0.5, 0.5]);
+    let byte = |c: f64| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
+    Some(egui::Color32::from_rgb(byte(r), byte(g), byte(b)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -769,6 +833,7 @@ mod tests {
             request: EvalRequest::new(32, 32, Region::UNIT, 0).with_cancel(cancel),
             generation: 1,
             binding: None,
+            materials: Vec::new(),
         };
 
         // A superseded (pre-cancelled) job evaluates to nothing, so the worker
@@ -799,6 +864,7 @@ mod tests {
             request: EvalRequest::new(16, 16, Region::UNIT, 0),
             generation: 1,
             binding: None,
+            materials: Vec::new(),
         };
 
         let mut cache = EvalCache::new(4);
