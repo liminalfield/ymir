@@ -8,6 +8,14 @@
 //! ([`preview`]) evaluates the selected node's output on a worker thread. All
 //! display strings resolve through `tr(key)`, so this crate holds no node prose.
 
+// On Windows a console program opens a console window alongside its own, so a released editor
+// would sit in front of an empty black terminal. This detaches it. Release only: a debug build
+// keeps its console, which is where `println!` and a panic backtrace go while developing. It
+// belongs here and not on `ymir-cli`, which is a console program and needs one.
+//
+// A no-op everywhere else, so it needs no `cfg(windows)` of its own.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use eframe::egui;
