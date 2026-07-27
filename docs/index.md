@@ -8,7 +8,7 @@ status: draft
 
 # Ymir
 
-Ymir is a node-based procedural terrain generator for Linux, written in Rust. You build terrain by
+Ymir is a node-based procedural terrain generator for Linux and Windows, written in Rust. You build terrain by
 wiring a graph of small, single-purpose nodes: generators lay down base shapes and noise, modifiers
 sculpt and erode them, selectors and masks scope where effects apply, and endpoints export
 heightmaps. One data type flows on every edge, so a node drops in anywhere and there is no fixed
