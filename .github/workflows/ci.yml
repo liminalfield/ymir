@@ -95,16 +95,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Lint
         run: cargo clippy --workspace --all-targets -- -D warnings
-      # Which GPU adapters the runner exposes, and therefore whether the ymir-gpu tests below
-      # actually ran or skipped. `windows-latest` has no physical GPU, but usually offers the
+      # Which display adapters Windows itself reports, as context for whether the ymir-gpu tests
+      # below ran or skipped. `windows-latest` has no physical GPU, but usually offers the
       # Microsoft Basic Render Driver (WARP), a software DX12 adapter. If it enumerates, this job
-      # exercises the DX12 path, including its FXC shader compilation, for free. Printed either
-      # way so the answer is in the log rather than assumed.
-      - name: GPU adapters
-        run: |
-          dxdiag /t dxdiag.txt
-          Select-String -Path dxdiag.txt -Pattern 'Card name|Driver Model|Feature Levels' || $true
+      # exercises the DX12 path, including its FXC shader compilation, for free.
+      #
+      # `continue-on-error` because this asserts nothing: it exists to put information in the log,
+      # and a diagnostic that can fail the build inverts its purpose. The authoritative answer for
+      # whether wgpu found an adapter is the ymir-gpu tests' own skip message in the Test step.
+      #
+      # Not `dxdiag`, which returns before it finishes writing its report, so reading the file
+      # races the tool that produces it. CIM is synchronous and needs no temporary file.
+      - name: Display adapters (diagnostic)
+        continue-on-error: true
         shell: pwsh
+        run: Get-CimInstance Win32_VideoController | Format-List Name, DriverVersion, VideoProcessor
       # The CLI's tests/render.rs spawns the real binary through CARGO_BIN_EXE, so this covers
       # linking and process spawning, not just compilation. The ymir-gpu tests skip gracefully
       # when no adapter is found, printing why; --nocapture keeps that visible.
