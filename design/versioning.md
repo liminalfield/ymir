@@ -25,11 +25,12 @@ Ymir is in `0.x` while it is a public preview: still evolving, no stability prom
 Two independent axes, do not conflate them:
 
 - **App version** (this document): the marketing/release number, one per release.
-- **Save-format versions**: `ymir_core::project::FORMAT_VERSION` and the GUI's
-  `PROJECT_FORMAT_VERSION` / `SUBGRAPH_FORMAT_VERSION`. These bump only when the
-  serialized schema changes, and each change ships a migration path (see the
-  file-format-stability rule in CLAUDE.md). A release can bump the app version many times
-  without touching the format version, and vice versa.
+- **Save-format versions**: `ymir_core::PROJECT_FILE_VERSION` (the whole `.ymir` file),
+  `ymir_core::project::FORMAT_VERSION` (the graph document nested inside it), and the GUI's
+  `SUBGRAPH_FORMAT_VERSION`. These bump only when the serialized schema changes, and each
+  change ships a migration path or is a documented break (see the file-format-stability rule
+  in CLAUDE.md, and `design/project-format.md`). A release can bump the app version many
+  times without touching a format version, and vice versa.
 
 ## Single source of truth
 

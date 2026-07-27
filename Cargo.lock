@@ -4081,7 +4081,7 @@ checksum = "3ae8337f8a065cfc972643663ea4279e04e7256de865aa66fe25cec5fb912d3f"
 
 [[package]]
 name = "xtask"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -4089,11 +4089,11 @@ dependencies = [
 
 [[package]]
 name = "ymir-build-info"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "ymir-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "log",
  "serde",
@@ -4106,7 +4106,7 @@ dependencies = [
 
 [[package]]
 name = "ymir-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "exr",
  "humantime",
@@ -4134,7 +4134,7 @@ dependencies = [
 
 [[package]]
 name = "ymir-gui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytemuck",
  "eframe",
@@ -4156,7 +4156,7 @@ dependencies = [
 
 [[package]]
 name = "ymir-nodes"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytemuck",
  "inventory",
