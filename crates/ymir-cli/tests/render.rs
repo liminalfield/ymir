@@ -29,6 +29,30 @@ const PROJECT: &str = r#"{
   }
 }"#;
 
+/// A project with an export endpoint *and* a loose modifier sink, which is what an editing
+/// session leaves behind when an export was wired up and something else was left dangling.
+///
+/// The export writes into `out/` relative to the working directory, which the test overrides.
+const MIXED_SINKS: &str = r#"{
+  "format_version": 2,
+  "world": {
+    "seed": 1, "world_extent": 1024.0, "world_height": 256.0,
+    "sea_level": 0.3, "build_res": 32
+  },
+  "graph": {
+    "format_version": 1,
+    "next_stable_id": 3,
+    "nodes": [
+      { "stable_id": 0, "type_id": "generator.fbm" },
+      { "stable_id": 1, "type_id": "endpoint.export",
+        "params": { "path": { "text": "exported.png" } },
+        "connections": [ { "input": 0, "source": 0, "output": 0 } ] },
+      { "stable_id": 2, "type_id": "modifier.blur",
+        "connections": [ { "input": 0, "source": 0, "output": 0 } ] }
+    ]
+  }
+}"#;
+
 /// A scratch directory unique to one test, removed when the test ends.
 struct Scratch(PathBuf);
 
@@ -177,6 +201,38 @@ fn every_output_format_writes_something_readable() {
             .len(),
         64 * 64 * 2,
         "r16 is raw 16-bit samples, so its size is exactly the cell count"
+    );
+}
+
+#[test]
+fn an_export_node_alongside_a_loose_sink_does_not_break_the_out_file() {
+    // Found in a real project: an export endpoint and a modifier left dangling from an earlier
+    // session are both sinks, so a build touches both. `--out` names where the modifier's field
+    // goes; the endpoint writes the path it carries and has no output to hand over. Writing for
+    // every target made the endpoint's empty result an error and lost the render.
+    let scratch = Scratch::new("mixed");
+    let project = scratch.path("mixed.ymir");
+    std::fs::write(&project, MIXED_SINKS).expect("write project");
+    let out = scratch.path("blurred.png");
+
+    let run = Command::new(env!("CARGO_BIN_EXE_ymir-cli"))
+        .args([
+            "render",
+            project.to_str().expect("utf-8 path"),
+            "--out",
+            out.to_str().expect("utf-8 path"),
+        ])
+        // The export node writes a relative path, so run where the scratch directory is.
+        .current_dir(&scratch.0)
+        .output()
+        .expect("run ymir-cli");
+
+    assert!(run.status.success(), "{}", transcript(&run));
+    assert!(out.exists(), "--out was not written\n{}", transcript(&run));
+    assert!(
+        scratch.path("exported.png").exists(),
+        "the export endpoint's own file was not written\n{}",
+        transcript(&run)
     );
 }
 

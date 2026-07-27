@@ -330,6 +330,13 @@ pub(crate) fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
     let mut cache = EvalCache::new(CACHE_NODES);
     for &id in &targets {
         let outputs = graph.evaluate(id, &request, &mut cache)?;
+        // `--out` names where *this* node's field goes, so it applies only to the node that has
+        // one. An endpoint in the same build wrote the path it carries while it evaluated, and
+        // has no output to write here. A project can hold both: an export node, and a modifier
+        // left dangling from a previous session.
+        if !writing.contains(&id) {
+            continue;
+        }
         if let (Some(path), Some(format)) = (&args.out, format) {
             let field = outputs
                 .first()
