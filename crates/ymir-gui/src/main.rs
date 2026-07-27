@@ -34,6 +34,7 @@ use ymir_nodes::{CategoryDef, categories, find_category, node_group, tr};
 mod canvas;
 use canvas::Handle;
 // The parameter inspector: ParamSpec-driven widgets, no per-node code.
+mod materials;
 mod param_ui;
 // The visual curve editor widget (GUI step A2), rendered for ParamKind::Curve.
 mod curve_edit;
@@ -445,6 +446,8 @@ struct AppState {
     /// the user likes to read this graph rather than a passing question.
     node_sort: status::NodeSort,
     node_density: status::Density,
+    /// The project's material sets (#267): which materials show together and in what order.
+    material_sets: materials::MaterialSets,
     /// The node pinned as the preview target, if any (GUI view-state, not core graph
     /// data — issue #39). When set and still previewable, the 2D preview shows this
     /// node instead of the selection, so selection can move upstream to edit while the
@@ -882,6 +885,7 @@ impl AppState {
             node_chips: status::Chips::default(),
             node_sort: status::NodeSort::default(),
             node_density: status::Density::default(),
+            material_sets: materials::MaterialSets::default(),
             preview_pin: None,
             preview_dismissed: false,
             rename: None,
@@ -1008,6 +1012,7 @@ impl AppState {
         self.build_progress.clear();
         self.node_sort = restored.node_sort;
         self.node_density = restored.node_density;
+        self.material_sets = restored.material_sets.clone();
         // The filter is not restored on purpose: see `node_filter`.
         self.node_filter.clear();
         self.node_chips = status::Chips::default();
@@ -1068,6 +1073,7 @@ impl AppState {
         self.apply_water_settings(view.water);
         self.node_sort = view.node_sort;
         self.node_density = view.node_density;
+        self.material_sets = view.material_sets.clone();
         self.clear_selection();
         self.preview_pin = None;
         self.node_menu = None;
@@ -1114,6 +1120,7 @@ impl AppState {
                     water: r.water,
                     node_sort: r.node_sort,
                     node_density: r.node_density,
+                    material_sets: r.material_sets.clone(),
                 };
                 self.install_fresh(r.graph, r.snarl, world, view, r.subgraph_layouts);
             }
@@ -1153,6 +1160,7 @@ impl AppState {
             water: self.water_settings(),
             node_sort: self.node_sort,
             node_density: self.node_density,
+            material_sets: self.material_sets.clone(),
         }
     }
 
@@ -1785,6 +1793,7 @@ impl AppState {
                 self.frames = restored.frames;
                 self.node_sort = restored.node_sort;
                 self.node_density = restored.node_density;
+                self.material_sets = restored.material_sets.clone();
                 self.node_filter.clear();
                 self.node_chips = status::Chips::default();
                 self.subgraph_layouts = restored.subgraph_layouts;
@@ -5541,6 +5550,251 @@ fn frame_inspector(ui: &mut egui::Ui, state: &mut AppState, index: usize) {
 /// shows only when open. With `divider`, a faint rule sits above the header so stacked sections read
 /// as distinct bands (off for the first section, which has nothing above it). Open/closed state
 /// persists for the session in egui memory, keyed by `id`.
+/// The Materials section of the left panel (#267): which materials show together, in what order,
+/// and which are muted.
+///
+/// The panel arranges materials; it never edits one. A material is a node, so its name and colour
+/// are edited in the right inspector like any node's parameters, and clicking a row here selects
+/// that node so the two panels work as a pair. The swatch and name on a row identify the node,
+/// they are not a second place to change it.
+fn materials_section(ui: &mut egui::Ui, state: &mut AppState) {
+    // Every Material node in the graph, with what a row needs to show it.
+    let available: Vec<(u64, NodeId, String, egui::Color32)> = state
+        .graph
+        .nodes_of_type("modifier.material")
+        .into_iter()
+        .filter_map(|id| {
+            let stable_id = state.graph.stable_id(id)?;
+            let params = state.graph.params(id)?;
+            let name = params.get_str("name", "").trim().to_string();
+            let name = if name.is_empty() {
+                node_display_name(&state.graph, id)
+            } else {
+                name
+            };
+            let [r, g, b] = params.get_color("color", [0.5, 0.5, 0.5]);
+            let to_byte = |c: f64| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
+            Some((
+                stable_id,
+                id,
+                name,
+                egui::Color32::from_rgb(to_byte(r), to_byte(g), to_byte(b)),
+            ))
+        })
+        .collect();
+
+    // The badge counts what is actually showing, not what is in the set, so a mute or a solo is
+    // visible from the collapsed header rather than only once it is opened.
+    let badge = state.material_sets.active().map(|set| {
+        let total = set.entries.len();
+        let showing = state.material_sets.showing().len();
+        if showing == total {
+            total.to_string()
+        } else {
+            format!("{showing}/{total}")
+        }
+    });
+    section(
+        ui,
+        "world_section_materials",
+        "Materials",
+        true,
+        true,
+        badge,
+        |ui| {
+            materials_body(ui, state, &available);
+        },
+    );
+}
+
+/// The body of the Materials section, split out so the section closure stays readable.
+fn materials_body(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    available: &[(u64, NodeId, String, egui::Color32)],
+) {
+    if available.is_empty() && state.material_sets.is_empty() {
+        ui.weak("No material nodes in the graph.");
+        return;
+    }
+
+    // The set picker. Labelled, because "Materials" is the section and the dropdown is one set
+    // within it; without the label the two read as the same thing.
+    let mut pending_remove = None;
+    ui.horizontal(|ui| {
+        ui.label("Set");
+        let active_name = state
+            .material_sets
+            .active()
+            .map_or_else(|| "none".to_string(), |set| set.name.clone());
+        egui::ComboBox::from_id_salt("material_set_pick")
+            .selected_text(active_name)
+            .width(ui.available_width() - 60.0)
+            .show_ui(ui, |ui| {
+                for (i, name) in state
+                    .material_sets
+                    .sets
+                    .iter()
+                    .map(|s| s.name.clone())
+                    .enumerate()
+                    .collect::<Vec<_>>()
+                {
+                    ui.selectable_value(&mut state.material_sets.active, i, name);
+                }
+            });
+        if ui
+            .small_button("+")
+            .on_hover_text("New material set")
+            .clicked()
+        {
+            let name = state.material_sets.fresh_name();
+            state.material_sets.add_set(name);
+        }
+        if state.material_sets.active().is_some()
+            && ui
+                .small_button("\u{2212}")
+                .on_hover_text("Delete this set")
+                .clicked()
+        {
+            pending_remove = Some(state.material_sets.active);
+        }
+    });
+    if let Some(index) = pending_remove {
+        state.material_sets.remove_set(index);
+    }
+
+    let Some(set) = state.material_sets.active() else {
+        ui.weak("No material sets. Create one to arrange the materials in your graph.");
+        return;
+    };
+
+    // Rows top-first, because a layer stack reads top down, while the set stores bottom-first so
+    // its order and the compositing loop agree without anything reversing in between.
+    let rows: Vec<(usize, u64)> = set
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(i, e)| (i, e.node))
+        .rev()
+        .collect();
+
+    if rows.is_empty() {
+        ui.weak("Set is empty. Add a material below.");
+    }
+
+    let mut action: Option<MaterialRowAction> = None;
+    for (index, node) in rows {
+        let found = available.iter().find(|(sid, ..)| *sid == node);
+        let showing = state.material_sets.is_showing(node);
+        let muted = state.material_sets.is_muted(node);
+        let soloed = state.material_sets.soloed.contains(&node);
+
+        ui.horizontal(|ui| {
+            // Swatch, then name, then the two toggles. At the panel's width that is all that fits,
+            // which is why mute and solo are single letters rather than icons with labels.
+            match found {
+                Some((_, _, name, color)) => {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                    ui.painter().rect_filled(rect, 2.0, *color);
+                    let text = if showing {
+                        egui::RichText::new(name)
+                    } else {
+                        egui::RichText::new(name).weak().strikethrough()
+                    };
+                    if ui.selectable_label(false, text).clicked() {
+                        action = Some(MaterialRowAction::Select(node));
+                    }
+                }
+                // Its node was deleted. Kept and marked rather than dropped silently: you deleted
+                // a node, not a set entry, and it contributes nothing until you remove it.
+                None => {
+                    ui.label(egui::RichText::new("\u{26a0}").color(theme::WARNING));
+                    ui.label(
+                        egui::RichText::new(format!("missing node {node}"))
+                            .italics()
+                            .color(theme::WARNING),
+                    );
+                }
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .selectable_label(soloed, "S")
+                    .on_hover_text("Solo: show only this. Not saved with the project.")
+                    .clicked()
+                {
+                    action = Some(MaterialRowAction::Solo(node));
+                }
+                if ui
+                    .selectable_label(muted, "M")
+                    .on_hover_text("Mute: leave this out of the composite.")
+                    .clicked()
+                {
+                    action = Some(MaterialRowAction::Mute(node));
+                }
+                if ui
+                    .small_button("\u{25b2}")
+                    .on_hover_text("Move up")
+                    .clicked()
+                {
+                    action = Some(MaterialRowAction::Move(index, index + 1));
+                }
+                if ui
+                    .small_button("\u{25bc}")
+                    .on_hover_text("Move down")
+                    .clicked()
+                {
+                    action = Some(MaterialRowAction::Move(index, index.saturating_sub(1)));
+                }
+            });
+        });
+    }
+
+    // Applied after the loop so the row closure never holds a mutable borrow of the sets.
+    match action {
+        // Selecting the node brings it up in the right inspector, which is where a material's
+        // name and colour are edited. The selection takes the stable id directly.
+        Some(MaterialRowAction::Select(node)) => state.select_only(node),
+        Some(MaterialRowAction::Mute(node)) => state.material_sets.toggle_mute(node),
+        Some(MaterialRowAction::Solo(node)) => state.material_sets.toggle_solo(node),
+        Some(MaterialRowAction::Move(from, to)) => state.material_sets.reorder(from, to),
+        None => {}
+    }
+
+    // Membership, both directions in one list: a tick means it is in the set, and clicking
+    // toggles it. A delete control on every row would cost width the panel does not have, for
+    // something done rarely.
+    ui.add_space(4.0);
+    let mut toggled = None;
+    ui.menu_button("Materials in this set\u{2026}", |ui| {
+        if available.is_empty() {
+            ui.weak("No material nodes in the graph.");
+        }
+        for (stable_id, _, name, color) in available {
+            let in_set = state.material_sets.contains(*stable_id);
+            ui.horizontal(|ui| {
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                ui.painter().rect_filled(rect, 2.0, *color);
+                if ui.selectable_label(in_set, name).clicked() {
+                    toggled = Some(*stable_id);
+                }
+            });
+        }
+    });
+    if let Some(node) = toggled {
+        state.material_sets.toggle_member(node);
+    }
+}
+
+/// What a click on a material row asked for, applied after the row is drawn.
+enum MaterialRowAction {
+    Select(u64),
+    Mute(u64),
+    Solo(u64),
+    Move(usize, usize),
+}
+
 fn section(
     ui: &mut egui::Ui,
     id: &str,
@@ -5901,6 +6155,8 @@ fn world_settings(ui: &mut egui::Ui, state: &mut AppState) {
             });
         },
     );
+
+    materials_section(ui, state);
 
     // WATER: the rendering look, grouped (the 1c handoff) into Surface / Depth / Foam, each a header
     // row with an enable toggle owning the params it gates. The effect toggles are those headers.
