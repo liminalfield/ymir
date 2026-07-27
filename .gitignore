@@ -33,3 +33,7 @@ Thumbs.db
 # Claude Code: transient agent worktrees and local settings (settings.json is shared)
 .claude/worktrees/
 .claude/settings.local.json
+
+# Design handoffs: working material from the design process, kept beside the repo rather than in
+# it. The mockups they produce belong in design/; the handoff bundles do not.
+design_handoff_*/
