@@ -6,6 +6,15 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # A dry run, so the release path can be proven before a tag depends on it. Everything
+  # happens except the publish: the binaries are built, packaged and checksummed exactly as a
+  # real release would, and the result is uploaded as an artifact to inspect.
+  #
+  # Worth having because a tag-triggered workflow is otherwise only exercised at the moment it
+  # matters, and a break surfaces when cutting a release rather than before. That is the same
+  # class of problem as #300, where the release profile stayed broken for weeks because nothing
+  # built it until a tag did.
+  workflow_dispatch:
 
 # The release step creates a GitHub Release and uploads assets, which needs write access
 # to repository contents. Nothing else here writes, so the token stays otherwise read-only.
@@ -13,8 +22,22 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  # One job per platform, then a single publish step that gathers both. Split this way so the
+  # two builds run in parallel and, more importantly, so one checksum file covers every asset
+  # in the release: computing them per platform would leave a user two files to reconcile.
+  build:
+    strategy:
+      # Both platforms always attempt, so a Windows failure still shows the Linux result rather
+      # than cancelling it. `publish` needs both to succeed regardless, so a partial release
+      # cannot be published by accident.
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+          - os: windows-latest
+            platform: windows-x86_64
+    runs-on: ${{ matrix.os }}
     steps:
       # Full history so build.rs can stamp the commit and the tag resolves to a commit.
       - uses: actions/checkout@v4
@@ -24,7 +47,13 @@ jobs:
       # Guard: the tag (minus its leading v) must equal the workspace version. A mismatch
       # means someone tagged without bumping Cargo.toml, or vice versa; fail before building
       # rather than ship a binary whose About box disagrees with its tag.
+      #
+      # Runs on every platform in the matrix rather than once, so a Windows binary can never
+      # ship reporting a version its tag disagrees with either.
       - name: Verify tag matches Cargo version
+        # A dry run is dispatched from a branch, where there is no tag to agree with.
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
         run: |
           tag="${GITHUB_REF_NAME#v}"
           cargo_ver="$(cargo metadata --no-deps --format-version 1 \
@@ -37,7 +66,6 @@ jobs:
 
       # rustup honors rust-toolchain.toml. The cache is shared with the CI workflow's key
       # scheme, so a release usually reuses the already-compiled dependency tree.
-      - run: rustup component add rustfmt clippy
       - uses: Swatinem/rust-cache@v2
 
       # Release binaries for both the GUI and the headless CLI. build.rs stamps the tagged
@@ -45,13 +73,85 @@ jobs:
       - name: Build release binaries
         run: cargo build --release --workspace --bins
 
-      # Name the assets by platform and record checksums, so a download is verifiable.
-      - name: Package
+      # Linux ships bare binaries, matching what every release so far has attached.
+      - name: Package (Linux)
+        if: matrix.os == 'ubuntu-latest'
         run: |
           mkdir -p dist
           cp target/release/ymir-gui dist/ymir-gui-linux-x86_64
           cp target/release/ymir-cli dist/ymir-cli-linux-x86_64
-          (cd dist && sha256sum ymir-* > SHA256SUMS)
+
+      # Windows ships a zip rather than bare .exe files. Browsers and Windows both treat a
+      # directly downloaded executable more suspiciously than an archive, and the archive can
+      # carry a readme: the first thing Windows does with an unsigned binary is warn about it,
+      # and someone who does not expect that reasonably stops there.
+      - name: Package (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist, staging | Out-Null
+          Copy-Item target/release/ymir-gui.exe staging/
+          Copy-Item target/release/ymir-cli.exe staging/
+          @"
+          Ymir $env:GITHUB_REF_NAME for Windows
+
+          ymir-gui.exe  The node editor.
+          ymir-cli.exe  The headless runner. Try:
+                        ymir-cli.exe render <project.ymir> --out out.png
+
+          These binaries are unsigned, so SmartScreen warns the first time you run one.
+          Choose "More info" then "Run anyway". The warning is about the absence of a
+          code-signing certificate, not about anything found in the file.
+
+          Requires a GPU with working Vulkan or DX12 drivers. The editor will not start
+          without one.
+
+          Ymir keeps its settings in %APPDATA%\Ymir and its build cache in
+          %LOCALAPPDATA%\Ymir. Deleting either is safe; the cache only costs rebuild time.
+
+          Documentation: https://liminalfield.github.io/ymir/
+          "@ | Set-Content -Path staging/README.txt -Encoding utf8
+          Compress-Archive -Path staging/* -DestinationPath dist/ymir-windows-x86_64.zip
+
+      # Each platform hands its assets to the publish job, which computes one checksum file
+      # across all of them.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}
+          path: dist/
+          retention-days: 1
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      # Only the notes are needed here; the binaries come from the build jobs.
+      - uses: actions/checkout@v4
+
+      # Every platform's assets into one directory, flattened, so SHA256SUMS covers the whole
+      # release and a user has one file to check rather than one per platform.
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: staging
+          merge-multiple: true
+
+      - name: Collect and checksum
+        run: |
+          mkdir -p dist
+          cp staging/* dist/
+          (cd dist && sha256sum -- * > SHA256SUMS)
+          ls -la dist
+
+      # The assembled release, for a dry run to inspect. Same bytes the publish step would
+      # attach; this is what makes the dry run worth anything.
+      - name: Upload the assembled release (dry run)
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dry-run
+          path: dist/
+          retention-days: 7
 
       # Create the Release via the preinstalled gh CLI (no third-party action), attaching the
       # binaries and checksums.
@@ -62,6 +162,9 @@ jobs:
       # wall of every PR ever merged. Prose that says what the thing is beats a commit dump
       # whenever someone has taken the trouble to write it.
       - name: Publish GitHub Release
+        # Only a tag publishes. A dry run stops above, having proven everything except the
+        # single irreversible step.
+        if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
