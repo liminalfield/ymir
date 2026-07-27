@@ -52,24 +52,27 @@ what a weight map already is, so the export is a write of data that already exis
 
 Input 0 is the field. Input 1 is an optional mask, which is the selection deciding where the
 material goes. An unwired mask means the material applies everywhere, which is how a base
-material is expressed: a Material node with nothing in its mask input. The node writes its
-own weight layer, composites it against the material layers already present, and passes
-everything else through untouched.
+material is expressed: a Material node with nothing in its mask input. The node writes its own
+weight layer and passes every other layer through untouched, including the weight layers of the
+materials before it, which it does not modify (see "Weights are independent" below).
 
-Parameters: the material `name`, its preview colour, and (open, see below) a strength.
+Parameters: the material `name` and its preview colour.
 
-### Composition is the chain
+### The chain collects, it does not compose
 
-Order is wiring order. A graph reads:
+A graph reads:
 
 ```
 terrain ─► Material "rock" ─► Material "grass" ◄─ slope selection
                                    └─► Material "snow" ◄─ height selection
 ```
 
-The stack is legible from the node structure, which is the property CLAUDE.md's node
-philosophy asks for. Compositing happens as each node evaluates, so nothing downstream needs
-to know the order: it sees finished weights.
+Each node adds one weight layer, so the field arriving at the end carries all of them. Which
+materials a graph has is legible from the node structure, which is the property CLAUDE.md's node
+philosophy asks for.
+
+What the chain does *not* decide is how the weights stack when they overlap. That is layer order,
+it is preview-only, and it is deliberately not the wiring's job.
 
 ### The colour travels on the field
 
@@ -145,10 +148,49 @@ Two material sets meeting on one field is defined behaviour: chained, the second
 over the first under the same rule the stack uses. Sets are kept in parallel branches when
 they are meant to be alternatives.
 
+## Weights are independent, and order is preview only
+
+Settled 2026-07-27 against how the maintainer actually works, which is the test that mattered
+more than the reasoning that preceded it.
+
+The workflow is World Machine to Unreal. Each map is generated from its own selection and
+exported on its own. Overlapping coverage, per-cell sums above one, and cells no map claims are
+all expected and none of them are policed at generation time. One map is authored as all ones and
+assigned to the bottom landscape layer, so nothing is ever uncovered. The engine then owns
+ordering and normalization: Unreal's weight-blended landscape layers normalize across layers at
+render, and the blend order lives in the material, not in the maps.
+
+So:
+
+- **A Material node writes an independent weight layer.** No occlusion. `material.rock` is
+  exactly what the rock selection said, whatever `material.snow` says in the same cell. The node
+  is therefore order-insensitive and stays a pure per-cell write.
+- **A base material is a Material node with no mask**, weight 1 everywhere. That is the all-ones
+  map, and it falls out of the design rather than being a special case.
+- **The export writes those raw weights**, one map per material. It does not normalize. Doing so
+  would rescale what the author saw, and the engine renormalizes anyway.
+- **Layer order never leaves Ymir.** No downstream tool reads it: Unreal and Unity both take
+  ordering from their own material setup. Order exists so the viewport can *predict* what the
+  engine will show, which makes it view state, alongside the canvas camera and the water
+  settings, not engine truth. It does not belong on the field, in the manifest, or in a headless
+  path.
+
+An earlier framing had this as a choice between an occluding composite and a normalized one, and
+insisted the preview and the export apply the same rule. That was wrong twice over: it conflated
+what the maps contain with how they are stacked, and the rule that matters is the engine's. The
+preview's job is to replicate it; the export's job is to stay out of the way.
+
+**This also retires the objection to a set object.** "Why not Texture and TextureSet" below argues
+that a composition living in the GUI layer cannot drive a headless export and the two would
+drift. That holds only if order reaches the export. It does not, so nothing can drift, and an
+ordering entity on the GUI side is legitimate. Where order lives inside the editor (chain order, a
+list on a node, a panel) is a pure presentation question with no engine consequence, and is best
+decided with a stack on screen to judge.
+
 ## Decisions settled
 
-1. Materials are named weight layers, composed by the node chain. No TextureSet object, no
-   canvas presentation nodes.
+1. Materials are named weight layers, written independently by one node each. No TextureSet
+   object, no canvas presentation nodes.
 2. The colour is a node parameter and rides the field's `detail` map.
 3. The material's name is its identity; the colour is preview only.
 4. A material set is a subgraph; A/B is parallel branches plus the preview pin.
@@ -157,9 +199,7 @@ they are meant to be alternatives.
 
 ## Open decisions
 
-1. **Composite semantics.** Whether a Material node takes weight from those below it (an
-   over composite) and whether the export normalizes weights to sum to one. The preview and
-   the export must use the same rule, so this is settled once and applied in both.
+1. ~~**Composite semantics.**~~ Settled; see "Weights are independent" below.
 2. **How many materials the shader composites**, and what happens past that count.
 3. **Export form.** N single-channel weight maps plus a manifest, or channels packed into
    RGBA. #78 wants both eventually; one of them is first.
