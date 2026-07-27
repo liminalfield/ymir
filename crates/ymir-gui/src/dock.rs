@@ -72,3 +72,29 @@ impl Default for DockState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_rail_is_the_panes_in_a_fixed_order() {
+        // Panes self-register, so one can appear without any dock code changing. That is the point
+        // of the pattern, and also why the rail's contents are worth pinning: adding a pane should
+        // be a deliberate act, and the order decides which one opens by default.
+        let ids: Vec<&str> = dock_panes().iter().map(|pane| pane.id).collect();
+        assert_eq!(ids, ["world", "library", "nodes", "materials"]);
+    }
+
+    #[test]
+    fn every_pane_is_reachable_by_its_id() {
+        for pane in dock_panes() {
+            assert!(
+                dock_pane(pane.id).is_some(),
+                "{} registered but does not look up",
+                pane.id
+            );
+        }
+        assert!(dock_pane("not-a-pane").is_none());
+    }
+}

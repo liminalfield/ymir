@@ -5545,19 +5545,27 @@ fn frame_inspector(ui: &mut egui::Ui, state: &mut AppState, index: usize) {
     }
 }
 
-/// A collapsible section for the World panel (the 1c handoff): a slim header of a chevron and an
-/// uppercase label, optionally trailed by a muted `badge` (an active count), over a body that
-/// shows only when open. With `divider`, a faint rule sits above the header so stacked sections read
-/// as distinct bands (off for the first section, which has nothing above it). Open/closed state
-/// persists for the session in egui memory, keyed by `id`.
-/// The Materials section of the left panel (#267): which materials show together, in what order,
-/// and which are muted.
+inventory::submit! {
+    dock::DockPane {
+        id: "materials",
+        order: 30,
+        icon: egui_phosphor::regular::STACK_SIMPLE,
+        title: "Materials",
+        draw: materials_pane,
+    }
+}
+
+/// The Materials dock pane (#267): which materials show together, in what order, and which are
+/// muted.
 ///
-/// The panel arranges materials; it never edits one. A material is a node, so its name and colour
+/// Its own pane rather than a section of the World pane, because arranging materials is a task you
+/// sit in rather than a setting you glance at, and the list needs the height.
+///
+/// The pane arranges materials; it never edits one. A material is a node, so its name and colour
 /// are edited in the right inspector like any node's parameters, and clicking a row here selects
-/// that node so the two panels work as a pair. The swatch and name on a row identify the node,
-/// they are not a second place to change it.
-fn materials_section(ui: &mut egui::Ui, state: &mut AppState) {
+/// that node so the two panes work as a pair. The swatch and name on a row identify the node, they
+/// are not a second place to change it.
+fn materials_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // Every Material node in the graph, with what a row needs to show it.
     let available: Vec<(u64, NodeId, String, egui::Color32)> = state
         .graph
@@ -5795,6 +5803,11 @@ enum MaterialRowAction {
     Move(usize, usize),
 }
 
+/// A collapsible section for the World panel (the 1c handoff): a slim header of a chevron and an
+/// uppercase label, optionally trailed by a muted `badge` (an active count), over a body that
+/// shows only when open. With `divider`, a faint rule sits above the header so stacked sections read
+/// as distinct bands (off for the first section, which has nothing above it). Open/closed state
+/// persists for the session in egui memory, keyed by `id`.
 fn section(
     ui: &mut egui::Ui,
     id: &str,
@@ -6155,8 +6168,6 @@ fn world_settings(ui: &mut egui::Ui, state: &mut AppState) {
             });
         },
     );
-
-    materials_section(ui, state);
 
     // WATER: the rendering look, grouped (the 1c handoff) into Surface / Depth / Foam, each a header
     // row with an enable toggle owning the params it gates. The effect toggles are those headers.
