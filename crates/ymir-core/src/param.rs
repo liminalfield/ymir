@@ -32,6 +32,16 @@ pub enum ParamValue {
     Curve(Curve),
     /// A set of hand-painted brush strokes, for the Paint node.
     Strokes(Strokes),
+    /// An opaque colour: red, green and blue in `[0, 1]`, in sRGB.
+    ///
+    /// sRGB because that is the space a picker shows and the space a hex colour in an exported
+    /// manifest means; converting to linear is the shading path's job, not the stored value's.
+    /// `f64` to match every other numeric parameter and the field's `detail` map, which is where
+    /// a material's colour travels so an endpoint can read it (see `design/texturing.md`).
+    ///
+    /// No alpha: a material's weight layer already says how much of it is present, and a second
+    /// opacity channel would be a duplicate control that can disagree with the first.
+    Color([f64; 3]),
 }
 
 /// Canonical bit pattern of an `f64` for equality and hashing: every NaN maps to
@@ -265,6 +275,12 @@ impl PartialEq for ParamValue {
             (ParamValue::Text(a), ParamValue::Text(b)) => a == b,
             (ParamValue::Curve(a), ParamValue::Curve(b)) => a == b,
             (ParamValue::Strokes(a), ParamValue::Strokes(b)) => a == b,
+            // Channel by channel through the same normalization as a float, so two colours that
+            // are equal produce equal cache keys.
+            (ParamValue::Color(a), ParamValue::Color(b)) => a
+                .iter()
+                .zip(b)
+                .all(|(x, y)| canonical_f64_bits(*x) == canonical_f64_bits(*y)),
             _ => false,
         }
     }
@@ -300,6 +316,12 @@ impl ParamValue {
             ParamValue::Strokes(s) => {
                 h.write_bytes(&[5]);
                 s.hash_into(h);
+            }
+            ParamValue::Color(rgb) => {
+                h.write_bytes(&[6]);
+                for channel in rgb {
+                    h.write_u64(canonical_f64_bits(*channel));
+                }
             }
         }
     }
@@ -396,6 +418,15 @@ impl Params {
         }
     }
 
+    /// Returns the colour at `name`, or `default` if absent or not a colour.
+    #[must_use]
+    pub fn get_color(&self, name: &str, default: [f64; 3]) -> [f64; 3] {
+        match self.0.get(name) {
+            Some(ParamValue::Color(c)) => *c,
+            _ => default,
+        }
+    }
+
     /// Iterates the parameters in name order.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &ParamValue)> {
         self.0.iter().map(|(k, v)| (k.as_str(), v))
@@ -469,6 +500,8 @@ pub enum ParamKind {
     /// A hand-painted mask, edited by brushing on the 2D map. The value is a
     /// [`ParamValue::Strokes`].
     Strokes,
+    /// A colour, edited with a colour picker. The value is a [`ParamValue::Color`].
+    Color,
 }
 
 /// A physical unit a numeric parameter can carry. Semantic, not prose: the display
@@ -562,7 +595,8 @@ fn default_matches_kind(kind: &ParamKind, default: &ParamValue) -> bool {
         | (ParamKind::Bool, ParamValue::Bool(_))
         | (ParamKind::Text | ParamKind::Path, ParamValue::Text(_))
         | (ParamKind::Curve, ParamValue::Curve(_))
-        | (ParamKind::Strokes, ParamValue::Strokes(_)) => true,
+        | (ParamKind::Strokes, ParamValue::Strokes(_))
+        | (ParamKind::Color, ParamValue::Color(_)) => true,
         (ParamKind::Enum { options }, ParamValue::Text(value)) => options.contains(&value.as_str()),
         _ => false,
     }
@@ -745,5 +779,71 @@ mod tests {
         };
         assert_eq!(options, ["add", "multiply", "mix"]);
         assert_eq!(spec.default, ParamValue::Text("mix".into()));
+    }
+
+    #[test]
+    fn equal_colors_hash_equal_and_a_changed_channel_does_not() {
+        // The property the memo cache depends on: a colour that has not changed must not
+        // invalidate a node, and one that has must.
+        let a = ParamValue::Color([0.25, 0.5, 0.75]);
+        let b = ParamValue::Color([0.25, 0.5, 0.75]);
+        assert_eq!(a, b);
+        assert_eq!(hash(&a), hash(&b));
+
+        let changed = ParamValue::Color([0.25, 0.5, 0.76]);
+        assert_ne!(a, changed);
+        assert_ne!(hash(&a), hash(&changed));
+    }
+
+    #[test]
+    fn a_color_normalizes_its_channels_the_way_a_float_does() {
+        // -0.0 and 0.0 are distinct bit patterns and equal numbers. Every other float value
+        // collapses them so equal params key equally; a colour must not be the exception.
+        let positive = ParamValue::Color([0.0, 0.5, 1.0]);
+        let negative = ParamValue::Color([-0.0, 0.5, 1.0]);
+        assert_eq!(positive, negative);
+        assert_eq!(hash(&positive), hash(&negative));
+    }
+
+    #[test]
+    fn a_color_is_distinct_from_other_kinds_carrying_the_same_numbers() {
+        // The variant tag in `hash_into` is what keeps these apart. Without it a colour and a
+        // float that happened to share bits could collide into one cache key.
+        assert_ne!(
+            hash(&ParamValue::Color([1.0, 0.0, 0.0])),
+            hash(&ParamValue::Float(1.0))
+        );
+        assert_ne!(ParamValue::Color([1.0, 0.0, 0.0]), ParamValue::Float(1.0));
+    }
+
+    #[test]
+    fn a_color_parameter_reads_back_and_falls_back_when_absent() {
+        let params = Params::new().with("tint", ParamValue::Color([0.1, 0.2, 0.3]));
+        assert_eq!(params.get_color("tint", [0.0; 3]), [0.1, 0.2, 0.3]);
+        assert_eq!(
+            params.get_color("missing", [1.0, 1.0, 1.0]),
+            [1.0, 1.0, 1.0],
+            "an absent parameter takes the default"
+        );
+        // The typed accessors never hand-match variants, so a wrong-kind value degrades to the
+        // default rather than reaching an operator as something it cannot use.
+        let wrong = Params::new().with("tint", ParamValue::Float(0.5));
+        assert_eq!(wrong.get_color("tint", [1.0, 1.0, 1.0]), [1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn a_color_spec_accepts_only_a_color_default() {
+        assert!(default_matches_kind(
+            &ParamKind::Color,
+            &ParamValue::Color([0.0, 0.0, 0.0])
+        ));
+        assert!(!default_matches_kind(
+            &ParamKind::Color,
+            &ParamValue::Text("#000000".into())
+        ));
+        assert!(!default_matches_kind(
+            &ParamKind::Text,
+            &ParamValue::Color([0.0, 0.0, 0.0])
+        ));
     }
 }

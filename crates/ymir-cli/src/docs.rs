@@ -175,6 +175,7 @@ fn param(type_id: &str, p: &ParamSpec) -> Param {
         ),
         ParamKind::Curve => ("curve", None, None, None),
         ParamKind::Strokes => ("strokes", None, None, None),
+        ParamKind::Color => ("color", None, None, None),
         // `ParamKind` is `#[non_exhaustive]`; a new variant surfaces as "unknown" in the reference
         // (rather than a silent miss) until it is given a mapping here.
         _ => ("unknown", None, None, None),
@@ -184,6 +185,11 @@ fn param(type_id: &str, p: &ParamSpec) -> Param {
         ParamValue::Int(v) => json!(v),
         ParamValue::Bool(v) => json!(v),
         ParamValue::Text(v) => json!(v),
+        // Hex, so the reference shows a colour the way a reader would write one down.
+        ParamValue::Color([r, g, b]) => {
+            let byte = |c: f64| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
+            json!(format!("#{:02X}{:02X}{:02X}", byte(*r), byte(*g), byte(*b)))
+        }
         // A curve or stroke default is not a scalar; represent it as null in the reference.
         ParamValue::Curve(_) | ParamValue::Strokes(_) => Value::Null,
     };
