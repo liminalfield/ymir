@@ -234,26 +234,49 @@ pub(crate) struct Shown<'a> {
 ///
 /// This predicts what a game engine will show. It does not constrain an export, which writes the
 /// raw independent weights and lets the engine do its own blending.
-pub(crate) fn composite(image: &mut egui::ColorImage, shown: &[Shown<'_>]) {
-    let [w, h] = image.size;
-    let Some(layers) = aligned(shown, w, h) else {
+/// Tints `image` with a composite already built by [`overlay`].
+///
+/// Takes the finished overlay rather than the materials, so the over-stack is walked once per
+/// change and not once per view. At preview resolution each full-image pass is tens of
+/// milliseconds in a debug build, and doing the stack twice made the difference between a preview
+/// that keeps up with a drag and one that does not.
+///
+/// The colour is **multiplied** into the shading rather than replacing it, so the relief still
+/// reads: a lit slope stays lighter than a shaded one under the same material. A cell no material
+/// claims has zero coverage and is left alone, so bare terrain shows as terrain.
+pub(crate) fn composite(image: &mut egui::ColorImage, overlay: &Overlay) {
+    if image.size != overlay.size {
         return;
-    };
-    for y in 0..h {
-        for x in 0..w {
-            let Some((rgb, covered)) = over(&layers, x, y) else {
-                continue;
-            };
-            let pixel = &mut image.pixels[y * w + x];
-            let shaded = [pixel.r(), pixel.g(), pixel.b()];
-            let mut out = [0_u8; 3];
-            for ((slot, lit), tint) in out.iter_mut().zip(shaded).zip(rgb) {
-                let lit = f32::from(lit) / 255.0;
-                *slot = byte((lit * tint - lit).mul_add(covered, lit));
-            }
-            *pixel = egui::Color32::from_rgba_unmultiplied(out[0], out[1], out[2], pixel.a());
-        }
     }
+    for (pixel, tint) in image.pixels.iter_mut().zip(overlay.pixels.chunks_exact(4)) {
+        let covered = f32::from(tint[3]) / 255.0;
+        if covered <= 0.0 {
+            continue;
+        }
+        let shaded = [pixel.r(), pixel.g(), pixel.b()];
+        let over = [tint[0], tint[1], tint[2]];
+        let mut out = [0_u8; 3];
+        for ((slot, lit), paint) in out.iter_mut().zip(shaded).zip(over) {
+            let lit = f32::from(lit) / 255.0;
+            let paint = f32::from(paint) / 255.0;
+            *slot = byte((lit * paint - lit).mul_add(covered, lit));
+        }
+        *pixel = egui::Color32::from_rgba_unmultiplied(out[0], out[1], out[2], pixel.a());
+    }
+}
+
+/// A composited set: straight colour in RGB, coverage in alpha, as raw bytes.
+///
+/// Deliberately not an `egui::ColorImage`. `Color32` stores colour **premultiplied**, so putting a
+/// straight colour and a coverage into one multiplies them together: the thumbnail blend reads a
+/// darkened colour, and the texture the shader samples is premultiplied while the shader treats it
+/// as straight. Raw bytes keep the two channels independent, and the viewport uploads them
+/// directly with no conversion in between.
+pub(crate) struct Overlay {
+    /// RGBA, row-major, straight (not premultiplied).
+    pub pixels: Vec<u8>,
+    /// Width and height in cells, matching the field it was built from.
+    pub size: [usize; 2],
 }
 
 /// The composite as an image: colour in RGB, coverage in alpha.
@@ -264,7 +287,7 @@ pub(crate) fn composite(image: &mut egui::ColorImage, shown: &[Shown<'_>]) {
 ///
 /// `None` when there is nothing to draw, so a caller can skip the upload rather than push a
 /// transparent texture.
-pub(crate) fn overlay(shown: &[Shown<'_>], w: usize, h: usize) -> Option<egui::ColorImage> {
+pub(crate) fn overlay(shown: &[Shown<'_>], w: usize, h: usize) -> Option<Overlay> {
     let layers = aligned(shown, w, h)?;
     let mut rgba = Vec::with_capacity(w * h * 4);
     for y in 0..h {
@@ -281,7 +304,10 @@ pub(crate) fn overlay(shown: &[Shown<'_>], w: usize, h: usize) -> Option<egui::C
             }
         }
     }
-    Some(egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba))
+    Some(Overlay {
+        pixels: rgba,
+        size: [w, h],
+    })
 }
 
 /// The materials that line up with a `w` by `h` grid, paired with their colours.
@@ -511,12 +537,20 @@ mod tests {
         [p.r(), p.g(), p.b()]
     }
 
+    /// Runs the whole path a view takes: build the stack once, then blend it in.
+    fn composited(level: u8, shown: &[Shown<'_>]) -> egui::ColorImage {
+        let mut image = shaded(level);
+        if let Some(over) = overlay(shown, 2, 2) {
+            composite(&mut image, &over);
+        }
+        image
+    }
+
     #[test]
     fn a_full_weight_material_hides_what_is_under_it() {
         let (base, top) = (weight(1.0), weight(1.0));
-        let mut image = shaded(255);
-        composite(
-            &mut image,
+        let image = composited(
+            255,
             &[
                 Shown {
                     weight: &base,
@@ -536,9 +570,8 @@ mod tests {
         // The property the whole ordering design rests on. A normalized weighted average would
         // give the same answer both ways round and could not express "snow on top".
         let (a, b) = (weight(1.0), weight(1.0));
-        let mut up = shaded(255);
-        composite(
-            &mut up,
+        let up = composited(
+            255,
             &[
                 Shown {
                     weight: &a,
@@ -550,9 +583,8 @@ mod tests {
                 },
             ],
         );
-        let mut down = shaded(255);
-        composite(
-            &mut down,
+        let down = composited(
+            255,
             &[
                 Shown {
                     weight: &b,
@@ -574,21 +606,14 @@ mod tests {
         // Multiply, not replace: a lit cell under a material stays lighter than a shaded one, so
         // the shape still reads. Replacing would give flat colour and throw the relief away.
         let full = weight(1.0);
-        let (mut light, mut dark) = (shaded(200), shaded(60));
-        composite(
-            &mut light,
-            &[Shown {
+        let shown = || {
+            vec![Shown {
                 weight: &full,
                 color: RED,
-            }],
-        );
-        composite(
-            &mut dark,
-            &[Shown {
-                weight: &full,
-                color: RED,
-            }],
-        );
+            }]
+        };
+        let light = composited(200, &shown());
+        let dark = composited(60, &shown());
         assert_eq!(first(&light)[1], 0, "the tint removed the green channel");
         assert!(
             first(&light)[0] > first(&dark)[0],
@@ -601,24 +626,21 @@ mod tests {
         // The visible sign of a stack with no base material under it, and the reason coverage is
         // tracked separately from colour.
         let none = weight(0.0);
-        let mut image = shaded(128);
-        let before = image.pixels.clone();
-        composite(
-            &mut image,
+        let image = composited(
+            128,
             &[Shown {
                 weight: &none,
                 color: RED,
             }],
         );
-        assert_eq!(image.pixels, before);
+        assert_eq!(first(&image), [128, 128, 128]);
     }
 
     #[test]
     fn a_partial_weight_tints_partway() {
         let half = weight(0.5);
-        let mut image = shaded(200);
-        composite(
-            &mut image,
+        let image = composited(
+            200,
             &[Shown {
                 weight: &half,
                 color: BLUE,
@@ -635,23 +657,35 @@ mod tests {
         // up cell for cell is the only honest option.
         let small = Field::new(1, 1, Region::UNIT)
             .with_layer(layers::HEIGHT, Arc::new(Layer::filled(1, 1, 1.0)));
-        let mut image = shaded(128);
-        let before = image.pixels.clone();
-        composite(
-            &mut image,
-            &[Shown {
-                weight: &small,
-                color: RED,
-            }],
+        assert!(
+            overlay(
+                &[Shown {
+                    weight: &small,
+                    color: RED
+                }],
+                2,
+                2
+            )
+            .is_none()
         );
-        assert_eq!(image.pixels, before);
     }
 
     #[test]
-    fn nothing_to_composite_leaves_the_image_alone() {
+    fn nothing_to_composite_is_nothing_to_build() {
+        assert!(overlay(&[], 2, 2).is_none());
+    }
+
+    #[test]
+    fn an_overlay_of_another_size_is_refused() {
+        // The two are built from the same field, so a mismatch means one is stale. Blending them
+        // anyway would smear a previous resolution's colours across the current image.
         let mut image = shaded(128);
         let before = image.pixels.clone();
-        composite(&mut image, &[]);
+        let wrong = Overlay {
+            pixels: vec![255, 0, 0, 255],
+            size: [1, 1],
+        };
+        composite(&mut image, &wrong);
         assert_eq!(image.pixels, before);
     }
 }

@@ -1318,7 +1318,7 @@ pub(crate) struct Overlays<'a> {
     pub brush: Option<crate::viewport2d::BrushCursor>,
     /// The active material set composited (#334), with a generation that changes when it does, so
     /// the texture is uploaded once per change rather than per frame.
-    pub materials: Option<(&'a egui::ColorImage, u64)>,
+    pub materials: Option<(&'a crate::materials::Overlay, u64)>,
 }
 
 pub(crate) fn show(
@@ -1448,10 +1448,12 @@ pub(crate) fn show(
     let view_proj = vp_mat.to_cols_array_2d();
     // The composite is square and already at the weights' resolution, so it needs no resampling:
     // the mesh's uv addresses it directly, the same way it does the mask.
-    let material_upload = materials.and_then(|(image, generation)| {
-        let [w, h] = image.size;
+    let material_upload = materials.and_then(|(overlay, generation)| {
+        let [w, h] = overlay.size;
+        // Uploaded as-is: the bytes are straight RGBA, which is what the shader mixes with. Going
+        // through an egui image here would premultiply them and darken every partial coverage.
         (w == h && w > 0).then(|| MaterialUpload {
-            pixels: image.as_raw().to_vec(),
+            pixels: overlay.pixels.clone(),
             res: w,
             generation,
         })

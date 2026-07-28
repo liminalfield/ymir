@@ -186,7 +186,7 @@ pub(crate) struct PreviewEngine {
     /// upload and mix onto the lit surface. Built here rather than in the viewport because this
     /// is what holds the weights, and rebuilt only when the texture is, so it costs a pass when
     /// something changed and nothing per frame.
-    material_overlay: Option<egui::ColorImage>,
+    material_overlay: Option<crate::materials::Overlay>,
     /// Bumped whenever `material_overlay` is rebuilt, so the viewport can tell whether the
     /// texture it holds is still the current one without comparing images.
     material_generation: u64,
@@ -585,10 +585,14 @@ impl PreviewEngine {
                 })
             })
             .collect();
-        crate::materials::composite(&mut image, &shown);
-        // The same composite as an image, for the viewport. Built in this branch so it follows
-        // the texture's change gate rather than running every frame.
+        // The over-stack is walked once, here, and then blended into both views. Doing it per view
+        // meant two full-image passes per material, and at preview resolution a pass is tens of
+        // milliseconds in a debug build. Building it once also means the flat preview and the
+        // viewport are showing the same pixels rather than two computations of the same rule.
         let overlay = crate::materials::overlay(&shown, field.width(), field.height());
+        if let Some(overlay) = &overlay {
+            crate::materials::composite(&mut image, overlay);
+        }
         if overlay.is_some() || self.material_overlay.is_some() {
             self.material_overlay = overlay;
             self.material_generation = self.material_generation.wrapping_add(1);
@@ -917,7 +921,7 @@ impl PreviewEngine {
     ///
     /// The viewport uploads this as a texture and mixes it onto the terrain, so the tint lands on
     /// the lit surface rather than on a picture of one.
-    pub(crate) fn material_overlay(&self) -> Option<(&egui::ColorImage, u64)> {
+    pub(crate) fn material_overlay(&self) -> Option<(&crate::materials::Overlay, u64)> {
         self.material_overlay
             .as_ref()
             .map(|image| (image, self.material_generation))
