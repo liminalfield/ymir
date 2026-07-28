@@ -35,6 +35,7 @@ mod canvas;
 use canvas::Handle;
 // The parameter inspector: ParamSpec-driven widgets, no per-node code.
 mod materials;
+mod output_kind;
 mod param_ui;
 // The visual curve editor widget (GUI step A2), rendered for ParamKind::Curve.
 mod curve_edit;
@@ -599,6 +600,10 @@ struct AppState {
     /// Which projection the main viewport draws: the 3D relief or the flat 2D map (#134).
     /// A view aid, not persisted; 3D by default.
     viewport_mode: viewport2d::Mode,
+    /// The preview target the projection was last opened for (#339). A change of target opens the
+    /// view its output wants; leaving it recorded means a manual switch afterwards sticks, because
+    /// the default is applied on the change rather than every frame.
+    viewed_target: Option<Handle>,
     /// The 2D map view's state (texture, pan, zoom, shading), used when `viewport_mode` is
     /// `TwoD`. Draws the same field the 3D view meshes, flat and pannable.
     viewport_2d: viewport2d::View2d,
@@ -944,6 +949,7 @@ impl AppState {
             frame_to_graph_request: true,
             viewport_mesh: None,
             viewport_mode: viewport2d::Mode::default(),
+            viewed_target: None,
             viewport_2d: viewport2d::View2d::default(),
             viewport_camera: viewport::OrbitCamera::default(),
             render_state: None,
@@ -2040,7 +2046,34 @@ impl AppState {
     /// The 3D viewport meshes the preview's output, so without this the viewport froze whenever
     /// the 2D preview pane was hidden: evaluation used to run only inside that pane. A no-op when
     /// no node is previewable.
+    /// Opens the projection the previewed node's output wants, when the target changes (#339).
+    ///
+    /// A selection is judged flat: where it applies and how strongly. Terrain is judged in the
+    /// relief. Applied on a change of target rather than every frame, so switching projection by
+    /// hand afterwards sticks and this is a default rather than a lock.
+    ///
+    /// Painting is the exception, and deliberately: brushing on the 3D surface is the good way to
+    /// paint, so a paint target is left where it is even though a painted mask is a selection.
+    fn follow_target_view(&mut self) {
+        let target = self.preview_target();
+        if self.viewed_target == target {
+            return;
+        }
+        self.viewed_target = target;
+        if self.paint_target.is_some() && target == self.paint_target {
+            return;
+        }
+        let Some(id) = target.and_then(|h| self.graph.node_id_of(h)) else {
+            return;
+        };
+        self.viewport_mode = match output_kind::of(&self.graph, id) {
+            output_kind::OutputKind::Selection => viewport2d::Mode::TwoD,
+            output_kind::OutputKind::Terrain => viewport2d::Mode::ThreeD,
+        };
+    }
+
     fn drive_preview(&mut self, ctx: &egui::Context) {
+        self.follow_target_view();
         let Some(id) = self.preview_target().and_then(|h| self.graph.node_id_of(h)) else {
             // No target (an empty graph, or the preview was dismissed by clicking empty canvas):
             // blank the preview so the viewport and inspector show nothing, not a stale field.
@@ -2064,6 +2097,8 @@ impl AppState {
         // solo-silenced ones are already filtered out, so the preview never evaluates a material
         // it is not going to draw.
         self.preview.set_materials(self.material_sets.showing());
+        self.preview
+            .set_selection(output_kind::of(&self.graph, id) == output_kind::OutputKind::Selection);
         self.preview
             .sync(&self.graph, id, request, now, binding.as_ref());
         self.preview.poll(ctx, &self.graph);
@@ -9187,10 +9222,22 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
     let showing_build = build_field.is_some();
     let field = build_field.or_else(|| state.preview.field());
 
+    // What the previewed node produces, which decides how to show it (#339). A selection is
+    // judged by where it applies and how strongly, so it wants a flat image at true scale with no
+    // water; terrain is judged by its shape, so it wants the lit relief.
+    let showing_selection = state
+        .preview_target()
+        .and_then(|h| state.graph.node_id_of(h))
+        .is_some_and(|id| output_kind::of(&state.graph, id) == output_kind::OutputKind::Selection);
+
     // Sea level and the Show water toggle drive the same overlay across projections: the 3D water
     // plane and the 2D map's water tint. Presentation only, so no re-evaluation on change (#96).
+    //
+    // A selection has no waterline: its values are a weight, not a height, so a sea level drawn
+    // across it is meaningless. Suppressed here rather than by changing the setting, so switching
+    // to a mask and back does not clobber the water you set up for the terrain.
     let sea_level = state.sea_level as f32;
-    let show_water = state.show_water;
+    let show_water = state.show_water && !showing_selection;
 
     // Paint mode is on when a paint node is the target and is the previewed node.
     let paint_active = state.paint_target.is_some() && state.preview_target() == state.paint_target;
@@ -9335,7 +9382,16 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 field,
                 viewport2d::MapDisplay {
                     output: display,
-                    scale: state.viewport_scale,
+                    // Fixed range for a selection, always. Auto maps the layer's own range to
+                    // black and white, so a selection that only reaches 0.03 renders as a
+                    // confident white shape while contributing almost nothing as a weight. The
+                    // question about a selection is its strength, and auto range hides exactly
+                    // that.
+                    scale: if showing_selection {
+                        shade::HeightScale::Fixed
+                    } else {
+                        state.viewport_scale
+                    },
                     sea_level,
                     show_water,
                 },

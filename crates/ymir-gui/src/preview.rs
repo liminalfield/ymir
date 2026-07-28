@@ -119,6 +119,7 @@ type TextureKey = (
     bool,
     u64,
     u64,
+    bool,
 );
 
 /// Drives background preview evaluation. The UI calls [`sync`](Self::sync) (submit
@@ -171,6 +172,10 @@ pub(crate) struct PreviewEngine {
     last_outputs: Vec<Field>,
     /// The Material nodes of the active set, bottom first, carried to the next job.
     materials: Vec<u64>,
+    /// Whether the previewed node produces a selection rather than terrain (#339). A selection is
+    /// drawn at true scale with no water, because its values are a weight and the question about
+    /// it is its strength.
+    selection: bool,
     /// The material nodes the last completed job evaluated, in composite order. Distinct from
     /// `materials`, which is what the *next* job will use: pairing the live list with finished
     /// weights mismatches them whenever the set changed while a job was running.
@@ -227,6 +232,7 @@ impl PreviewEngine {
             display_output: 0,
             last_outputs: Vec::new(),
             materials: Vec::new(),
+            selection: false,
             evaluated_materials: Vec::new(),
             material_weights: Vec::new(),
             material_overlay: None,
@@ -348,6 +354,12 @@ impl PreviewEngine {
     /// is what knows the active set; the preview only carries them to the worker.
     pub(crate) fn set_materials(&mut self, materials: Vec<u64>) {
         self.materials = materials;
+    }
+
+    /// Records whether the previewed node produces a selection (#339), which changes how the
+    /// thumbnail is drawn: true scale, and no water.
+    pub(crate) fn set_selection(&mut self, selection: bool) {
+        self.selection = selection;
     }
 
     /// Submits a fresh evaluation if the previewed output would differ from the last
@@ -528,12 +540,24 @@ impl PreviewEngine {
             // most: a job finishing with fresh weights while the field it was keyed on is
             // unchanged, and muting or soloing, which touches no graph and no field at all.
             self.material_signature(),
+            // The drawing rule itself: switching between true and auto scale changes the picture
+            // without changing the field, so the key has to notice it.
+            self.selection,
         );
         if self.texture_key == Some(key) {
             return;
         }
-        let mut image = field_to_image(field, layers::HEIGHT, self.mode, self.scale, self.light);
-        if self.show_water {
+        // A selection is drawn at true scale: auto range maps the layer's own range to black and
+        // white, so one that only reaches 0.03 looks fully selected while being nearly nothing as
+        // a weight. Its strength is the question, and auto range hides exactly that.
+        let scale = if self.selection {
+            HeightScale::Fixed
+        } else {
+            self.scale
+        };
+        let mut image = field_to_image(field, layers::HEIGHT, self.mode, scale, self.light);
+        // A selection has no waterline: its values are a weight, not a height.
+        if self.show_water && !self.selection {
             apply_water(
                 &mut image,
                 field,
