@@ -4,12 +4,12 @@ status: draft
 
 ## Purpose
 
-Names a region of the terrain as a material, so it can be shown in colour while you work and exported as a weight map for a game engine. Reach for it once the form is right and you want to say which parts are rock, grass, snow, or sand.
+Names a selection as a material and gives it a colour, so it can be shown on the terrain and arranged with other materials. Reach for it once the form is right and you want to say which parts are rock, grass, snow, or sand.
 
 ## Behaviour
 
-Wire a selection into the mask to say where the material goes. The selection's values become the material's weight, so a Slope selector puts rock on steep ground and a Height selector puts snow above a line. Leave the mask empty and the material covers everything, which is how you make a base material that guarantees no part of the terrain is left unclaimed.
+Wire a selection into it: a Slope selector for rock on steep ground, a Height selector for snow above a line, a Constant at 1 for a material that covers everything. The selection's values become the material's weight, clamped to the range a weight is defined over, and that is what comes out. Tap it to preview that material's coverage, or run it into an export node to write the weight map to disk.
 
-Each Material node writes one layer and leaves the others alone. It does not take weight away from materials already on the terrain, so two materials can both claim the same ground at full strength, and the per-cell total can exceed one. That is deliberate. A game engine normalizes its landscape layers when it renders them, and takes the stacking order from its own material setup rather than from the maps you give it, so deciding the blend here would only overwrite a choice that belongs downstream.
+It takes no terrain. A material says where something is, not what the ground does. Which materials are shown together, in what order, and which are muted is a material set, and that lives in the Materials panel rather than in the graph.
 
-The colour is for previewing. It is never exported, and no engine reads it.
+The material takes its name from the node itself, so rename the node to rename the material. The colour is for previewing: it is never exported, and no engine reads it. Both are read by the Materials panel, which is where materials are arranged into sets.

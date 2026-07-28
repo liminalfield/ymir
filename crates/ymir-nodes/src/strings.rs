@@ -235,11 +235,6 @@ fn lookup(key: &str) -> Option<&'static str> {
              exported as a weight map. Wire a selection into the mask to say where it goes; \
              leave the mask empty for a base material that covers everything."
         }
-        "param-modifier.material-name" => "Name",
-        "param-modifier.material-name-desc" => {
-            "The material's name. It names the weight layer, the exported map, and the layer \
-             you assign it to in an engine, so it is the part worth choosing deliberately."
-        }
         "param-modifier.material-color" => "Colour",
         "param-modifier.material-color-desc" => {
             "The colour this material previews as. Preview only: it is never exported and no \

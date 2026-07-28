@@ -260,7 +260,9 @@ pub(crate) struct View {
 ///
 /// None of these reach evaluation. They are what the user set up while working on this project
 /// and would have to set up again on reopening it.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// Not `Copy`: the material sets are a list. Cloned at the few points that need an owned copy,
+/// which is a handful of pointers per set rather than anything measurable.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ViewSettings {
     /// The resolution the interactive preview evaluates at (square). A per-project working
     /// choice, so it reopens as the user left it.
@@ -281,6 +283,14 @@ pub(crate) struct ViewSettings {
     pub node_sort: crate::status::NodeSort,
     #[serde(default)]
     pub node_density: crate::status::Density,
+    /// The project's material sets: which materials show together, in what order, and which are
+    /// muted (#267). View state, because no engine reads a stacking order, so it never has to
+    /// leave Ymir. Solo is deliberately not part of it; see [`crate::materials`].
+    #[serde(
+        default,
+        skip_serializing_if = "crate::materials::MaterialSets::is_empty"
+    )]
+    pub material_sets: crate::materials::MaterialSets,
 }
 
 impl Default for ViewSettings {
@@ -291,6 +301,7 @@ impl Default for ViewSettings {
             water: WaterSettings::default(),
             node_sort: crate::status::NodeSort::default(),
             node_density: crate::status::Density::default(),
+            material_sets: crate::materials::MaterialSets::default(),
         }
     }
 }
@@ -351,6 +362,8 @@ pub(crate) struct RestoredProject {
     /// The restored node-pane ordering and density (#281).
     pub node_sort: crate::status::NodeSort,
     pub node_density: crate::status::Density,
+    /// The restored material sets (#267).
+    pub material_sets: crate::materials::MaterialSets,
     /// The restored interior layouts of subgraph containers, flattened to a path-keyed map
     /// (the container `stable_id`s from the top) for the editor's in-session layout cache.
     pub subgraph_layouts: HashMap<Vec<u64>, BTreeMap<u64, [f32; 2]>>,
@@ -482,6 +495,7 @@ pub(crate) fn restore(file: &ProjectFile) -> Result<RestoredProject, ymir_core::
         frames: file.view.canvas.frames.clone(),
         node_sort: file.view.settings.node_sort,
         node_density: file.view.settings.node_density,
+        material_sets: file.view.settings.material_sets.clone(),
         subgraph_layouts,
         warnings,
     })

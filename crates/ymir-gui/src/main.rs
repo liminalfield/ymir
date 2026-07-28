@@ -34,6 +34,7 @@ use ymir_nodes::{CategoryDef, categories, find_category, node_group, tr};
 mod canvas;
 use canvas::Handle;
 // The parameter inspector: ParamSpec-driven widgets, no per-node code.
+mod materials;
 mod param_ui;
 // The visual curve editor widget (GUI step A2), rendered for ParamKind::Curve.
 mod curve_edit;
@@ -445,6 +446,8 @@ struct AppState {
     /// the user likes to read this graph rather than a passing question.
     node_sort: status::NodeSort,
     node_density: status::Density,
+    /// The project's material sets (#267): which materials show together and in what order.
+    material_sets: materials::MaterialSets,
     /// The node pinned as the preview target, if any (GUI view-state, not core graph
     /// data — issue #39). When set and still previewable, the 2D preview shows this
     /// node instead of the selection, so selection can move upstream to edit while the
@@ -882,6 +885,7 @@ impl AppState {
             node_chips: status::Chips::default(),
             node_sort: status::NodeSort::default(),
             node_density: status::Density::default(),
+            material_sets: materials::MaterialSets::default(),
             preview_pin: None,
             preview_dismissed: false,
             rename: None,
@@ -1008,6 +1012,7 @@ impl AppState {
         self.build_progress.clear();
         self.node_sort = restored.node_sort;
         self.node_density = restored.node_density;
+        self.material_sets = restored.material_sets.clone();
         // The filter is not restored on purpose: see `node_filter`.
         self.node_filter.clear();
         self.node_chips = status::Chips::default();
@@ -1068,6 +1073,7 @@ impl AppState {
         self.apply_water_settings(view.water);
         self.node_sort = view.node_sort;
         self.node_density = view.node_density;
+        self.material_sets = view.material_sets.clone();
         self.clear_selection();
         self.preview_pin = None;
         self.node_menu = None;
@@ -1114,6 +1120,7 @@ impl AppState {
                     water: r.water,
                     node_sort: r.node_sort,
                     node_density: r.node_density,
+                    material_sets: r.material_sets.clone(),
                 };
                 self.install_fresh(r.graph, r.snarl, world, view, r.subgraph_layouts);
             }
@@ -1153,6 +1160,7 @@ impl AppState {
             water: self.water_settings(),
             node_sort: self.node_sort,
             node_density: self.node_density,
+            material_sets: self.material_sets.clone(),
         }
     }
 
@@ -1785,6 +1793,7 @@ impl AppState {
                 self.frames = restored.frames;
                 self.node_sort = restored.node_sort;
                 self.node_density = restored.node_density;
+                self.material_sets = restored.material_sets.clone();
                 self.node_filter.clear();
                 self.node_chips = status::Chips::default();
                 self.subgraph_layouts = restored.subgraph_layouts;
@@ -2050,9 +2059,14 @@ impl AppState {
         // Inside a subgraph, bind the live input fields so the 2D preview shows real data
         // rather than the Input markers' zero stand-in (#106). `None` at the top level.
         let binding = self.subgraph_inputs();
+        // The active set's materials, bottom first, so the worker evaluates their weights
+        // alongside the previewed node and the composite has something to work with. Muted and
+        // solo-silenced ones are already filtered out, so the preview never evaluates a material
+        // it is not going to draw.
+        self.preview.set_materials(self.material_sets.showing());
         self.preview
             .sync(&self.graph, id, request, now, binding.as_ref());
-        self.preview.poll(ctx);
+        self.preview.poll(ctx, &self.graph);
     }
 }
 
@@ -5534,6 +5548,699 @@ fn frame_inspector(ui: &mut egui::Ui, state: &mut AppState, index: usize) {
         state.selected_frame = None;
         state.frame_color_edit = None;
     }
+}
+
+inventory::submit! {
+    dock::DockPane {
+        id: "materials",
+        order: 30,
+        icon: egui_phosphor::regular::GRAPH,
+        title: "Materials",
+        draw: materials_pane,
+    }
+}
+
+/// The Materials dock pane (#267): which materials show together, in what order, and which are
+/// muted.
+///
+/// Its own pane rather than a section of the World pane, because arranging materials is a task you
+/// sit in rather than a setting you glance at, and the list needs the height.
+///
+/// The pane arranges materials; it never edits one. A material is a node, so its name and colour
+/// are edited in the right inspector like any node's parameters, and clicking a row here selects
+/// that node so the two panes work as a pair. The swatch and name on a row identify the node, they
+/// are not a second place to change it.
+fn materials_pane(ui: &mut egui::Ui, state: &mut AppState) {
+    // Every Material node in the graph, with what a row needs to show it.
+    let available: Vec<(u64, NodeId, String, egui::Color32)> = state
+        .graph
+        .nodes_of_type("modifier.material")
+        .into_iter()
+        .filter_map(|id| {
+            let stable_id = state.graph.stable_id(id)?;
+            let params = state.graph.params(id)?;
+            // The node's own display name. A material has no separate name of its own: a second
+            // name field would leave two places to change one thing.
+            let name = node_display_name(&state.graph, id);
+            let [r, g, b] = params.get_color("color", [0.5, 0.5, 0.5]);
+            let to_byte = |c: f64| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
+            Some((
+                stable_id,
+                id,
+                name,
+                egui::Color32::from_rgb(to_byte(r), to_byte(g), to_byte(b)),
+            ))
+        })
+        .collect();
+
+    // The dock body does not inset its panes, so each pane pads its own content. The same margin
+    // the World and Library panes use, so the rail's panes line up with one another.
+    egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(8, 6))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            materials_body(ui, state, &available);
+        });
+}
+
+/// Measurements for the Materials pane, from the design specification.
+///
+/// Named rather than inlined because the horizontal ones are a budget that has to add up: the pane
+/// is 260 wide and not resizable, so every value here is spent against a fixed total and changing
+/// one means taking the pixels from another.
+mod material_metrics {
+    /// Pane content width: 260 pane less 8 padding each side.
+    pub(super) const CONTENT: f32 = 244.0;
+    /// Row inner padding. Deliberately 5 rather than the pane's 8: at this width 8 each side costs
+    /// more than a swatch and its gap, and the row has its own fill so its edge reads without
+    /// being pushed in. The pane keeps 8 at its own edge, so the outer rhythm is unchanged.
+    pub(super) const ROW_PAD: f32 = 5.0;
+    pub(super) const GRIP: f32 = 10.0;
+    pub(super) const GRIP_GAP: f32 = 6.0;
+    pub(super) const SWATCH: f32 = 14.0;
+    /// Wider than the grip gap, to separate identity from label.
+    pub(super) const SWATCH_GAP: f32 = 8.0;
+    /// The remainder of the budget, and the only flexible column.
+    pub(super) const NAME: f32 = 140.0;
+    pub(super) const NAME_GAP: f32 = 6.0;
+    /// Square, and matching the icon-button height: these are the two things in the pane clicked
+    /// most, and at 20 tall they were shorter than every other control in the app.
+    pub(super) const TOGGLE: f32 = 24.0;
+    /// Tight, so mute and solo read as one control pair rather than two buttons.
+    pub(super) const TOGGLE_GAP: f32 = 2.0;
+    /// 24 toggle plus 2 breathing each side.
+    pub(super) const ROW_H: f32 = 28.0;
+    /// The drop indicator lives in this gap.
+    pub(super) const ROW_GAP: f32 = 2.0;
+    /// The accent edge marking a soloed row, which absorbs 2 of its left padding.
+    pub(super) const SOLO_EDGE: f32 = 2.0;
+    pub(super) const RADIUS: f32 = 3.0;
+    /// Every control row that is not a material row.
+    pub(super) const CONTROL_H: f32 = 26.0;
+}
+
+/// How a material row should read, which is the specification's row-state table.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RowLook {
+    /// Composites normally.
+    Showing,
+    /// Muted: the user's decision, marked with a filled M, a strikethrough, and a hatched swatch.
+    Muted,
+    /// Not soloed while something else is. Dimmed, but deliberately **not** struck through: that
+    /// is reserved for mute, so "I muted this" and "this is not the soloed one" never look alike.
+    Silenced,
+    /// Its Material node is gone. Kept and marked rather than dropped: you deleted a node, not a
+    /// set entry.
+    Missing,
+}
+
+/// The body of the Materials pane, split out so the padded frame's closure stays readable.
+fn materials_body(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    available: &[(u64, NodeId, String, egui::Color32)],
+) {
+    use material_metrics as m;
+
+    if available.is_empty() && state.material_sets.is_empty() {
+        // The one empty state whose fix is on the canvas, so it deliberately offers no button: a
+        // "New material set" here would lie about what is needed.
+        materials_empty(
+            ui,
+            "No material nodes",
+            "Add a Material node to the canvas, then arrange them here.",
+        );
+        return;
+    }
+
+    materials_set_bar(ui, state);
+
+    let Some(set) = state.material_sets.active() else {
+        materials_empty(
+            ui,
+            "No material sets",
+            "Create one to arrange the materials in your graph.",
+        );
+        if ui
+            .add_sized(
+                [m::CONTENT, m::CONTROL_H],
+                egui::Button::new(format!("{} New material set", egui_phosphor::regular::PLUS)),
+            )
+            .clicked()
+        {
+            let name = state.material_sets.fresh_name();
+            state.material_sets.add_set(name);
+        }
+        return;
+    };
+
+    // Rows top-first, because a layer stack reads top down, while the set stores bottom-first so
+    // its order and the compositing loop agree without anything reversing in between.
+    let rows: Vec<(usize, u64)> = set
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(i, e)| (i, e.node))
+        .rev()
+        .collect();
+
+    if rows.is_empty() {
+        materials_empty(ui, "Set is empty", "Add a material from the graph below.");
+    }
+
+    let mut action: Option<MaterialRowAction> = None;
+    ui.spacing_mut().item_spacing.y = m::ROW_GAP;
+    for (index, node) in rows {
+        let found = available.iter().find(|(sid, ..)| *sid == node);
+        let look = if found.is_none() {
+            RowLook::Missing
+        } else if state.material_sets.is_muted(node) {
+            RowLook::Muted
+        } else if state.material_sets.is_showing(node) {
+            RowLook::Showing
+        } else {
+            RowLook::Silenced
+        };
+        let soloed = state.material_sets.soloed.contains(&node);
+        let selected = state.selection.contains(&node);
+        let name = found.map_or_else(
+            || format!("missing node {node}"),
+            |(_, _, name, _)| name.clone(),
+        );
+        let color = found.map(|(_, _, _, c)| *c);
+
+        // The row is painted rather than built from nested layouts: the column stops have to land
+        // on the pixel, and `item_spacing` fights that.
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(m::CONTENT, m::ROW_H),
+            egui::Sense::click_and_drag(),
+        );
+        if let Some(hit) = material_row(ui, rect, &response, &name, color, look, soloed, selected) {
+            action = Some(match hit {
+                RowHit::Name => MaterialRowAction::Select(node),
+                RowHit::Mute => MaterialRowAction::Mute(node),
+                RowHit::Solo => MaterialRowAction::Solo(node),
+            });
+        }
+        // Each row is a drag source and a drop target, so dragging one onto another moves it. The
+        // payload is the entry index, in the set's own bottom-first order, which is what the
+        // reorder takes, so nothing translates between that and the top-first display order.
+        if response.drag_started() {
+            egui::DragAndDrop::set_payload(ui.ctx(), index);
+        }
+        if let Some(from) = response.dnd_release_payload::<usize>() {
+            action = Some(MaterialRowAction::Move(*from, index));
+        }
+        // The drop indicator sits in the gap, snapped between rows rather than at a half position.
+        if response.contains_pointer() && egui::DragAndDrop::has_payload_of_type::<usize>(ui.ctx())
+        {
+            let y = rect.top() - m::ROW_GAP * 0.5;
+            ui.painter().rect_filled(
+                egui::Rect::from_min_size(
+                    egui::pos2(rect.left(), y - 1.0),
+                    egui::vec2(m::CONTENT, 2.0),
+                ),
+                1.0,
+                theme::ACCENT_PRIMARY,
+            );
+        }
+    }
+
+    // Applied after the loop so no row closure holds a mutable borrow of the sets.
+    match action {
+        // Selecting the node brings it up in the right inspector, which is where a material's
+        // name and colour are edited.
+        Some(MaterialRowAction::Select(node)) => state.select_only(node),
+        Some(MaterialRowAction::Mute(node)) => state.material_sets.toggle_mute(node),
+        Some(MaterialRowAction::Solo(node)) => state.material_sets.toggle_solo(node),
+        Some(MaterialRowAction::Move(from, to)) => state.material_sets.reorder(from, to),
+        None => {}
+    }
+
+    materials_count_line(ui, state);
+    materials_membership(ui, state, available);
+}
+
+/// The set picker and the rename field.
+fn materials_set_bar(ui: &mut egui::Ui, state: &mut AppState) {
+    use material_metrics as m;
+
+    let mut pending_remove = None;
+    ui.horizontal(|ui| {
+        ui.label(materials_label("Set"));
+        let active_name = state
+            .material_sets
+            .active()
+            .map_or_else(|| "none".to_string(), |set| set.name.clone());
+        let combo_w = m::CONTENT - 24.0 - 6.0 - 6.0 - m::CONTROL_H - 6.0 - m::CONTROL_H;
+        egui::ComboBox::from_id_salt("material_set_pick")
+            .selected_text(active_name)
+            .width(combo_w)
+            .show_ui(ui, |ui| {
+                let names: Vec<(usize, String)> = state
+                    .material_sets
+                    .sets
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| (i, s.name.clone()))
+                    .collect();
+                for (i, name) in names {
+                    ui.selectable_value(&mut state.material_sets.active, i, name);
+                }
+            });
+        if ui
+            .add_sized(
+                [m::CONTROL_H, m::CONTROL_H],
+                egui::Button::new(egui_phosphor::regular::PLUS),
+            )
+            .on_hover_text("New material set")
+            .clicked()
+        {
+            let name = state.material_sets.fresh_name();
+            state.material_sets.add_set(name);
+        }
+        if state.material_sets.active().is_some()
+            && ui
+                .add_sized(
+                    [m::CONTROL_H, m::CONTROL_H],
+                    egui::Button::new(egui_phosphor::regular::DOTS_THREE),
+                )
+                .on_hover_text("Delete this set")
+                .clicked()
+        {
+            pending_remove = Some(state.material_sets.active);
+        }
+    });
+    if let Some(index) = pending_remove {
+        state.material_sets.remove_set(index);
+    }
+
+    // Renaming in place rather than behind a dialog: the field that changes the name sits under
+    // the dropdown that shows it.
+    if let Some(set) = state.material_sets.active_mut() {
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label(materials_label("Name"));
+            ui.add_sized(
+                [ui.available_width(), m::CONTROL_H],
+                egui::TextEdit::singleline(&mut set.name).hint_text("Material set"),
+            );
+        });
+        ui.add_space(10.0);
+    }
+}
+
+/// The count of what is actually showing, which mute and solo change.
+fn materials_count_line(ui: &mut egui::Ui, state: &AppState) {
+    let Some(set) = state.material_sets.active() else {
+        return;
+    };
+    let total = set.entries.len();
+    if total == 0 {
+        return;
+    }
+    let showing = state.material_sets.showing().len();
+    let soloing = !state.material_sets.soloed.is_empty();
+    ui.add_space(8.0);
+    // Zero showing is a state a user can reach and be confused by, so it says what it means
+    // rather than reading as a count that happens to be low.
+    let (text, color) = if showing == 0 {
+        (
+            "nothing showing \u{2014} bare terrain".to_string(),
+            theme::WARNING,
+        )
+    } else if soloing {
+        (
+            format!("{showing} of {total} showing \u{b7} solo"),
+            theme::TEXT_TERTIARY,
+        )
+    } else {
+        (
+            format!("{showing} of {total} showing"),
+            theme::TEXT_TERTIARY,
+        )
+    };
+    ui.label(
+        egui::RichText::new(text)
+            .font(egui::FontId::monospace(10.5))
+            .color(color),
+    );
+    ui.add_space(6.0);
+}
+
+/// Membership, both directions in one list: a tick means it is in the set, and clicking toggles
+/// it. A delete control on every row would cost width the pane does not have, for something done
+/// rarely.
+fn materials_membership(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    available: &[(u64, NodeId, String, egui::Color32)],
+) {
+    use material_metrics as m;
+
+    let mut toggled = None;
+    let label = format!(
+        "{} Materials in this set\u{2026}",
+        egui_phosphor::regular::LIST_CHECKS
+    );
+    ui.allocate_ui(egui::vec2(m::CONTENT, m::CONTROL_H), |ui| {
+        ui.menu_button(label, |ui| {
+            if available.is_empty() {
+                ui.label(
+                    egui::RichText::new("No material nodes in the graph.")
+                        .color(theme::TEXT_TERTIARY),
+                );
+            }
+            for (stable_id, _, name, color) in available {
+                let in_set = state.material_sets.contains(*stable_id);
+                ui.horizontal(|ui| {
+                    // A 12 px gutter for the tick, so names line up whether ticked or not.
+                    let (tick, _) =
+                        ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                    if in_set {
+                        ui.painter().text(
+                            tick.center(),
+                            egui::Align2::CENTER_CENTER,
+                            egui_phosphor::regular::CHECK,
+                            egui::FontId::proportional(11.0),
+                            theme::ACCENT_PRIMARY,
+                        );
+                    }
+                    let (swatch, _) =
+                        ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                    ui.painter().rect_filled(swatch, 2.0, *color);
+                    if ui.selectable_label(false, name).clicked() {
+                        toggled = Some(*stable_id);
+                    }
+                });
+            }
+        });
+    });
+    if let Some(node) = toggled {
+        state.material_sets.toggle_member(node);
+    }
+}
+
+/// An empty-state block: a title and a line of body, centred, with no border or fill. An empty
+/// pane should look empty rather than like a card with nothing in it.
+fn materials_empty(ui: &mut egui::Ui, title: &str, body: &str) {
+    ui.add_space(14.0);
+    ui.vertical_centered(|ui| {
+        ui.label(
+            egui::RichText::new(title)
+                .size(12.5)
+                .color(theme::TEXT_SECONDARY),
+        );
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(body)
+                .size(11.5)
+                .color(theme::TEXT_TERTIARY),
+        );
+    });
+    ui.add_space(14.0);
+}
+
+/// A field label in the pane's idiom.
+fn materials_label(text: &str) -> egui::RichText {
+    egui::RichText::new(text)
+        .size(12.0)
+        .color(theme::TEXT_SECONDARY)
+}
+
+/// What part of a material row was clicked.
+enum RowHit {
+    Name,
+    Mute,
+    Solo,
+}
+
+/// Paints one material row and hit-tests its parts.
+///
+/// Painted rather than laid out: the column stops are a fixed budget across 244 px and have to
+/// land on the pixel, which nested layouts and `item_spacing` will not do reliably.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a row's appearance is genuinely this many independent facts, and bundling them into \
+              a struct used at one call site would move the argument list rather than shorten it"
+)]
+fn material_row(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    response: &egui::Response,
+    name: &str,
+    color: Option<egui::Color32>,
+    look: RowLook,
+    soloed: bool,
+    selected: bool,
+) -> Option<RowHit> {
+    use material_metrics as m;
+
+    let painter = ui.painter();
+    let pointer = response.hover_pos();
+    let inert = look == RowLook::Missing;
+
+    // Fill and stroke. The stroke width is reserved even when there is no stroke, so hovering does
+    // not shift the layout by a pixel.
+    let (fill, stroke) = match (
+        selected,
+        response.is_pointer_button_down_on(),
+        response.hovered(),
+    ) {
+        (_, true, _) => (theme::BG_HOVER, theme::LINE_STRONG),
+        (true, _, _) => (theme::SELECTION, theme::LINE_STRONG),
+        (_, _, true) => (theme::BG_RAISED, theme::LINE),
+        _ => (theme::BG_SURFACE, egui::Color32::TRANSPARENT),
+    };
+    painter.rect(
+        rect,
+        m::RADIUS,
+        fill,
+        egui::Stroke::new(1.0, stroke),
+        egui::StrokeKind::Inside,
+    );
+
+    // A soloed row carries an accent edge down its left, full height. The mark in a 24 px box at
+    // the far right makes "what is soloed" a column of small boxes to read; this is findable in
+    // peripheral vision at any list length, and survives greyscale.
+    if soloed {
+        painter.rect_filled(
+            egui::Rect::from_min_size(rect.left_top(), egui::vec2(m::SOLO_EDGE, rect.height())),
+            m::RADIUS,
+            theme::ACCENT_PRIMARY,
+        );
+    }
+
+    // The edge paints inside the row's left padding rather than displacing it, so soloing does not
+    // shift the row's contents. Same reasoning as reserving the hover stroke's width: a state
+    // change should change how a row reads, never where its parts are.
+    let mut x = rect.left() + m::ROW_PAD;
+    let mid = rect.center().y;
+
+    painter.text(
+        egui::pos2(x + m::GRIP * 0.5, mid),
+        egui::Align2::CENTER_CENTER,
+        egui_phosphor::regular::DOTS_SIX_VERTICAL,
+        egui::FontId::proportional(12.0),
+        theme::TEXT_TERTIARY,
+    );
+    x += m::GRIP + m::GRIP_GAP;
+
+    // Swatch. Hatched when muted or missing, so the state reads without depending on colour.
+    let swatch = egui::Rect::from_center_size(
+        egui::pos2(x + m::SWATCH * 0.5, mid),
+        egui::vec2(m::SWATCH, m::SWATCH),
+    );
+    let border = egui::Stroke::new(1.0, egui::Color32::from_black_alpha(115));
+    match (look, color) {
+        (RowLook::Missing, _) => hatch(painter, swatch, theme::BG_RAISED, theme::LINE_STRONG),
+        (RowLook::Muted, Some(c)) => hatch(painter, swatch, theme::BG_SURFACE, desaturate(c)),
+        (RowLook::Silenced, Some(c)) => {
+            painter.rect(
+                swatch,
+                2.0,
+                c.gamma_multiply(0.34),
+                border,
+                egui::StrokeKind::Inside,
+            );
+        }
+        (_, Some(c)) => {
+            painter.rect(swatch, 2.0, c, border, egui::StrokeKind::Inside);
+        }
+        (_, None) => {}
+    }
+    x += m::SWATCH + m::SWATCH_GAP;
+
+    // Name, truncated with an ellipsis and offered in full on hover.
+    let name_rect = egui::Rect::from_min_size(
+        egui::pos2(x, rect.top()),
+        egui::vec2(m::NAME, rect.height()),
+    );
+    let (ink, italics) = match look {
+        RowLook::Missing => (theme::WARNING, true),
+        RowLook::Muted | RowLook::Silenced => (theme::TEXT_TERTIARY, false),
+        RowLook::Showing => (theme::TEXT_PRIMARY, false),
+    };
+    let mut job = egui::text::LayoutJob::single_section(
+        name.to_string(),
+        egui::TextFormat {
+            font_id: egui::FontId::proportional(12.5),
+            color: ink,
+            italics,
+            strikethrough: if look == RowLook::Muted {
+                egui::Stroke::new(1.0, theme::TEXT_TERTIARY)
+            } else {
+                egui::Stroke::NONE
+            },
+            ..Default::default()
+        },
+    );
+    job.wrap = egui::text::TextWrapping::truncate_at_width(m::NAME);
+    let galley = ui.ctx().fonts_mut(|f| f.layout_job(job));
+    painter.galley(
+        egui::pos2(name_rect.left(), mid - galley.size().y * 0.5),
+        galley,
+        ink,
+    );
+    x += m::NAME + m::NAME_GAP;
+
+    // The two toggles, painted rather than `selectable_label`, whose padding and rounding are
+    // wrong at this size.
+    let mute_rect = egui::Rect::from_center_size(
+        egui::pos2(x + m::TOGGLE * 0.5, mid),
+        egui::vec2(m::TOGGLE, m::TOGGLE),
+    );
+    x += m::TOGGLE + m::TOGGLE_GAP;
+    let solo_rect = egui::Rect::from_center_size(
+        egui::pos2(x + m::TOGGLE * 0.5, mid),
+        egui::vec2(m::TOGGLE, m::TOGGLE),
+    );
+
+    let muted = look == RowLook::Muted;
+    toggle(
+        ui,
+        mute_rect,
+        "M",
+        muted,
+        theme::TEXT_TERTIARY,
+        theme::BG_BASE,
+        inert,
+    );
+    toggle(
+        ui,
+        solo_rect,
+        "S",
+        soloed,
+        theme::ACCENT_PRIMARY,
+        egui::Color32::from_rgb(0x08, 0x22, 0x2b),
+        inert,
+    );
+
+    // Hit test in the order a click should resolve: the toggles win over the row.
+    let clicked = response.clicked();
+    let at = pointer?;
+    if inert {
+        return None;
+    }
+    if clicked && mute_rect.contains(at) {
+        return Some(RowHit::Mute);
+    }
+    if clicked && solo_rect.contains(at) {
+        return Some(RowHit::Solo);
+    }
+    if clicked && name_rect.contains(at) {
+        return Some(RowHit::Name);
+    }
+    None
+}
+
+/// Paints one M/S toggle: a letter, filled when on.
+fn toggle(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    letter: &str,
+    on: bool,
+    fill: egui::Color32,
+    on_ink: egui::Color32,
+    inert: bool,
+) {
+    let painter = ui.painter();
+    let hovered = !inert && ui.rect_contains_pointer(rect);
+    if on {
+        painter.rect(
+            rect,
+            material_metrics::RADIUS,
+            fill,
+            egui::Stroke::new(1.0, fill),
+            egui::StrokeKind::Inside,
+        );
+    } else if hovered {
+        painter.rect_stroke(
+            rect,
+            material_metrics::RADIUS,
+            egui::Stroke::new(1.0, theme::LINE_STRONG),
+            egui::StrokeKind::Inside,
+        );
+    }
+    let ink = if on {
+        on_ink
+    } else if inert {
+        theme::LINE_STRONG
+    } else if hovered {
+        theme::TEXT_SECONDARY
+    } else {
+        theme::TEXT_TERTIARY
+    };
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        letter,
+        egui::FontId::monospace(10.0),
+        ink,
+    );
+}
+
+/// A 45-degree hatch, for a swatch whose material is muted or whose node is gone.
+fn hatch(painter: &egui::Painter, rect: egui::Rect, bg: egui::Color32, ink: egui::Color32) {
+    painter.rect(
+        rect,
+        2.0,
+        bg,
+        egui::Stroke::new(1.0, egui::Color32::from_black_alpha(115)),
+        egui::StrokeKind::Inside,
+    );
+    let clip = painter.with_clip_rect(rect);
+    let step = 6.0;
+    let mut offset = -rect.height();
+    while offset < rect.width() {
+        clip.line_segment(
+            [
+                egui::pos2(rect.left() + offset, rect.bottom()),
+                egui::pos2(rect.left() + offset + rect.height(), rect.top()),
+            ],
+            egui::Stroke::new(3.0, ink),
+        );
+        offset += step;
+    }
+}
+
+/// A muted material's colour: the same hue, drained, so the swatch still identifies the material
+/// while reading as switched off.
+fn desaturate(color: egui::Color32) -> egui::Color32 {
+    let grey = f32::from(color.r()).mul_add(
+        0.299,
+        f32::from(color.g()).mul_add(0.587, f32::from(color.b()) * 0.114),
+    );
+    let mix = |c: u8| ((f32::from(c) + grey) * 0.5) as u8;
+    egui::Color32::from_rgb(mix(color.r()), mix(color.g()), mix(color.b()))
+}
+
+/// What a click on a material row asked for, applied after the row is drawn.
+enum MaterialRowAction {
+    Select(u64),
+    Mute(u64),
+    Solo(u64),
+    Move(usize, usize),
 }
 
 /// A collapsible section for the World panel (the 1c handoff): a slim header of a chevron and an
