@@ -603,13 +603,9 @@ struct AppState {
     /// What the previewed output is, derived once per frame and memoized against the graph, the
     /// target and the tapped output (#339).
     ///
-    /// Deriving it walks upstream through `Graph::spec`, which *builds* a `NodeSpec` per node:
-    /// vectors of ports and parameters, with their names. Doing that up to sixty-four deep, three
-    /// times a frame, is a lot of allocation for an answer that changes only when the graph does.
-    previewed_kind: (
-        Option<(u64, Option<Handle>, usize)>,
-        output_kind::OutputKind,
-    ),
+    /// Derived once per frame in `drive_preview` and read from here by everything else, so the
+    /// upstream walk happens once rather than at each of the three places that need the answer.
+    previewed_kind: output_kind::OutputKind,
     /// The preview target the projection was last opened for (#339). A change of target opens the
     /// view its output wants; leaving it recorded means a manual switch afterwards sticks, because
     /// the default is applied on the change rather than every frame.
@@ -959,7 +955,7 @@ impl AppState {
             frame_to_graph_request: true,
             viewport_mesh: None,
             viewport_mode: viewport2d::Mode::default(),
-            previewed_kind: (None, output_kind::OutputKind::Terrain),
+            previewed_kind: output_kind::OutputKind::Terrain,
             viewed_target: None,
             viewport_2d: viewport2d::View2d::default(),
             viewport_camera: viewport::OrbitCamera::default(),
@@ -2068,28 +2064,24 @@ impl AppState {
     /// What the previewed output is, as last derived. Read by the render path, which cannot take
     /// `&mut self`; `drive_preview` refreshes it earlier in the same frame.
     fn previewed_kind_now(&self) -> output_kind::OutputKind {
-        self.previewed_kind.1
+        self.previewed_kind
     }
 
-    /// What the previewed output is, from the memo, recomputing only when the graph, the target or
-    /// the tapped output has moved. The graph's own hash is memoized (#299), so the check is cheap.
-    fn previewed_kind(&mut self) -> output_kind::OutputKind {
-        let target = self.preview_target();
-        let key = (
-            self.graph.content_hash(),
-            target,
-            self.preview.display_output(),
-        );
-        if self.previewed_kind.0 == Some(key) {
-            return self.previewed_kind.1;
-        }
-        let kind = target
+    /// Derives what the previewed output is, once per frame.
+    ///
+    /// Deliberately not memoized against the graph. `Graph::content_hash` is memoized, but every
+    /// mutation clears that memo, and computing it serializes the whole graph: every node's params
+    /// cloned, subgraphs recursed. A parameter scrub mutates the graph on every frame, so keying
+    /// this on it meant serializing the entire graph every frame to decide whether the view had
+    /// changed, which cost far more than the thing it was avoiding. The walk itself is a handful
+    /// of nodes.
+    fn refresh_previewed_kind(&mut self) {
+        self.previewed_kind = self
+            .preview_target()
             .and_then(|h| self.graph.node_id_of(h))
             .map_or(output_kind::OutputKind::Terrain, |id| {
                 output_kind::of(&self.graph, id, self.preview.display_output())
             });
-        self.previewed_kind = (Some(key), kind);
-        kind
     }
 
     fn follow_target_view(&mut self) {
@@ -2104,13 +2096,14 @@ impl AppState {
         if target.and_then(|h| self.graph.node_id_of(h)).is_none() {
             return;
         }
-        self.viewport_mode = match self.previewed_kind() {
+        self.viewport_mode = match self.previewed_kind {
             output_kind::OutputKind::Selection => viewport2d::Mode::TwoD,
             output_kind::OutputKind::Terrain => viewport2d::Mode::ThreeD,
         };
     }
 
     fn drive_preview(&mut self, ctx: &egui::Context) {
+        self.refresh_previewed_kind();
         self.follow_target_view();
         let Some(id) = self.preview_target().and_then(|h| self.graph.node_id_of(h)) else {
             // No target (an empty graph, or the preview was dismissed by clicking empty canvas):
@@ -2135,7 +2128,7 @@ impl AppState {
         // solo-silenced ones are already filtered out, so the preview never evaluates a material
         // it is not going to draw.
         self.preview.set_materials(self.material_sets.showing());
-        let selection = self.previewed_kind() == output_kind::OutputKind::Selection;
+        let selection = self.previewed_kind == output_kind::OutputKind::Selection;
         self.preview.set_selection(selection);
         self.preview
             .sync(&self.graph, id, request, now, binding.as_ref());
