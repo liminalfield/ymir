@@ -606,10 +606,16 @@ struct AppState {
     /// Derived once per frame in `drive_preview` and read from here by everything else, so the
     /// upstream walk happens once rather than at each of the three places that need the answer.
     previewed_kind: output_kind::OutputKind,
-    /// The preview target the projection was last opened for (#339). A change of target opens the
-    /// view its output wants; leaving it recorded means a manual switch afterwards sticks, because
-    /// the default is applied on the change rather than every frame.
-    viewed_target: Option<Handle>,
+    /// What the projection was last opened for (#339): the preview target, and the kind that
+    /// target's shown output resolves to. A change in either opens the view that thing wants;
+    /// leaving it recorded means a manual switch afterwards sticks, because the default is applied
+    /// on the change rather than every frame.
+    ///
+    /// The kind is part of it, and not just the target, because tapping a different output of the
+    /// same node changes what you are looking at without changing which node it is: erosion's
+    /// `wear` is a selection sitting beside a heightfield, and switching the output picker to it
+    /// used to leave the viewport in 3D.
+    viewed: Option<(Option<Handle>, output_kind::OutputKind)>,
     /// The 2D map view's state (texture, pan, zoom, shading), used when `viewport_mode` is
     /// `TwoD`. Draws the same field the 3D view meshes, flat and pannable.
     viewport_2d: viewport2d::View2d,
@@ -956,7 +962,7 @@ impl AppState {
             viewport_mesh: None,
             viewport_mode: viewport2d::Mode::default(),
             previewed_kind: output_kind::OutputKind::Terrain,
-            viewed_target: None,
+            viewed: None,
             viewport_2d: viewport2d::View2d::default(),
             viewport_camera: viewport::OrbitCamera::default(),
             render_state: None,
@@ -2087,10 +2093,11 @@ impl AppState {
 
     fn follow_target_view(&mut self) {
         let target = self.preview_target();
-        if self.viewed_target == target {
+        let viewing = (target, self.previewed_kind);
+        if self.viewed == Some(viewing) {
             return;
         }
-        self.viewed_target = target;
+        self.viewed = Some(viewing);
         if self.paint_target.is_some() && target == self.paint_target {
             return;
         }
@@ -11700,6 +11707,74 @@ mod tests {
         assert!(back.ends_with("Back"));
         assert_eq!(menu_row_text(MenuRow::Category("adjust")), "Adjust");
         assert_eq!(menu_row_text(MenuRow::Node("modifier.invert")), "Invert");
+    }
+
+    #[test]
+    fn tapping_a_byproduct_output_opens_the_flat_view() {
+        // The output picker changes what you are looking at without changing which node it is:
+        // erosion emits `wear` beside its heightfield. Steering the view on a change of target
+        // alone left the viewport in 3D on a selection, which is the thing #339 exists to stop.
+        let mut state = AppState::new();
+        let pos = egui::Pos2::ZERO;
+        let gen_id =
+            canvas::add_node(&mut state.graph, &mut state.snarl, "generator.fbm", pos).unwrap();
+        let ero_id = canvas::add_node(
+            &mut state.graph,
+            &mut state.snarl,
+            "modifier.thermal_erosion",
+            pos,
+        )
+        .unwrap();
+        state.graph.connect(gen_id, 0, ero_id, 0).unwrap();
+        let erosion = state.graph.stable_id(ero_id).unwrap();
+        state.select_only(erosion);
+
+        // Output 0 is the heightfield: terrain, so the 3D view.
+        state.preview.set_display_output(0);
+        state.refresh_previewed_kind();
+        state.follow_target_view();
+        assert_eq!(state.viewport_mode, viewport2d::Mode::ThreeD);
+
+        // Output 1 is `wear`, a selection. Same node, same selection, different output.
+        state.preview.set_display_output(1);
+        state.refresh_previewed_kind();
+        state.follow_target_view();
+        assert_eq!(
+            state.viewport_mode,
+            viewport2d::Mode::TwoD,
+            "tapping wear should open flat"
+        );
+
+        // And back again, so this is a default that follows rather than a one-way trip.
+        state.preview.set_display_output(0);
+        state.refresh_previewed_kind();
+        state.follow_target_view();
+        assert_eq!(state.viewport_mode, viewport2d::Mode::ThreeD);
+    }
+
+    #[test]
+    fn a_manual_projection_switch_sticks_while_nothing_changes() {
+        // The other half of the contract: this is a default, not a lock. Once the view is steered,
+        // re-running the follow must leave a hand-made choice alone.
+        let mut state = AppState::new();
+        let pos = egui::Pos2::ZERO;
+        let gen_id =
+            canvas::add_node(&mut state.graph, &mut state.snarl, "generator.fbm", pos).unwrap();
+        let generator = state.graph.stable_id(gen_id).unwrap();
+        state.select_only(generator);
+        state.refresh_previewed_kind();
+        state.follow_target_view();
+        assert_eq!(state.viewport_mode, viewport2d::Mode::ThreeD);
+
+        // The user flips to flat by hand, then the frame loop runs again.
+        state.viewport_mode = viewport2d::Mode::TwoD;
+        state.refresh_previewed_kind();
+        state.follow_target_view();
+        assert_eq!(
+            state.viewport_mode,
+            viewport2d::Mode::TwoD,
+            "the follow must not overwrite a hand-made choice"
+        );
     }
 
     #[test]

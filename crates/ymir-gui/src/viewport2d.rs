@@ -94,7 +94,7 @@ pub(crate) fn draw_mode_badge(
 }
 
 /// Which projection the main viewport draws.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub(crate) enum Mode {
     /// The 3D meshed relief (the original viewport).
     #[default]
