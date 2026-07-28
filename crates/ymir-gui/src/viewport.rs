@@ -915,6 +915,17 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
         let Some(res) = resources.get_mut::<ViewportResources>() else {
             return Vec::new();
         };
+        // Whether the composite changed this frame, read *before* the upload below records the new
+        // generation on `res`. The terrain-dirty check further down needs this signal, and the
+        // upload is what destroys it: having uploaded, `res.material_generation` equals the
+        // incoming one, so asking the same question later always answers "unchanged". That is what
+        // left a new composite sitting in the texture with no pass drawing it, so the 3D view kept
+        // the previously rendered image until something else (selecting another node, which
+        // changes the field) forced a re-render (#338).
+        let materials_changed = self
+            .materials
+            .as_ref()
+            .is_some_and(|upload| upload.generation != res.material_generation);
         {
             let uniforms = Uniforms {
                 mvp: self.view_proj,
@@ -1028,10 +1039,13 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                 write_height_texture(queue, &res.mask_texture, &upload.values, upload.res);
             }
 
-            // Material overlay (#334): uploaded when the composite changed, which the generation
-            // says, so a resident overlay costs nothing per frame.
+            // Material overlay (#334): uploaded when the composite changed, which `materials_changed`
+            // says, so a resident overlay costs nothing per frame. Both this and the terrain-dirty
+            // check read that one flag rather than each re-deriving it from `res.material_generation`,
+            // which is what let them disagree: this branch updated the generation and the check below
+            // then saw no change (#338).
             if let Some(upload) = &self.materials
-                && upload.generation != res.material_generation
+                && materials_changed
             {
                 if upload.res != res.material_res {
                     res.material_texture =
@@ -1087,13 +1101,11 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
             || res.terrain_light != self.light
             || res.terrain_wet != terrain_wet
             || res.terrain_paint != self.paint
-            // Toggling the overlay changes the terrain even when nothing else did. A content
-            // change re-renders through the upload above, which is gated on the generation.
+            // Toggling the overlay changes the terrain even when nothing else did, and so does a
+            // new composite: recolouring a material, or muting and soloing, changes what the
+            // surface should look like while the mesh, the camera and the light all stay put.
             || res.terrain_materials != self.material_uniform
-            || self
-                .materials
-                .as_ref()
-                .is_some_and(|upload| upload.generation != res.material_generation);
+            || materials_changed;
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("viewport-offscreen-encoder"),
