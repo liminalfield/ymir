@@ -47,7 +47,7 @@ impl Operator for Slope {
             type_id: TYPE_ID,
             category: "selector",
             inputs: vec![PortSpec::new("in")],
-            outputs: vec![PortSpec::new("out")],
+            outputs: vec![PortSpec::new("out").selection()],
             params: vec![
                 ParamSpec::new(
                     "min",

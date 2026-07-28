@@ -47,7 +47,7 @@ impl Operator for Material {
             type_id: TYPE_ID,
             category: "material",
             inputs: vec![PortSpec::new("selection")],
-            outputs: vec![PortSpec::new("out")],
+            outputs: vec![PortSpec::new("out").selection()],
             // No name parameter. Every node already carries a display-name override, which is
             // editable in the inspector, serialized with the graph, and deliberately outside every
             // cache key because it is cosmetic. A material's name is exactly that, and a second

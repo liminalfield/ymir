@@ -2066,7 +2066,7 @@ impl AppState {
         let Some(id) = target.and_then(|h| self.graph.node_id_of(h)) else {
             return;
         };
-        self.viewport_mode = match output_kind::of(&self.graph, id) {
+        self.viewport_mode = match output_kind::of(&self.graph, id, self.preview.display_output()) {
             output_kind::OutputKind::Selection => viewport2d::Mode::TwoD,
             output_kind::OutputKind::Terrain => viewport2d::Mode::ThreeD,
         };
@@ -2097,8 +2097,10 @@ impl AppState {
         // solo-silenced ones are already filtered out, so the preview never evaluates a material
         // it is not going to draw.
         self.preview.set_materials(self.material_sets.showing());
-        self.preview
-            .set_selection(output_kind::of(&self.graph, id) == output_kind::OutputKind::Selection);
+        self.preview.set_selection(
+            output_kind::of(&self.graph, id, self.preview.display_output())
+                == output_kind::OutputKind::Selection,
+        );
         self.preview
             .sync(&self.graph, id, request, now, binding.as_ref());
         self.preview.poll(ctx, &self.graph);
@@ -9228,7 +9230,10 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
     let showing_selection = state
         .preview_target()
         .and_then(|h| state.graph.node_id_of(h))
-        .is_some_and(|id| output_kind::of(&state.graph, id) == output_kind::OutputKind::Selection);
+        .is_some_and(|id| {
+            output_kind::of(&state.graph, id, state.preview.display_output())
+                == output_kind::OutputKind::Selection
+        });
 
     // Sea level and the Show water toggle drive the same overlay across projections: the 3D water
     // plane and the 2D map's water tint. Presentation only, so no re-evaluation on change (#96).
