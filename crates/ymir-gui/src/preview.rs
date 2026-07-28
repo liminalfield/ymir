@@ -531,10 +531,14 @@ impl PreviewEngine {
             self.light.map(f32::to_bits),
             water_bits,
             self.show_water,
-            // A material's colour does not change the field it produces, so a recolour would slip
-            // past a key built only from the field. The graph's hash is memoized (#299), so
-            // reading it costs nothing.
-            graph.content_hash(),
+            // The material colours. A colour does not change the field a material produces, so a
+            // recolour would slip past a key built only from the field.
+            //
+            // Deliberately not the graph's hash, which was here first and was far too broad: every
+            // graph edit changed it, so dragging a curve rebuilt the full-resolution shade, the
+            // water pass and the composite on every frame, while the field it was drawing had not
+            // been re-evaluated yet. Cheap to read and expensive in what it triggered.
+            self.color_signature(graph),
             // And the materials themselves. Without this the composite rebuilds only when the
             // *previewed* field or the graph changes, which misses the two cases that matter
             // most: a job finishing with fresh weights while the field it was keyed on is
@@ -874,6 +878,18 @@ fn field_histogram(field: &Field, bins: usize) -> Vec<f32> {
 }
 
 impl PreviewEngine {
+    /// A signature of the colours the composite would use, so a recolour rebuilds it and nothing
+    /// else does.
+    fn color_signature(&self, graph: &Graph) -> u64 {
+        self.evaluated_materials.iter().fold(0_u64, |acc, &node| {
+            let color = material_color(graph, node).map_or(0, |c| {
+                let [r, g, b, _] = c.to_srgba_unmultiplied();
+                u64::from(u32::from_be_bytes([0, r, g, b]))
+            });
+            acc.wrapping_mul(31).wrapping_add(color)
+        })
+    }
+
     /// A signature of the materials the composite would be built from: which nodes, in what
     /// order, and what each of them currently evaluates to.
     ///
