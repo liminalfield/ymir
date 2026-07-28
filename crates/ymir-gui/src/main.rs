@@ -2945,7 +2945,21 @@ fn apply_default(state: &mut AppState) {
         return;
     }
     match read_project(&path) {
-        Ok(restored) => {
+        Ok(restored) => apply_restored_default(state, restored),
+        Err(err) => {
+            state.status = Some(format!("Default startup graph could not be loaded: {err}"));
+        }
+    }
+}
+
+/// Installs a loaded default startup graph onto `state`.
+///
+/// Split out from [`apply_default`] so it can be tested without a filesystem: the copying is the
+/// part that goes wrong, since a field added to the project file has to be added here too and
+/// forgetting is silent.
+fn apply_restored_default(state: &mut AppState, restored: project_file::RestoredProject) {
+    {
+        {
             state.graph = restored.graph;
             state.snarl = restored.snarl;
             state.seed = restored.seed;
@@ -2956,13 +2970,20 @@ fn apply_default(state: &mut AppState) {
             state.sea_level = restored.sea_level;
             state.show_water = restored.show_water;
             state.apply_water_settings(restored.water);
+            // Everything else the file carries. This list used to stop at the water, so a default
+            // startup graph silently arrived without its canvas frames, its pane preferences, its
+            // subgraph layouts or its material sets, and the next Save as Default wrote the empty
+            // values back over the file. Nothing about evaluation notices any of these missing,
+            // which is why it read as "the sets are not being saved" rather than as a load bug.
+            state.frames = restored.frames;
+            state.node_sort = restored.node_sort;
+            state.node_density = restored.node_density;
+            state.material_sets = restored.material_sets.clone();
+            state.subgraph_layouts = restored.subgraph_layouts.clone();
             state.apply_restored_view(restored.camera);
             // Anchor undo and the clean point at the default, not the starter it replaced.
             state.reset_history();
             state.mark_clean();
-        }
-        Err(err) => {
-            state.status = Some(format!("Default startup graph could not be loaded: {err}"));
         }
     }
 }
@@ -12228,6 +12249,53 @@ mod tests {
         assert_eq!(state.graph.node_count(), 0); // a blank canvas
         assert!(state.project_path.is_none());
         assert!(!state.modified);
+    }
+
+    #[test]
+    fn the_startup_load_keeps_everything_the_file_carries() {
+        // `apply_default` copies fields across by hand, so anything added to the project file has
+        // to be added here too, and forgetting is silent: none of these reach evaluation, so a
+        // default graph that loses them looks like the user never set them up. That is exactly how
+        // material sets went missing on every restart.
+        let restored = project_file::restore(&{
+            let mut state = AppState::new();
+            state.material_sets.add_set("Alpine");
+            state.material_sets.toggle_member(41);
+            state.node_density = status::Density::Compact;
+            state.node_sort = status::NodeSort::StaleFirst;
+            state.project_for_save()
+        })
+        .expect("restore");
+
+        let mut state = AppState::new();
+        apply_restored_default(&mut state, restored);
+
+        assert_eq!(state.material_sets.sets.len(), 1, "material sets");
+        assert_eq!(state.node_density, status::Density::Compact, "row density");
+        assert_eq!(state.node_sort, status::NodeSort::StaleFirst, "pane sort");
+    }
+
+    #[test]
+    fn a_material_set_reaches_the_file_the_app_would_write() {
+        // Reported as: saved into the default graph, reopened, sets gone. The round-trip through
+        // ProjectFile is already covered; this covers the step before it, taking the sets off the
+        // live AppState and into the file the save actually writes.
+        let mut state = AppState::new();
+        state.material_sets.add_set("Alpine");
+        state.material_sets.toggle_member(41);
+
+        let file = state.project_for_save();
+        assert_eq!(
+            file.view.settings.material_sets.sets.len(),
+            1,
+            "the capture must take the sets off the live state"
+        );
+
+        let json = serde_json::to_string(&file).expect("serialize");
+        assert!(
+            json.contains("material_sets"),
+            "and they must reach the bytes on disk"
+        );
     }
 
     #[test]
