@@ -61,7 +61,11 @@ enum Outcome {
         /// Every output of the previewed node, so the pane can switch which one it shows
         /// without re-evaluating (the engine computes all outputs together).
         fields: Vec<Field>,
-        /// The active set's material weights, in the order they composite.
+        /// The material nodes this job evaluated, in composite order. Carried back rather than
+        /// read from the live set, because the set can change while a job is in flight and the
+        /// weights below only line up with the list the job actually used.
+        materials: Vec<u64>,
+        /// Their weights, in the same order.
         material_weights: Vec<Field>,
         /// Normalized bin heights of the node's *input* distribution (the field feeding
         /// it), for the editor histogram. `None` for a generator (no input) or a failed
@@ -157,7 +161,11 @@ pub(crate) struct PreviewEngine {
     last_outputs: Vec<Field>,
     /// The Material nodes of the active set, bottom first, carried to the next job.
     materials: Vec<u64>,
-    /// Their evaluated weights, in the same order, from the last completed job.
+    /// The material nodes the last completed job evaluated, in composite order. Distinct from
+    /// `materials`, which is what the *next* job will use: pairing the live list with finished
+    /// weights mismatches them whenever the set changed while a job was running.
+    evaluated_materials: Vec<u64>,
+    /// Their weights, in the same order.
     material_weights: Vec<Field>,
     /// The composite as an image (colour in RGB, coverage in alpha), for the 3D viewport to
     /// upload and mix onto the lit surface. Built here rather than in the viewport because this
@@ -209,6 +217,7 @@ impl PreviewEngine {
             display_output: 0,
             last_outputs: Vec::new(),
             materials: Vec::new(),
+            evaluated_materials: Vec::new(),
             material_weights: Vec::new(),
             material_overlay: None,
             material_generation: 0,
@@ -325,15 +334,15 @@ impl PreviewEngine {
         }
     }
 
-    /// Submits a fresh evaluation if the previewed output would differ from the last
-    /// one submitted. A structural error (disconnected input, cycle) is detected
-    /// here, synchronously and cheaply, and shown instead of submitting work.
     /// The Material nodes to evaluate with the next job, bottom first. Set by the caller, which
     /// is what knows the active set; the preview only carries them to the worker.
     pub(crate) fn set_materials(&mut self, materials: Vec<u64>) {
         self.materials = materials;
     }
 
+    /// Submits a fresh evaluation if the previewed output would differ from the last
+    /// one submitted. A structural error (disconnected input, cycle) is detected
+    /// here, synchronously and cheaply, and shown instead of submitting work.
     pub(crate) fn sync(
         &mut self,
         graph: &Graph,
@@ -345,6 +354,18 @@ impl PreviewEngine {
         match graph.output_key(target, &request) {
             Ok(key) => {
                 self.structural_error = None;
+                // Fold the materials into the signature. Without this the gate asks only whether
+                // the *previewed* node changed, so editing a material's selection, or adding one
+                // to the set, submits nothing and the composite stays as it was.
+                let key = self.materials.iter().fold(key, |acc, &node| {
+                    let material = graph
+                        .node_id_of(node)
+                        .and_then(|id| graph.output_key(id, &request).ok())
+                        // A material that cannot be keyed still has to change the signature when
+                        // it appears or disappears, so its id stands in.
+                        .unwrap_or(node);
+                    acc.wrapping_mul(31).wrapping_add(material)
+                });
                 if self.submitted_key != Some(key) {
                     // Remember the latest changed signature; it is submitted below
                     // once the debounce interval elapses, so the trailing value wins.
@@ -430,6 +451,7 @@ impl PreviewEngine {
         match outcome {
             Outcome::Ready {
                 fields,
+                materials,
                 material_weights,
                 target,
                 histogram,
@@ -442,6 +464,7 @@ impl PreviewEngine {
                 // Keep all outputs; `refresh_texture` re-uploads only when the shown output
                 // or the shading mode changed.
                 self.last_outputs = fields;
+                self.evaluated_materials = materials;
                 self.material_weights = material_weights;
                 self.last_histogram = histogram;
                 self.histogram_target = Some(target);
@@ -452,6 +475,7 @@ impl PreviewEngine {
                 self.eval_error = Some(message);
                 self.failed_node = Some(target);
                 self.last_outputs = Vec::new();
+                self.evaluated_materials = Vec::new();
                 self.material_weights = Vec::new();
                 self.last_histogram = None;
                 self.histogram_target = None;
@@ -508,7 +532,7 @@ impl PreviewEngine {
         // carried on the field: the editor has both, and a colour is preview-only, so nothing
         // headless ever needs it.
         let shown: Vec<crate::materials::Shown<'_>> = self
-            .materials
+            .evaluated_materials
             .iter()
             .zip(&self.material_weights)
             .filter_map(|(&node, weight)| {
@@ -730,19 +754,24 @@ fn evaluate_job(job: &Job, cache: &mut EvalCache) -> Option<Outcome> {
             // the target, so a material reading terrain the target already built is a hit. One
             // that fails to evaluate is skipped rather than failing the whole preview: a broken
             // material should cost its own colour, not the picture.
-            let material_weights = job
+            //
+            // The id and its weight are produced together and unzipped, so the two lists cannot
+            // drift apart. Building them from separate passes with separate conditions is exactly
+            // how they would.
+            let (materials, material_weights): (Vec<u64>, Vec<Field>) = job
                 .materials
                 .iter()
                 .filter_map(|&stable_id| {
                     let node = job.graph.node_id_of(stable_id)?;
                     let outputs = job.graph.evaluate(node, &job.request, cache).ok()?;
-                    outputs.first().cloned()
+                    Some((stable_id, outputs.first()?.clone()))
                 })
-                .collect();
+                .unzip();
             Outcome::Ready {
                 generation,
                 target: job.target,
                 fields: outputs,
+                materials,
                 material_weights,
                 histogram,
                 cache: cache_report(&job.graph, &job.request, cache),
