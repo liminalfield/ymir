@@ -6,7 +6,8 @@
 //! a *layer*, never asking "which node is this?", so the additive-node invariant holds.
 
 use eframe::egui;
-use ymir_core::Field;
+use std::sync::Arc;
+use ymir_core::{Field, Layer};
 
 /// How the height layer is shaded.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -87,6 +88,48 @@ fn relief_shade(gx: f32, gy: f32, light: [f32; 3]) -> f32 {
     let n = [-gx * inv_len, -gy * inv_len, inv_len];
     let lambert = (n[0] * light[0] + n[1] * light[1] + n[2] * light[2]).max(0.0);
     RELIEF_AMBIENT + (1.0 - RELIEF_AMBIENT) * lambert
+}
+
+/// The largest thumbnail the preview pane shades, in cells per side.
+///
+/// The pane draws its image a few hundred points wide, so shading the field's own resolution is
+/// work that never reaches a pixel: at a preview resolution of 1024 that is a million cells shaded,
+/// watered and composited on the UI thread every time the field changes, for a picture the size of
+/// a postage stamp. 512 stays comfortably above what the pane can show, including on a
+/// high-DPI display.
+///
+/// This bounds the *thumbnail* only. The 2D viewport shades the field on the GPU and the 3D
+/// viewport meshes it, both at its own resolution, so nothing that is looked at closely is
+/// reduced here.
+pub(crate) const THUMB_RES: usize = 512;
+
+/// `field` reduced to at most `cap` cells per side, carrying only `layer`.
+///
+/// Nearest sampling, which is what a thumbnail wants: it is cheap, and the relief gradient is
+/// normalized by the grid size (see [`relief_image`]), so a reduced grid shades to the same
+/// apparent slope and differs only in detail. Auto range is taken over the sampled cells, so a
+/// lone extreme cell can be missed and the mapping shift slightly; that is a thumbnail's business,
+/// and the viewports show the field itself.
+///
+/// Returns the field unchanged when it is already within the cap. `Field` clones share their
+/// layers through `Arc`, so that costs nothing.
+pub(crate) fn reduced(field: &Field, layer: &str, cap: usize) -> Field {
+    let (w, h) = (field.width(), field.height());
+    if w <= cap && h <= cap {
+        return field.clone();
+    }
+    let src = field.layer_or(layer, 0.0);
+    let (tw, th) = (w.min(cap).max(1), h.min(cap).max(1));
+    // Sample the centre of each source block, so the reduction is symmetric rather than biased
+    // toward the top-left corner of the grid.
+    let sampled = Layer::from_fn(tw, th, |x, y| {
+        let sx = ((x * 2 + 1) * w / (tw * 2)).min(w - 1);
+        let sy = ((y * 2 + 1) * h / (th * 2)).min(h - 1);
+        src.get(sx, sy).unwrap_or(0.0)
+    });
+    let mut out = Field::new(tw, th, field.region());
+    out.set_layer(layer, Arc::new(sampled));
+    out
 }
 
 /// Builds an image from the named layer of `field`, in the chosen mode and (for Height)
@@ -359,5 +402,88 @@ mod tests {
         // Stays in range even for a near-vertical slope.
         let steep = relief_shade(50.0, -50.0, DEFAULT_LIGHT);
         assert!((0.0..=1.0).contains(&steep), "shade {steep} out of range");
+    }
+}
+
+#[cfg(test)]
+mod reduction {
+    use super::*;
+    use ymir_core::{Region, layers};
+
+    fn ramp(res: usize) -> Field {
+        let mut field = Field::new(res, res, Region::UNIT);
+        field.set_layer(
+            layers::HEIGHT,
+            Arc::new(Layer::from_fn(res, res, |x, _| {
+                f32::from(u16::try_from(x).expect("x fits"))
+                    / f32::from(u16::try_from(res).expect("res fits"))
+            })),
+        );
+        field
+    }
+
+    #[test]
+    fn a_field_within_the_cap_is_untouched() {
+        let field = ramp(64);
+        let out = reduced(&field, layers::HEIGHT, 512);
+        assert_eq!(out.width(), 64);
+        assert_eq!(out, field, "no resampling, and every layer kept");
+    }
+
+    #[test]
+    fn a_larger_field_comes_back_at_the_cap() {
+        let out = reduced(&ramp(1024), layers::HEIGHT, 512);
+        assert_eq!((out.width(), out.height()), (512, 512));
+    }
+
+    #[test]
+    fn the_reduction_keeps_the_shape() {
+        // The point of the thumbnail: less detail, same picture. A left-to-right ramp has to
+        // still run left to right, at roughly the same values.
+        let full = ramp(1024);
+        let small = reduced(&full, layers::HEIGHT, 512);
+        let (a, b) = (
+            full.layer_or(layers::HEIGHT, 0.0),
+            small.layer_or(layers::HEIGHT, 0.0),
+        );
+        for x in [0_usize, 100, 255, 400, 511] {
+            let want = a.get(x * 2, 0).expect("full");
+            let got = b.get(x, 0).expect("small");
+            assert!(
+                (want - got).abs() < 0.01,
+                "column {x}: reduced {got} against full {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_reduction_stays_inside_the_source() {
+        // The far edge is where a rounding slip would index out of the grid, which `get` would
+        // quietly turn into 0.0 and paint a black stripe down the edge of every thumbnail.
+        let small = reduced(&ramp(1023), layers::HEIGHT, 512);
+        let layer = small.layer_or(layers::HEIGHT, 0.0);
+        let last = layer.get(511, 0).expect("far column");
+        assert!(
+            last > 0.9,
+            "far column reduced to {last}, expected near 1.0"
+        );
+    }
+
+    #[test]
+    fn relief_of_a_reduced_field_matches_the_full_one() {
+        // The gradient is normalized by the grid size, which is what makes the cap safe: the same
+        // terrain shades to the same tone at either resolution, differing only in detail.
+        let full = relief_image(&ramp(512), layers::HEIGHT, DEFAULT_LIGHT);
+        let small = relief_image(
+            &reduced(&ramp(512), layers::HEIGHT, 128),
+            layers::HEIGHT,
+            DEFAULT_LIGHT,
+        );
+        let centre = |img: &egui::ColorImage| {
+            let [w, _] = img.size;
+            img.pixels[(w / 2) * w + w / 2].r()
+        };
+        let (a, b) = (centre(&full), centre(&small));
+        assert!(a.abs_diff(b) <= 2, "full {a} against reduced {b}");
     }
 }
