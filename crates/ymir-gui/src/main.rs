@@ -3596,11 +3596,21 @@ inventory::submit! {
 /// node. The dock draws the pane's "World" title header; this pads and renders the settings body
 /// (which is [`world_settings`], unchanged from when it lived in the right column).
 fn world_dock_pane(ui: &mut egui::Ui, state: &mut AppState) {
-    egui::Frame::new()
-        .inner_margin(egui::Margin::symmetric(8, 6))
+    // The body scrolls, like the node inspector's. World has grown several sections (seed, extent,
+    // height, sea level, resolutions, water), and on a short window the lower ones were clipped
+    // with no way to reach them: not merely awkward but unusable, since the settings below the fold
+    // could not be read or changed at all (#277).
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
         .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            world_settings(ui, state);
+            egui::Frame::new()
+                .inner_margin(egui::Margin::symmetric(8, 6))
+                .show(ui, |ui| {
+                    // The scroll area hands out the full viewport width, so the settings still fill
+                    // the pane rather than shrinking to their content.
+                    ui.set_min_width(ui.available_width());
+                    world_settings(ui, state);
+                });
         });
 }
 inventory::submit! {
