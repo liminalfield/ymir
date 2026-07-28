@@ -94,6 +94,17 @@ pub(crate) struct Node {
 pub struct Graph {
     nodes: SlotMap<NodeId, Node>,
     next_stable_id: u64,
+    /// Bumped by every mutation, as a cheap "has this graph changed at all" signal.
+    ///
+    /// The content hash answers that too, but computing it serializes the whole graph, and its
+    /// memo is cleared by the very mutations a caller wants to detect. So anything asking each
+    /// frame whether the graph moved paid a full serialization on exactly the frames it moved,
+    /// which is during a drag. This is a counter: equal means unchanged, and that is all a
+    /// change check needs.
+    ///
+    /// Not a content hash and deliberately not usable as one: two graphs with identical content
+    /// have different revisions, and it never leaves memory.
+    revision: u64,
     /// Memoized [`content_hash`](Self::content_hash), cleared by every mutation.
     ///
     /// Computing it serializes the whole graph, cloning every node's params and recursing into
@@ -112,6 +123,7 @@ impl Graph {
         Self {
             nodes: SlotMap::with_key(),
             next_stable_id: 0,
+            revision: 0,
             hash: OnceLock::new(),
         }
     }
@@ -120,6 +132,7 @@ impl Graph {
     /// input ports are sized from the operator's spec and start unconnected.
     pub fn add_op(&mut self, operator: Box<dyn Operator>, params: Params) -> NodeId {
         self.hash = OnceLock::new();
+        self.revision = self.revision.wrapping_add(1);
         let spec = operator.spec();
         let type_id = spec.type_id;
         let input_count = spec.inputs.len();
@@ -169,6 +182,7 @@ impl Graph {
     /// Returns [`Error::NodeNotFound`] if `id` is not in the graph.
     pub fn set_operator(&mut self, id: NodeId, operator: Box<dyn Operator>) -> Result<()> {
         self.hash = OnceLock::new();
+        self.revision = self.revision.wrapping_add(1);
         let spec = operator.spec();
         let type_id = spec.type_id;
         let input_count = spec.inputs.len();
@@ -230,6 +244,7 @@ impl Graph {
     /// Returns [`Error::NodeNotFound`] if `id` is not in the graph.
     pub fn set_nested(&mut self, id: NodeId, inner: Graph) -> Result<()> {
         self.hash = OnceLock::new();
+        self.revision = self.revision.wrapping_add(1);
         let rebuilt = self
             .node(id)
             .ok_or(Error::NodeNotFound)?
@@ -245,6 +260,7 @@ impl Graph {
     /// Returns [`Error::NodeNotFound`] if `node` is not in the graph.
     pub fn set_params(&mut self, node: NodeId, params: Params) -> Result<()> {
         self.hash = OnceLock::new();
+        self.revision = self.revision.wrapping_add(1);
         let node = self.nodes.get_mut(node).ok_or(Error::NodeNotFound)?;
         node.params = params;
         Ok(())
@@ -264,6 +280,7 @@ impl Graph {
     /// Returns [`Error::NodeNotFound`] if `node` is not in the graph.
     pub fn set_name(&mut self, node: NodeId, name: Option<String>) -> Result<()> {
         self.hash = OnceLock::new();
+        self.revision = self.revision.wrapping_add(1);
         let node = self.nodes.get_mut(node).ok_or(Error::NodeNotFound)?;
         node.name = name;
         Ok(())
@@ -283,6 +300,7 @@ impl Graph {
     /// Returns [`Error::NodeNotFound`] if `node` is not in the graph.
     pub fn set_bypassed(&mut self, node: NodeId, bypassed: bool) -> Result<()> {
         self.hash = OnceLock::new();
+        self.revision = self.revision.wrapping_add(1);
         let node = self.nodes.get_mut(node).ok_or(Error::NodeNotFound)?;
         node.bypassed = bypassed;
         Ok(())
@@ -303,6 +321,7 @@ impl Graph {
         dest_port: usize,
     ) -> Result<()> {
         self.hash = OnceLock::new();
+        self.revision = self.revision.wrapping_add(1);
         let (source_type, source_outputs) = {
             let s = self.nodes.get(source).ok_or(Error::NodeNotFound)?;
             (s.type_id, s.output_count)
@@ -401,6 +420,7 @@ impl Graph {
     /// if `dest_port` is out of range.
     pub fn disconnect(&mut self, dest: NodeId, dest_port: usize) -> Result<()> {
         self.hash = OnceLock::new();
+        self.revision = self.revision.wrapping_add(1);
         let node = self.nodes.get_mut(dest).ok_or(Error::NodeNotFound)?;
         if dest_port >= node.inputs.len() {
             return Err(Error::InvalidPort {
@@ -420,6 +440,7 @@ impl Graph {
     /// returns `false`.
     pub fn remove_node(&mut self, id: NodeId) -> bool {
         self.hash = OnceLock::new();
+        self.revision = self.revision.wrapping_add(1);
         if self.nodes.remove(id).is_none() {
             return false;
         }
@@ -451,6 +472,7 @@ impl Graph {
     /// independent of the order `nodes` is given in.
     pub fn copy_subgraph(&mut self, nodes: &[NodeId]) -> HashMap<NodeId, NodeId> {
         self.hash = OnceLock::new();
+        self.revision = self.revision.wrapping_add(1);
         // Deduplicate to the live nodes paired with their stable_id, then order by it,
         // so fresh ids are assigned deterministically regardless of the caller's order.
         let unique: HashSet<NodeId> = nodes.iter().copied().collect();
@@ -530,6 +552,7 @@ impl Graph {
     /// does not happen for a well-formed selection (every port is copied from a live node).
     pub fn extract_subgraph(&mut self, nodes: &[NodeId]) -> Result<Extraction> {
         self.hash = OnceLock::new();
+        self.revision = self.revision.wrapping_add(1);
         use crate::subgraph::{InputNode, OutputNode, SubgraphNode};
 
         // Live, de-duplicated selection in ascending stable_id order, for deterministic port
@@ -774,6 +797,19 @@ impl Graph {
             .into_iter()
             .filter(|id| !consumed.contains(id))
             .collect()
+    }
+
+    /// How many times this graph has been mutated, as a cheap change signal.
+    ///
+    /// Equal revisions mean the graph has not changed since. Use this, not
+    /// [`content_hash`](Self::content_hash), when the question is only "did anything move": the
+    /// hash costs a full serialization on precisely the frames the answer is yes.
+    ///
+    /// It says nothing about *content*: two graphs holding the same thing have unrelated
+    /// revisions, and a clone shares the value only until either is edited.
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// A canonical, machine-independent content hash of the graph's output-determining
@@ -2028,5 +2064,51 @@ mod tests {
     #[test]
     fn an_empty_graph_has_no_sinks() {
         assert!(Graph::new().sinks().is_empty());
+    }
+
+    #[test]
+    fn every_mutation_bumps_the_revision() {
+        // The counter exists so a caller asking "did anything move" each frame does not pay a
+        // content hash to find out. A mutation that forgot to bump it would leave the editor
+        // showing a graph that has changed as though it had not, the same failure the memoized
+        // hash guards against above.
+        let mut graph = Graph::new();
+        let a = add(&mut graph, "test.a", 0, 1);
+        let b = add(&mut graph, "test.b", 1, 1);
+
+        fn moved(graph: &Graph, last: &mut u64, what: &str) {
+            let now = graph.revision();
+            assert_ne!(*last, now, "{what} did not bump the revision");
+            *last = now;
+        }
+        let mut last = graph.revision();
+
+        graph.connect(a, 0, b, 0).expect("connect");
+        moved(&graph, &mut last, "connect");
+        graph
+            .set_params(b, Params::new().with("k", crate::ParamValue::Int(1)))
+            .expect("set_params");
+        moved(&graph, &mut last, "set_params");
+        graph.set_name(b, Some("named".into())).expect("set_name");
+        moved(&graph, &mut last, "set_name");
+        graph.set_bypassed(b, true).expect("set_bypassed");
+        moved(&graph, &mut last, "set_bypassed");
+        graph.disconnect(b, 0).expect("disconnect");
+        moved(&graph, &mut last, "disconnect");
+        graph.remove_node(b);
+        moved(&graph, &mut last, "remove_node");
+    }
+
+    #[test]
+    fn reading_the_graph_leaves_the_revision_alone() {
+        // Otherwise every frame would look like a change and the memo it guards would never hold.
+        let mut graph = Graph::new();
+        let a = add(&mut graph, "test.a", 0, 1);
+        let before = graph.revision();
+        let _ = graph.content_hash();
+        let _ = graph.node_count();
+        let _ = graph.spec(a);
+        let _ = graph.sinks();
+        assert_eq!(graph.revision(), before);
     }
 }

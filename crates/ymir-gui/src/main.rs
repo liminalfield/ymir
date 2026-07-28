@@ -433,7 +433,7 @@ struct AppState {
     /// status model: this changes many times a second and must never trigger the graph walk that
     /// derives the model.
     build_progress: build_progress::BuildProgress,
-    node_status_key: Option<(u64, u64, usize, Option<Handle>)>,
+    node_status_key: Option<(u64, usize, Option<Handle>)>,
     /// The node pane's filter text and quick chips (#281). Deliberately not persisted: a filter
     /// is a momentary question, and restoring one means opening a project to a list that hides
     /// most of its nodes with no memory of why.
@@ -1872,16 +1872,17 @@ impl AppState {
 
     /// Rebuilds the per-node status if anything it depends on has moved, and returns it (#282).
     ///
-    /// The key is the graph's content hash, the size of the worker's cache report, and the pin.
-    /// One graph hash a frame replaces the per-node key computation the canvas ran for every node
-    /// on every frame, so this is cheaper than what it replaces even before the pane reads it too.
+    /// The key is the graph's revision, the size of the worker's cache report, and the pin, so the
+    /// check itself costs nothing whether or not the graph moved.
     fn refresh_node_status(&mut self) {
-        // `content_hash` is memoized in core (#299), so this is a lookup on an unchanged graph
-        // rather than a fresh serialization every frame. `display_hash` rides alongside because a
-        // rename is invisible to `content_hash` by design, and the pane shows names.
+        // The graph's revision, not its content hash. The hash is memoized (#299), which is true
+        // and was the wrong thing to check: every mutation clears that memo and recomputing it
+        // serializes the whole graph, so this paid a full serialization on exactly the frames the
+        // graph moved, which is every frame of a drag. The revision is a counter, and "did
+        // anything move" is the only question being asked. It covers renames too, which
+        // `content_hash` deliberately ignores and the pane needs to see.
         let key = (
-            self.graph.content_hash(),
-            self.graph.display_hash(),
+            self.graph.revision(),
             self.preview.cache_report().len(),
             self.preview_pin,
         );
