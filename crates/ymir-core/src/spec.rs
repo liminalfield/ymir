@@ -14,6 +14,28 @@ pub struct PortSpec {
     /// ports must be declared *after* all required ones (the evaluator and
     /// [`Inputs`](crate::Inputs) split inputs at the first optional port).
     pub optional: bool,
+    /// What this port carries, for anything that has to *show* it (#339).
+    ///
+    /// Every port carries a [`Field`](crate::Field), so this changes nothing about evaluation. It
+    /// exists because a heightfield and a `[0, 1]` selection are judged by different questions, so
+    /// an editor showing them identically shows one of them badly: a selection rendered with the
+    /// terrain's auto-ranging looks fully selected when its values barely register.
+    ///
+    /// Declared per port rather than per node because a node can produce both. Erosion emits a
+    /// heightfield alongside `wear` and `flow`; Coastal emits one alongside `shore`, `beach` and
+    /// `bluff`. Position cannot stand in for this either: Frequency Split's two outputs are both
+    /// terrain.
+    pub carries: Carries,
+}
+
+/// What a port carries, as far as presentation is concerned.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Carries {
+    /// A heightfield, or something derived from one that is still terrain.
+    #[default]
+    Terrain,
+    /// A `[0, 1]` selection: a mask, a weight, an erosion byproduct.
+    Selection,
 }
 
 impl PortSpec {
@@ -23,7 +45,15 @@ impl PortSpec {
         Self {
             name: name.into(),
             optional: false,
+            carries: Carries::Terrain,
         }
+    }
+
+    /// Marks this port as carrying a selection rather than terrain, so an editor shows it as one.
+    #[must_use]
+    pub fn selection(mut self) -> Self {
+        self.carries = Carries::Selection;
+        self
     }
 
     /// Creates an optional input port schema. Optional ports must be declared after
@@ -33,6 +63,7 @@ impl PortSpec {
         Self {
             name: name.into(),
             optional: true,
+            carries: Carries::Terrain,
         }
     }
 }

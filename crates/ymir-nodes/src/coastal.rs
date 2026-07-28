@@ -105,9 +105,9 @@ impl Operator for Coastal {
             ],
             outputs: vec![
                 PortSpec::new("heightfield"),
-                PortSpec::new("shore"),
-                PortSpec::new("beach"),
-                PortSpec::new("bluff"),
+                PortSpec::new("shore").selection(),
+                PortSpec::new("beach").selection(),
+                PortSpec::new("bluff").selection(),
             ],
             params: vec![
                 ParamSpec::new(

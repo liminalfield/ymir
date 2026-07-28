@@ -16,20 +16,26 @@
 //! type says nothing about which they are carrying. Marking each one by hand would mean walking
 //! whole branches ticking boxes.
 //!
-//! So this walks upstream instead. A **selector** or a **Material** originates a selection whatever
-//! went into it; a **generator** originates terrain; everything else inherits from its primary
-//! input. `Slope -> Blur -> Blend -> Curve` is a selection the whole way down with nothing
-//! configured, and `fBm -> Blur -> Erosion` is terrain.
+//! So this walks upstream instead. Each **port declares what it carries** ([`Carries`]): a
+//! selector's output is a selection, and so are erosion's `wear` and `flow` and Coastal's `shore`.
+//! Everything else inherits from its primary input. `Slope -> Blur -> Blend -> Curve` is a
+//! selection the whole way down with nothing configured, and `fBm -> Blur -> Erosion` is terrain.
+//!
+//! The declaration is per *port*, not per node, because a node can produce both: erosion emits a
+//! heightfield beside its byproducts. Which output a wire left from is therefore carried through
+//! the walk, so a Levels inserted after `wear` inherits the byproduct and not the heightfield next
+//! to it. Position cannot stand in for the declaration either, since Frequency Split's two outputs
+//! are both terrain.
 //!
 //! Blending a mask *into* terrain reads as terrain, because input 0 is the terrain and terrain is
 //! what you are making. Blending two masks stays a mask. Following input 0 is what makes both come
 //! out right, and it works because Ymir's convention is that input 0 is the main chain and a mask
 //! arrives on a later, optional port.
 //!
-//! Nothing here asks which node it is looking at: it reads each node's category and arity from its
-//! own spec and follows the wiring, so a new node needs no entry anywhere.
+//! Nothing here asks which node it is looking at: it reads each node's own spec and follows the
+//! wiring, so a new node declares its ports and needs no entry anywhere.
 
-use ymir_core::{Graph, NodeId};
+use ymir_core::{Carries, Graph, NodeId};
 
 /// What a node's output is, for the purpose of showing it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -41,13 +47,6 @@ pub(crate) enum OutputKind {
     Selection,
 }
 
-/// Categories whose nodes originate a selection regardless of what they read.
-///
-/// A selector answers a question *about* terrain (how steep, how high, which way facing) and its
-/// answer is a mask. A material names a selection. Neither passes terrain through, so neither
-/// inherits.
-const SELECTION_SOURCES: [&str; 2] = ["selector", "material"];
-
 /// A ceiling on the upstream walk.
 ///
 /// The graph is validated as a DAG before evaluation, so a cycle should not reach here. This is
@@ -55,16 +54,24 @@ const SELECTION_SOURCES: [&str; 2] = ["selector", "material"];
 /// bad trade for something that only decides which view opens.
 const MAX_DEPTH: usize = 64;
 
-/// What `node` produces, derived by walking upstream.
-pub(crate) fn of(graph: &Graph, node: NodeId) -> OutputKind {
-    walk(graph, node, MAX_DEPTH)
+/// What `node` produces on `port`, derived by walking upstream.
+pub(crate) fn of(graph: &Graph, node: NodeId, port: usize) -> OutputKind {
+    walk(graph, node, port, MAX_DEPTH)
 }
 
-fn walk(graph: &Graph, node: NodeId, budget: usize) -> OutputKind {
+fn walk(graph: &Graph, node: NodeId, port: usize, budget: usize) -> OutputKind {
     let Some(spec) = graph.spec(node) else {
         return OutputKind::Terrain;
     };
-    if SELECTION_SOURCES.contains(&spec.category) {
+    // The port's own declaration wins. A node can produce both at once: erosion emits a
+    // heightfield beside `wear` and `flow`, Coastal one beside `shore`, `beach` and `bluff`. Which
+    // output a wire came from is the whole question, and position cannot answer it either, since
+    // Frequency Split's two outputs are both terrain.
+    if spec
+        .outputs
+        .get(port)
+        .is_some_and(|out| out.carries == Carries::Selection)
+    {
         return OutputKind::Selection;
     }
     // No inputs means nothing to inherit from: a generator, or a subgraph boundary marker standing
@@ -75,9 +82,10 @@ fn walk(graph: &Graph, node: NodeId, budget: usize) -> OutputKind {
     }
     // Input 0 is the main chain by convention; a mask arrives on a later, optional port. Following
     // it is what makes "a mask blended into terrain" read as terrain while "two masks blended"
-    // stays a mask.
+    // stays a mask. The source *port* is carried through, so a Levels inserted after an erosion
+    // node's `wear` output inherits the byproduct rather than the heightfield beside it.
     match graph.input_source(node, 0) {
-        Some((source, _)) => walk(graph, source, budget - 1),
+        Some((source, source_port)) => walk(graph, source, source_port, budget - 1),
         // An unwired primary input produces nothing useful yet; terrain is the calmer default,
         // since it is the view the editor already opens in.
         None => OutputKind::Terrain,
@@ -108,14 +116,14 @@ mod tests {
     #[test]
     fn a_generator_is_terrain() {
         let (graph, ids) = graph_of(&[("generator.fbm", None)]);
-        assert_eq!(of(&graph, ids[0]), OutputKind::Terrain);
+        assert_eq!(of(&graph, ids[0], 0), OutputKind::Terrain);
     }
 
     #[test]
     fn a_selector_is_a_selection_whatever_it_reads() {
         // It answers a question about terrain, and the answer is a mask, so it does not inherit.
         let (graph, ids) = graph_of(&[("generator.fbm", None), ("modifier.slope", Some(0))]);
-        assert_eq!(of(&graph, ids[1]), OutputKind::Selection);
+        assert_eq!(of(&graph, ids[1], 0), OutputKind::Selection);
     }
 
     #[test]
@@ -128,7 +136,7 @@ mod tests {
             ("modifier.blur", Some(1)),
             ("modifier.curve", Some(2)),
         ]);
-        assert_eq!(of(&graph, ids[3]), OutputKind::Selection);
+        assert_eq!(of(&graph, ids[3], 0), OutputKind::Selection);
     }
 
     #[test]
@@ -138,7 +146,7 @@ mod tests {
             ("modifier.blur", Some(0)),
             ("modifier.thermal_erosion", Some(1)),
         ]);
-        assert_eq!(of(&graph, ids[2]), OutputKind::Terrain);
+        assert_eq!(of(&graph, ids[2], 0), OutputKind::Terrain);
     }
 
     #[test]
@@ -154,7 +162,7 @@ mod tests {
         graph
             .connect(ids[1], 0, ids[2], 1)
             .expect("mask into blend");
-        assert_eq!(of(&graph, ids[2]), OutputKind::Terrain);
+        assert_eq!(of(&graph, ids[2], 0), OutputKind::Terrain);
     }
 
     #[test]
@@ -166,7 +174,7 @@ mod tests {
             ("modifier.blend", Some(1)),
         ]);
         graph.connect(ids[2], 0, ids[3], 1).expect("second mask");
-        assert_eq!(of(&graph, ids[3]), OutputKind::Selection);
+        assert_eq!(of(&graph, ids[3], 0), OutputKind::Selection);
     }
 
     #[test]
@@ -176,7 +184,7 @@ mod tests {
             ("modifier.slope", Some(0)),
             ("modifier.material", Some(1)),
         ]);
-        assert_eq!(of(&graph, ids[2]), OutputKind::Selection);
+        assert_eq!(of(&graph, ids[2], 0), OutputKind::Selection);
     }
 
     #[test]
@@ -184,7 +192,57 @@ mod tests {
         // Nothing to inherit from yet. Terrain is the calmer default: it is the view the editor
         // already opens in, so an unfinished graph does not flip the viewport about.
         let (graph, ids) = graph_of(&[("modifier.blur", None)]);
-        assert_eq!(of(&graph, ids[0]), OutputKind::Terrain);
+        assert_eq!(of(&graph, ids[0], 0), OutputKind::Terrain);
+    }
+
+    #[test]
+    fn an_erosion_byproduct_is_a_selection_but_its_heightfield_is_not() {
+        // The same node answers differently per port, which is why the declaration is on the port
+        // and not the node.
+        let (graph, ids) = graph_of(&[
+            ("generator.fbm", None),
+            ("modifier.thermal_erosion", Some(0)),
+        ]);
+        assert_eq!(of(&graph, ids[1], 0), OutputKind::Terrain, "heightfield");
+        assert_eq!(of(&graph, ids[1], 1), OutputKind::Selection, "wear");
+        assert_eq!(of(&graph, ids[1], 2), OutputKind::Selection, "debris");
+    }
+
+    #[test]
+    fn a_node_inserted_after_a_byproduct_inherits_the_byproduct() {
+        // Reported from use: a Levels dropped after an erosion node's `wear` output opened in 3D,
+        // because the walk followed the source node and threw away which output it came from.
+        let mut graph = Graph::new();
+        let fbm = graph.add_op(
+            registry::make("generator.fbm").expect("fbm"),
+            ymir_core::Params::default(),
+        );
+        let erosion = graph.add_op(
+            registry::make("modifier.thermal_erosion").expect("thermal"),
+            ymir_core::Params::default(),
+        );
+        let levels = graph.add_op(
+            registry::make("modifier.levels").expect("levels"),
+            ymir_core::Params::default(),
+        );
+        graph.connect(fbm, 0, erosion, 0).expect("fbm -> erosion");
+        // Output 1 is `wear`, not the heightfield.
+        graph
+            .connect(erosion, 1, levels, 0)
+            .expect("wear -> levels");
+        assert_eq!(of(&graph, levels, 0), OutputKind::Selection);
+    }
+
+    #[test]
+    fn both_halves_of_a_frequency_split_are_terrain() {
+        // The counter-example to "a later port means a selection": these are two bands of the same
+        // heightfield, so position says nothing and only the declaration can.
+        let (graph, ids) = graph_of(&[
+            ("generator.fbm", None),
+            ("modifier.frequency_split", Some(0)),
+        ]);
+        assert_eq!(of(&graph, ids[1], 0), OutputKind::Terrain, "low");
+        assert_eq!(of(&graph, ids[1], 1), OutputKind::Terrain, "high");
     }
 
     #[test]
@@ -198,7 +256,7 @@ mod tests {
         }
         let (graph, ids) = graph_of(&nodes);
         assert_eq!(
-            of(&graph, *ids.last().expect("nodes")),
+            of(&graph, *ids.last().expect("nodes"), 0),
             OutputKind::Selection
         );
     }

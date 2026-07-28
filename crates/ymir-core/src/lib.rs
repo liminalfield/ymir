@@ -73,5 +73,5 @@ pub use project::{
     WorldSettings,
 };
 pub use region::Region;
-pub use spec::{NodeKind, NodeSpec, PortSpec};
+pub use spec::{Carries, NodeKind, NodeSpec, PortSpec};
 pub use subgraph::{INPUT_TYPE_ID, OUTPUT_TYPE_ID, SUBGRAPH_TYPE_ID, marker_port_label};

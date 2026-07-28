@@ -105,9 +105,9 @@ impl Operator for StreamErosion {
             ],
             outputs: vec![
                 PortSpec::new("heightfield"),
-                PortSpec::new("flow"),
-                PortSpec::new("wear"),
-                PortSpec::new("deposition"),
+                PortSpec::new("flow").selection(),
+                PortSpec::new("wear").selection(),
+                PortSpec::new("deposition").selection(),
             ],
             params: vec![
                 ParamSpec::new(

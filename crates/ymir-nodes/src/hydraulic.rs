@@ -80,9 +80,9 @@ impl Operator for HydraulicErosion {
             inputs: vec![PortSpec::new("in"), PortSpec::optional("mask")],
             outputs: vec![
                 PortSpec::new("heightfield"),
-                PortSpec::new("wear"),
-                PortSpec::new("deposition"),
-                PortSpec::new("flow"),
+                PortSpec::new("wear").selection(),
+                PortSpec::new("deposition").selection(),
+                PortSpec::new("flow").selection(),
             ],
             params: vec![
                 ParamSpec::new(
