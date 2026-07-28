@@ -61,7 +61,11 @@ enum Outcome {
         /// Every output of the previewed node, so the pane can switch which one it shows
         /// without re-evaluating (the engine computes all outputs together).
         fields: Vec<Field>,
-        /// The active set's material weights, in the order they composite.
+        /// The material nodes this job evaluated, in composite order. Carried back rather than
+        /// read from the live set, because the set can change while a job is in flight and the
+        /// weights below only line up with the list the job actually used.
+        materials: Vec<u64>,
+        /// Their weights, in the same order.
         material_weights: Vec<Field>,
         /// Normalized bin heights of the node's *input* distribution (the field feeding
         /// it), for the editor histogram. `None` for a generator (no input) or a failed
@@ -105,7 +109,17 @@ enum Status {
 /// The identity a preview texture was built from: field hash, output index, shading mode and
 /// scale, relief light bits, sea-level bits, and whether water is shown. The texture is rebuilt
 /// when any of these change.
-type TextureKey = (u64, usize, ShadeMode, HeightScale, [u32; 3], u32, bool, u64);
+type TextureKey = (
+    u64,
+    usize,
+    ShadeMode,
+    HeightScale,
+    [u32; 3],
+    u32,
+    bool,
+    u64,
+    u64,
+);
 
 /// Drives background preview evaluation. The UI calls [`sync`](Self::sync) (submit
 /// if changed), [`poll`](Self::poll) (collect results), then [`show`](Self::show)
@@ -157,8 +171,20 @@ pub(crate) struct PreviewEngine {
     last_outputs: Vec<Field>,
     /// The Material nodes of the active set, bottom first, carried to the next job.
     materials: Vec<u64>,
-    /// Their evaluated weights, in the same order, from the last completed job.
+    /// The material nodes the last completed job evaluated, in composite order. Distinct from
+    /// `materials`, which is what the *next* job will use: pairing the live list with finished
+    /// weights mismatches them whenever the set changed while a job was running.
+    evaluated_materials: Vec<u64>,
+    /// Their weights, in the same order.
     material_weights: Vec<Field>,
+    /// The composite as an image (colour in RGB, coverage in alpha), for the 3D viewport to
+    /// upload and mix onto the lit surface. Built here rather than in the viewport because this
+    /// is what holds the weights, and rebuilt only when the texture is, so it costs a pass when
+    /// something changed and nothing per frame.
+    material_overlay: Option<egui::ColorImage>,
+    /// Bumped whenever `material_overlay` is rebuilt, so the viewport can tell whether the
+    /// texture it holds is still the current one without comparing images.
+    material_generation: u64,
     /// The worker's last cache report, by `stable_id` (#279): which nodes hold a result still
     /// keyed to what they would produce now. Held until the next report, so the node pane and the
     /// canvas read a settled fact instead of recomputing keys every frame.
@@ -201,7 +227,10 @@ impl PreviewEngine {
             display_output: 0,
             last_outputs: Vec::new(),
             materials: Vec::new(),
+            evaluated_materials: Vec::new(),
             material_weights: Vec::new(),
+            material_overlay: None,
+            material_generation: 0,
             cache_report: HashMap::new(),
             failed_node: None,
             last_histogram: None,
@@ -315,15 +344,15 @@ impl PreviewEngine {
         }
     }
 
-    /// Submits a fresh evaluation if the previewed output would differ from the last
-    /// one submitted. A structural error (disconnected input, cycle) is detected
-    /// here, synchronously and cheaply, and shown instead of submitting work.
     /// The Material nodes to evaluate with the next job, bottom first. Set by the caller, which
     /// is what knows the active set; the preview only carries them to the worker.
     pub(crate) fn set_materials(&mut self, materials: Vec<u64>) {
         self.materials = materials;
     }
 
+    /// Submits a fresh evaluation if the previewed output would differ from the last
+    /// one submitted. A structural error (disconnected input, cycle) is detected
+    /// here, synchronously and cheaply, and shown instead of submitting work.
     pub(crate) fn sync(
         &mut self,
         graph: &Graph,
@@ -335,6 +364,18 @@ impl PreviewEngine {
         match graph.output_key(target, &request) {
             Ok(key) => {
                 self.structural_error = None;
+                // Fold the materials into the signature. Without this the gate asks only whether
+                // the *previewed* node changed, so editing a material's selection, or adding one
+                // to the set, submits nothing and the composite stays as it was.
+                let key = self.materials.iter().fold(key, |acc, &node| {
+                    let material = graph
+                        .node_id_of(node)
+                        .and_then(|id| graph.output_key(id, &request).ok())
+                        // A material that cannot be keyed still has to change the signature when
+                        // it appears or disappears, so its id stands in.
+                        .unwrap_or(node);
+                    acc.wrapping_mul(31).wrapping_add(material)
+                });
                 if self.submitted_key != Some(key) {
                     // Remember the latest changed signature; it is submitted below
                     // once the debounce interval elapses, so the trailing value wins.
@@ -420,6 +461,7 @@ impl PreviewEngine {
         match outcome {
             Outcome::Ready {
                 fields,
+                materials,
                 material_weights,
                 target,
                 histogram,
@@ -432,6 +474,7 @@ impl PreviewEngine {
                 // Keep all outputs; `refresh_texture` re-uploads only when the shown output
                 // or the shading mode changed.
                 self.last_outputs = fields;
+                self.evaluated_materials = materials;
                 self.material_weights = material_weights;
                 self.last_histogram = histogram;
                 self.histogram_target = Some(target);
@@ -442,6 +485,7 @@ impl PreviewEngine {
                 self.eval_error = Some(message);
                 self.failed_node = Some(target);
                 self.last_outputs = Vec::new();
+                self.evaluated_materials = Vec::new();
                 self.material_weights = Vec::new();
                 self.last_histogram = None;
                 self.histogram_target = None;
@@ -479,6 +523,11 @@ impl PreviewEngine {
             // past a key built only from the field. The graph's hash is memoized (#299), so
             // reading it costs nothing.
             graph.content_hash(),
+            // And the materials themselves. Without this the composite rebuilds only when the
+            // *previewed* field or the graph changes, which misses the two cases that matter
+            // most: a job finishing with fresh weights while the field it was keyed on is
+            // unchanged, and muting or soloing, which touches no graph and no field at all.
+            self.material_signature(),
         );
         if self.texture_key == Some(key) {
             return;
@@ -498,7 +547,7 @@ impl PreviewEngine {
         // carried on the field: the editor has both, and a colour is preview-only, so nothing
         // headless ever needs it.
         let shown: Vec<crate::materials::Shown<'_>> = self
-            .materials
+            .evaluated_materials
             .iter()
             .zip(&self.material_weights)
             .filter_map(|(&node, weight)| {
@@ -509,6 +558,13 @@ impl PreviewEngine {
             })
             .collect();
         crate::materials::composite(&mut image, &shown);
+        // The same composite as an image, for the viewport. Built in this branch so it follows
+        // the texture's change gate rather than running every frame.
+        let overlay = crate::materials::overlay(&shown, field.width(), field.height());
+        if overlay.is_some() || self.material_overlay.is_some() {
+            self.material_overlay = overlay;
+            self.material_generation = self.material_generation.wrapping_add(1);
+        }
         self.texture = Some(ctx.load_texture("preview", image, egui::TextureOptions::LINEAR));
         self.texture_key = Some(key);
     }
@@ -713,19 +769,24 @@ fn evaluate_job(job: &Job, cache: &mut EvalCache) -> Option<Outcome> {
             // the target, so a material reading terrain the target already built is a hit. One
             // that fails to evaluate is skipped rather than failing the whole preview: a broken
             // material should cost its own colour, not the picture.
-            let material_weights = job
+            //
+            // The id and its weight are produced together and unzipped, so the two lists cannot
+            // drift apart. Building them from separate passes with separate conditions is exactly
+            // how they would.
+            let (materials, material_weights): (Vec<u64>, Vec<Field>) = job
                 .materials
                 .iter()
                 .filter_map(|&stable_id| {
                     let node = job.graph.node_id_of(stable_id)?;
                     let outputs = job.graph.evaluate(node, &job.request, cache).ok()?;
-                    outputs.first().cloned()
+                    Some((stable_id, outputs.first()?.clone()))
                 })
-                .collect();
+                .unzip();
             Outcome::Ready {
                 generation,
                 target: job.target,
                 fields: outputs,
+                materials,
                 material_weights,
                 histogram,
                 cache: cache_report(&job.graph, &job.request, cache),
@@ -786,6 +847,35 @@ fn field_histogram(field: &Field, bins: usize) -> Vec<f32> {
     }
     let max = counts.iter().copied().max().unwrap_or(0).max(1);
     counts.iter().map(|&c| c as f32 / max as f32).collect()
+}
+
+impl PreviewEngine {
+    /// A signature of the materials the composite would be built from: which nodes, in what
+    /// order, and what each of them currently evaluates to.
+    ///
+    /// Ordering matters, so the fold is order-sensitive: reordering a set changes what the
+    /// composite looks like without changing any one weight.
+    fn material_signature(&self) -> u64 {
+        self.evaluated_materials
+            .iter()
+            .zip(&self.material_weights)
+            .fold(0_u64, |acc, (&node, weight)| {
+                acc.wrapping_mul(31)
+                    .wrapping_add(node)
+                    .wrapping_mul(31)
+                    .wrapping_add(weight.content_hash().to_u64())
+            })
+    }
+
+    /// The active set composited as an image, with a generation that changes when it does.
+    ///
+    /// The viewport uploads this as a texture and mixes it onto the terrain, so the tint lands on
+    /// the lit surface rather than on a picture of one.
+    pub(crate) fn material_overlay(&self) -> Option<(&egui::ColorImage, u64)> {
+        self.material_overlay
+            .as_ref()
+            .map(|image| (image, self.material_generation))
+    }
 }
 
 /// The colour of the Material node with `stable_id`, or `None` when the graph no longer has it.

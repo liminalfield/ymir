@@ -119,6 +119,10 @@ struct Uniforms {
     /// or off (`0.0`). On, the terrain fragment shader mixes the surface colour toward the
     /// tint by the mask texture's value, so a painted selection reads as colour, not shape.
     paint: [f32; 4],
+    /// Material overlay (#334): w = enabled (`1.0`) or off (`0.0`); xyz unused. On, the terrain
+    /// fragment shader mixes the surface toward the composited material colour by its coverage.
+    /// Applied before the light, like the paint tint, so the relief still reads underneath.
+    materials: [f32; 4],
 }
 
 /// The offscreen targets the scene renders into, plus the bind group that lets the blit composite
@@ -267,6 +271,14 @@ struct ViewportResources {
     /// (the shader statically reads it); the `paint` uniform gates whether it shows.
     mask_texture: wgpu::Texture,
     mask_res: usize,
+    /// Material overlay (#334): the composited set as RGBA, colour in RGB and coverage in alpha,
+    /// bound alongside the mask in group 1 (binding 4). Always bound because the shader statically
+    /// reads it; the `materials` uniform gates whether it shows.
+    material_texture: wgpu::Texture,
+    material_res: usize,
+    /// The overlay generation this texture holds, so a rebuilt composite uploads once rather than
+    /// every frame.
+    material_generation: u64,
     mask_bind_group: wgpu::BindGroup,
     mask_layout: wgpu::BindGroupLayout,
     /// Offscreen fork: the color+depth targets the scene renders into, the pipeline + layout +
@@ -291,6 +303,9 @@ struct ViewportResources {
     /// changing the tint must re-render the terrain. A mask *content* change re-renders via
     /// the mask upload itself (see `prepare`), so it is not tracked here.
     terrain_paint: [f32; 4],
+    /// The material-overlay uniform the terrain shader reads (#334): toggling it must re-render
+    /// the terrain. A content change re-renders via the upload itself, as with the mask.
+    terrain_materials: [f32; 4],
     /// Whether the terrain geometry was drawn on the last terrain pass (vs the pass clearing to
     /// empty). A change forces a re-render, so blanking the preview clears the resident mesh.
     terrain_drawn: bool,
@@ -370,9 +385,11 @@ fn make_mask_bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     texture: &wgpu::Texture,
+    materials: &wgpu::Texture,
     sampler: &wgpu::Sampler,
 ) -> wgpu::BindGroup {
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let material_view = materials.create_view(&wgpu::TextureViewDescriptor::default());
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("viewport-mask-bind-group"),
         layout,
@@ -385,8 +402,56 @@ fn make_mask_bind_group(
                 binding: 3,
                 resource: wgpu::BindingResource::Sampler(sampler),
             },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(&material_view),
+            },
         ],
     })
+}
+
+/// Creates a `res`x`res` RGBA8 texture for the material overlay: colour in RGB, coverage in alpha.
+///
+/// Unorm rather than Srgb so the values reach the shader as written, matching the paint tint,
+/// which is also handed over as plain numbers rather than converted.
+fn make_rgba_texture(device: &wgpu::Device, label: &str, res: usize) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: res as u32,
+            height: res as u32,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    })
+}
+
+/// Uploads RGBA pixels into a material-overlay texture.
+fn write_rgba_texture(queue: &wgpu::Queue, texture: &wgpu::Texture, pixels: &[u8], res: usize) {
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        pixels,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4 * res as u32),
+            rows_per_image: Some(res as u32),
+        },
+        wgpu::Extent3d {
+            width: res as u32,
+            height: res as u32,
+            depth_or_array_layers: 1,
+        },
+    );
 }
 
 /// Builds the viewport's wgpu pipeline, fixed grid topology, and uniforms, storing them for
@@ -464,6 +529,20 @@ pub(crate) fn init(render_state: &egui_wgpu::RenderState) {
                 binding: 3,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                count: None,
+            },
+            // The material overlay (#334) rides in the same group: it is read by the same shader
+            // stage at the same time, so a second group would buy nothing. Declared non-filterable
+            // so it can share the sampler at binding 3, with the same manual bilinear the mask
+            // uses (see `sample_materials`).
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
                 count: None,
             },
         ],
@@ -685,7 +764,14 @@ pub(crate) fn init(render_state: &egui_wgpu::RenderState) {
         &vec![0.0_f32; MESH_RES * MESH_RES],
         MESH_RES,
     );
-    let mask_bind_group = make_mask_bind_group(device, &mask_layout, &mask_texture, &sampler);
+    let material_texture = make_rgba_texture(device, "viewport-material-texture", MESH_RES);
+    let mask_bind_group = make_mask_bind_group(
+        device,
+        &mask_layout,
+        &mask_texture,
+        &material_texture,
+        &sampler,
+    );
 
     render_state
         .renderer
@@ -706,6 +792,9 @@ pub(crate) fn init(render_state: &egui_wgpu::RenderState) {
             height_bind_group,
             height_layout,
             mask_texture,
+            material_texture,
+            material_res: MESH_RES,
+            material_generation: 0,
             mask_res: MESH_RES,
             mask_bind_group,
             mask_layout,
@@ -720,6 +809,7 @@ pub(crate) fn init(render_state: &egui_wgpu::RenderState) {
             terrain_light: [0.0; 4],
             terrain_wet: [0.0; 5],
             terrain_paint: [0.0; 4],
+            terrain_materials: [0.0; 4],
             terrain_drawn: false,
         });
 }
@@ -745,6 +835,10 @@ struct ViewportCallback {
     mask: Option<MaskUpload>,
     /// Paint-overlay uniform: tint colour (xyz) and enabled flag (w). See [`Uniforms::paint`].
     paint: [f32; 4],
+    /// New material overlay to upload this frame (#334), or `None` when there is none to show.
+    materials: Option<MaterialUpload>,
+    /// Material-overlay uniform: w gates it. See [`Uniforms::materials`].
+    material_uniform: [f32; 4],
     /// Water surface height in mesh units (`sea_level` mapped the same way terrain height is).
     water_y: f32,
     /// The same sea level as a normalized `[0, 1]` height, for the water shader's depth (kept
@@ -796,6 +890,14 @@ struct MeshUpload {
 /// A painted mask ready to upload to the mask texture (#145): raw `[0, 1]` mask values
 /// (row-major, `res`x`res`), sampled from the previewed field's height layer while a backdrop
 /// carries the terrain.
+/// A composited material set ready to upload: RGBA, colour in RGB and coverage in alpha.
+struct MaterialUpload {
+    pixels: Vec<u8>,
+    res: usize,
+    /// Which composite this is, so a resident one is not re-uploaded every frame.
+    generation: u64,
+}
+
 struct MaskUpload {
     values: Vec<f32>,
     res: usize,
@@ -856,6 +958,7 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                     self.water_spread,
                 ],
                 paint: self.paint,
+                materials: self.material_uniform,
             };
             queue.write_buffer(&res.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
@@ -917,11 +1020,33 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                         device,
                         &res.mask_layout,
                         &res.mask_texture,
+                        &res.material_texture,
                         &res.sampler,
                     );
                     res.mask_res = upload.res;
                 }
                 write_height_texture(queue, &res.mask_texture, &upload.values, upload.res);
+            }
+
+            // Material overlay (#334): uploaded when the composite changed, which the generation
+            // says, so a resident overlay costs nothing per frame.
+            if let Some(upload) = &self.materials
+                && upload.generation != res.material_generation
+            {
+                if upload.res != res.material_res {
+                    res.material_texture =
+                        make_rgba_texture(device, "viewport-material-texture", upload.res);
+                    res.mask_bind_group = make_mask_bind_group(
+                        device,
+                        &res.mask_layout,
+                        &res.mask_texture,
+                        &res.material_texture,
+                        &res.sampler,
+                    );
+                    res.material_res = upload.res;
+                }
+                write_rgba_texture(queue, &res.material_texture, &upload.pixels, upload.res);
+                res.material_generation = upload.generation;
             }
         }
 
@@ -961,7 +1086,14 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
             || res.terrain_light_dir != self.light_dir
             || res.terrain_light != self.light
             || res.terrain_wet != terrain_wet
-            || res.terrain_paint != self.paint;
+            || res.terrain_paint != self.paint
+            // Toggling the overlay changes the terrain even when nothing else did. A content
+            // change re-renders through the upload above, which is gated on the generation.
+            || res.terrain_materials != self.material_uniform
+            || self
+                .materials
+                .as_ref()
+                .is_some_and(|upload| upload.generation != res.material_generation);
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("viewport-offscreen-encoder"),
@@ -1014,6 +1146,7 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
             res.terrain_light = self.light;
             res.terrain_wet = terrain_wet;
             res.terrain_paint = self.paint;
+            res.terrain_materials = self.material_uniform;
         }
 
         // Water pass: draw the animated water into the shared work target, resolving to the water
@@ -1178,6 +1311,16 @@ pub(crate) struct MeshKey {
 /// Fills `ui` with the 3D viewport for `field` (the previewed node's output), driven by the
 /// orbit `camera` and `settings`. Re-meshes only when the field or settings change: `meshed`
 /// carries the key of the mesh in the vertex buffer, so nothing uploads when it is unchanged.
+/// What is drawn over the terrain surface, as opposed to the terrain itself.
+#[derive(Default, Clone, Copy)]
+pub(crate) struct Overlays<'a> {
+    /// The paint brush cursor, when painting (#145).
+    pub brush: Option<crate::viewport2d::BrushCursor>,
+    /// The active material set composited (#334), with a generation that changes when it does, so
+    /// the texture is uploaded once per change rather than per frame.
+    pub materials: Option<(&'a egui::ColorImage, u64)>,
+}
+
 pub(crate) fn show(
     ui: &mut egui::Ui,
     camera: &mut OrbitCamera,
@@ -1185,8 +1328,9 @@ pub(crate) fn show(
     settings: ViewSettings,
     lighting: Lighting,
     meshed: &mut Option<MeshKey>,
-    brush: Option<crate::viewport2d::BrushCursor>,
+    overlays: Overlays<'_>,
 ) -> Option<crate::viewport2d::PaintSample> {
+    let Overlays { brush, materials } = overlays;
     let (rect, response) =
         ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
     // Repaint continuously while flying, so held keys keep advancing the camera between mouse moves.
@@ -1302,9 +1446,27 @@ pub(crate) fn show(
     });
 
     let view_proj = vp_mat.to_cols_array_2d();
+    // The composite is square and already at the weights' resolution, so it needs no resampling:
+    // the mesh's uv addresses it directly, the same way it does the mask.
+    let material_upload = materials.and_then(|(image, generation)| {
+        let [w, h] = image.size;
+        (w == h && w > 0).then(|| MaterialUpload {
+            pixels: image.as_raw().to_vec(),
+            res: w,
+            generation,
+        })
+    });
+    let material_uniform = [
+        0.0,
+        0.0,
+        0.0,
+        f32::from(u8::from(material_upload.is_some())),
+    ];
     let callback = egui_wgpu::Callback::new_paint_callback(
         rect,
         ViewportCallback {
+            materials: material_upload,
+            material_uniform,
             view_proj,
             light_dir: lighting.travel_dir(),
             light: [lighting.intensity, lighting.ambient, 0.0, 0.0],
@@ -1877,6 +2039,7 @@ struct Uniforms {
     flags: vec4<f32>,
     waves: vec4<f32>,
     paint: vec4<f32>,
+    materials: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 
@@ -1934,6 +2097,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let m = clamp(sample_mask(in.uv), 0.0, 1.0);
         base = mix(base, u.paint.xyz, m * PAINT_TINT_MAX * (1.0 - in.kind));
     }
+    // Material overlay (#334): mix the surface toward the composited material colour by its
+    // coverage, terrain top only (kind 0). Before the light, like the paint tint, so the tinted
+    // surface still shades and the relief reads under the colour. A cell no material claims has
+    // zero coverage and is left as terrain, which is how a stack with no base material shows.
+    if (u.materials.w > 0.5) {
+        let m = sample_materials(in.uv);
+        base = mix(base, m.rgb, clamp(m.a, 0.0, 1.0) * (1.0 - in.kind));
+    }
     return vec4<f32>(base * shade, 1.0);
 }
 
@@ -1960,6 +2131,28 @@ fn sample_mask(uv: vec2<f32>) -> f32 {
     let b = textureSampleLevel(mask_tex, mask_samp, base + dx, 0.0).r;
     let c = textureSampleLevel(mask_tex, mask_samp, base + dy, 0.0).r;
     let d = textureSampleLevel(mask_tex, mask_samp, base + dx + dy, 0.0).r;
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+// Group 1 for the terrain pipeline: the composited material set (#334), colour in rgb and
+// coverage in a. Binding 4, sharing the sampler at binding 3.
+@group(1) @binding(4) var material_tex: texture_2d<f32>;
+
+// Bilinearly samples the material overlay at `uv`. The same manual filter as `sample_mask`, and
+// for the same reason: the sampler is non-filtering, so a plain read snaps to the texel grid and
+// a material's edge would stair-step against the smooth terrain it sits on.
+fn sample_materials(uv: vec2<f32>) -> vec4<f32> {
+    let dims = vec2<f32>(textureDimensions(material_tex));
+    let t = uv * dims - 0.5;
+    let i = floor(t);
+    let f = t - i;
+    let base = (i + 0.5) / dims;
+    let dx = vec2<f32>(1.0 / dims.x, 0.0);
+    let dy = vec2<f32>(0.0, 1.0 / dims.y);
+    let a = textureSampleLevel(material_tex, mask_samp, base, 0.0);
+    let b = textureSampleLevel(material_tex, mask_samp, base + dx, 0.0);
+    let c = textureSampleLevel(material_tex, mask_samp, base + dy, 0.0);
+    let d = textureSampleLevel(material_tex, mask_samp, base + dx + dy, 0.0);
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
