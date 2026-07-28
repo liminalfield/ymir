@@ -9315,7 +9315,12 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 settings,
                 state.viewport_lighting,
                 &mut state.viewport_mesh,
-                brush,
+                viewport::Overlays {
+                    brush,
+                    // The active set, composited. Built by the preview, which is what holds the
+                    // material weights, and rebuilt only when they change.
+                    materials: state.preview.material_overlay(),
+                },
             );
             if let Some(sample) = sample {
                 apply_paint_sample(state, sample, effective_mode);

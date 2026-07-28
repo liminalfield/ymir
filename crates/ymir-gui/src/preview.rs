@@ -159,6 +159,14 @@ pub(crate) struct PreviewEngine {
     materials: Vec<u64>,
     /// Their evaluated weights, in the same order, from the last completed job.
     material_weights: Vec<Field>,
+    /// The composite as an image (colour in RGB, coverage in alpha), for the 3D viewport to
+    /// upload and mix onto the lit surface. Built here rather than in the viewport because this
+    /// is what holds the weights, and rebuilt only when the texture is, so it costs a pass when
+    /// something changed and nothing per frame.
+    material_overlay: Option<egui::ColorImage>,
+    /// Bumped whenever `material_overlay` is rebuilt, so the viewport can tell whether the
+    /// texture it holds is still the current one without comparing images.
+    material_generation: u64,
     /// The worker's last cache report, by `stable_id` (#279): which nodes hold a result still
     /// keyed to what they would produce now. Held until the next report, so the node pane and the
     /// canvas read a settled fact instead of recomputing keys every frame.
@@ -202,6 +210,8 @@ impl PreviewEngine {
             last_outputs: Vec::new(),
             materials: Vec::new(),
             material_weights: Vec::new(),
+            material_overlay: None,
+            material_generation: 0,
             cache_report: HashMap::new(),
             failed_node: None,
             last_histogram: None,
@@ -509,6 +519,13 @@ impl PreviewEngine {
             })
             .collect();
         crate::materials::composite(&mut image, &shown);
+        // The same composite as an image, for the viewport. Built in this branch so it follows
+        // the texture's change gate rather than running every frame.
+        let overlay = crate::materials::overlay(&shown, field.width(), field.height());
+        if overlay.is_some() || self.material_overlay.is_some() {
+            self.material_overlay = overlay;
+            self.material_generation = self.material_generation.wrapping_add(1);
+        }
         self.texture = Some(ctx.load_texture("preview", image, egui::TextureOptions::LINEAR));
         self.texture_key = Some(key);
     }
@@ -786,6 +803,18 @@ fn field_histogram(field: &Field, bins: usize) -> Vec<f32> {
     }
     let max = counts.iter().copied().max().unwrap_or(0).max(1);
     counts.iter().map(|&c| c as f32 / max as f32).collect()
+}
+
+impl PreviewEngine {
+    /// The active set composited as an image, with a generation that changes when it does.
+    ///
+    /// The viewport uploads this as a texture and mixes it onto the terrain, so the tint lands on
+    /// the lit surface rather than on a picture of one.
+    pub(crate) fn material_overlay(&self) -> Option<(&egui::ColorImage, u64)> {
+        self.material_overlay
+            .as_ref()
+            .map(|image| (image, self.material_generation))
+    }
 }
 
 /// The colour of the Material node with `stable_id`, or `None` when the graph no longer has it.

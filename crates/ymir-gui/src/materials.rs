@@ -20,9 +20,11 @@
 
 use std::collections::HashSet;
 
+use std::sync::Arc;
+
 use eframe::egui;
 use serde::{Deserialize, Serialize};
-use ymir_core::{Field, layers};
+use ymir_core::{Field, Layer, layers};
 
 /// One material in a set, by the `stable_id` of its Material node.
 ///
@@ -233,52 +235,15 @@ pub(crate) struct Shown<'a> {
 /// This predicts what a game engine will show. It does not constrain an export, which writes the
 /// raw independent weights and lets the engine do its own blending.
 pub(crate) fn composite(image: &mut egui::ColorImage, shown: &[Shown<'_>]) {
-    if shown.is_empty() {
-        return;
-    }
     let [w, h] = image.size;
-    let weights: Vec<_> = shown
-        .iter()
-        .map(|s| (s.weight.layer_or(layers::HEIGHT, 0.0), s.color))
-        .collect();
-    // A material evaluated at a different resolution from the terrain cannot be lined up cell for
-    // cell, and stretching it would invent coverage. Skipping is the honest answer.
-    let aligned: Vec<_> = weights
-        .into_iter()
-        .filter(|(layer, _)| layer.width() == w && layer.height() == h)
-        .collect();
-    if aligned.is_empty() {
+    let Some(layers) = aligned(shown, w, h) else {
         return;
-    }
-
+    };
     for y in 0..h {
         for x in 0..w {
-            let mut rgb = [0.0_f32; 3];
-            let mut covered = 0.0_f32;
-            for (layer, color) in &aligned {
-                let a = layer.get(x, y).unwrap_or(0.0).clamp(0.0, 1.0);
-                if a <= 0.0 {
-                    continue;
-                }
-                let over = [
-                    f32::from(color.r()) / 255.0,
-                    f32::from(color.g()) / 255.0,
-                    f32::from(color.b()) / 255.0,
-                ];
-                for (channel, tint) in rgb.iter_mut().zip(over) {
-                    *channel = channel.mul_add(1.0 - a, tint * a);
-                }
-                covered = covered.mul_add(1.0 - a, a);
-            }
-            if covered <= 0.0 {
+            let Some((rgb, covered)) = over(&layers, x, y) else {
                 continue;
-            }
-            // The accumulation above is premultiplied by coverage, so recover the straight colour
-            // before mixing by coverage below. Without this the coverage is counted twice and a
-            // partial weight darkens the terrain rather than tinting it.
-            for channel in &mut rgb {
-                *channel /= covered;
-            }
+            };
             let pixel = &mut image.pixels[y * w + x];
             let shaded = [pixel.r(), pixel.g(), pixel.b()];
             let mut out = [0_u8; 3];
@@ -289,6 +254,87 @@ pub(crate) fn composite(image: &mut egui::ColorImage, shown: &[Shown<'_>]) {
             *pixel = egui::Color32::from_rgba_unmultiplied(out[0], out[1], out[2], pixel.a());
         }
     }
+}
+
+/// The composite as an image: colour in RGB, coverage in alpha.
+///
+/// What the 3D viewport needs, where the mixing happens in the shader so the tint lands on the lit
+/// surface rather than on a picture of one. It shares [`over`] with [`composite`], so the flat
+/// preview and the viewport cannot disagree about what a set looks like.
+///
+/// `None` when there is nothing to draw, so a caller can skip the upload rather than push a
+/// transparent texture.
+pub(crate) fn overlay(shown: &[Shown<'_>], w: usize, h: usize) -> Option<egui::ColorImage> {
+    let layers = aligned(shown, w, h)?;
+    let mut rgba = Vec::with_capacity(w * h * 4);
+    for y in 0..h {
+        for x in 0..w {
+            match over(&layers, x, y) {
+                Some((rgb, covered)) => rgba.extend_from_slice(&[
+                    byte(rgb[0]),
+                    byte(rgb[1]),
+                    byte(rgb[2]),
+                    byte(covered),
+                ]),
+                // Nothing claims the cell, so the terrain shows through untinted.
+                None => rgba.extend_from_slice(&[0, 0, 0, 0]),
+            }
+        }
+    }
+    Some(egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba))
+}
+
+/// The materials that line up with a `w` by `h` grid, paired with their colours.
+///
+/// One evaluated at a different resolution cannot be lined up cell for cell, and stretching it
+/// would invent coverage, so it is dropped. `None` when none of them line up.
+fn aligned<'a>(
+    shown: &'a [Shown<'a>],
+    w: usize,
+    h: usize,
+) -> Option<Vec<(Arc<Layer>, egui::Color32)>> {
+    if shown.is_empty() || w == 0 || h == 0 {
+        return None;
+    }
+    let layers: Vec<_> = shown
+        .iter()
+        .map(|s| (s.weight.layer_or(layers::HEIGHT, 0.0), s.color))
+        .filter(|(layer, _)| layer.width() == w && layer.height() == h)
+        .collect();
+    (!layers.is_empty()).then_some(layers)
+}
+
+/// The over stack at one cell: the straight colour, and how much of the cell is claimed.
+///
+/// `None` when nothing claims it. The colour is un-premultiplied before returning: the
+/// accumulation builds it scaled by coverage, and every caller mixes by coverage again, so
+/// leaving it premultiplied counts coverage twice and darkens a partial weight rather than
+/// tinting it.
+fn over(layers: &[(Arc<Layer>, egui::Color32)], x: usize, y: usize) -> Option<([f32; 3], f32)> {
+    let mut rgb = [0.0_f32; 3];
+    let mut covered = 0.0_f32;
+    for (layer, color) in layers {
+        let a = layer.get(x, y).unwrap_or(0.0).clamp(0.0, 1.0);
+        if a <= 0.0 {
+            continue;
+        }
+        let tint = [
+            f32::from(color.r()) / 255.0,
+            f32::from(color.g()) / 255.0,
+            f32::from(color.b()) / 255.0,
+        ];
+        for (channel, paint) in rgb.iter_mut().zip(tint) {
+            *channel = channel.mul_add(1.0 - a, paint * a);
+        }
+        covered = covered.mul_add(1.0 - a, a);
+    }
+    if covered <= 0.0 {
+        return None;
+    }
+    for channel in &mut rgb {
+        *channel /= covered;
+    }
+    Some((rgb, covered))
 }
 
 /// A `[0, 1]` channel as a byte, rounded so a value that came from a byte returns to it.
@@ -444,8 +490,7 @@ mod tests {
         assert_eq!(s.fresh_name(), "Material set 3");
     }
 
-    use std::sync::Arc;
-    use ymir_core::{Layer, Region};
+    use ymir_core::Region;
 
     const RED: egui::Color32 = egui::Color32::from_rgb(255, 0, 0);
     const BLUE: egui::Color32 = egui::Color32::from_rgb(0, 0, 255);
