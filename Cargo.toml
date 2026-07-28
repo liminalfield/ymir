@@ -49,3 +49,28 @@ missing_docs = "warn"
 # vendor/egui-snarl/Cargo.toml must match the pinned `=0.10.0`.
 [patch.crates-io]
 egui-snarl = { path = "vendor/egui-snarl" }
+
+# The development profile is optimized, lightly.
+#
+# The editor does real per-pixel work every time the previewed field changes: shading the preview,
+# meshing the terrain, compositing materials. Unoptimized, that work is around seven times slower,
+# which is the difference between a parameter drag that keeps up and one that chunks. Measured on
+# the 1024-square relief shade: 105 ms at opt-level 0 against 15 ms at opt-level 1.
+#
+# Level 1 rather than 2 or 3 because the higher levels measured no faster here (15 ms at all
+# three), so there is nothing to buy with the extra compile time.
+#
+# This is not a trade against the edit-rebuild loop: an incremental rebuild of ymir-gui measured
+# the same at either level (~1.1 s), since the crate is recompiled either way and the optimizer is
+# not what dominates. Only the first build after changing this pays, once.
+#
+# Deliberately not `--release` as the development answer: this keeps `debug_assert!` and overflow
+# checks on, and several of the invariants here are written as debug assertions.
+[profile.dev]
+opt-level = 1
+
+# Dependencies at full optimization. egui's tessellation, wgpu and rayon run every frame, and a
+# dependency is rebuilt only when its version changes, so the compile cost lands once and never in
+# the edit-rebuild loop.
+[profile.dev.package."*"]
+opt-level = 3
