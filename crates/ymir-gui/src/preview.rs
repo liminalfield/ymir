@@ -109,7 +109,17 @@ enum Status {
 /// The identity a preview texture was built from: field hash, output index, shading mode and
 /// scale, relief light bits, sea-level bits, and whether water is shown. The texture is rebuilt
 /// when any of these change.
-type TextureKey = (u64, usize, ShadeMode, HeightScale, [u32; 3], u32, bool, u64);
+type TextureKey = (
+    u64,
+    usize,
+    ShadeMode,
+    HeightScale,
+    [u32; 3],
+    u32,
+    bool,
+    u64,
+    u64,
+);
 
 /// Drives background preview evaluation. The UI calls [`sync`](Self::sync) (submit
 /// if changed), [`poll`](Self::poll) (collect results), then [`show`](Self::show)
@@ -513,6 +523,11 @@ impl PreviewEngine {
             // past a key built only from the field. The graph's hash is memoized (#299), so
             // reading it costs nothing.
             graph.content_hash(),
+            // And the materials themselves. Without this the composite rebuilds only when the
+            // *previewed* field or the graph changes, which misses the two cases that matter
+            // most: a job finishing with fresh weights while the field it was keyed on is
+            // unchanged, and muting or soloing, which touches no graph and no field at all.
+            self.material_signature(),
         );
         if self.texture_key == Some(key) {
             return;
@@ -835,6 +850,23 @@ fn field_histogram(field: &Field, bins: usize) -> Vec<f32> {
 }
 
 impl PreviewEngine {
+    /// A signature of the materials the composite would be built from: which nodes, in what
+    /// order, and what each of them currently evaluates to.
+    ///
+    /// Ordering matters, so the fold is order-sensitive: reordering a set changes what the
+    /// composite looks like without changing any one weight.
+    fn material_signature(&self) -> u64 {
+        self.evaluated_materials
+            .iter()
+            .zip(&self.material_weights)
+            .fold(0_u64, |acc, (&node, weight)| {
+                acc.wrapping_mul(31)
+                    .wrapping_add(node)
+                    .wrapping_mul(31)
+                    .wrapping_add(weight.content_hash().to_u64())
+            })
+    }
+
     /// The active set composited as an image, with a generation that changes when it does.
     ///
     /// The viewport uploads this as a texture and mixes it onto the terrain, so the tint lands on
