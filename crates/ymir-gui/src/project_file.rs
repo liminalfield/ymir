@@ -495,7 +495,18 @@ pub(crate) fn restore(file: &ProjectFile) -> Result<RestoredProject, ymir_core::
         frames: file.view.canvas.frames.clone(),
         node_sort: file.view.settings.node_sort,
         node_density: file.view.settings.node_density,
-        material_sets: file.view.settings.material_sets.clone(),
+        material_sets: {
+            // Logged because material sets are view state: nothing about evaluation notices them
+            // going missing, so a project that quietly loses them looks like the user forgot to
+            // build one. Reported once per open, at the point they either arrive or do not.
+            let sets = file.view.settings.material_sets.clone();
+            log::info!(
+                "restored {} material set(s), active {}",
+                sets.sets.len(),
+                sets.active
+            );
+            sets
+        },
         subgraph_layouts,
         warnings,
     })
@@ -812,6 +823,52 @@ mod tests {
             restore(&file),
             Err(ymir_core::Error::UnsupportedFormatVersion { .. })
         ));
+    }
+
+    #[test]
+    fn material_sets_survive_a_save_and_reload() {
+        // Reported as "I keep rebuilding the set every restart". They are view state, so nothing
+        // about evaluation would notice them going missing; only a round-trip test does.
+        let mut sets = crate::materials::MaterialSets::default();
+        sets.add_set("Alpine");
+        sets.toggle_member(7);
+        sets.toggle_member(9);
+        sets.toggle_mute(9);
+        sets.toggle_solo(7);
+
+        let file = capture(
+            &Graph::new(),
+            &Snarl::<Handle>::new(),
+            WorldSettings {
+                seed: 0,
+                world_extent: 1024.0,
+                world_height: 256.0,
+                build_res: DEFAULT_BUILD_RES,
+                sea_level: DEFAULT_SEA_LEVEL,
+            },
+            ViewSettings {
+                material_sets: sets,
+                ..ViewSettings::default()
+            },
+            &[],
+        );
+
+        let json = serde_json::to_string(&file).expect("serialize");
+        assert!(
+            json.contains("material_sets"),
+            "the sets must reach the file: {json}"
+        );
+        let back: ProjectFile = serde_json::from_str(&json).expect("deserialize");
+        let restored = restore(&back).expect("restore");
+
+        let set = restored.material_sets.active().expect("the set comes back");
+        assert_eq!(set.name, "Alpine");
+        assert_eq!(set.entries.len(), 2, "with both materials, in order");
+        assert!(restored.material_sets.is_muted(9), "and the mute");
+        assert!(
+            restored.material_sets.soloed.is_empty(),
+            "but not the solo, which is a look rather than a decision"
+        );
     }
 
     #[test]
