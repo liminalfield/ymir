@@ -559,12 +559,18 @@ impl PreviewEngine {
         } else {
             self.scale
         };
-        let mut image = field_to_image(field, layers::HEIGHT, self.mode, scale, self.light);
+        // Shaded from a reduced copy, not the field itself. The pane draws this a few hundred
+        // points wide, so shading the field's own resolution spends a million cells per pass on a
+        // postage stamp, on the UI thread, every time the field changes: during a parameter drag
+        // that is the whole frame budget, several times over. The viewports still work from the
+        // field itself, so nothing that is looked at closely is reduced.
+        let thumb = crate::shade::reduced(field, layers::HEIGHT, crate::shade::THUMB_RES);
+        let mut image = field_to_image(&thumb, layers::HEIGHT, self.mode, scale, self.light);
         // A selection has no waterline: its values are a weight, not a height.
         if self.show_water && !self.selection {
             apply_water(
                 &mut image,
-                field,
+                &thumb,
                 layers::HEIGHT,
                 self.sea_level,
                 &WaterStyle::default(),

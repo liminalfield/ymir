@@ -244,11 +244,27 @@ pub(crate) struct Shown<'a> {
 /// The colour is **multiplied** into the shading rather than replacing it, so the relief still
 /// reads: a lit slope stays lighter than a shaded one under the same material. A cell no material
 /// claims has zero coverage and is left alone, so bare terrain shows as terrain.
+///
+/// The overlay is built at the field's resolution, because the 3D viewport samples it across the
+/// terrain surface, while the thumbnail is shaded at a bounded size (`shade::THUMB_RES`). So this
+/// samples rather than walking in step: the cost is the thumbnail's pixel count, not the field's.
 pub(crate) fn composite(image: &mut egui::ColorImage, overlay: &Overlay) {
-    if image.size != overlay.size {
+    let ([iw, ih], [ow, oh]) = (image.size, overlay.size);
+    if iw == 0 || ih == 0 || ow == 0 || oh == 0 {
         return;
     }
-    for (pixel, tint) in image.pixels.iter_mut().zip(overlay.pixels.chunks_exact(4)) {
+    for (i, pixel) in image.pixels.iter_mut().enumerate() {
+        // Nearest, matching how the thumbnail's own heights were sampled, so the tint lands on the
+        // cell it was computed for.
+        let (x, y) = (i % iw, i / iw);
+        let (sx, sy) = (x * ow / iw, y * oh / ih);
+        let Some(tint) = overlay
+            .pixels
+            .get((sy * ow + sx) * 4..)
+            .and_then(|p| p.get(..4))
+        else {
+            continue;
+        };
         let covered = f32::from(tint[3]) / 255.0;
         if covered <= 0.0 {
             continue;
@@ -676,16 +692,67 @@ mod tests {
     }
 
     #[test]
-    fn an_overlay_of_another_size_is_refused() {
-        // The two are built from the same field, so a mismatch means one is stale. Blending them
-        // anyway would smear a previous resolution's colours across the current image.
+    fn a_larger_overlay_is_sampled_down_to_the_thumbnail() {
+        // The overlay is built at the field's resolution for the viewport, while the thumbnail is
+        // shaded at a bounded size, so the two sizes differ by design and the tint has to be
+        // sampled rather than walked in step.
+        let mut image = shaded(128);
+        assert_eq!(image.size, [2, 2], "the fixture is 2x2");
+        // 4x4 fully-covered blue, so every thumbnail pixel samples a covered cell.
+        let overlay = Overlay {
+            pixels: [0, 0, 255, 255].repeat(16),
+            size: [4, 4],
+        };
+        composite(&mut image, &overlay);
+        for pixel in &image.pixels {
+            assert_eq!(pixel.b(), 128, "blue survives a blue tint");
+            assert_eq!(pixel.r(), 0, "red is removed by a blue tint");
+        }
+    }
+
+    #[test]
+    fn the_left_half_of_an_overlay_lands_on_the_left_half_of_the_thumbnail() {
+        // Sampling has to preserve position: a tint covering only the source's left half must
+        // reach only the thumbnail's left half, or a material would drift across the terrain.
+        let mut image = shaded(128);
+        let mut pixels = Vec::new();
+        for _y in 0..4 {
+            for x in 0..4 {
+                // Covered on the left half only.
+                let a = if x < 2 { 255 } else { 0 };
+                pixels.extend_from_slice(&[0, 0, 255, a]);
+            }
+        }
+        composite(
+            &mut image,
+            &Overlay {
+                pixels,
+                size: [4, 4],
+            },
+        );
+        for (i, pixel) in image.pixels.iter().enumerate() {
+            let left = i % 2 == 0;
+            assert_eq!(
+                pixel.r() == 0,
+                left,
+                "pixel {i} tinted={} but left={left}",
+                pixel.r() == 0
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_overlay_is_left_alone() {
+        // A zero-sized overlay would divide by zero in the sampling; it is refused instead.
         let mut image = shaded(128);
         let before = image.pixels.clone();
-        let wrong = Overlay {
-            pixels: vec![255, 0, 0, 255],
-            size: [1, 1],
-        };
-        composite(&mut image, &wrong);
+        composite(
+            &mut image,
+            &Overlay {
+                pixels: Vec::new(),
+                size: [0, 0],
+            },
+        );
         assert_eq!(image.pixels, before);
     }
 }
