@@ -884,10 +884,16 @@ impl PreviewEngine {
             .iter()
             .zip(&self.material_weights)
             .fold(0_u64, |acc, (&node, weight)| {
+                // The *layer's* hash, not the field's. `Layer::content_hash` is memoized, so this
+                // is a pointer chase after the first call; `Field::content_hash` re-hashes every
+                // cell of every layer on every call, and this runs each frame to decide whether
+                // anything changed. Three materials at preview resolution meant several million
+                // cells hashed per frame to conclude that nothing had.
+                let weight = weight.layer_or(layers::HEIGHT, 0.0).content_hash().to_u64();
                 acc.wrapping_mul(31)
                     .wrapping_add(node)
                     .wrapping_mul(31)
-                    .wrapping_add(weight.content_hash().to_u64())
+                    .wrapping_add(weight)
             })
     }
 
