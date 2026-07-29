@@ -285,6 +285,26 @@ pub(crate) enum WorleyFeature {
     Regions,
 }
 
+/// Where the feature points sit before jitter moves them.
+///
+/// Named `placement` rather than `lattice` because `design/scatter.md` calls the same idea
+/// "Placement strategy", and Scatter will need to express arrangements that are not lattices at
+/// all (random points, Poisson-disc spacing). Points cannot travel on an edge, so the two features
+/// cannot share data, but they can share this vocabulary instead of coining rivals (#346).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Placement {
+    /// One point per square integer cell. Cells are squares at jitter 0.
+    Square,
+    /// A triangular lattice: alternate rows offset by half a cell, rows spaced `sqrt(3)/2` apart,
+    /// so nearest-neighbour distance is 1 in every direction. Its Voronoi diagram is a grid of
+    /// regular hexagons, which is what contraction cracks actually form: joints meet at 120
+    /// degrees, so columnar basalt and dried mud are hexagon-dominated rather than square.
+    Hex,
+}
+
+/// Row spacing of the triangular lattice, `sqrt(3)/2`.
+const HEX_ROW: f32 = 0.866_025_4;
+
 /// Parameters for cellular (Worley) noise.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct WorleyParams {
@@ -298,6 +318,8 @@ pub(crate) struct WorleyParams {
     pub offset_x: f64,
     /// Pan of the sampling window along y, in region heights.
     pub offset_y: f64,
+    /// Where the feature points sit before jitter moves them.
+    pub placement: Placement,
 }
 
 /// Decorrelates the y feature-offset hash from the x one so points are not on a diagonal.
@@ -340,7 +362,7 @@ pub(crate) fn worley_field(
         let wx = (region.min_x + u * region.width()) * params.frequency;
         let wy = (region.min_y + v * region.height()) * params.frequency;
 
-        let (f1, f2, cell) = worley(seed, wx as f32, wy as f32, params.jitter);
+        let (f1, f2, cell) = worley(seed, wx as f32, wy as f32, params.jitter, params.placement);
         match feature {
             WorleyFeature::Bumps => (1.0 - f1).clamp(0.0, 1.0),
             WorleyFeature::Cracks => (1.0 - (f2 - f1)).clamp(0.0, 1.0),
@@ -350,7 +372,7 @@ pub(crate) fn worley_field(
                 // point* rather than the cell centre keeps it consistent with where the cell
                 // actually sits once jitter has moved it.
                 Some(values) => {
-                    let (px, py) = feature_point(seed, cell, params.jitter);
+                    let (px, py) = feature_point(seed, cell, params.jitter, params.placement);
                     let (sx, sy) = noise_to_cell(px, py, width, height, region, params);
                     values.layer.get(sx, sy).unwrap_or(0.0)
                 }
@@ -366,20 +388,20 @@ pub(crate) fn worley_field(
 /// feature points around `(x, y)` in noise space, and the integer cell of the nearest.
 /// Each cell holds one feature point, jittered from its origin by a per-cell hash; only
 /// the 3x3 neighborhood can hold the two nearest, so the search is bounded.
-fn worley(seed: u64, x: f32, y: f32, jitter: f32) -> (f32, f32, (i32, i32)) {
-    let ix = x.floor() as i32;
-    let iy = y.floor() as i32;
+fn worley(seed: u64, x: f32, y: f32, jitter: f32, placement: Placement) -> (f32, f32, (i32, i32)) {
+    let (ix, iy) = base_cell(x, y, placement);
     let mut f1 = f32::INFINITY;
     let mut f2 = f32::INFINITY;
     let mut nearest = (ix, iy);
+    // A 3x3 index neighbourhood, which covers both lattices: no point outside it can be nearer
+    // than one inside, because jitter never moves a point beyond its own cell.
     for dj in -1..=1 {
         for di in -1..=1 {
             let cx = ix + di;
             let cy = iy + dj;
-            // Feature point: the cell origin plus a jittered, per-cell-deterministic
+            // Feature point: the lattice position plus a jittered, per-cell-deterministic
             // offset (independent hashes for x and y so points are not diagonal).
-            let px = cx as f32 + jitter * hash_unit(seed, cx, cy);
-            let py = cy as f32 + jitter * hash_unit(seed ^ WORLEY_SALT_Y, cx, cy);
+            let (px, py) = feature_point(seed, (cx, cy), jitter, placement);
             let d2 = (px - x).powi(2) + (py - y).powi(2);
             if d2 < f1 {
                 f2 = f1;
@@ -397,12 +419,42 @@ fn worley(seed: u64, x: f32, y: f32, jitter: f32) -> (f32, f32, (i32, i32)) {
 ///
 /// Kept as a separate function rather than returned from `worley` because only the Regions feature
 /// needs it, and the hot path should not pay for a value the other two features discard.
-fn feature_point(seed: u64, cell: (i32, i32), jitter: f32) -> (f32, f32) {
+fn feature_point(seed: u64, cell: (i32, i32), jitter: f32, placement: Placement) -> (f32, f32) {
     let (cx, cy) = cell;
-    (
-        cx as f32 + jitter * hash_unit(seed, cx, cy),
-        cy as f32 + jitter * hash_unit(seed ^ WORLEY_SALT_Y, cx, cy),
-    )
+    match placement {
+        Placement::Square => (
+            cx as f32 + jitter * hash_unit(seed, cx, cy),
+            cy as f32 + jitter * hash_unit(seed ^ WORLEY_SALT_Y, cx, cy),
+        ),
+        // Jitter is centred here, unlike the square case where it only ever pushes a point in the
+        // positive direction. The square form is locked by backward compatibility; for a lattice
+        // whose points sit at cell *centres* rather than corners, a centred offset is what keeps
+        // the point inside its own hexagon. Scaled per axis so jitter 1 reaches the cell's extent
+        // in both directions rather than overshooting in y.
+        Placement::Hex => {
+            let row_offset = if cy & 1 == 0 { 0.0 } else { 0.5 };
+            (
+                cx as f32 + row_offset + jitter * (hash_unit(seed, cx, cy) - 0.5),
+                cy as f32 * HEX_ROW
+                    + jitter * (hash_unit(seed ^ WORLEY_SALT_Y, cx, cy) - 0.5) * HEX_ROW,
+            )
+        }
+    }
+}
+
+/// The lattice index nearest `(x, y)` in noise space: the search centre for [`worley`].
+fn base_cell(x: f32, y: f32, placement: Placement) -> (i32, i32) {
+    match placement {
+        // The cell containing the point, since square lattice points sit at cell corners.
+        Placement::Square => (x.floor() as i32, y.floor() as i32),
+        // The nearest lattice point, since hex points sit at cell centres. The row is found first
+        // because the half-cell offset applied to x depends on which row it is.
+        Placement::Hex => {
+            let iy = (y / HEX_ROW).round() as i32;
+            let row_offset = if iy & 1 == 0 { 0.0 } else { 0.5 };
+            ((x - row_offset).round() as i32, iy)
+        }
+    }
 }
 
 /// Maps a noise-space position back to the grid cell it falls in, inverting the sampling in
@@ -727,6 +779,7 @@ mod tests {
             jitter: 1.0,
             offset_x: 0.0,
             offset_y: 0.0,
+            placement: Placement::Square,
         }
     }
 
@@ -791,6 +844,7 @@ mod tests {
             jitter: 0.0,
             offset_x: 0.0,
             offset_y: 0.0,
+            placement: Placement::Square,
         };
         let a = worley_field(64, 64, Region::UNIT, grid, WorleyFeature::Bumps, 7, None);
         let b = worley_field(
@@ -803,5 +857,177 @@ mod tests {
             None,
         );
         assert_ne!(a.content_hash(), b.content_hash());
+    }
+
+    /// The distance from each lattice point to its nearest neighbour, for a placement.
+    fn nearest_neighbour_distances(placement: Placement) -> Vec<f32> {
+        let mut out = Vec::new();
+        for cy in -2..=2_i32 {
+            for cx in -2..=2_i32 {
+                let (px, py) = feature_point(0, (cx, cy), 0.0, placement);
+                let mut best = f32::INFINITY;
+                for dy in -2..=2_i32 {
+                    for dx in -2..=2_i32 {
+                        if dx == 0 && dy == 0 {
+                            continue;
+                        }
+                        let (qx, qy) = feature_point(0, (cx + dx, cy + dy), 0.0, placement);
+                        let d = ((px - qx).powi(2) + (py - qy).powi(2)).sqrt();
+                        best = best.min(d);
+                    }
+                }
+                out.push(best);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn hex_points_are_evenly_spaced_in_every_direction() {
+        // The property that makes the Voronoi cells regular hexagons: every lattice point is the
+        // same distance from its nearest neighbour whichever way you look. A square lattice is not
+        // (1 along the axes, sqrt(2) diagonally), which is why its cells come out square.
+        for d in nearest_neighbour_distances(Placement::Hex) {
+            assert!(
+                (d - 1.0).abs() < 1e-4,
+                "hex nearest-neighbour distance {d}, expected 1.0"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hex_point_has_six_neighbours_at_that_distance() {
+        // Six equidistant neighbours is what a hexagon needs; a square lattice has four.
+        let count = |placement: Placement| {
+            let (px, py) = feature_point(0, (0, 0), 0.0, placement);
+            let mut n = 0;
+            for dy in -2..=2_i32 {
+                for dx in -2..=2_i32 {
+                    if dx == 0 && dy == 0 {
+                        continue;
+                    }
+                    let (qx, qy) = feature_point(0, (dx, dy), 0.0, placement);
+                    let d = ((px - qx).powi(2) + (py - qy).powi(2)).sqrt();
+                    if (d - 1.0).abs() < 1e-4 {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+        assert_eq!(count(Placement::Hex), 6, "hex");
+        assert_eq!(count(Placement::Square), 4, "square");
+    }
+
+    #[test]
+    fn hex_regions_have_six_sided_cells_on_average() {
+        // The payoff, measured on the rendered field rather than the lattice: count how many
+        // distinct neighbouring region values each cell touches. A jittered square lattice averages
+        // below six; an unjittered hex lattice should sit at six.
+        let mean_sides = |placement: Placement, jitter: f32| {
+            let params = WorleyParams {
+                frequency: 12.0,
+                jitter,
+                offset_x: 0.0,
+                offset_y: 0.0,
+                placement,
+            };
+            let field = worley_field(
+                256,
+                256,
+                Region::UNIT,
+                params,
+                WorleyFeature::Regions,
+                7,
+                None,
+            );
+            let layer = field.layer_or(layers::HEIGHT, 0.0);
+            // For each cell value, the set of other values it borders.
+            let mut borders: std::collections::HashMap<u32, std::collections::HashSet<u32>> =
+                std::collections::HashMap::new();
+            for y in 1..255 {
+                for x in 1..255 {
+                    let here = layer.get(x, y).unwrap_or(0.0).to_bits();
+                    for (nx, ny) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] {
+                        let other = layer.get(nx, ny).unwrap_or(0.0).to_bits();
+                        if other != here {
+                            borders.entry(here).or_default().insert(other);
+                        }
+                    }
+                }
+            }
+            // A cell touching the image border has neighbours outside the field, so it counts
+            // short however regular the lattice is. Drop any cell that reaches the margin: the
+            // question is what the lattice does, not what cropping does to it.
+            let margin = 24;
+            let mut edge: std::collections::HashSet<u32> = std::collections::HashSet::new();
+            for y in 0..256 {
+                for x in 0..256 {
+                    if x < margin || y < margin || x >= 256 - margin || y >= 256 - margin {
+                        edge.insert(layer.get(x, y).unwrap_or(0.0).to_bits());
+                    }
+                }
+            }
+            let kept: Vec<usize> = borders
+                .iter()
+                .filter(|(value, _)| !edge.contains(value))
+                .map(|(_, set)| set.len())
+                .collect();
+            assert!(!kept.is_empty(), "no interior cells to measure");
+            kept.iter().sum::<usize>() as f32 / kept.len() as f32
+        };
+        let hex = mean_sides(Placement::Hex, 0.0);
+        assert!(
+            (hex - 6.0).abs() < 0.4,
+            "unjittered hex cells averaged {hex} sides, expected about 6"
+        );
+    }
+
+    #[test]
+    fn placement_changes_the_pattern_and_stays_deterministic() {
+        let make = |placement: Placement| {
+            let params = WorleyParams {
+                frequency: 8.0,
+                jitter: 0.5,
+                offset_x: 0.0,
+                offset_y: 0.0,
+                placement,
+            };
+            worley_field(
+                64,
+                64,
+                Region::UNIT,
+                params,
+                WorleyFeature::Regions,
+                3,
+                None,
+            )
+        };
+        assert_ne!(
+            make(Placement::Square).content_hash(),
+            make(Placement::Hex).content_hash(),
+            "hex must not reproduce the square pattern"
+        );
+        assert_eq!(
+            make(Placement::Hex).content_hash(),
+            make(Placement::Hex).content_hash(),
+            "same inputs, same output"
+        );
+    }
+
+    #[test]
+    fn hex_jitter_still_disturbs_the_grid() {
+        // The dial has to keep working on the new lattice: regular at 0, irregular as it rises.
+        let make = |jitter: f32| {
+            let params = WorleyParams {
+                frequency: 8.0,
+                jitter,
+                offset_x: 0.0,
+                offset_y: 0.0,
+                placement: Placement::Hex,
+            };
+            worley_field(64, 64, Region::UNIT, params, WorleyFeature::Cracks, 3, None)
+        };
+        assert_ne!(make(0.0).content_hash(), make(0.9).content_hash());
     }
 }

@@ -103,6 +103,13 @@ families, possibly a mode:
 A `min spacing` parameter or a distribution mode selects between them. The density field
 modulates the local rate in either case.
 
+**Share the vocabulary with the Cellular generators.** They answer the same question, how
+feature points are spread over the plane, and they already answer it: `placement`, with
+`square` and `hex` (#346). Points cannot travel on an edge, so the two features cannot share
+data and there is no shared abstraction to build. But Scatter should extend that parameter
+rather than coin a rival, adding values like `random` and `spaced` alongside the two lattices.
+The name was chosen from this section's own heading so it would fit both.
+
 ## Not yet decided
 
 - Baked stamp (resample) first, or hold out for the procedural subgraph path?
