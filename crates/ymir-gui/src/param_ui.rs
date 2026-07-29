@@ -174,13 +174,31 @@ fn angle_wraps(min: f64, max: f64) -> bool {
     max - min >= 360.0
 }
 
-/// Display precision (decimal places) for a metric quantity, from its declared max. A wide
-/// world-unit reach (a coastal width, a blur radius, declared up to 100 km) is edited in whole
-/// metres; a small-range length (a berm crest, at most tens of metres) wants sub-metre steps to be
-/// controllable on a small-scale terrain. The author's declared max is the signal, so narrowing a
-/// parameter's range is what buys it finer steps.
-fn metric_decimals(max: f64) -> usize {
-    if max <= 100.0 { 1 } else { 0 }
+/// Display precision (decimal places) for a metric quantity: always hundredths of a metre.
+///
+/// Fixed rather than derived. It used to come from the parameter's declared maximum, which meant
+/// every length in the app was edited in whole metres, because all of them declare a 100 km ceiling
+/// and none had ever narrowed it (#352). A typed 2.5 rounded to 3, and on a small world a blur
+/// radius could only be 0, 1 or 2.
+///
+/// Deliberately not derived from the cell size or the world extent either. Precision that shifts
+/// when the build resolution changes is invisible coupling: the same project would present
+/// differently between a preview and a final build, with nothing on screen to explain why.
+///
+/// `max_decimals` trims trailing zeros, so a whole value still reads `5 m` and only a fractional one
+/// shows its decimals. The scrub speed is a separate question, answered by [`metric_scrub_speed`].
+const METRIC_DECIMALS: usize = 2;
+
+/// Scrub step for a metric quantity, from its declared range.
+///
+/// Kept proportional to the range, and kept *separate* from the display precision. Tying the two
+/// together is what forced whole-metre display: scrubbing 0 to 100 km in hundredths would be
+/// unusable, so the precision was sacrificed to keep the drag sane. Dragging stays coarse on a wide
+/// parameter; an exact value is typed rather than dragged.
+fn metric_scrub_speed(min: f64, max: f64) -> f64 {
+    // A full drag across the value box should cross a useful part of the range, so step by roughly
+    // a thousandth of it, floored at a hundredth of a metre so a narrow parameter is not frozen.
+    ((max - min) / 1000.0).max(0.01)
 }
 
 /// Layers infinite (wrapping) scrub onto a numeric value box. While `resp` is dragged, the value is
@@ -591,14 +609,12 @@ pub(crate) fn edit(
                     // here, so otherwise it shows full float precision). Degrees always show a fixed
                     // tenth; a metric length shows a precision that suits its declared range (whole
                     // metres for a wide reach, up to a tenth for a small length like a berm crest).
-                    let metric_dp = metric_decimals(max);
-                    // The scrub step matches the shown precision, so a field displayed to a tenth
-                    // also scrubs by tenths rather than jumping whole metres. Degrees keep their
-                    // prior half-degree-per-pixel feel; a wide metric reach keeps whole-metre steps.
+                    // Display precision and scrub speed are answered separately: a length shows
+                    // hundredths whatever its range, and scrubs by a step suited to that range.
                     let speed = if degrees {
                         0.5
                     } else {
-                        10f64.powi(-(metric_dp as i32))
+                        metric_scrub_speed(min, max)
                     };
                     // DragValue supplies display, click-to-type, and formatting; its own drag is
                     // made inert (speed 0) so the infinite scrub below is the only thing that moves
@@ -609,7 +625,7 @@ pub(crate) fn edit(
                     drag = if degrees {
                         drag.fixed_decimals(1)
                     } else {
-                        drag.max_decimals(metric_dp)
+                        drag.max_decimals(METRIC_DECIMALS)
                     };
                     // Everything but a wrapping direction clamps click-to-type to the declared
                     // range; a wrapping angle has no meaningful bound to type against (it rolls).
@@ -1004,12 +1020,46 @@ mod tests {
     }
 
     #[test]
-    fn metric_precision_follows_the_declared_range() {
-        // A wide world reach (declared up to 100 km) edits in whole metres.
-        assert_eq!(metric_decimals(100_000.0), 0);
-        // A small-range length (a berm crest) earns sub-metre steps from its narrow declared max.
-        assert_eq!(metric_decimals(100.0), 1);
-        assert_eq!(metric_decimals(10.0), 1);
+    fn a_length_shows_hundredths_whatever_its_range() {
+        // The precision used to come from the declared max, and every length in the app declares a
+        // 100 km ceiling, so all of them edited in whole metres and a typed 2.5 rounded to 3 (#352).
+        // It is now fixed, so the range cannot take the decimals away.
+        assert_eq!(METRIC_DECIMALS, 2);
+    }
+
+    #[test]
+    fn a_typed_fraction_of_a_metre_survives() {
+        // The point of #352: a blur radius of 2.5 m has to stay 2.5 m. Nothing on the commit path
+        // may round it to the scrub step or to a whole metre.
+        let blur_range = Some((0.0, 100_000.0));
+        assert!((finalize_value(2.5, None, blur_range) - 2.5).abs() < f64::EPSILON);
+        assert!((finalize_value(0.25, None, blur_range) - 0.25).abs() < f64::EPSILON);
+        // Still clamped to the declared range, which is the one thing that may change a value.
+        assert!((finalize_value(-3.0, None, blur_range) - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn scrub_speed_follows_the_range_without_touching_precision() {
+        // The two were derived from one number, which is what forced whole metres: scrubbing 0 to
+        // 100 km in hundredths would be unusable, so the display was sacrificed to keep the drag
+        // sane. Separated, a wide parameter still scrubs in large steps.
+        let wide = metric_scrub_speed(0.0, 100_000.0);
+        let narrow = metric_scrub_speed(0.0, 10.0);
+        assert!(
+            wide > narrow,
+            "a wide range must scrub faster: {wide} vs {narrow}"
+        );
+        assert!(
+            wide >= 100.0,
+            "a 100 km range should still cross usefully in a drag, got {wide}"
+        );
+        // A narrow range is floored rather than frozen: a 10 m parameter must still move.
+        assert!(
+            (0.01..=0.05).contains(&narrow),
+            "a 10 m range should scrub finely but not stall, got {narrow}"
+        );
+        // And a degenerate range still moves at all.
+        assert!(metric_scrub_speed(5.0, 5.0) > 0.0);
     }
 
     #[test]
