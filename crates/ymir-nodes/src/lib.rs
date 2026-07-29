@@ -67,6 +67,7 @@ mod terrace;
 mod thermal;
 mod thermal_gpu;
 mod warp;
+mod waves;
 
 pub use aspect::Aspect;
 pub use billow::Billow;

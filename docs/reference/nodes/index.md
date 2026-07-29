@@ -51,6 +51,7 @@ Every node, grouped by category.
 - [Rectangle](generator.rect.md). A flat-topped rectangular footprint with soft, rounded flanks.
 - [Ridged Noise](generator.ridged.md). Ridged multifractal noise, with sharp mountain ridgelines.
 - [Ring](generator.ring.md). A smooth circular ridge (1 on the radius, 0 on each flank): the envelope for a crater rim, caldera wall, or atoll.
+- [Waves](generator.waves.md). Parallel bands swept across the terrain (dunes, ripples, corrugated ridges): a straight ramp to each crest, so a Curve after it draws any profile you like.
 
 ## Geology
 
