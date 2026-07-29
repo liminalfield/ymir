@@ -106,6 +106,7 @@ impl Operator for CellularCracks {
             worley,
             WorleyFeature::Cracks,
             seed,
+            None,
         );
         Ok(vec![field])
     }

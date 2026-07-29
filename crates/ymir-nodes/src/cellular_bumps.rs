@@ -110,6 +110,7 @@ impl Operator for CellularBumps {
             worley,
             WorleyFeature::Bumps,
             seed,
+            None,
         );
         Ok(vec![field])
     }
