@@ -17,9 +17,16 @@ use ymir_core::{
     PortSpec, Result, layers,
 };
 
-use crate::noise::{RegionValues, WorleyFeature, WorleyParams, worley_field};
+use crate::noise::{Placement, RegionValues, WorleyFeature, WorleyParams, worley_field};
 
 /// Stable type identifier and registry key.
+/// Placement ids: where the feature points sit before jitter moves them. `square` is the original
+/// behaviour and stays the default, so every existing project is unchanged. Named to match
+/// `design/scatter.md`'s "Placement strategy", so Scatter can adopt the same vocabulary (#346).
+const PLACEMENT_SQUARE: &str = "square";
+const PLACEMENT_HEX: &str = "hex";
+const PLACEMENTS: &[&str] = &[PLACEMENT_SQUARE, PLACEMENT_HEX];
+
 const TYPE_ID: &str = "generator.cellular_regions";
 
 /// Default cell density (region count).
@@ -83,6 +90,13 @@ impl Operator for CellularRegions {
                     },
                     ParamValue::Int(0),
                 ),
+                ParamSpec::new(
+                    "placement",
+                    ParamKind::Enum {
+                        options: PLACEMENTS,
+                    },
+                    ParamValue::Text(PLACEMENT_SQUARE.to_string()),
+                ),
             ],
             emitted_layers: Vec::new(),
             mask_aware: false,
@@ -96,11 +110,17 @@ impl Operator for CellularRegions {
     }
 
     fn eval(&self, inputs: Inputs, params: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
+        let placement = if params.get_str("placement", PLACEMENT_SQUARE) == PLACEMENT_HEX {
+            Placement::Hex
+        } else {
+            Placement::Square
+        };
         let worley = WorleyParams {
             frequency: params.get_f64("frequency", DEFAULT_FREQUENCY),
             jitter: params.get_f64("jitter", DEFAULT_JITTER).clamp(0.0, 1.0) as f32,
             offset_x: params.get_i64("offset_x", 0) as f64,
             offset_y: params.get_i64("offset_y", 0) as f64,
+            placement,
         };
         let seed = ctx.seed.wrapping_add(params.get_i64("seed", 0) as u64);
         // Each cell takes one value from the wired field, read at the cell's own feature point, so

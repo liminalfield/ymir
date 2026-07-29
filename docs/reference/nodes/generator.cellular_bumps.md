@@ -32,7 +32,14 @@ This node takes no inputs.
 | Seed (`seed`) | int | [0, 2147483647] | 0 |  | The random seed; changing it regenerates a different variation of the same pattern. | no |
 | Offset X (`offset_x`) | int | [-10000, 10000] | 0 |  | Pans the noise pattern along the X axis without changing its shape. | no |
 | Offset Y (`offset_y`) | int | [-10000, 10000] | 0 |  | Pans the noise pattern along the Y axis without changing its shape. | no |
+| Placement (`placement`) | enum | square, hex | square |  |  | no |
 
 ## Layer contract
 
 Reads and writes the height layer.
+
+## Behaviour
+
+Placement sets where the cells start from. `square` puts one point per square of a grid, so at jitter 0 the cells are squares. `hex` uses a triangular lattice, where every point is the same distance from its six nearest neighbours, so at jitter 0 the cells are regular hexagons.
+
+Reach for `hex` when the pattern is cracking rather than tiling. Rock cools and mud dries by contracting, and contraction joints meet at 120 degrees, which makes hexagons. Columnar basalt is the clearest case. Raise jitter from there and you get irregular but still six-sided-on-average cells, which is what real jointing looks like.
