@@ -26,6 +26,7 @@ Every node, grouped by category.
 ## Filters
 
 - [Blur](modifier.blur.md). Gaussian-blurs the height layer by a world-unit radius (the scale knob for derived selectors, and feathers masks).
+- [Deposit](modifier.deposit.md). Rains material onto the terrain and lets it settle: snow that fills hollows and sheds cliffs, or sand that buries all but the peaks.
 - [Directional Blur](modifier.directional_blur.md). Smooths the height layer along or across a guide direction, steered by the slope or a flow field.
 - [Frequency Split](modifier.frequency_split.md). Splits the height into a low-frequency band and the high-frequency residual.
 - [Grow / Shrink](modifier.grow_shrink.md). Grows or shrinks a selection by a distance in metres, moving its edge out or in with a soft border.

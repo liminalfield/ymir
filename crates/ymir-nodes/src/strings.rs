@@ -278,6 +278,13 @@ fn lookup(key: &str) -> Option<&'static str> {
             "Relaxes slopes steeper than the talus angle toward repose."
         }
 
+        // Deposit.
+        "node-modifier.deposit" => "Deposit",
+        "node-modifier.deposit-desc" => {
+            "Rains material onto the terrain and lets it settle: snow that fills hollows and \
+             sheds cliffs, or sand that buries all but the peaks."
+        }
+
         // Hydraulic erosion.
         "node-modifier.hydraulic_erosion" => "Hydraulic Erosion",
         "node-modifier.hydraulic_erosion-desc" => {
@@ -344,6 +351,29 @@ fn lookup(key: &str) -> Option<&'static str> {
         // inspector tooltip and the reference table.
 
         // Shared: meaning-invariant across every node that uses them.
+        "param-depth" => "Depth",
+        "param-depth-desc" => "How much material falls, before any of it settles.",
+        "param-repose" => "Repose",
+        "param-repose-desc" => {
+            "The angle the material can hold before it slides. Near zero it levels out and \
+             fills hollows like a liquid; around 34 degrees it behaves like sand and around \
+             38 like snow, draping the ground and shedding the steep faces."
+        }
+        "param-elevation" => "Elevation",
+        "param-elevation-desc" => {
+            "The height above which material accumulates: a snow line. Zero for everywhere."
+        }
+        "param-elevation_falloff" => "Elevation Falloff",
+        "param-elevation_falloff-desc" => {
+            "How far the elevation line takes to come in, so it is a band rather than a cut."
+        }
+        "param-wind_direction" => "Wind Direction",
+        "param-wind_direction-desc" => "Which way the wind blows, in degrees.",
+        "param-wind_bias" => "Wind Bias",
+        "param-wind_bias-desc" => {
+            "How strongly material piles up on the sheltered side of the ground."
+        }
+
         "param-wavelength" => "Wavelength",
         "param-wavelength-desc" => "Distance from one crest to the next, in world units.",
         "param-direction" => "Direction",
