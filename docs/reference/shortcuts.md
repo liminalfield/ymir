@@ -37,7 +37,7 @@ In the inspector, for the selected node.
 
 A scrub keeps going while you drag, so the pointer reaching the edge of the screen does not end it. Values stay within the range the node declares, so a scrub or a typed number stops at the limit. A direction is the exception: it rolls, so scrubbing past 360° carries on from 0°.
 
-A scrub steps by an amount suited to the parameter's range, so a length that can run to kilometres moves in large steps and one that runs to a few metres moves in small ones. Type the value when you want an exact one: a length keeps two decimals, so 2.5 m stays 2.5 m.
+A scrub steps by an amount suited to the value it is on, so a length sitting at a few metres moves in centimetres and one sitting at kilometres moves in tens of metres. Type the value when you want an exact one: a length keeps two decimals, so 2.5 m stays 2.5 m.
 
 ## Nodes pane
 
