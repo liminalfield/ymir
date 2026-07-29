@@ -23,6 +23,8 @@ use std::sync::Arc;
 
 use ymir_core::{Field, Layer, Region, layers};
 
+use crate::shape::smoothstep;
+
 /// Parameters for fractional Brownian motion layering of simplex noise.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct FbmParams {
@@ -344,6 +346,16 @@ pub(crate) struct RegionValues<'a> {
     pub layer: &'a Layer,
 }
 
+/// The [`WorleyFeature::Regions`] options, grouped because they only apply to that feature and
+/// because passing them separately pushed `worley_field` past a sensible argument count.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct RegionOptions<'a> {
+    /// Where each cell takes its value from. `None` hashes the cell id.
+    pub values: Option<RegionValues<'a>>,
+    /// Width of the boundary blend, in noise units, or `None` for hard edges (#350).
+    pub antialias: Option<f32>,
+}
+
 pub(crate) fn worley_field(
     width: usize,
     height: usize,
@@ -351,7 +363,7 @@ pub(crate) fn worley_field(
     params: WorleyParams,
     feature: WorleyFeature,
     seed: u64,
-    values: Option<RegionValues<'_>>,
+    regions: RegionOptions<'_>,
 ) -> Field {
     let layer = Layer::from_par_fn(width, height, |x, y| {
         // Same world-space sampling as the other generators, so frequency sets cell size
@@ -362,22 +374,45 @@ pub(crate) fn worley_field(
         let wx = (region.min_x + u * region.width()) * params.frequency;
         let wy = (region.min_y + v * region.height()) * params.frequency;
 
-        let (f1, f2, cell) = worley(seed, wx as f32, wy as f32, params.jitter, params.placement);
+        let hit = worley(seed, wx as f32, wy as f32, params.jitter, params.placement);
+        let (f1, f2, cell) = (hit.f1, hit.f2, hit.nearest);
         match feature {
             WorleyFeature::Bumps => (1.0 - f1).clamp(0.0, 1.0),
             WorleyFeature::Cracks => (1.0 - (f2 - f1)).clamp(0.0, 1.0),
-            WorleyFeature::Regions => match values {
-                // The cell reads one value from the wired layer, at its own feature point, so the
-                // whole cell is flat at whatever that layer says there. Sampling the *feature
-                // point* rather than the cell centre keeps it consistent with where the cell
-                // actually sits once jitter has moved it.
-                Some(values) => {
-                    let (px, py) = feature_point(seed, cell, params.jitter, params.placement);
-                    let (sx, sy) = noise_to_cell(px, py, width, height, region, params);
-                    values.layer.get(sx, sy).unwrap_or(0.0)
+            WorleyFeature::Regions => {
+                let of_cell = |cell: (i32, i32)| -> f32 {
+                    match regions.values {
+                        // The cell reads one value from the wired layer, at its own feature point, so the
+                        // whole cell is flat at whatever that layer says there. Sampling the *feature
+                        // point* rather than the cell centre keeps it consistent with where the cell
+                        // actually sits once jitter has moved it.
+                        Some(values) => {
+                            let (px, py) =
+                                feature_point(seed, cell, params.jitter, params.placement);
+                            let (sx, sy) = noise_to_cell(px, py, width, height, region, params);
+                            values.layer.get(sx, sy).unwrap_or(0.0)
+                        }
+                        None => hash_unit(seed ^ WORLEY_SALT_REGION, cell.0, cell.1),
+                    }
+                };
+                let near = of_cell(cell);
+                match regions.antialias {
+                    // `f2 - f1` is the distance to the boundary, doubled: it is zero on the
+                    // boundary and grows at about twice the perpendicular distance from it. Blend
+                    // over one output pixel's worth, so a pixel sitting exactly on the boundary
+                    // takes the average of the two cells it straddles and one pixel away takes the
+                    // nearest cell alone. The width is derived from the output grid, so the joint
+                    // stays one pixel wide however large the build is, rather than softening.
+                    Some(edge) if edge > 0.0 => {
+                        let t = smoothstep(0.0, edge, f2 - f1);
+                        let both = 0.5 * (near + of_cell(hit.second));
+                        both + (near - both) * t
+                    }
+                    // Off: every pixel belongs wholly to one cell, which is what a selection wants
+                    // when a half-selected pixel would be wrong.
+                    _ => near,
                 }
-                None => hash_unit(seed ^ WORLEY_SALT_REGION, cell.0, cell.1),
-            },
+            }
         }
     });
 
@@ -388,11 +423,12 @@ pub(crate) fn worley_field(
 /// feature points around `(x, y)` in noise space, and the integer cell of the nearest.
 /// Each cell holds one feature point, jittered from its origin by a per-cell hash; only
 /// the 3x3 neighborhood can hold the two nearest, so the search is bounded.
-fn worley(seed: u64, x: f32, y: f32, jitter: f32, placement: Placement) -> (f32, f32, (i32, i32)) {
+fn worley(seed: u64, x: f32, y: f32, jitter: f32, placement: Placement) -> WorleyHit {
     let (ix, iy) = base_cell(x, y, placement);
     let mut f1 = f32::INFINITY;
     let mut f2 = f32::INFINITY;
     let mut nearest = (ix, iy);
+    let mut second = (ix, iy);
     // A 3x3 index neighbourhood, which covers both lattices: no point outside it can be nearer
     // than one inside, because jitter never moves a point beyond its own cell.
     for dj in -1..=1 {
@@ -405,14 +441,34 @@ fn worley(seed: u64, x: f32, y: f32, jitter: f32, placement: Placement) -> (f32,
             let d2 = (px - x).powi(2) + (py - y).powi(2);
             if d2 < f1 {
                 f2 = f1;
+                second = nearest;
                 f1 = d2;
                 nearest = (cx, cy);
             } else if d2 < f2 {
                 f2 = d2;
+                second = (cx, cy);
             }
         }
     }
-    (f1.sqrt(), f2.sqrt(), nearest)
+    WorleyHit {
+        f1: f1.sqrt(),
+        f2: f2.sqrt(),
+        nearest,
+        second,
+    }
+}
+
+/// What [`worley`] found around a sample point.
+struct WorleyHit {
+    /// Distance to the nearest feature point.
+    f1: f32,
+    /// Distance to the second-nearest.
+    f2: f32,
+    /// The cell of the nearest feature point.
+    nearest: (i32, i32),
+    /// The cell of the second-nearest. `f2 - f1` is the distance to the boundary between this cell
+    /// and `nearest`, which is what lets the Regions feature antialias that boundary (#350).
+    second: (i32, i32),
 }
 
 /// The feature point of `cell` in noise space, recomputed from the same hashes [`worley`] uses.
@@ -790,8 +846,24 @@ mod tests {
             WorleyFeature::Cracks,
             WorleyFeature::Regions,
         ] {
-            let a = worley_field(64, 64, Region::UNIT, worley_params(), feature, 42, None);
-            let b = worley_field(64, 64, Region::UNIT, worley_params(), feature, 42, None);
+            let a = worley_field(
+                64,
+                64,
+                Region::UNIT,
+                worley_params(),
+                feature,
+                42,
+                RegionOptions::default(),
+            );
+            let b = worley_field(
+                64,
+                64,
+                Region::UNIT,
+                worley_params(),
+                feature,
+                42,
+                RegionOptions::default(),
+            );
             assert_eq!(a.content_hash(), b.content_hash(), "feature {feature:?}");
         }
     }
@@ -805,7 +877,7 @@ mod tests {
             worley_params(),
             WorleyFeature::Bumps,
             7,
-            None,
+            RegionOptions::default(),
         );
         let cracks = worley_field(
             64,
@@ -814,7 +886,7 @@ mod tests {
             worley_params(),
             WorleyFeature::Cracks,
             7,
-            None,
+            RegionOptions::default(),
         );
         let regions = worley_field(
             64,
@@ -823,7 +895,7 @@ mod tests {
             worley_params(),
             WorleyFeature::Regions,
             7,
-            None,
+            RegionOptions::default(),
         );
         // The three features render the same cells differently.
         assert_ne!(bumps.content_hash(), cracks.content_hash());
@@ -846,7 +918,15 @@ mod tests {
             offset_y: 0.0,
             placement: Placement::Square,
         };
-        let a = worley_field(64, 64, Region::UNIT, grid, WorleyFeature::Bumps, 7, None);
+        let a = worley_field(
+            64,
+            64,
+            Region::UNIT,
+            grid,
+            WorleyFeature::Bumps,
+            7,
+            RegionOptions::default(),
+        );
         let b = worley_field(
             64,
             64,
@@ -854,7 +934,7 @@ mod tests {
             worley_params(),
             WorleyFeature::Bumps,
             7,
-            None,
+            RegionOptions::default(),
         );
         assert_ne!(a.content_hash(), b.content_hash());
     }
@@ -939,7 +1019,7 @@ mod tests {
                 params,
                 WorleyFeature::Regions,
                 7,
-                None,
+                RegionOptions::default(),
             );
             let layer = field.layer_or(layers::HEIGHT, 0.0);
             // For each cell value, the set of other values it borders.
@@ -1000,7 +1080,7 @@ mod tests {
                 params,
                 WorleyFeature::Regions,
                 3,
-                None,
+                RegionOptions::default(),
             )
         };
         assert_ne!(
@@ -1026,7 +1106,15 @@ mod tests {
                 offset_y: 0.0,
                 placement: Placement::Hex,
             };
-            worley_field(64, 64, Region::UNIT, params, WorleyFeature::Cracks, 3, None)
+            worley_field(
+                64,
+                64,
+                Region::UNIT,
+                params,
+                WorleyFeature::Cracks,
+                3,
+                RegionOptions::default(),
+            )
         };
         assert_ne!(make(0.0).content_hash(), make(0.9).content_hash());
     }
