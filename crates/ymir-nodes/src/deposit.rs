@@ -151,6 +151,15 @@ impl Operator for Deposit {
         ContextDeps::SLOPE
     }
 
+    /// Experimental: the settling is a local relaxation, so how far material travels is bounded by
+    /// the pass count rather than by the material itself. A low repose needs far more passes than
+    /// the defaults suggest, and too few strand it part-way as tongues that read steeper than the
+    /// ground they fell on. The look is real and useful, but the pass count is doing work the user
+    /// has to know about, so it is offered with a caveat rather than as a settled tool.
+    fn experimental(&self) -> bool {
+        true
+    }
+
     fn eval(&self, inputs: Inputs, params: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
         let input = inputs[0];
         let (width, height) = (input.width(), input.height());
@@ -416,6 +425,9 @@ mod tests {
         assert!(spec.inputs[1].optional, "the mask is optional");
         assert_eq!(spec.outputs.len(), 2);
         assert_eq!(spec.emitted_layers, vec![layers::COVER]);
+        // Badged in the editor: the settling's reach is bounded by the pass count, so the node is
+        // offered with a caveat rather than as a settled tool.
+        assert!(Deposit.experimental());
     }
 
     #[test]
