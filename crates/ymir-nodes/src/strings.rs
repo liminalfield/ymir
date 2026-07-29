@@ -111,6 +111,13 @@ fn lookup(key: &str) -> Option<&'static str> {
              for a coast-to-highland trend or a dune-field direction."
         }
 
+        // Waves generator.
+        "node-generator.waves" => "Waves",
+        "node-generator.waves-desc" => {
+            "Parallel bands swept across the terrain (dunes, ripples, corrugated ridges): \
+             a straight ramp to each crest, so a Curve after it draws any profile you like."
+        }
+
         // Ring (annulus) generator.
         "node-generator.ring" => "Ring",
         "node-generator.ring-desc" => {
@@ -337,6 +344,23 @@ fn lookup(key: &str) -> Option<&'static str> {
         // inspector tooltip and the reference table.
 
         // Shared: meaning-invariant across every node that uses them.
+        "param-wavelength" => "Wavelength",
+        "param-wavelength-desc" => "Distance from one crest to the next, in world units.",
+        "param-direction" => "Direction",
+        "param-direction-desc" => {
+            "Which way the bands run, in degrees. The crests lie across this direction."
+        }
+        "param-phase" => "Phase",
+        "param-phase-desc" => {
+            "Slides the pattern along its direction, without moving or resizing the bands."
+        }
+        "param-skew" => "Skew",
+        "param-skew-desc" => {
+            "Moves the crest within each wave, so one slope grows long and the other short. \
+             Positive puts the crest late, which is the way round a dune runs. Nothing \
+             downstream can do this: a Curve changes height, so it treats both slopes alike."
+        }
+
         "param-frequency" => "Frequency",
         "param-frequency-desc" => {
             "Sets the feature size of the noise; higher values pack in smaller, denser features."

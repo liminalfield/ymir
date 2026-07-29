@@ -27,7 +27,7 @@ Selects slopes that face a compass direction, high where the terrain looks towar
 
 | Parameter | Type | Range | Default | Unit | Description | Field-driven |
 |---|---|---|---|---|---|---|
-| Direction (`direction`) | float | [0, 360] | 0 | ° |  | no |
+| Direction (`direction`) | float | [0, 360] | 0 | ° | Which way the bands run, in degrees. The crests lie across this direction. | no |
 | Falloff (`falloff`) | float | [1, 180] | 90 | ° |  | no |
 | Slope Weight (`slope_weight`) | float | [0, 1] | 1 |  |  | no |
 | Output (`output`) | enum | selection, measure | selection |  |  | no |

@@ -51,6 +51,7 @@ const EXPECTED: &[&str] = &[
     "generator.rect",
     "generator.ridged",
     "generator.ring",
+    "generator.waves",
     // ymir-nodes: modifiers
     "modifier.aspect",
     "modifier.blend",
