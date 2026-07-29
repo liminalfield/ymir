@@ -189,16 +189,24 @@ fn angle_wraps(min: f64, max: f64) -> bool {
 /// shows its decimals. The scrub speed is a separate question, answered by [`metric_scrub_speed`].
 const METRIC_DECIMALS: usize = 2;
 
-/// Scrub step for a metric quantity, from its declared range.
+/// Scrub step for a metric quantity, from the value being dragged.
 ///
-/// Kept proportional to the range, and kept *separate* from the display precision. Tying the two
-/// together is what forced whole-metre display: scrubbing 0 to 100 km in hundredths would be
-/// unusable, so the precision was sacrificed to keep the drag sane. Dragging stays coarse on a wide
-/// parameter; an exact value is typed rather than dragged.
-fn metric_scrub_speed(min: f64, max: f64) -> f64 {
-    // A full drag across the value box should cross a useful part of the range, so step by roughly
-    // a thousandth of it, floored at a hundredth of a metre so a narrow parameter is not frozen.
-    ((max - min) / 1000.0).max(0.01)
+/// Proportional to where the value already is, not to its declared range. Dragging near 8 m moves in
+/// small steps; dragging near 5 km moves in large ones. So one rule suits a blur radius of a couple
+/// of metres and a coastal reach of kilometres, and the parameter's declared ceiling never enters
+/// into it.
+///
+/// It was briefly range-proportional, which was worse than what it replaced. Every metric parameter
+/// in `ymir-nodes` declares a 100 km ceiling, so a thousandth of the range came to 100 m per step,
+/// and reaching 8 m by dragging was harder than reaching 100 km. A declared maximum is an outer
+/// bound, not a statement about the values anyone works at, so it is the wrong thing to scale by.
+///
+/// Kept separate from the display precision, which stays fixed at [`METRIC_DECIMALS`]. Deriving
+/// those two from one number is what forced whole-metre display before #352.
+fn metric_scrub_speed(value: f64) -> f64 {
+    // A fiftieth of the current value, so roughly fifty pixels of drag doubles it. Floored so a
+    // value sitting at zero is not frozen there.
+    (value.abs() / 50.0).max(0.05)
 }
 
 /// Layers infinite (wrapping) scrub onto a numeric value box. While `resp` is dragged, the value is
@@ -611,11 +619,7 @@ pub(crate) fn edit(
                     // metres for a wide reach, up to a tenth for a small length like a berm crest).
                     // Display precision and scrub speed are answered separately: a length shows
                     // hundredths whatever its range, and scrubs by a step suited to that range.
-                    let speed = if degrees {
-                        0.5
-                    } else {
-                        metric_scrub_speed(min, max)
-                    };
+                    let speed = if degrees { 0.5 } else { metric_scrub_speed(x) };
                     // DragValue supplies display, click-to-type, and formatting; its own drag is
                     // made inert (speed 0) so the infinite scrub below is the only thing that moves
                     // the value.
@@ -1039,27 +1043,32 @@ mod tests {
     }
 
     #[test]
-    fn scrub_speed_follows_the_range_without_touching_precision() {
-        // The two were derived from one number, which is what forced whole metres: scrubbing 0 to
-        // 100 km in hundredths would be unusable, so the display was sacrificed to keep the drag
-        // sane. Separated, a wide parameter still scrubs in large steps.
-        let wide = metric_scrub_speed(0.0, 100_000.0);
-        let narrow = metric_scrub_speed(0.0, 10.0);
+    fn scrub_speed_follows_the_value_not_the_declared_range() {
+        // The bug this replaces: the step was a thousandth of the declared range, and every metric
+        // parameter declares a 100 km ceiling, so everything scrubbed at 100 m a step and a depth
+        // of 8 m was unreachable by dragging.
+        //
+        // Scaling by the value instead means a parameter sitting at 8 moves in small steps whatever
+        // its declared maximum, and one sitting at 5000 moves in large ones.
+        let small = metric_scrub_speed(8.0);
+        let large = metric_scrub_speed(5000.0);
         assert!(
-            wide > narrow,
-            "a wide range must scrub faster: {wide} vs {narrow}"
+            small < 1.0,
+            "8 m should scrub finer than a metre, got {small}"
         );
         assert!(
-            wide >= 100.0,
-            "a 100 km range should still cross usefully in a drag, got {wide}"
+            large > 10.0,
+            "5 km should scrub in tens of metres, got {large}"
         );
-        // A narrow range is floored rather than frozen: a 10 m parameter must still move.
+        assert!(large > small * 100.0, "the step must scale with the value");
+        // Zero is floored rather than frozen: a value starting at zero must still be draggable.
+        let zero = metric_scrub_speed(0.0);
         assert!(
-            (0.01..=0.05).contains(&narrow),
-            "a 10 m range should scrub finely but not stall, got {narrow}"
+            zero > 0.0 && zero <= 0.1,
+            "zero should still move, got {zero}"
         );
-        // And a degenerate range still moves at all.
-        assert!(metric_scrub_speed(5.0, 5.0) > 0.0);
+        // Negative values scrub at the same rate as their positive twin.
+        assert!((metric_scrub_speed(-500.0) - metric_scrub_speed(500.0)).abs() < f64::EPSILON);
     }
 
     #[test]
