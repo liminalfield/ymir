@@ -32,6 +32,7 @@ Flat, discrete cells, for plates or zones you can shape or scatter one region at
 | Seed (`seed`) | int | [0, 2147483647] | 0 |  | The random seed; changing it regenerates a different variation of the same pattern. | no |
 | Offset X (`offset_x`) | int | [-10000, 10000] | 0 |  | Pans the noise pattern along the X axis without changing its shape. | no |
 | Offset Y (`offset_y`) | int | [-10000, 10000] | 0 |  | Pans the noise pattern along the Y axis without changing its shape. | no |
+| Antialias (`antialias`) | bool |  | true |  |  | no |
 | Placement (`placement`) | enum | square, hex | square |  |  | no |
 
 ## Layer contract
@@ -55,3 +56,5 @@ Frequency sets the cell size and jitter their regularity: 0 is a square grid, 1 
 Placement sets where the cells start from. `square` puts one point per square of a grid, so at jitter 0 the cells are squares. `hex` uses a triangular lattice, where every point is the same distance from its six nearest neighbours, so at jitter 0 the cells are regular hexagons.
 
 Reach for `hex` when the pattern is cracking rather than tiling. Rock cools and mud dries by contracting, and contraction joints meet at 120 degrees, which makes hexagons. Columnar basalt is the clearest case. Raise jitter from there and you get irregular but still six-sided-on-average cells, which is what real jointing looks like.
+
+Antialias softens the join between cells by one pixel, and is on by default. A cell boundary is a hard step, so without it the pixel grid can only approximate the boundary's angle by stair-stepping, and building at a higher resolution makes the steps smaller without removing them. Turn it off when you want the region map as a selection and a half-selected pixel would be wrong.

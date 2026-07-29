@@ -17,12 +17,19 @@ use ymir_core::{
     PortSpec, Result, layers,
 };
 
-use crate::noise::{Placement, RegionValues, WorleyFeature, WorleyParams, worley_field};
+use crate::noise::{
+    Placement, RegionOptions, RegionValues, WorleyFeature, WorleyParams, worley_field,
+};
 
 /// Stable type identifier and registry key.
 /// Placement ids: where the feature points sit before jitter moves them. `square` is the original
 /// behaviour and stays the default, so every existing project is unchanged. Named to match
 /// `design/scatter.md`'s "Placement strategy", so Scatter can adopt the same vocabulary (#346).
+/// Whether cell boundaries are antialiased. On by default: a hard boundary stair-steps at any
+/// resolution, because the pixel grid can only approximate its angle. Off gives every pixel wholly
+/// to one cell, which is what a selection wants when a half-selected pixel would be wrong (#350).
+const DEFAULT_ANTIALIAS: bool = true;
+
 const PLACEMENT_SQUARE: &str = "square";
 const PLACEMENT_HEX: &str = "hex";
 const PLACEMENTS: &[&str] = &[PLACEMENT_SQUARE, PLACEMENT_HEX];
@@ -91,6 +98,11 @@ impl Operator for CellularRegions {
                     ParamValue::Int(0),
                 ),
                 ParamSpec::new(
+                    "antialias",
+                    ParamKind::Bool,
+                    ParamValue::Bool(DEFAULT_ANTIALIAS),
+                ),
+                ParamSpec::new(
                     "placement",
                     ParamKind::Enum {
                         options: PLACEMENTS,
@@ -128,6 +140,14 @@ impl Operator for CellularRegions {
         // hash of the cell id as before. Held for the whole call so the borrow outlives the field
         // construction below.
         let source = inputs.optional(0).map(|f| f.layer_or(layers::HEIGHT, 0.0));
+        // The blend width for the boundary: one output pixel, converted into the noise units `f1`
+        // and `f2` are measured in. Taking the larger axis so a non-square region antialiases on
+        // its coarser side rather than under-blending there.
+        let antialias = params.get_bool("antialias", DEFAULT_ANTIALIAS).then(|| {
+            let per_x = ctx.region.width() / ctx.width.max(1) as f64;
+            let per_y = ctx.region.height() / ctx.height.max(1) as f64;
+            (per_x.max(per_y) * worley.frequency) as f32
+        });
         let field = worley_field(
             ctx.width,
             ctx.height,
@@ -135,7 +155,10 @@ impl Operator for CellularRegions {
             worley,
             WorleyFeature::Regions,
             seed,
-            source.as_deref().map(|layer| RegionValues { layer }),
+            RegionOptions {
+                values: source.as_deref().map(|layer| RegionValues { layer }),
+                antialias,
+            },
         );
         Ok(vec![field])
     }
@@ -214,9 +237,12 @@ mod tests {
     fn a_wired_field_gives_each_cell_one_value_from_it() {
         // A ramp rising left to right: cells on the left must come out darker than cells on the
         // right, and each cell must be flat, which is what the hash cannot give.
+        // Antialias off: this counts distinct cell values, and the one-pixel boundary blend #350
+        // adds would show up as extra values that say nothing about the assignment being tested.
         let params = Params::default()
             .with("frequency", ParamValue::Float(8.0))
-            .with("jitter", ParamValue::Float(0.5));
+            .with("jitter", ParamValue::Float(0.5))
+            .with("antialias", ParamValue::Bool(false));
         let out = run_with(&ramp(128), &params, &ctx(128));
         let h = out.layer_or(layers::HEIGHT, 0.0);
 
@@ -243,9 +269,12 @@ mod tests {
         // The reason the input exists (#347): a smooth field blended in tilts every cell top,
         // while sampling it once per cell keeps the cell flat. Walk a row and check that values
         // change only in steps, never gradually within a run.
+        // Antialias off, so this measures the cell assignment rather than the one-pixel blend at
+        // each boundary that #350 adds. That blend is covered separately below.
         let params = Params::default()
             .with("frequency", ParamValue::Float(6.0))
-            .with("jitter", ParamValue::Float(0.0));
+            .with("jitter", ParamValue::Float(0.0))
+            .with("antialias", ParamValue::Bool(false));
         let out = run_with(&ramp(96), &params, &ctx(96));
         let h = out.layer_or(layers::HEIGHT, 0.0);
         let row: Vec<f32> = (0..96).map(|x| h.get(x, 48).unwrap_or(0.0)).collect();
@@ -370,10 +399,125 @@ mod tests {
 
     #[test]
     fn output_matches_golden_value() {
+        // Anchored with antialias off, because that is the raw cell assignment and #350 did not
+        // touch it. Keeping this value proves the Worley computation itself still produces exactly
+        // what it always has; the antialiased default has its own golden below.
+        let out = run(
+            &Params::default()
+                .with("frequency", ParamValue::Float(6.0))
+                .with("antialias", ParamValue::Bool(false)),
+            &ctx(8),
+        );
+        assert_eq!(out.content_hash().to_u64(), 0xa4a6_a8e3_1504_4743);
+    }
+
+    #[test]
+    fn the_antialiased_default_has_its_own_golden() {
         let out = run(
             &Params::default().with("frequency", ParamValue::Float(6.0)),
             &ctx(8),
         );
-        assert_eq!(out.content_hash().to_u64(), 0xa4a6_a8e3_1504_4743);
+        assert_eq!(out.content_hash().to_u64(), 0x7431_c7d1_4598_14e5);
+    }
+
+    #[test]
+    fn antialiasing_touches_only_the_boundaries() {
+        // Interiors must be untouched: the point is to soften the joint, not the cells. Every pixel
+        // that moves has to sit within two pixels of a cell boundary.
+        //
+        // Two rather than one because of cell vertices. `f2 - f1` grows at about twice the distance
+        // from a boundary only along the bisector of two cells; where three meet, the second-nearest
+        // point changes identity and the difference stays small over a slightly wider patch.
+        // Measured on this case, 3922 changed pixels sit on a boundary, 194 one pixel away, 6 two
+        // pixels away, and none further.
+        let params = |aa: bool| {
+            Params::default()
+                .with("frequency", ParamValue::Float(9.0))
+                .with("antialias", ParamValue::Bool(aa))
+        };
+        let res = 192_usize;
+        let hard = run(&params(false), &ctx(res));
+        let soft = run(&params(true), &ctx(res));
+        let (h, sf) = (
+            hard.layer_or(layers::HEIGHT, 0.0),
+            soft.layer_or(layers::HEIGHT, 0.0),
+        );
+        let on_boundary = |x: usize, y: usize| -> bool {
+            let v = h.get(x, y).unwrap_or(0.0);
+            (-1..=1_isize).any(|dy| {
+                (-1..=1_isize).any(|dx| {
+                    let (nx, ny) = (x.wrapping_add_signed(dx), y.wrapping_add_signed(dy));
+                    (h.get(nx, ny).unwrap_or(v) - v).abs() > f32::EPSILON
+                })
+            })
+        };
+        let mut moved = 0;
+        for y in 2..res - 2 {
+            for x in 2..res - 2 {
+                if (h.get(x, y).unwrap_or(0.0) - sf.get(x, y).unwrap_or(0.0)).abs() <= f32::EPSILON
+                {
+                    continue;
+                }
+                moved += 1;
+                let near_boundary = (-2..=2_isize).any(|dy| {
+                    (-2..=2_isize)
+                        .any(|dx| on_boundary(x.wrapping_add_signed(dx), y.wrapping_add_signed(dy)))
+                });
+                assert!(
+                    near_boundary,
+                    "pixel ({x}, {y}) changed but is more than two pixels from any boundary"
+                );
+            }
+        }
+        assert!(moved > 0, "antialiasing changed nothing");
+    }
+
+    #[test]
+    fn the_softened_band_stays_one_pixel_as_resolution_rises() {
+        // The reason the width is derived from the output grid: a fixed world-space width would
+        // cover more pixels as the build grows, so the joint would soften instead of staying sharp.
+        // Measure the share of pixels sitting on a boundary blend at two resolutions.
+        let share = |res: usize| -> f32 {
+            let params = Params::default()
+                .with("frequency", ParamValue::Float(9.0))
+                .with("antialias", ParamValue::Bool(true));
+            let hard = run(
+                &params.clone().with("antialias", ParamValue::Bool(false)),
+                &ctx(res),
+            );
+            let soft = run(&params, &ctx(res));
+            let (h, sf) = (
+                hard.layer_or(layers::HEIGHT, 0.0),
+                soft.layer_or(layers::HEIGHT, 0.0),
+            );
+            let mut moved = 0_usize;
+            for y in 0..res {
+                for x in 0..res {
+                    if (h.get(x, y).unwrap_or(0.0) - sf.get(x, y).unwrap_or(0.0)).abs()
+                        > f32::EPSILON
+                    {
+                        moved += 1;
+                    }
+                }
+            }
+            // Boundary pixels scale with perimeter (res), total with area (res^2), so the share
+            // should roughly halve when the resolution doubles.
+            moved as f32 / (res * res) as f32
+        };
+        let low = share(128);
+        let high = share(256);
+        assert!(
+            high < low * 0.75,
+            "band share {high} at 256 against {low} at 128: not shrinking with resolution"
+        );
+    }
+
+    #[test]
+    fn antialiasing_is_deterministic() {
+        let params = Params::default().with("frequency", ParamValue::Float(9.0));
+        assert_eq!(
+            run(&params, &ctx(96)).content_hash(),
+            run(&params, &ctx(96)).content_hash()
+        );
     }
 }

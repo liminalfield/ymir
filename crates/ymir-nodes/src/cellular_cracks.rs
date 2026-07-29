@@ -16,7 +16,7 @@ use ymir_core::{
     PortSpec, Result,
 };
 
-use crate::noise::{Placement, WorleyFeature, WorleyParams, worley_field};
+use crate::noise::{Placement, RegionOptions, WorleyFeature, WorleyParams, worley_field};
 
 /// Stable type identifier and registry key.
 /// Placement ids: where the feature points sit before jitter moves them. `square` is the original
@@ -126,7 +126,7 @@ impl Operator for CellularCracks {
             worley,
             WorleyFeature::Cracks,
             seed,
-            None,
+            RegionOptions::default(),
         );
         Ok(vec![field])
     }
