@@ -65,6 +65,14 @@ pub const ERODIBILITY: &str = "erodibility";
 /// below.
 pub const BEDROCK: &str = "bedrock";
 
+/// Depth of material laid over the terrain by the Deposit node: snow, sand, ash.
+///
+/// Distinct from [`DEPOSITION`], which is material the erosion nodes moved and dropped as part of
+/// the terrain's own history. This arrived from outside it, so a downstream texture or mask can
+/// tell covered ground from bare rock. Absent on a plain heightfield, so consumers read it through
+/// [`Field::layer_or`](crate::Field::layer_or) and degrade gracefully.
+pub const COVER: &str = "cover";
+
 /// Backdrop terrain height, carried for display only: the terrain a Paint node is painted over, so
 /// the viewport can mesh the real surface (geometry) while the painted mask rides the height layer
 /// as a texture (not displacement). Never consumed by an operator; a pass-through for the editor.

@@ -43,10 +43,26 @@ pub(crate) fn relax_pass(
     delta: &mut [f32],
     pass: &Pass,
 ) {
+    shed_phase(heights, moved, total_excess, pass);
+    gather_phase(heights, moved, total_excess, delta, pass);
+}
+
+/// Phase one: what each cell would shed this pass, and the downhill excess that splits it among
+/// its lower neighbours.
+///
+/// Split out from [`relax_pass`] so a caller with a limited supply of material can cap `moved`
+/// before the gather reads it. Relaxing a *surface* made of immovable rock plus a thin cover is
+/// exactly that case: the surface slope says a cell should shed a great deal, but it only has its
+/// cover to give. Capping here rather than after the fact keeps the pass mass-conserving, because
+/// what a cell sheds is what its neighbours receive.
+pub(crate) fn shed_phase(
+    heights: &[f32],
+    moved: &mut [f32],
+    total_excess: &mut [f32],
+    pass: &Pass,
+) {
     // One row per chunk (`max(1)` keeps the chunk size non-zero for a zero-width field).
     let row = pass.width.max(1);
-
-    // Phase one: each cell's shed amount and its downhill excess sum.
     moved
         .par_chunks_mut(row)
         .zip(total_excess.par_chunks_mut(row))
@@ -56,8 +72,17 @@ pub(crate) fn relax_pass(
                 (*m, *te) = shed_at(heights, x, y, pass);
             }
         });
+}
 
-    // Phase two: each cell gathers its incoming and outgoing movement.
+/// Phase two: each cell gathers its incoming and outgoing movement into `delta`.
+pub(crate) fn gather_phase(
+    heights: &[f32],
+    moved: &[f32],
+    total_excess: &[f32],
+    delta: &mut [f32],
+    pass: &Pass,
+) {
+    let row = pass.width.max(1);
     delta
         .par_chunks_mut(row)
         .enumerate()

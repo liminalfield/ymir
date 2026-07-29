@@ -23,6 +23,7 @@ mod coastal;
 mod constant;
 mod curvature;
 mod curve;
+mod deposit;
 mod directional_blur;
 mod distance;
 mod erosion;
