@@ -14,10 +14,10 @@
 use ymir_core::registry::OperatorEntry;
 use ymir_core::{
     EvalContext, Field, Inputs, NodeSpec, Operator, ParamKind, ParamSpec, ParamValue, Params,
-    PortSpec, Result,
+    PortSpec, Result, layers,
 };
 
-use crate::noise::{WorleyFeature, WorleyParams, worley_field};
+use crate::noise::{RegionValues, WorleyFeature, WorleyParams, worley_field};
 
 /// Stable type identifier and registry key.
 const TYPE_ID: &str = "generator.cellular_regions";
@@ -27,7 +27,7 @@ const DEFAULT_FREQUENCY: f64 = 8.0;
 /// Default jitter: fully organic region shapes.
 const DEFAULT_JITTER: f64 = 1.0;
 
-/// Cellular Regions generator: no inputs, one output.
+/// Cellular Regions generator: one optional input, one output.
 #[derive(Clone)]
 pub struct CellularRegions;
 
@@ -36,7 +36,9 @@ impl Operator for CellularRegions {
         NodeSpec {
             type_id: TYPE_ID,
             category: "generator",
-            inputs: Vec::new(),
+            // Optional: the field each cell reads its value from. Unwired, values are a hash of
+            // the cell id, which is the original behaviour and still the common case.
+            inputs: vec![PortSpec::optional("values")],
             outputs: vec![PortSpec::new("out")],
             params: vec![
                 ParamSpec::new(
@@ -93,7 +95,7 @@ impl Operator for CellularRegions {
         ymir_core::ContextDeps::NO_WORLD
     }
 
-    fn eval(&self, _inputs: Inputs, params: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
+    fn eval(&self, inputs: Inputs, params: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
         let worley = WorleyParams {
             frequency: params.get_f64("frequency", DEFAULT_FREQUENCY),
             jitter: params.get_f64("jitter", DEFAULT_JITTER).clamp(0.0, 1.0) as f32,
@@ -101,6 +103,11 @@ impl Operator for CellularRegions {
             offset_y: params.get_i64("offset_y", 0) as f64,
         };
         let seed = ctx.seed.wrapping_add(params.get_i64("seed", 0) as u64);
+        // Each cell takes one value from the wired field, read at the cell's own feature point, so
+        // the cell stays flat at whatever that field says there (#347). Unwired, the value is a
+        // hash of the cell id as before. Held for the whole call so the borrow outlives the field
+        // construction below.
+        let source = inputs.optional(0).map(|f| f.layer_or(layers::HEIGHT, 0.0));
         let field = worley_field(
             ctx.width,
             ctx.height,
@@ -108,6 +115,7 @@ impl Operator for CellularRegions {
             worley,
             WorleyFeature::Regions,
             seed,
+            source.as_deref().map(|layer| RegionValues { layer }),
         );
         Ok(vec![field])
     }
@@ -135,6 +143,143 @@ mod tests {
             .eval(Inputs::required_only(&[]), params, ctx)
             .unwrap()
             .remove(0)
+    }
+
+    /// Runs with a field wired to the optional `values` input.
+    fn run_with(values: &Field, params: &Params, ctx: &EvalContext) -> Field {
+        CellularRegions
+            .eval(Inputs::new(&[], &[Some(values)]), params, ctx)
+            .unwrap()
+            .remove(0)
+    }
+
+    /// A field whose height rises left to right across `[0, 1]`, so a cell's value says where it
+    /// sits along x.
+    fn ramp(res: usize) -> Field {
+        Field::new(res, res, Region::UNIT).with_layer(
+            layers::HEIGHT,
+            std::sync::Arc::new(ymir_core::Layer::from_fn(res, res, |x, _| {
+                f32::from(u16::try_from(x).expect("x fits")) / (res - 1) as f32
+            })),
+        )
+    }
+
+    /// Every distinct value present in a field's height layer, as sorted bit patterns.
+    fn distinct(field: &Field) -> Vec<u32> {
+        let mut v: Vec<u32> = field
+            .layer_or(layers::HEIGHT, 0.0)
+            .as_slice()
+            .iter()
+            .map(|f| f.to_bits())
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    #[test]
+    fn an_unwired_input_leaves_the_output_untouched() {
+        // The whole point of the soft contract here: adding the port must not change a single
+        // existing project. Byte-identical, not merely similar.
+        let params = Params::default().with("frequency", ParamValue::Float(8.0));
+        let before = run(&params, &ctx(64));
+        let after = CellularRegions
+            .eval(Inputs::new(&[], &[None]), &params, &ctx(64))
+            .unwrap()
+            .remove(0);
+        assert_eq!(before.content_hash(), after.content_hash());
+    }
+
+    #[test]
+    fn a_wired_field_gives_each_cell_one_value_from_it() {
+        // A ramp rising left to right: cells on the left must come out darker than cells on the
+        // right, and each cell must be flat, which is what the hash cannot give.
+        let params = Params::default()
+            .with("frequency", ParamValue::Float(8.0))
+            .with("jitter", ParamValue::Float(0.5));
+        let out = run_with(&ramp(128), &params, &ctx(128));
+        let h = out.layer_or(layers::HEIGHT, 0.0);
+
+        // At most one value per cell: 8x8 cells over the region, so far fewer distinct values
+        // than the 16384 pixels. The hash path would give the same bound, so this alone is not
+        // enough; the ordering check below is what proves the values came from the ramp.
+        assert!(
+            distinct(&out).len() <= 128,
+            "expected one value per cell, got {}",
+            distinct(&out).len()
+        );
+
+        // Left edge reads lower than right edge, because the ramp does.
+        let left = h.get(2, 64).expect("left");
+        let right = h.get(125, 64).expect("right");
+        assert!(
+            right > left,
+            "ramp not followed: left {left}, right {right}"
+        );
+    }
+
+    #[test]
+    fn a_cell_is_flat_even_where_the_source_is_not() {
+        // The reason the input exists (#347): a smooth field blended in tilts every cell top,
+        // while sampling it once per cell keeps the cell flat. Walk a row and check that values
+        // change only in steps, never gradually within a run.
+        let params = Params::default()
+            .with("frequency", ParamValue::Float(6.0))
+            .with("jitter", ParamValue::Float(0.0));
+        let out = run_with(&ramp(96), &params, &ctx(96));
+        let h = out.layer_or(layers::HEIGHT, 0.0);
+        let row: Vec<f32> = (0..96).map(|x| h.get(x, 48).unwrap_or(0.0)).collect();
+        let mut runs = 0;
+        for pair in row.windows(2) {
+            if (pair[0] - pair[1]).abs() > f32::EPSILON {
+                runs += 1;
+            }
+        }
+        // A 6-cell frequency across the row: a handful of steps, not 95 gradual changes.
+        assert!(
+            runs < 12,
+            "row changed {runs} times, expected a few flat runs"
+        );
+    }
+
+    #[test]
+    fn a_wired_input_is_deterministic() {
+        let params = Params::default().with("frequency", ParamValue::Float(8.0));
+        let source = ramp(64);
+        let a = run_with(&source, &params, &ctx(64));
+        let b = run_with(&source, &params, &ctx(64));
+        assert_eq!(a.content_hash(), b.content_hash());
+    }
+
+    #[test]
+    fn neighbouring_cells_correlate_when_the_source_is_smooth() {
+        // The reported symptom (#347): with hashed values a cell that lands high has no
+        // neighbours near it, so it reads as a solitary spike. Sourcing from a smooth field
+        // should make adjacent cells much closer in value than hashing does.
+        let params = Params::default()
+            .with("frequency", ParamValue::Float(12.0))
+            .with("jitter", ParamValue::Float(0.6));
+        let res = 192;
+        let step = |field: &Field| -> f32 {
+            let h = field.layer_or(layers::HEIGHT, 0.0);
+            let row: Vec<f32> = (0..res).map(|x| h.get(x, res / 2).unwrap_or(0.0)).collect();
+            let jumps: Vec<f32> = row
+                .windows(2)
+                .map(|p| (p[0] - p[1]).abs())
+                .filter(|d| *d > f32::EPSILON)
+                .collect();
+            if jumps.is_empty() {
+                0.0
+            } else {
+                jumps.iter().sum::<f32>() / jumps.len() as f32
+            }
+        };
+        let hashed = step(&run(&params, &ctx(res)));
+        let sourced = step(&run_with(&ramp(res), &params, &ctx(res)));
+        assert!(
+            sourced < hashed * 0.5,
+            "sourced steps {sourced} not much smaller than hashed {hashed}"
+        );
     }
 
     #[test]
@@ -188,12 +333,19 @@ mod tests {
     }
 
     #[test]
-    fn spec_is_a_generator() {
-        assert_eq!(
-            CellularRegions.spec().kind(),
-            ymir_core::NodeKind::Generator
-        );
-        assert_eq!(CellularRegions.spec().type_id, TYPE_ID);
+    fn spec_is_a_source_with_one_optional_input() {
+        let spec = CellularRegions.spec();
+        assert_eq!(spec.type_id, TYPE_ID);
+        // It reads as a source in the palette, which is the presentation question, and that is
+        // unchanged by taking an input.
+        assert_eq!(spec.category, "generator");
+        // But the arity-derived kind is now Modifier, because the node genuinely has an input
+        // socket (#347). Nothing in the engine or GUI branches on the kind, and `generator.paint`
+        // set this precedent already: an optional input on a source is fine, and the soft contract
+        // covers the unwired case.
+        assert_eq!(spec.kind(), ymir_core::NodeKind::Modifier);
+        assert_eq!(spec.inputs.len(), 1);
+        assert!(spec.inputs[0].optional, "the values input is optional");
     }
 
     #[test]

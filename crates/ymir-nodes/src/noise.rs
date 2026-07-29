@@ -308,6 +308,20 @@ const WORLEY_SALT_REGION: u64 = 0x9E37_79B9_7F4A_7C15;
 /// Generates a field whose `height` layer is cellular (Worley) noise in `[0, 1]`, for the
 /// chosen [`WorleyFeature`]. Sampled across `region` in world space like the fBm path, so
 /// it is resolution-independent, and seeded deterministically through [`hash_coords`].
+/// Where a [`WorleyFeature::Regions`] cell takes its value from.
+///
+/// Without one, a cell's value is a hash of its id: white noise, so neighbouring cells are
+/// uncorrelated. With one, the cell samples this layer at its own feature point, so cells that sit
+/// near each other take nearby values and the variation becomes spatially correlated (#347).
+///
+/// This cannot be done downstream. A later node sees only the finished raster and has no way to
+/// tell which pixels belong to which cell, so it can remap values but never make neighbours agree.
+#[derive(Clone, Copy)]
+pub(crate) struct RegionValues<'a> {
+    /// The layer to sample. One value per cell is read from it.
+    pub layer: &'a Layer,
+}
+
 pub(crate) fn worley_field(
     width: usize,
     height: usize,
@@ -315,6 +329,7 @@ pub(crate) fn worley_field(
     params: WorleyParams,
     feature: WorleyFeature,
     seed: u64,
+    values: Option<RegionValues<'_>>,
 ) -> Field {
     let layer = Layer::from_par_fn(width, height, |x, y| {
         // Same world-space sampling as the other generators, so frequency sets cell size
@@ -329,7 +344,18 @@ pub(crate) fn worley_field(
         match feature {
             WorleyFeature::Bumps => (1.0 - f1).clamp(0.0, 1.0),
             WorleyFeature::Cracks => (1.0 - (f2 - f1)).clamp(0.0, 1.0),
-            WorleyFeature::Regions => hash_unit(seed ^ WORLEY_SALT_REGION, cell.0, cell.1),
+            WorleyFeature::Regions => match values {
+                // The cell reads one value from the wired layer, at its own feature point, so the
+                // whole cell is flat at whatever that layer says there. Sampling the *feature
+                // point* rather than the cell centre keeps it consistent with where the cell
+                // actually sits once jitter has moved it.
+                Some(values) => {
+                    let (px, py) = feature_point(seed, cell, params.jitter);
+                    let (sx, sy) = noise_to_cell(px, py, width, height, region, params);
+                    values.layer.get(sx, sy).unwrap_or(0.0)
+                }
+                None => hash_unit(seed ^ WORLEY_SALT_REGION, cell.0, cell.1),
+            },
         }
     });
 
@@ -365,6 +391,54 @@ fn worley(seed: u64, x: f32, y: f32, jitter: f32) -> (f32, f32, (i32, i32)) {
         }
     }
     (f1.sqrt(), f2.sqrt(), nearest)
+}
+
+/// The feature point of `cell` in noise space, recomputed from the same hashes [`worley`] uses.
+///
+/// Kept as a separate function rather than returned from `worley` because only the Regions feature
+/// needs it, and the hot path should not pay for a value the other two features discard.
+fn feature_point(seed: u64, cell: (i32, i32), jitter: f32) -> (f32, f32) {
+    let (cx, cy) = cell;
+    (
+        cx as f32 + jitter * hash_unit(seed, cx, cy),
+        cy as f32 + jitter * hash_unit(seed ^ WORLEY_SALT_Y, cx, cy),
+    )
+}
+
+/// Maps a noise-space position back to the grid cell it falls in, inverting the sampling in
+/// [`worley_field`]. Clamped to the grid, so a feature point just outside the field (cells on the
+/// border own points beyond it) reads the nearest edge value rather than nothing.
+fn noise_to_cell(
+    px: f32,
+    py: f32,
+    width: usize,
+    height: usize,
+    region: Region,
+    params: WorleyParams,
+) -> (usize, usize) {
+    // Guard the divisors: a zero-width region or zero frequency would otherwise produce a NaN
+    // index, which `as usize` turns into 0 silently.
+    let frequency = if params.frequency.abs() < f64::EPSILON {
+        f64::EPSILON
+    } else {
+        params.frequency
+    };
+    let axis = |p: f32, min: f64, span: f64, offset: f64, n: usize| -> usize {
+        let span = if span.abs() < f64::EPSILON {
+            f64::EPSILON
+        } else {
+            span
+        };
+        let u = (f64::from(p) / frequency - min) / span - offset;
+        let idx = u * n as f64 - 0.5;
+        // `clamp` before the cast: an out-of-range float cast saturates, but doing it explicitly
+        // keeps the intent readable and the bound obvious.
+        idx.round().clamp(0.0, (n - 1) as f64) as usize
+    };
+    (
+        axis(px, region.min_x, region.width(), params.offset_x, width),
+        axis(py, region.min_y, region.height(), params.offset_y, height),
+    )
 }
 
 /// A deterministic value in `[0, 1)` for an integer cell, from the coordinate hash. Uses
@@ -663,8 +737,8 @@ mod tests {
             WorleyFeature::Cracks,
             WorleyFeature::Regions,
         ] {
-            let a = worley_field(64, 64, Region::UNIT, worley_params(), feature, 42);
-            let b = worley_field(64, 64, Region::UNIT, worley_params(), feature, 42);
+            let a = worley_field(64, 64, Region::UNIT, worley_params(), feature, 42, None);
+            let b = worley_field(64, 64, Region::UNIT, worley_params(), feature, 42, None);
             assert_eq!(a.content_hash(), b.content_hash(), "feature {feature:?}");
         }
     }
@@ -678,6 +752,7 @@ mod tests {
             worley_params(),
             WorleyFeature::Bumps,
             7,
+            None,
         );
         let cracks = worley_field(
             64,
@@ -686,6 +761,7 @@ mod tests {
             worley_params(),
             WorleyFeature::Cracks,
             7,
+            None,
         );
         let regions = worley_field(
             64,
@@ -694,6 +770,7 @@ mod tests {
             worley_params(),
             WorleyFeature::Regions,
             7,
+            None,
         );
         // The three features render the same cells differently.
         assert_ne!(bumps.content_hash(), cracks.content_hash());
@@ -715,7 +792,7 @@ mod tests {
             offset_x: 0.0,
             offset_y: 0.0,
         };
-        let a = worley_field(64, 64, Region::UNIT, grid, WorleyFeature::Bumps, 7);
+        let a = worley_field(64, 64, Region::UNIT, grid, WorleyFeature::Bumps, 7, None);
         let b = worley_field(
             64,
             64,
@@ -723,6 +800,7 @@ mod tests {
             worley_params(),
             WorleyFeature::Bumps,
             7,
+            None,
         );
         assert_ne!(a.content_hash(), b.content_hash());
     }
