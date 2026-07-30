@@ -101,19 +101,19 @@ impl Operator for Fbm {
                 ),
                 ParamSpec::new(
                     "offset_x",
-                    ParamKind::Int {
-                        min: -10_000,
-                        max: 10_000,
+                    ParamKind::Float {
+                        min: -10_000.0,
+                        max: 10_000.0,
                     },
-                    ParamValue::Int(0),
+                    ParamValue::Float(0.0),
                 ),
                 ParamSpec::new(
                     "offset_y",
-                    ParamKind::Int {
-                        min: -10_000,
-                        max: 10_000,
+                    ParamKind::Float {
+                        min: -10_000.0,
+                        max: 10_000.0,
                     },
-                    ParamValue::Int(0),
+                    ParamValue::Float(0.0),
                 ),
             ],
             emitted_layers: Vec::new(),
@@ -138,9 +138,8 @@ impl Operator for Fbm {
             octaves: params.get_i64("octaves", 5).clamp(0, 32) as u32,
             lacunarity: params.get_f64("lacunarity", 2.0),
             gain: params.get_f64("gain", 0.5) as f32,
-            // Integer region-width pan: a different region per step, no fractions.
-            offset_x: params.get_i64("offset_x", 0) as f64,
-            offset_y: params.get_i64("offset_y", 0) as f64,
+            offset_x: params.get_f64("offset_x", 0.0),
+            offset_y: params.get_f64("offset_y", 0.0),
         };
 
         // Offset the node's derived seed by the per-node seed param (0 = unchanged).
@@ -242,11 +241,35 @@ mod tests {
         let panned = op
             .eval(
                 Inputs::required_only(&[]),
-                &Params::new().with("offset_x", ParamValue::Int(2)),
+                &Params::new().with("offset_x", ParamValue::Float(2.0)),
                 &ctx,
             )
             .unwrap();
         assert_ne!(base[0].content_hash(), panned[0].content_hash());
+    }
+
+    #[test]
+    fn the_pan_reaches_a_neighbouring_patch_not_only_a_whole_map_away() {
+        // The offset used to be an integer in region widths, so the smallest pan available moved the
+        // sampling window by the entire terrain: every step was a different view rather than a slide
+        // through the field (#360). A fraction of a width has to do something.
+        let op = Fbm;
+        let ctx = default_ctx();
+        let base = op
+            .eval(Inputs::required_only(&[]), &Params::default(), &ctx)
+            .unwrap();
+        let nudged = op
+            .eval(
+                Inputs::required_only(&[]),
+                &Params::new().with("offset_x", ParamValue::Float(0.01)),
+                &ctx,
+            )
+            .unwrap();
+        assert_ne!(
+            base[0].content_hash(),
+            nudged[0].content_hash(),
+            "a hundredth of a map must pan the noise"
+        );
     }
 
     #[test]
