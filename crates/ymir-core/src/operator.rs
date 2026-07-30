@@ -203,6 +203,27 @@ pub trait Operator: OperatorClone + Send + Sync {
         ContextDeps::ALL
     }
 
+    /// Whether this node's output is a window onto a field that continues past the map, which its
+    /// `offset_x` / `offset_y` parameters slide across. `false` (the default), since most nodes
+    /// produce a value defined only over the map they are given.
+    ///
+    /// This is a fact about the node's sampling domain, not a feature request: a coherent-noise
+    /// generator evaluates a function defined everywhere and shows the part the world covers, so
+    /// there is more of it to look at and a meaningful way to move around in it. A node reading an
+    /// imported image, or one shaping an input it was handed, has no such surrounding field.
+    ///
+    /// Declared rather than inferred, and the distinction matters. `generator.import` also has
+    /// `offset_x` / `offset_y`, bounded to ±1, meaning "shift this image within the frame", so
+    /// keying off the parameter names would claim an unbounded field for a finite picture. A caller
+    /// asks the node, and a future generator answers for itself by overriding this.
+    ///
+    /// Presentation only, exactly like [`experimental`](Self::experimental): the engine never reads
+    /// it. The editor uses it to offer a view of the surrounding field, since drawing one for a node
+    /// that has none would be showing empty space and calling it noise.
+    fn pannable_field(&self) -> bool {
+        false
+    }
+
     /// Whether this node is experimental: fully functional, but rough or artifact-prone enough
     /// that it is offered with a caveat rather than as a settled tool. `false` (the default) for
     /// ordinary nodes. The engine does not treat these differently; it is presentation only, so the
