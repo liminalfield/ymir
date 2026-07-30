@@ -232,6 +232,18 @@ const MARQUEE_MIN_DRAG: f32 = 4.0;
 /// world-unit parameters (scale-aware nodes consume it via `EvalContext`).
 const DEFAULT_WORLD_EXTENT: f64 = 1024.0;
 
+/// How many worlds across the field view starts at, and the bounds the wheel moves it between.
+///
+/// Four worlds across shows the world as a quarter of the view: enough surrounding field to judge
+/// where to go without the world shrinking to a detail. The ceiling is where a world becomes a
+/// speck; the floor is the world itself, since pulling in past it would show less field than the
+/// terrain covers, which the ordinary map view already does better.
+const DEFAULT_EXPLORE_ZOOM: f32 = 4.0;
+const MIN_EXPLORE_ZOOM: f32 = 1.0;
+const MAX_EXPLORE_ZOOM: f32 = 32.0;
+/// Wheel points to e-fold the field pull-back, matching the map view's own zoom feel.
+const EXPLORE_ZOOM_SPEED: f32 = 0.0015;
+
 /// The world settings for a fresh, untitled project: the app-level defaults. Used to anchor a
 /// new session's clean point and to reset on New/Close/open-default.
 fn fresh_world_settings() -> project_file::WorldSettings {
@@ -521,6 +533,15 @@ struct AppState {
     curve_popout: Option<CurvePopout>,
     /// The current paint brush, edited in a Paint node's inspector.
     paint_brush: PaintBrush,
+    /// The generator currently being explored (`stable_id`), so the 2D map shows the field around
+    /// the world rather than the world alone. `None` when not exploring.
+    ///
+    /// A mode rather than a zoom level, for the same reason paint is one: while it is on, the wheel
+    /// and the drag on the map mean different things, and that has to be something the user turned on
+    /// rather than something they fell into by scrolling too far.
+    explore_target: Option<Handle>,
+    /// How many worlds across the explored field is. Meaningless unless `explore_target` is set.
+    explore_zoom: f32,
     /// The Paint node currently in paint mode (`stable_id`), so a drag on the 2D map brushes into
     /// its strokes. `None` when not painting.
     paint_target: Option<Handle>,
@@ -961,6 +982,8 @@ impl AppState {
             // render (the comment above; this is the one-shot the open path also uses).
             frame_to_graph_request: true,
             viewport_mesh: None,
+            explore_target: None,
+            explore_zoom: DEFAULT_EXPLORE_ZOOM,
             viewport_mode: viewport2d::Mode::default(),
             previewed_kind: output_kind::OutputKind::Terrain,
             viewed: None,
@@ -2105,10 +2128,25 @@ impl AppState {
         if target.and_then(|h| self.graph.node_id_of(h)).is_none() {
             return;
         }
-        self.viewport_mode = match self.previewed_kind {
-            output_kind::OutputKind::Selection => viewport2d::Mode::TwoD,
-            output_kind::OutputKind::Terrain => viewport2d::Mode::ThreeD,
+        self.viewport_mode = if self.exploring() {
+            // The field view is a flat map by nature: it shows ground beyond the world, which a
+            // meshed terrain has no vertices for. A generator would otherwise open in 3D.
+            viewport2d::Mode::TwoD
+        } else {
+            match self.previewed_kind {
+                output_kind::OutputKind::Selection => viewport2d::Mode::TwoD,
+                output_kind::OutputKind::Terrain => viewport2d::Mode::ThreeD,
+            }
         };
+    }
+
+    /// Whether the field view is showing, which is only while the explored node is the previewed one.
+    ///
+    /// Both conditions matter. The target is what the user turned on, and the pin normally keeps the
+    /// preview there, but a pin the user moves elsewhere should leave the field view rather than
+    /// render some other node at a world four times too wide.
+    fn exploring(&self) -> bool {
+        self.explore_target.is_some() && self.preview_target() == self.explore_target
     }
 
     fn drive_preview(&mut self, ctx: &egui::Context) {
@@ -2121,7 +2159,15 @@ impl AppState {
             return;
         };
         let res = self.preview_res;
-        let mut request = EvalRequest::from_world(&self.world_settings(), res);
+        // Exploring renders the node at a larger world, which is the whole mechanism: since
+        // `frequency = world_extent / wavelength`, a world `zoom` times wider shows `zoom` times more
+        // field at the same feature size, still centred on the same pan (#361, #366). So the field
+        // view is one ordinary evaluation with one number changed, not a second render path.
+        let mut world = self.world_settings();
+        if self.exploring() {
+            world.world_extent *= f64::from(self.explore_zoom);
+        }
+        let mut request = EvalRequest::from_world(&world, res);
         // Run the preview on the GPU when the device is shared, so the tweak-adjust loop stays fast
         // at higher resolutions. The handle is not part of a node's cache key, so a GPU and a CPU
         // result are interchangeable in the cache.
@@ -2200,6 +2246,17 @@ fn node_entries() -> Vec<NodeEntry> {
 /// zero-cost unit struct) to read the flag, cheap enough to call per palette row.
 fn is_experimental(type_id: &str) -> bool {
     registry::make(type_id).is_some_and(|op| op.experimental())
+}
+
+/// Whether a node type's output is a window onto a field continuing past the map, read from its
+/// operator's [`pannable_field`](ymir_core::Operator::pannable_field). Constructs the operator (a
+/// zero-cost unit struct) to read the flag, exactly as [`is_experimental`] does.
+///
+/// Asking the node rather than looking for `offset_x` / `offset_y` is the point: Import has those
+/// too, meaning a shift within a finite image, and would otherwise be offered a tour of noise space
+/// it does not have.
+fn has_pannable_field(type_id: &str) -> bool {
+    registry::make(type_id).is_some_and(|op| op.pannable_field())
 }
 
 /// The registered categories, sorted by `sort` then `id` for a stable palette.
@@ -4996,6 +5053,56 @@ fn paint_label(type_id: &str, suffix: &str, default: &str) -> String {
     }
 }
 
+/// The Explore toggle for a node whose field continues past the map.
+///
+/// Modelled on the paint toggle, deliberately: both arm the 2D map to mean something other than
+/// "look at the output", so both are something the user turns on rather than falls into. Turning it
+/// on pins the preview to this node, and turning it off releases that pin, exactly as painting does.
+///
+/// The pin is what makes the mode usable rather than a curiosity. Without it, clicking any other node
+/// while hunting for a patch would swap the field view back to that node's ordinary map, losing the
+/// framing being worked on.
+fn explore_toggle(ui: &mut egui::Ui, state: &mut AppState, handle: Handle) {
+    let active = state.explore_target == Some(handle);
+    // A verb with the running state in the label, matching the paint toggle's "Paint - click to stop".
+    let label = if active {
+        "Explore field \u{2014} click to stop".to_string()
+    } else {
+        "Explore field".to_string()
+    };
+    let hint = if active {
+        "Scroll to pull further out or come back in. The outline is your world."
+    } else {
+        "Show the noise beyond your world, to choose which part of it the terrain sits on."
+    };
+    if ui
+        .selectable_label(active, label)
+        .on_hover_text(hint)
+        .clicked()
+    {
+        if active {
+            state.explore_target = None;
+            // Release the pin set when exploring began, so stopping returns the preview to following
+            // the selection. A pin the user placed elsewhere themselves is left alone.
+            if state.preview_pin == Some(handle) {
+                state.preview_pin = None;
+            }
+        } else {
+            state.explore_target = Some(handle);
+            state.preview_pin = Some(handle);
+            // Start pulled back a fixed amount rather than wherever the last hunt ended, so the mode
+            // opens the same way every time.
+            state.explore_zoom = DEFAULT_EXPLORE_ZOOM;
+        }
+    }
+    if active {
+        ui.weak(format!(
+            "{:.0} worlds across",
+            state.explore_zoom.max(MIN_EXPLORE_ZOOM)
+        ));
+    }
+}
+
 /// The selected node's inspector: its display-name override and parameter widgets.
 /// The inspector controls for a paint node's stroke param: the brush, the enable toggle, the stroke
 /// count, and undo/clear. The strokes themselves are authored by brushing on the 2D map or 3D surface;
@@ -5255,6 +5362,13 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
         }
     });
     ui.separator();
+
+    // A node whose field continues past the map offers a view of it. Above the parameters, because it
+    // changes what the viewport is showing rather than what the node computes.
+    if has_pannable_field(spec.type_id) {
+        explore_toggle(ui, state, handle);
+        ui.separator();
+    }
 
     if spec.params.is_empty() {
         ui.weak("This node has no parameters.");
@@ -9441,6 +9555,7 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
             }
         }
         viewport2d::Mode::TwoD => {
+            let exploring = state.exploring();
             // Paint mode is on when a Paint node is the target and it is the node the map previews,
             // so brushing lands on the mask you are looking at.
             let sample = state.viewport_2d.show(
@@ -9461,11 +9576,20 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
                     },
                     sea_level,
                     show_water,
+                    explore: exploring.then_some(viewport2d::Explore {
+                        zoom: state.explore_zoom,
+                    }),
                 },
                 brush,
             );
-            if let Some(sample) = sample {
+            if let Some(sample) = sample.sample {
                 apply_paint_sample(state, sample, effective_mode);
+            }
+            // The wheel, spent on the field pull-back rather than the image zoom while exploring.
+            if sample.field_scroll != 0.0 {
+                state.explore_zoom = (state.explore_zoom
+                    * (-sample.field_scroll * EXPLORE_ZOOM_SPEED).exp())
+                .clamp(MIN_EXPLORE_ZOOM, MAX_EXPLORE_ZOOM);
             }
         }
     }

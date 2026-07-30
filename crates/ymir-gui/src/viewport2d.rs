@@ -28,6 +28,44 @@ pub(crate) struct MapDisplay {
     pub sea_level: f32,
     /// Whether to draw the water overlay.
     pub show_water: bool,
+    /// Set while exploring the field around the world: how many worlds across the shown field is.
+    ///
+    /// The field is rendered at `world_extent * zoom`, so the world occupies the middle `1 / zoom` of
+    /// it. `None` when not exploring, which is the ordinary map view where the image *is* the world.
+    pub explore: Option<Explore>,
+}
+
+/// The state of a field view: how far out it is pulled, and where the world sits in it.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) struct Explore {
+    /// How many worlds across the rendered field is. `1.0` would show exactly the world.
+    pub zoom: f32,
+}
+
+impl Explore {
+    /// The world's rectangle inside `image`, the drawn extent of the whole field.
+    ///
+    /// Centred, because the world is centred on the field (#366): the rendered field reaches half of
+    /// `world_extent * zoom` either side of the pan, and the world reaches half of `world_extent`, so
+    /// the world is the middle `1 / zoom` of the image on both axes.
+    pub fn world_rect(self, image: egui::Rect) -> egui::Rect {
+        let frac = (1.0 / self.zoom.max(1.0)).clamp(0.0, 1.0);
+        egui::Rect::from_center_size(image.center(), image.size() * frac)
+    }
+}
+
+/// What one frame of the map view produced for its caller.
+///
+/// Two unrelated outputs travelled together rather than as separate returns because both are already
+/// known by the time the frame is drawn, and a second call to work either of them out would repeat
+/// the hit testing.
+#[derive(Default)]
+pub(crate) struct MapResult {
+    /// A brush sample, when paint mode is on and the primary button is down over the map.
+    pub sample: Option<PaintSample>,
+    /// Wheel travel to apply to the field pull-back, in points, when exploring. Zero otherwise: in
+    /// the ordinary map view the wheel has already been spent on the image zoom.
+    pub field_scroll: f32,
 }
 
 /// A paint sample from the 2D map while paint mode is active: a normalized `[0, 1]` position in the
@@ -180,7 +218,7 @@ impl View2d {
         field: Option<&Field>,
         display: MapDisplay,
         brush: Option<BrushCursor>,
-    ) -> Option<PaintSample> {
+    ) -> MapResult {
         let rect = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
         let paint_active = brush.is_some();
@@ -196,11 +234,25 @@ impl View2d {
             self.pan += response.drag_delta();
         }
         let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        // Scroll means one thing at a time. In the ordinary map view it magnifies or shrinks the
+        // image, which is what it has always done. While exploring it is reported back instead, for
+        // the caller to pull the field further out or bring it in, and the image is held at fit: two
+        // nested zooms in one view, both driven by the wheel, would be indistinguishable in the hand.
+        let mut field_scroll = 0.0;
         if scroll != 0.0
             && response.hovered()
             && let Some(cursor) = response.hover_pos()
         {
-            self.zoom_about(cursor, rect.center(), scroll);
+            if display.explore.is_some() {
+                field_scroll = scroll;
+            } else {
+                self.zoom_about(cursor, rect.center(), scroll);
+            }
+        }
+        if display.explore.is_some() {
+            // Held at fit, so the field fills the pane and the world box is the only thing that
+            // changes size. A leftover pan or zoom from the map view would otherwise persist here.
+            self.reset_view();
         }
 
         // The field's pixel size and the image transform, computed before shading so the paint
@@ -279,7 +331,21 @@ impl View2d {
             }
             draw_mode_badge(&painter, pos, r, brush.raise);
         }
-        sample
+
+        // The world's outline on the field. Drawn with the brush cursor's dark-under-light stroke
+        // pair for the reason documented there: it reads over any terrain without relying on colour,
+        // which a box over both bright snow and dark water needs.
+        if let (Some(explore), Some(ir)) = (display.explore, image_rect) {
+            let (dark, light) = cursor_strokes();
+            let world = explore.world_rect(ir);
+            painter.rect_stroke(world, 0.0, dark, egui::StrokeKind::Middle);
+            painter.rect_stroke(world, 0.0, light, egui::StrokeKind::Middle);
+        }
+
+        MapResult {
+            sample,
+            field_scroll,
+        }
     }
 
     /// Zooms toward/away so the map point under `cursor` stays fixed: the offset of the
@@ -323,6 +389,42 @@ mod tests {
             fit_scale(egui::vec2(0.0, 0.0), egui::vec2(400.0, 400.0)),
             1.0
         );
+    }
+
+    #[test]
+    fn the_world_box_is_the_middle_fraction_of_the_field() {
+        let image = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(400.0, 400.0));
+
+        // Four worlds across: the world is a quarter of the view on each axis, centred, because the
+        // world is centred on the field (#366). Not anchored at a corner, which is what it would be
+        // if the field still started at the world's origin.
+        let quarter = Explore { zoom: 4.0 }.world_rect(image);
+        assert_eq!(quarter.size(), egui::vec2(100.0, 100.0));
+        assert_eq!(quarter.center(), image.center());
+
+        // One world across is the world itself, which is the ordinary map view.
+        let all = Explore { zoom: 1.0 }.world_rect(image);
+        assert_eq!(all, image);
+
+        // A zoom below one would ask for a box larger than the field, which cannot be shown: the
+        // world cannot exceed the view it is drawn inside.
+        let clamped = Explore { zoom: 0.25 }.world_rect(image);
+        assert_eq!(clamped, image);
+    }
+
+    #[test]
+    fn the_world_box_shrinks_as_the_field_pulls_back() {
+        let image = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(256.0, 256.0));
+        let mut last = f32::INFINITY;
+        for zoom in [1.0, 2.0, 4.0, 8.0, 32.0] {
+            let w = Explore { zoom }.world_rect(image).width();
+            assert!(
+                w < last || zoom == 1.0,
+                "zoom {zoom} did not shrink the box"
+            );
+            assert!(w > 0.0, "zoom {zoom} shrank the box to nothing");
+            last = w;
+        }
     }
 
     #[test]
