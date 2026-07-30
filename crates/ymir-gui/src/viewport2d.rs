@@ -398,9 +398,14 @@ impl View2d {
         let mut explore_resize = None;
         if let (Some(settled), Some(ir)) = (settled_box, image_rect) {
             let hover = response.hover_pos();
+            // Decided on the *press*, not on `drag_started`. egui reports a drag only once the
+            // pointer has travelled past its threshold, so by then it has already left the handle it
+            // started on: grabbing a corner resolved as a pan every time, however carefully aimed.
+            // The magnitude ruler had exactly this bug, for exactly this reason (see `magnitude.rs`).
             if self.box_drag.is_none()
-                && let Some(pos) = hover
-                && response.drag_started_by(egui::PointerButton::Primary)
+                && response.is_pointer_button_down_on()
+                && ui.input(|i| i.pointer.primary_pressed())
+                && let Some(pos) = response.interact_pointer_pos()
             {
                 self.box_drag = Some(BoxDrag {
                     grab: grab_at(settled, pos),
