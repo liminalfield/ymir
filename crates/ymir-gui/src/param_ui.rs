@@ -539,23 +539,37 @@ pub(crate) fn edit(
                 ParamValue::Float(d) => *d,
                 _ => x,
             };
-            let speed = (max - min) * 0.002;
             let mut result = None;
             ui.horizontal(|ui| {
                 param_label(ui, type_id, name);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let value = ui
-                        .add_sized(
-                            egui::vec2(VALUE_W, ui.spacing().interact_size.y),
-                            egui::DragValue::new(&mut x)
-                                .range(min..=max)
-                                .speed(0.0)
-                                .fixed_decimals(3),
-                        )
-                        .on_hover_text("Drag to scrub \u{b7} click to type");
-                    let scrubbed = scrub_drag(ui, &value, &mut x, speed, |v| {
-                        finalize_value(v, None, Some((min, max)))
-                    });
+                    let value = ui.add_sized(
+                        egui::vec2(VALUE_W, ui.spacing().interact_size.y),
+                        egui::DragValue::new(&mut x)
+                            .range(min..=max)
+                            .speed(0.0)
+                            .fixed_decimals(3),
+                    );
+                    let value = if value.dragged() || value.drag_stopped() {
+                        value
+                    } else {
+                        value.on_hover_text("Drag to scrub \u{b7} click to type")
+                    };
+                    // The magnitude ruler here too (#358). This is the majority of the numeric
+                    // parameters in the application: only 40 of 154 carry a unit, so wiring the
+                    // unit-bearing rows alone left most of the inspector on the old scrub and made
+                    // the ruler look as though it did not work for floats at all.
+                    //
+                    // The slider beneath is untouched and keeps its own drag. Whether it still earns
+                    // its row is a separate question, and one this control exists to answer.
+                    let scrubbed = crate::magnitude::ruler_scrub(
+                        ui,
+                        &value,
+                        &mut x,
+                        (min, max),
+                        crate::magnitude::Resolution::Continuous,
+                        "",
+                    );
                     if value.changed() || scrubbed {
                         result = Some(ParamValue::Float(x));
                     }

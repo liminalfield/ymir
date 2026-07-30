@@ -67,6 +67,14 @@ pub(crate) enum Phase {
         baseline: f64,
         /// Vertical pixels travelled since the last tick, carried between frames.
         carry: f32,
+        /// Horizontal pixels travelled since the last column change.
+        ///
+        /// The column can still be changed once scrubbing, by moving sideways. Without this a
+        /// mis-aimed lock could only be escaped by releasing and starting the whole gesture again,
+        /// which is the difference between a control that forgives and one that punishes. It has to
+        /// be relative travel rather than cursor position, because the pointer is locked by then and
+        /// has no position to read.
+        drift: f32,
     },
 }
 
@@ -142,6 +150,42 @@ pub(crate) fn tick(value: f64, step: f64, up: bool) -> f64 {
         quotient.ceil() - 1.0
     };
     next * step
+}
+
+/// Moves to a neighbouring column after `drift` points of sideways travel, returning the column and
+/// the travel left over.
+///
+/// A column can still be changed once scrubbing has begun. Without it a mis-aimed lock could only be
+/// escaped by releasing and starting the whole gesture again, which was the difference between a
+/// control that forgives a wobble and one that punishes it. Travel is relative rather than a cursor
+/// position because the pointer is locked by then and has none.
+///
+/// Travel is discarded rather than banked at the ends of the ruler and against a disabled column.
+/// Banking it would let a long push against the end jump several columns at once the moment the way
+/// cleared, which is the opposite of the predictability the whole design is for.
+pub(crate) fn reselect(
+    column: usize,
+    drift: f32,
+    column_width: f32,
+    resolution: Resolution,
+) -> (usize, f32) {
+    if column_width <= 0.0 {
+        return (column, 0.0);
+    }
+    let mut column = column;
+    let mut drift = drift;
+    while drift.abs() >= column_width {
+        let step: isize = if drift > 0.0 { 1 } else { -1 };
+        let candidate = column as isize + step;
+        let open = (0..MAGNITUDES.len() as isize).contains(&candidate)
+            && column_enabled(candidate as usize, resolution);
+        if !open {
+            return (column, 0.0);
+        }
+        column = candidate as usize;
+        drift -= step as f32 * column_width;
+    }
+    (column, drift)
 }
 
 /// Turns vertical drag into ticks: the new value, and the pixels left over to carry.
@@ -226,27 +270,30 @@ use eframe::egui;
 
 /// Column width in points. Never below 20: a generous target is the point of the design, and it is
 /// what a ruler has that pointing at the digits of a number does not.
-const COLUMN_W: f32 = 22.0;
+const COLUMN_W: f32 = 34.0;
 /// Ruler row height.
-const RULER_H: f32 = 28.0;
+const RULER_H: f32 = 40.0;
 /// Readout row: the value, the step, and any clamp tag.
-const READOUT_H: f32 = 22.0;
+const READOUT_H: f32 = 26.0;
 /// The upward preview's band. Taller than the downward one on purpose: the live cursor sits in this
 /// band during aim, so the value is top-aligned to clear it. Growing this band is the right fix if a
 /// larger cursor still collides; moving the value sideways is not, because it would stop pointing at
 /// its column.
-const GHOST_UP_H: f32 = 20.0;
+const GHOST_UP_H: f32 = 24.0;
 /// The downward preview's band. Nothing occludes it.
-const GHOST_DOWN_H: f32 = 12.0;
+const GHOST_DOWN_H: f32 = 18.0;
 /// Padding inside the overlay frame.
-const PAD: f32 = 6.0;
+const PAD: f32 = 8.0;
 /// Vertical distance from the press point down to the ruler row's centre, so the ruler lands inside
 /// the same eye fixation as the field and aiming is a wrist movement rather than a reach.
 const RULER_BELOW_PRESS: f32 = 14.0;
-/// Vertical travel that ends aim and begins scrubbing. Asymmetric by design: horizontal movement
-/// during aim is free and unlimited, because looking down at the ruler and moving toward it is the
-/// user's instinct and must not be the gesture that ends their chance to aim.
-const ENGAGE_PX: f32 = 10.0;
+/// Vertical travel that ends aim and begins scrubbing.
+///
+/// Generous, and it has to be. Aiming means travelling up to the ruler's full width horizontally, and
+/// a hand doing that does not hold a straight line: at ten points the gesture engaged on the drift
+/// rather than on intent, locking the wrong column before the user reached the one they wanted.
+/// Horizontal movement during aim stays free and unlimited.
+const ENGAGE_PX: f32 = 26.0;
 /// Vertical travel per tick, identical for every parameter and every column.
 const PIXELS_PER_TICK: f32 = 10.0;
 
@@ -320,6 +367,7 @@ pub(crate) fn ruler_scrub(
                             column,
                             baseline: *value,
                             carry: 0.0,
+                            drift: 0.0,
                         }
                     }
                     // Engaged over no usable column: stay in aim rather than picking a neighbour.
@@ -333,10 +381,23 @@ pub(crate) fn ruler_scrub(
             column,
             baseline,
             carry,
+            drift,
         } => {
-            let delta = ui.input(|i| i.pointer.delta().y);
+            // Raw device motion, not the pointer's position delta. The pointer is locked by now, so
+            // it does not move on screen and a position delta reads zero: the scrub was dead for
+            // exactly this reason. `motion()` is what the older scrub has always used, and why it
+            // survives the screen edge.
+            let (dx, dy) = match ui.input(|i| i.pointer.motion()) {
+                Some(m) => (m.x, m.y),
+                None => (resp.drag_delta().x, resp.drag_delta().y),
+            };
+
+            // Sideways travel moves to the neighbouring column, so a mis-aimed lock is recoverable
+            // without restarting the gesture.
+            let (column, drift) = reselect(column, drift + dx, COLUMN_W, resolution);
+
             let (next_value, next_carry) =
-                advance(*value, step_of(column), delta, carry, PIXELS_PER_TICK);
+                advance(*value, step_of(column), dy, carry, PIXELS_PER_TICK);
             let held = clamp(next_value, bounds);
             if (held - *value).abs() > f64::EPSILON {
                 *value = held;
@@ -352,6 +413,7 @@ pub(crate) fn ruler_scrub(
                 } else {
                     next_carry
                 },
+                drift,
             }
         }
     };
@@ -449,7 +511,7 @@ fn draw(
                 egui::pos2(rect.left() + PAD, readout_y),
                 egui::Align2::LEFT_CENTER,
                 format!("{}{suffix}", trim(value)),
-                mono(12.0),
+                mono(15.0),
                 crate::theme::TEXT_PRIMARY,
             );
             let (step_text, step_ink) = match step {
@@ -460,7 +522,7 @@ fn draw(
                 egui::pos2(rect.right() - PAD, readout_y),
                 egui::Align2::RIGHT_CENTER,
                 step_text,
-                mono(9.5),
+                mono(12.0),
                 step_ink,
             );
 
@@ -484,7 +546,7 @@ fn draw(
                             egui::Stroke::new(1.0, crate::theme::TEXT_TERTIARY),
                         );
                     } else {
-                        p.text(egui::pos2(cx, y), align, trim(v), mono(8.5), ink);
+                        p.text(egui::pos2(cx, y), align, trim(v), mono(11.0), ink);
                     }
                 };
                 ghost(
@@ -539,14 +601,12 @@ fn draw(
                     egui::StrokeKind::Inside,
                 );
                 let (ink, size) = if is_active {
-                    (crate::theme::BG_ABYSS, 9.0)
-                } else if !enabled {
-                    (crate::theme::LINE_STRONG, 9.0)
-                } else if locked {
+                    (crate::theme::BG_ABYSS, 13.0)
+                } else if !enabled || locked {
                     // Idle labels drop back once locked, so the one in use stands alone.
-                    (crate::theme::LINE_STRONG, 9.0)
+                    (crate::theme::LINE_STRONG, 13.0)
                 } else {
-                    (crate::theme::TEXT_TERTIARY, 9.0)
+                    (crate::theme::TEXT_TERTIARY, 13.0)
                 };
                 p.text(
                     cell.center(),
@@ -754,6 +814,39 @@ mod tests {
     }
 
     #[test]
+    fn sideways_travel_moves_to_the_next_column() {
+        // Reported from use: locking the wrong column meant restarting the whole gesture. One column
+        // of travel moves one column, and the remainder carries so a slow slide still arrives.
+        assert_eq!(reselect(2, 34.0, 34.0, Resolution::Continuous), (3, 0.0));
+        assert_eq!(reselect(2, -34.0, 34.0, Resolution::Continuous), (1, 0.0));
+        // Under a full column's travel, nothing moves but the travel is kept.
+        let (column, drift) = reselect(2, 20.0, 34.0, Resolution::Continuous);
+        assert_eq!(column, 2);
+        assert!((drift - 20.0).abs() < 1e-4);
+        // Two columns of travel moves two.
+        assert_eq!(reselect(1, 70.0, 34.0, Resolution::Continuous).0, 3);
+    }
+
+    #[test]
+    fn travel_is_not_banked_at_the_ends_or_against_a_disabled_column() {
+        // Banking it would let a long push against the end jump several columns the moment the way
+        // cleared, which is the opposite of what this design is for.
+        assert_eq!(reselect(0, -300.0, 34.0, Resolution::Continuous), (0, 0.0));
+        assert_eq!(reselect(5, 300.0, 34.0, Resolution::Continuous), (5, 0.0));
+        // An integer parameter stops at the ones column rather than entering the fractional ones.
+        let ones = MAGNITUDES
+            .iter()
+            .position(|m| *m == 1.0)
+            .expect("ones column");
+        assert_eq!(
+            reselect(ones, 300.0, 34.0, Resolution::Integer),
+            (ones, 0.0)
+        );
+        // But it can still move the other way.
+        assert_eq!(reselect(ones, -34.0, 34.0, Resolution::Integer).0, ones - 1);
+    }
+
+    #[test]
     fn a_phase_carries_what_escape_and_history_both_need() {
         // The baseline is the Escape target and the value history compares against, so it is held
         // once rather than derived twice.
@@ -761,6 +854,7 @@ mod tests {
             column: 2,
             baseline: 41.5,
             carry: 0.0,
+            drift: 0.0,
         };
         match phase {
             Phase::Scrub { baseline, .. } => assert!((baseline - 41.5).abs() < 1e-9),
