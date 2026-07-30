@@ -69,21 +69,17 @@ pub(crate) struct MapResult {
     /// Wheel travel to apply to the field pull-back, in points, when exploring. Zero otherwise: in
     /// the ordinary map view the wheel has already been spent on the image zoom.
     pub field_scroll: f32,
-    /// A finished world-box gesture, handed back once on release. `None` on every other frame,
-    /// including every frame of the drag itself.
-    pub explore_commit: Option<ExploreCommit>,
-}
-
-/// What a released world-box gesture asks for.
-///
-/// Expressed as fractions and multipliers rather than metres, so the view never needs to know how
-/// wide the world is to move it: the caller holds the extent and does the conversion.
-pub(crate) struct ExploreCommit {
-    /// How far the world moved, as a fraction of the whole field view on each axis. Multiply by the
-    /// field's width in metres to get the pan to add to the node's offset.
-    pub pan: egui::Vec2,
-    /// Multiplier on the world extent. `1.0` when the gesture only moved the world.
-    pub extent_scale: f32,
+    /// How far the pattern was dragged this frame, as a fraction of the field view on each axis, to
+    /// add to the explored node's pan. Applied every frame of the drag: the view is centred on the
+    /// pan, so this is self-consistent and the pattern tracks the hand.
+    ///
+    /// A fraction rather than a distance, so the view never needs to know how wide the world is;
+    /// turning it into metres is the caller's job, being the only place that knows.
+    pub explore_pan: egui::Vec2,
+    /// A finished resize, as a multiplier on the world extent, handed back once on release. `None` on
+    /// every other frame, including every frame of the drag: writing it live would rescale the render
+    /// under the handle.
+    pub explore_resize: Option<f32>,
 }
 
 /// A paint sample from the 2D map while paint mode is active: a normalized `[0, 1]` position in the
@@ -188,35 +184,38 @@ pub(crate) struct View2d {
 /// Which part of the world box a gesture grabbed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Grab {
-    /// The body: moves the world through the field, which writes the node's pan.
-    Move,
-    /// A corner: resizes the world, which writes the world extent.
+    /// The field itself: drags the pattern under a fixed viewfinder, which writes the node's pan.
+    Pan,
+    /// A corner of the world box: resizes the world, which writes the world extent.
     Resize,
 }
 
-/// A world-box gesture in flight.
+/// A drag on the field view in flight.
 ///
-/// Held until release, and only then handed back to be applied. Not because undo needs it (the
-/// history already skips recording while a pointer is down) but because applying it live would be a
-/// feedback loop with no stable state, and there are two of them:
+/// The two gestures settle differently, and the difference is forced rather than chosen.
 ///
-/// The world and the field view are both centred on the node's pan, so the box is always in the
-/// middle of the view. Writing the pan mid-drag would re-centre the view on the new pan, putting the
-/// box back under the middle of the pane and leaving it pinned there however far the pointer went.
+/// **A pan applies live.** The world box is fixed at the centre of the view and the pattern is
+/// dragged under it, the way a map is dragged under a viewfinder. Writing the pan each frame is
+/// self-consistent: the view is centred on the pan, so moving the pan by exactly what the pointer
+/// travelled moves the content by exactly that much, and the pattern tracks the hand.
 ///
-/// And the field is rendered at `world_extent * zoom`, so writing the extent mid-drag would rescale
-/// the render under a box whose screen size had not changed, and the handle would run from the
-/// pointer. This is the shape that cost several rounds on the magnitude ruler, where recomputing the
-/// overlay position every frame made ticking move the ruler which moved the column under a stationary
-/// cursor.
+/// An earlier version moved the box instead and committed on release, which read as a snap: the box
+/// returned to the centre and hauled the pattern along with it. The box cannot be moved off centre,
+/// because the view is centred on the same pan the box is, so there was nowhere for it to go.
 ///
-/// Deferring both is also what makes the readout necessary rather than decorative: until release, the
-/// pending value exists nowhere else.
+/// **A resize is held until release.** The field is rendered at `world_extent * zoom`, so writing the
+/// extent mid-drag would rescale the render under a box whose screen size had not changed, and the
+/// handle would run from the pointer. That is the shape that cost several rounds on the magnitude
+/// ruler, where recomputing the overlay position every frame made ticking move the ruler, which moved
+/// the column under a stationary cursor. Holding it is also what makes the readout necessary rather
+/// than decorative: until release, the pending extent exists nowhere else.
 struct BoxDrag {
     grab: Grab,
-    /// Pointer position when the gesture began.
-    start: egui::Pos2,
     /// Pointer position now.
+    ///
+    /// Where the gesture began is not kept, because neither gesture needs it: a resize measures the
+    /// pointer against the box's settled centre, and a pan works from the frame's own delta, having
+    /// already applied everything before it.
     current: egui::Pos2,
 }
 
@@ -243,12 +242,16 @@ const HANDLE_GRAB_R: f32 = 10.0;
 /// corners are indistinguishable, so the gesture has nothing left to aim at.
 const MIN_BOX_PX: f32 = 12.0;
 
-/// Which part of `world` the pointer at `pos` is grabbing, if any.
+/// What a drag beginning at `pos` would do, given the world box at `world`.
 ///
-/// Corners win over the body, since they overlap it and the finer gesture should be the one that is
-/// hard to miss. Outside the box entirely is `None`: dragging the surrounding field does nothing,
-/// because the field's position is the world's position and there is nothing else to move.
-fn grab_at(world: egui::Rect, pos: egui::Pos2) -> Option<Grab> {
+/// A corner resizes; anywhere else pans, inside the box as well as outside it. Corners win where they
+/// overlap, since the finer gesture should be the one that is hard to miss, and they are given more
+/// slack than they are drawn with so a corner is catchable without precise aim.
+///
+/// The inside of the box is not special, which is the point of a fixed viewfinder: the box marks where
+/// the world is and the pattern moves under it, so a drag through the middle has nothing to mean that
+/// a drag at the edge does not.
+fn grab_at(world: egui::Rect, pos: egui::Pos2) -> Grab {
     let corners = [
         world.left_top(),
         world.right_top(),
@@ -256,9 +259,10 @@ fn grab_at(world: egui::Rect, pos: egui::Pos2) -> Option<Grab> {
         world.right_bottom(),
     ];
     if corners.iter().any(|c| (pos - *c).length() <= HANDLE_GRAB_R) {
-        return Some(Grab::Resize);
+        Grab::Resize
+    } else {
+        Grab::Pan
     }
-    world.contains(pos).then_some(Grab::Move)
 }
 
 /// The box a gesture would leave behind, given the settled box and the drag so far.
@@ -271,34 +275,17 @@ fn grab_at(world: egui::Rect, pos: egui::Pos2) -> Option<Grab> {
 /// The square half-size follows the axis the pointer moved furthest on, so a diagonal drag does the
 /// obvious thing rather than averaging into something between the two.
 fn dragged_box(settled: egui::Rect, drag: &BoxDrag, image: egui::Rect) -> egui::Rect {
-    match drag.grab {
-        Grab::Move => {
-            let moved = settled.translate(drag.current - drag.start);
-            // Held inside the field: a world outside the view could not be seen, and its pan would
-            // be one the gesture could not walk back.
-            let half = moved.size() * 0.5;
-            let centre = egui::pos2(
-                moved
-                    .center()
-                    .x
-                    .clamp(image.left() + half.x, image.right() - half.x),
-                moved
-                    .center()
-                    .y
-                    .clamp(image.top() + half.y, image.bottom() - half.y),
-            );
-            egui::Rect::from_center_size(centre, moved.size())
-        }
-        Grab::Resize => {
-            let centre = settled.center();
-            let reach = (drag.current - centre).abs();
-            let half = reach.x.max(reach.y).clamp(
-                MIN_BOX_PX * 0.5,
-                (image.width().min(image.height()) * 0.5).max(MIN_BOX_PX * 0.5),
-            );
-            egui::Rect::from_center_size(centre, egui::Vec2::splat(half * 2.0))
-        }
+    if drag.grab == Grab::Pan {
+        // A pan is applied as it happens, so the box is already where it always is: the centre.
+        return settled;
     }
+    let centre = settled.center();
+    let reach = (drag.current - centre).abs();
+    let half = reach.x.max(reach.y).clamp(
+        MIN_BOX_PX * 0.5,
+        (image.width().min(image.height()) * 0.5).max(MIN_BOX_PX * 0.5),
+    );
+    egui::Rect::from_center_size(centre, egui::Vec2::splat(half * 2.0))
 }
 
 /// A length in metres, written the way it reads at the scale it is: kilometres once it is one, metres
@@ -407,17 +394,16 @@ impl View2d {
             .zip(image_rect)
             .map(|(explore, ir)| explore.world_rect(ir));
 
-        let mut explore_commit = None;
+        let mut explore_pan = egui::Vec2::ZERO;
+        let mut explore_resize = None;
         if let (Some(settled), Some(ir)) = (settled_box, image_rect) {
             let hover = response.hover_pos();
             if self.box_drag.is_none()
                 && let Some(pos) = hover
                 && response.drag_started_by(egui::PointerButton::Primary)
-                && let Some(grab) = grab_at(settled, pos)
             {
                 self.box_drag = Some(BoxDrag {
-                    grab,
-                    start: pos,
+                    grab: grab_at(settled, pos),
                     current: pos,
                 });
             }
@@ -425,41 +411,39 @@ impl View2d {
                 if let Some(pos) = ui.input(|i| i.pointer.latest_pos()) {
                     drag.current = pos;
                 }
-                // Escape abandons the gesture and leaves the world where it was. Checked before the
-                // release, so a cancelled drag cannot also commit on the same frame.
+                let grab = drag.grab;
+                // Escape abandons the gesture. Checked before the release, so a cancelled drag cannot
+                // also commit on the same frame. A pan has nothing to abandon, having applied as it
+                // went; the pattern is simply left where the hand put it.
                 if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                     self.box_drag = None;
+                } else if grab == Grab::Pan {
+                    // Live, and self-consistent: the view is centred on the pan, so moving the pan by
+                    // what the pointer travelled moves the content by exactly that much and the
+                    // pattern tracks the hand. Reported as a fraction of the field, negated because
+                    // dragging the pattern one way looks further the other way, as dragging a map does.
+                    explore_pan = -response.drag_delta() / ir.size();
+                    if !ui.input(|i| i.pointer.primary_down()) {
+                        self.box_drag = None;
+                    }
                 } else if !ui.input(|i| i.pointer.primary_down()) {
                     let pending = dragged_box(settled, drag, ir);
-                    let grab = drag.grab;
                     self.box_drag = None;
-                    explore_commit = Some(match grab {
-                        // A fraction of the field, so the caller converts with the field's width in
-                        // metres and this stays free of world units.
-                        Grab::Move => ExploreCommit {
-                            pan: (pending.center() - settled.center()) / ir.size(),
-                            extent_scale: 1.0,
-                        },
-                        Grab::Resize => ExploreCommit {
-                            pan: egui::Vec2::ZERO,
-                            extent_scale: if settled.width() > 0.0 {
-                                pending.width() / settled.width()
-                            } else {
-                                1.0
-                            },
-                        },
-                    });
+                    explore_resize = (settled.width() > 0.0)
+                        .then(|| pending.width() / settled.width())
+                        .filter(|s| (s - 1.0).abs() > f32::EPSILON);
                 }
             }
-            // The grab cursor, so a corner reads as something to pull before it is pulled.
+            // The cursor, so a corner reads as something to pull before it is pulled, and the field as
+            // something to drag.
             let showing = self
                 .box_drag
                 .as_ref()
                 .map(|d| d.grab)
-                .or_else(|| hover.and_then(|pos| grab_at(settled, pos)));
+                .or_else(|| hover.map(|pos| grab_at(settled, pos)));
             match showing {
                 Some(Grab::Resize) => ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeNwSe),
-                Some(Grab::Move) => ui.ctx().set_cursor_icon(egui::CursorIcon::Grab),
+                Some(Grab::Pan) => ui.ctx().set_cursor_icon(egui::CursorIcon::Grab),
                 None => {}
             }
         }
@@ -589,7 +573,8 @@ impl View2d {
         MapResult {
             sample,
             field_scroll,
-            explore_commit,
+            explore_pan,
+            explore_resize,
         }
     }
 
@@ -680,12 +665,8 @@ mod tests {
         }
     }
 
-    fn drag(grab: Grab, from: egui::Pos2, to: egui::Pos2) -> BoxDrag {
-        BoxDrag {
-            grab,
-            start: from,
-            current: to,
-        }
+    fn drag(grab: Grab, to: egui::Pos2) -> BoxDrag {
+        BoxDrag { grab, current: to }
     }
 
     #[test]
@@ -698,11 +679,7 @@ mod tests {
         let centre = settled.center();
         let pulled = dragged_box(
             settled,
-            &drag(
-                Grab::Resize,
-                settled.right_bottom(),
-                centre + egui::vec2(80.0, 60.0),
-            ),
+            &drag(Grab::Resize, centre + egui::vec2(80.0, 60.0)),
             image,
         );
         // Square, from the axis that moved furthest: a diagonal drag does the obvious thing rather
@@ -723,75 +700,46 @@ mod tests {
         // seen and the pull-back would have to fight the gesture to show it.
         let huge = dragged_box(
             settled,
-            &drag(
-                Grab::Resize,
-                settled.right_bottom(),
-                centre + egui::vec2(9_000.0, 9_000.0),
-            ),
+            &drag(Grab::Resize, centre + egui::vec2(9_000.0, 9_000.0)),
             image,
         );
         assert_eq!(huge.width(), 400.0);
 
         // Dragged onto the centre: held at the floor, or the box would be a dot with no corners left
         // to aim at and the gesture could not be walked back.
-        let tiny = dragged_box(
-            settled,
-            &drag(Grab::Resize, settled.right_bottom(), centre),
-            image,
-        );
+        let tiny = dragged_box(settled, &drag(Grab::Resize, centre), image);
         assert_eq!(tiny.width(), MIN_BOX_PX);
     }
 
     #[test]
-    fn moving_the_box_is_held_inside_the_field() {
-        let image = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 400.0));
-        let settled = at_zoom(4.0).world_rect(image);
-
-        // A move well inside travels exactly as dragged.
-        let nudged = dragged_box(
-            settled,
-            &drag(
-                Grab::Move,
-                egui::pos2(200.0, 200.0),
-                egui::pos2(230.0, 180.0),
-            ),
-            image,
-        );
-        assert_eq!(nudged.center(), settled.center() + egui::vec2(30.0, -20.0));
-        assert_eq!(nudged.size(), settled.size());
-
-        // A move past the edge stops with the box against it, rather than leaving the world somewhere
-        // the view cannot show and the gesture cannot reach back to.
-        let shoved = dragged_box(
-            settled,
-            &drag(
-                Grab::Move,
-                egui::pos2(200.0, 200.0),
-                egui::pos2(5_000.0, 200.0),
-            ),
-            image,
-        );
-        assert_eq!(shoved.right(), image.right());
-        assert_eq!(shoved.size(), settled.size());
-    }
-
-    #[test]
-    fn a_corner_is_grabbed_in_preference_to_the_body() {
+    fn a_corner_resizes_and_everywhere_else_pans() {
         let image = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 400.0));
         let world = at_zoom(4.0).world_rect(image);
 
-        // Corners win where they overlap the body, so the finer gesture is the one hard to miss.
-        assert_eq!(grab_at(world, world.left_top()), Some(Grab::Resize));
-        assert_eq!(grab_at(world, world.right_bottom()), Some(Grab::Resize));
-        // Just inside a corner, still within its slack.
+        // Corners win where they overlap the field, so the finer gesture is the one hard to miss.
+        assert_eq!(grab_at(world, world.left_top()), Grab::Resize);
+        assert_eq!(grab_at(world, world.right_bottom()), Grab::Resize);
+        // Just inside a corner, still within its slack, which is wider than the mark is drawn.
         assert_eq!(
             grab_at(world, world.left_top() + egui::vec2(3.0, 3.0)),
-            Some(Grab::Resize)
+            Grab::Resize
         );
-        // The middle is a move.
-        assert_eq!(grab_at(world, world.center()), Some(Grab::Move));
-        // Outside is nothing: the surrounding field has no position of its own to drag.
-        assert_eq!(grab_at(world, image.left_top()), None);
+
+        // Everywhere else pans, and the inside of the box is not special: the box marks where the
+        // world is and the pattern moves under it, so a drag through the middle has nothing to mean
+        // that a drag outside does not.
+        assert_eq!(grab_at(world, world.center()), Grab::Pan);
+        assert_eq!(grab_at(world, image.left_top()), Grab::Pan);
+    }
+
+    #[test]
+    fn a_pan_leaves_the_box_where_it_was() {
+        // The box cannot be moved off centre, because the view is centred on the same pan the box is.
+        // A pan moves the pattern under it instead, so the box a pan leaves behind is the settled one.
+        let image = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 400.0));
+        let settled = at_zoom(4.0).world_rect(image);
+        let panned = dragged_box(settled, &drag(Grab::Pan, egui::pos2(320.0, 90.0)), image);
+        assert_eq!(panned, settled);
     }
 
     #[test]

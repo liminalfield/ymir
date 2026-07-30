@@ -95,11 +95,13 @@ The noise generators build from a pattern that carries on past your world, and o
 |---|---|
 | Start or stop | The Explore field button in the node's inspector |
 | See more or less of the pattern | Scroll |
-| Move your world | Drag inside the outline |
+| Move your world | Drag the pattern, anywhere except a corner handle |
 | Resize your world | Drag a corner handle |
-| Abandon a move or resize | Escape, while still holding |
+| Abandon a resize | Escape, while still holding |
 
-The outline is your world. Moving it changes where the generator samples the pattern; resizing it changes the world extent, and the size it will become is shown above the outline while you drag. Neither takes effect until you release, so the pattern behind the outline holds still while you aim.
+The outline is your world, and it stays in the middle of the view. You do not move it: you drag the pattern underneath it, the way you would drag a map under a viewfinder, until the part you want is inside. That is also why a drag through the middle of the outline does the same thing as one outside it.
+
+Resizing the outline changes the world extent, and the size it will become is shown above it while you drag. Nothing is written until you release, so the pattern holds still while you aim.
 
 Resizing keeps the surrounding pattern the same size on screen, so only the outline changes. The terrain keeps its scale either way: a 500 m hill stays 500 m, and a larger world simply holds more of them.
 
