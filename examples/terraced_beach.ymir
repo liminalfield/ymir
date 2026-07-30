@@ -15,20 +15,20 @@
         "stable_id": 0,
         "type_id": "generator.fbm",
         "params": {
-          "frequency": {
-            "float": 0.6906239266098149
-          },
           "lacunarity": {
             "float": 2.0387500000000003
           },
           "offset_x": {
-            "int": 0
+            "float": 0.0
           },
           "offset_y": {
-            "int": 0
+            "float": 0.0
           },
           "seed": {
             "int": 21
+          },
+          "wavelength": {
+            "float": 1482.7172366105037
           }
         }
       },
@@ -160,8 +160,8 @@
           "bias": {
             "float": 0.0054861111111110805
           },
-          "frequency": {
-            "float": 6.968428466212177
+          "wavelength": {
+            "float": 146.9484841474759
           }
         }
       },
@@ -218,11 +218,11 @@
           "bias": {
             "float": -0.025
           },
-          "frequency": {
-            "float": 2.374753514261821
-          },
           "gain": {
             "float": 0.7370833333333333
+          },
+          "wavelength": {
+            "float": 431.20264644320565
           }
         }
       },
@@ -233,11 +233,11 @@
           "amount": {
             "float": 16.0
           },
-          "frequency": {
-            "float": 7.101111111111111
-          },
           "seed": {
             "int": 3
+          },
+          "wavelength": {
+            "float": 144.20278516664058
           }
         },
         "connections": [
