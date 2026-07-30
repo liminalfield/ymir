@@ -34,6 +34,7 @@ use ymir_nodes::{CategoryDef, categories, find_category, node_group, tr};
 mod canvas;
 use canvas::Handle;
 // The parameter inspector: ParamSpec-driven widgets, no per-node code.
+mod magnitude;
 mod materials;
 mod output_kind;
 mod param_ui;
