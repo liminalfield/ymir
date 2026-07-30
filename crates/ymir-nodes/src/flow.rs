@@ -91,19 +91,19 @@ impl Operator for Flow {
                 ),
                 ParamSpec::new(
                     "offset_x",
-                    ParamKind::Int {
-                        min: -10_000,
-                        max: 10_000,
+                    ParamKind::Float {
+                        min: -10_000.0,
+                        max: 10_000.0,
                     },
-                    ParamValue::Int(0),
+                    ParamValue::Float(0.0),
                 ),
                 ParamSpec::new(
                     "offset_y",
-                    ParamKind::Int {
-                        min: -10_000,
-                        max: 10_000,
+                    ParamKind::Float {
+                        min: -10_000.0,
+                        max: 10_000.0,
                     },
-                    ParamValue::Int(0),
+                    ParamValue::Float(0.0),
                 ),
             ],
             emitted_layers: vec![layers::FLOW_X, layers::FLOW_Y],
@@ -127,8 +127,8 @@ impl Operator for Flow {
             octaves: params.get_i64("octaves", 5).clamp(0, 32) as u32,
             lacunarity: params.get_f64("lacunarity", 2.0),
             gain: params.get_f64("gain", 0.5) as f32,
-            offset_x: params.get_i64("offset_x", 0) as f64,
-            offset_y: params.get_i64("offset_y", 0) as f64,
+            offset_x: params.get_f64("offset_x", 0.0),
+            offset_y: params.get_f64("offset_y", 0.0),
         };
         let strength = params.get_f64("strength", DEFAULT_STRENGTH) as f32;
 

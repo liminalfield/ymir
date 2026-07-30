@@ -87,23 +87,24 @@ impl Operator for CellularRegions {
                     },
                     ParamValue::Int(0),
                 ),
-                // Pan the sampling window (in region widths) to place the cells differently
-                // without rerolling, matching the fractal-noise offset.
+                // Pan the sampling window, in region widths, to place the cells differently
+                // without rerolling. Fractional: a whole step is a whole map, which is a different
+                // view rather than a neighbouring patch (#360).
                 ParamSpec::new(
                     "offset_x",
-                    ParamKind::Int {
-                        min: -10_000,
-                        max: 10_000,
+                    ParamKind::Float {
+                        min: -10_000.0,
+                        max: 10_000.0,
                     },
-                    ParamValue::Int(0),
+                    ParamValue::Float(0.0),
                 ),
                 ParamSpec::new(
                     "offset_y",
-                    ParamKind::Int {
-                        min: -10_000,
-                        max: 10_000,
+                    ParamKind::Float {
+                        min: -10_000.0,
+                        max: 10_000.0,
                     },
-                    ParamValue::Int(0),
+                    ParamValue::Float(0.0),
                 ),
                 ParamSpec::new(
                     "antialias",
@@ -141,8 +142,8 @@ impl Operator for CellularRegions {
                 ctx.world_extent(),
             ),
             jitter: params.get_f64("jitter", DEFAULT_JITTER).clamp(0.0, 1.0) as f32,
-            offset_x: params.get_i64("offset_x", 0) as f64,
-            offset_y: params.get_i64("offset_y", 0) as f64,
+            offset_x: params.get_f64("offset_x", 0.0),
+            offset_y: params.get_f64("offset_y", 0.0),
             placement,
         };
         let seed = ctx.seed.wrapping_add(params.get_i64("seed", 0) as u64);
@@ -388,7 +389,10 @@ mod tests {
     fn the_offset_param_pans_the_field() {
         let c = ctx(64);
         let a = run(&Params::default(), &c);
-        let b = run(&Params::default().with("offset_x", ParamValue::Int(3)), &c);
+        let b = run(
+            &Params::default().with("offset_x", ParamValue::Float(3.0)),
+            &c,
+        );
         assert_ne!(a.content_hash(), b.content_hash());
     }
 
