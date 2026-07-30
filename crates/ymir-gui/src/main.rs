@@ -5053,6 +5053,49 @@ fn paint_label(type_id: &str, suffix: &str, default: &str) -> String {
     }
 }
 
+/// Applies a released world-box gesture: the pan to the explored node, the extent to the world.
+///
+/// The pan arrives as a fraction of the field view, so it converts with the field's width in metres,
+/// which is the world times the pull-back. That is the whole reason the view can stay free of world
+/// units: it moved the box by so much of what it was showing, and only here is that a distance.
+///
+/// Resizing holds the field view still. The view shows `world_extent * zoom` metres across, so
+/// growing the world by `s` and dividing the pull-back by the same `s` leaves that product unchanged:
+/// the field behind the box does not move and only the box changes size, which is what the gesture
+/// appeared to do. Letting the pull-back stand instead would zoom the view out every time the world
+/// grew, which is a surprise the gesture never asked for.
+fn apply_explore_commit(state: &mut AppState, commit: viewport2d::ExploreCommit) {
+    let Some(handle) = state.explore_target else {
+        return;
+    };
+    let Some(id) = state.graph.node_id_of(handle) else {
+        return;
+    };
+
+    if commit.pan != egui::Vec2::ZERO {
+        let field_m = state.world_extent * f64::from(state.explore_zoom);
+        let mut params = state.graph.params(id).cloned().unwrap_or_default();
+        for (name, delta) in [("offset_x", commit.pan.x), ("offset_y", commit.pan.y)] {
+            let was = params.get_f64(name, 0.0);
+            let now = was + f64::from(delta) * field_m;
+            params.insert(name, ParamValue::Float(now));
+        }
+        // The node vanished mid-gesture; drop the pan rather than error every frame, as the paint
+        // path does. `exploring()` will already have gone false.
+        if state.graph.set_params(id, params).is_err() {
+            state.explore_target = None;
+            return;
+        }
+    }
+
+    if (commit.extent_scale - 1.0).abs() > f32::EPSILON {
+        let scale = f64::from(commit.extent_scale);
+        state.world_extent = (state.world_extent * scale).clamp(1.0, 1_000_000.0);
+        state.explore_zoom =
+            (state.explore_zoom / commit.extent_scale).clamp(MIN_EXPLORE_ZOOM, MAX_EXPLORE_ZOOM);
+    }
+}
+
 /// The Explore toggle for a node whose field continues past the map.
 ///
 /// Modelled on the paint toggle, deliberately: both arm the 2D map to mean something other than
@@ -9578,6 +9621,7 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
                     show_water,
                     explore: exploring.then_some(viewport2d::Explore {
                         zoom: state.explore_zoom,
+                        world_extent_m: state.world_extent,
                     }),
                 },
                 brush,
@@ -9590,6 +9634,9 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 state.explore_zoom = (state.explore_zoom
                     * (-sample.field_scroll * EXPLORE_ZOOM_SPEED).exp())
                 .clamp(MIN_EXPLORE_ZOOM, MAX_EXPLORE_ZOOM);
+            }
+            if let Some(commit) = sample.explore_commit {
+                apply_explore_commit(state, commit);
             }
         }
     }

@@ -85,6 +85,25 @@ The viewport has two navigation modes.
 |---|---|
 | Pan | Drag |
 | Zoom | Scroll |
+| Reset to fit | Double-click |
+
+## Exploring the field
+
+The noise generators build from a pattern that carries on past your world, and only part of it is under the terrain. Select one and its inspector offers Explore field, which shows the surrounding pattern with your world outlined on it, so you can choose which part of it the terrain sits on.
+
+| Action | Input |
+|---|---|
+| Start or stop | The Explore field button in the node's inspector |
+| See more or less of the pattern | Scroll |
+| Move your world | Drag inside the outline |
+| Resize your world | Drag a corner handle |
+| Abandon a move or resize | Escape, while still holding |
+
+The outline is your world. Moving it changes where the generator samples the pattern; resizing it changes the world extent, and the size it will become is shown above the outline while you drag. Neither takes effect until you release, so the pattern behind the outline holds still while you aim.
+
+Resizing keeps the surrounding pattern the same size on screen, so only the outline changes. The terrain keeps its scale either way: a 500 m hill stays 500 m, and a larger world simply holds more of them.
+
+While exploring, the preview stays on the generator even if you select another node, so a stray click does not lose the framing you are working on. Stop exploring to return the preview to following the selection.
 
 ## Painting
 
