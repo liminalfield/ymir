@@ -313,7 +313,12 @@ pub(crate) fn ruler_scrub(
         return true;
     }
 
-    if resp.drag_started() {
+    // Opens on press, not on `drag_started`. egui reports a drag only once the pointer has moved past
+    // its threshold, so the ruler used to appear only after the gesture had already begun to move,
+    // and that first movement could tick the value before its magnitude had even been shown. Holding
+    // the button opens the ruler and changes nothing; the value moves when the pointer does.
+    let holding = resp.is_pointer_button_down_on() || resp.dragged();
+    if holding && gesture.is_none() {
         let press = resp.interact_pointer_pos().unwrap_or(resp.rect.center());
         // The ruler's position is fixed here, once, and held for the rest of the gesture.
         //
@@ -335,7 +340,8 @@ pub(crate) fn ruler_scrub(
     let Some(active) = gesture else {
         return false;
     };
-    if !resp.dragged() && !resp.drag_stopped() {
+    // Alive while the button is held; released or lost, the gesture ends.
+    if !holding {
         clear(ui, id);
         return false;
     }
@@ -394,7 +400,7 @@ pub(crate) fn ruler_scrub(
         ui, id, resp.rect, ruler_left, &usable, column, *value, bounds, suffix,
     );
 
-    if resp.drag_stopped() {
+    if resp.drag_stopped() && !resp.is_pointer_button_down_on() {
         clear(ui, id);
     } else {
         ui.data_mut(|d| {
