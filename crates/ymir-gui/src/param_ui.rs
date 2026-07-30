@@ -472,9 +472,15 @@ fn stepper(ui: &mut egui::Ui, value: &mut i64, min: i64, max: i64) -> bool {
                     .speed(0.0)
                     .range(min as f64..=max as f64),
             )
-            .on_hover_text("Drag to scrub \u{b7} click to type")
         })
         .inner;
+    // Suppressed while dragging, for the same reason as the float rows: the tooltip layer sits above
+    // the magnitude overlay.
+    let value_resp = if value_resp.dragged() || value_resp.drag_stopped() {
+        value_resp
+    } else {
+        value_resp.on_hover_text("Drag to scrub \u{b7} click to type")
+    };
     changed |= value_resp.changed();
     // The scrub runs on a float mirror (that is what `scrub_drag` drives) and lands back on the
     // integer, keeping the sub-step remainder across frames in this widget's own temp state. That
@@ -605,12 +611,18 @@ pub(crate) fn edit(
                     if !wraps {
                         drag = drag.range(min..=max);
                     }
-                    let value = ui
-                        .add_sized(
-                            egui::vec2(VALUE_W + 16.0, ui.spacing().interact_size.y),
-                            drag,
-                        )
-                        .on_hover_text("Drag to scrub \u{b7} click to type");
+                    let value = ui.add_sized(
+                        egui::vec2(VALUE_W + 16.0, ui.spacing().interact_size.y),
+                        drag,
+                    );
+                    // The tooltip is suppressed for the duration of a drag. It sits on a layer above
+                    // the magnitude overlay and covered the ruler the moment the gesture that opens
+                    // it began, which made the control unusable rather than merely untidy.
+                    let value = if value.dragged() || value.drag_stopped() {
+                        value
+                    } else {
+                        value.on_hover_text("Drag to scrub \u{b7} click to type")
+                    };
                     // The magnitude ruler (#358): aim at a magnitude, drag to tick by it. A wrapping
                     // direction keeps the older continuous scrub, because the ruler snaps to the grid
                     // of the chosen column and a bearing that rolls through 360 has no grid to snap
