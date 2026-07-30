@@ -6531,8 +6531,7 @@ fn angle_row(ui: &mut egui::Ui, label: &str, value: &mut f32) {
                         .suffix("\u{b0}"),
                 )
                 .on_hover_text(
-                    "Drag to scrub \u{b7} click to type\n\
-                     The bearing the swell travels: 0\u{b0} toward the right of the map, \
+                    "The bearing the swell travels: 0\u{b0} toward the right of the map, \
                      90\u{b0} toward the bottom",
                 );
             let scrubbed = param_ui::scrub_drag(ui, &resp, &mut x, SCRUB_SPEED, |v| {
