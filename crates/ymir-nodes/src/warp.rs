@@ -28,13 +28,19 @@ use ymir_core::{
     Params, PortSpec, Result, Unit, layers,
 };
 
-use crate::noise::{FbmParams, fbm_sample};
+use crate::noise::{FbmParams, cycles_per_region, fbm_sample};
 
 /// Stable type identifier and registry key.
 const TYPE_ID: &str = "modifier.warp";
 
 /// Default displacement in world units (meters). Pairs with the default world extent to
 /// give a visible but not violent wander out of the box.
+/// Default warp feature size, in world units.
+///
+/// The old default was 2 cycles per map, and the default world is 1024 m across, so 512 m is the
+/// same warp a new graph produced before.
+const DEFAULT_WAVELENGTH: f64 = 512.0;
+
 const DEFAULT_AMOUNT: f64 = 50.0;
 
 /// Decorrelation salt for the y-displacement seed, so the two offset fields are
@@ -67,14 +73,18 @@ impl Operator for Warp {
                     ParamValue::Float(DEFAULT_AMOUNT),
                 )
                 .with_unit(Unit::Meters),
+                // The warp field's feature size, in world units: how far apart the swirls are,
+                // as against `amount`, which is how far each one pushes. Replaces a cycles-per-map
+                // frequency, which meant a different warp on every world size.
                 ParamSpec::new(
-                    "frequency",
+                    "wavelength",
                     ParamKind::Float {
                         min: 0.0,
-                        max: 64.0,
+                        max: 100_000.0,
                     },
-                    ParamValue::Float(2.0),
-                ),
+                    ParamValue::Float(DEFAULT_WAVELENGTH),
+                )
+                .with_unit(Unit::Meters),
                 ParamSpec::new(
                     "octaves",
                     ParamKind::Int { min: 1, max: 12 },
@@ -122,7 +132,10 @@ impl Operator for Warp {
         // resolution.
         let amount_m = params.get_f64("amount", DEFAULT_AMOUNT).max(0.0);
         let amount_cells = ctx.world_to_cells(amount_m) as f32;
-        let frequency = params.get_f64("frequency", 2.0) as f32;
+        let frequency = cycles_per_region(
+            params.get_f64("wavelength", DEFAULT_WAVELENGTH),
+            ctx.world_extent(),
+        ) as f32;
 
         // The two offset fields share the octave layering; only the seed differs. The base
         // frequency is applied by scaling the sample coordinates below.
@@ -207,8 +220,17 @@ mod tests {
         )
     }
 
+    /// The warp field's feature size for every test here.
+    ///
+    /// Half the 16 m world the golden runs on, which is the 2 cycles per map the parameter used to
+    /// mean there, so that golden still pins the same warp field. The masked and unmasked helpers
+    /// must agree on it, or the tests that compare one against the other compare two warps.
+    const TEST_WAVELENGTH: f64 = 8.0;
+
     fn run(input: &Field, amount: f64, ctx: &EvalContext) -> Field {
-        let params = Params::new().with("amount", ParamValue::Float(amount));
+        let params = Params::new()
+            .with("amount", ParamValue::Float(amount))
+            .with("wavelength", ParamValue::Float(TEST_WAVELENGTH));
         Warp.eval(Inputs::required_only(&[input]), &params, ctx)
             .unwrap()
             .remove(0)
@@ -332,7 +354,9 @@ mod tests {
     }
 
     fn run_masked(input: &Field, amount: f64, mask: &Field, ctx: &EvalContext) -> Field {
-        let params = Params::new().with("amount", ParamValue::Float(amount));
+        let params = Params::new()
+            .with("amount", ParamValue::Float(amount))
+            .with("wavelength", ParamValue::Float(TEST_WAVELENGTH));
         Warp.eval(Inputs::new(&[input], &[Some(mask)]), &params, ctx)
             .unwrap()
             .remove(0)

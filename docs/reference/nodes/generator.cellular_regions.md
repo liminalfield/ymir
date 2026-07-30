@@ -27,7 +27,7 @@ Flat, discrete cells, for plates or zones you can shape or scatter one region at
 
 | Parameter | Type | Range | Default | Unit | Description | Field-driven |
 |---|---|---|---|---|---|---|
-| Frequency (`frequency`) | float | [0, 64] | 8 |  | Sets the feature size of the noise; higher values pack in smaller, denser features. | no |
+| Cell Size (`cell_size`) | float | [0, 100000] | 128 | m | How wide one cell is, in world units. Larger cells mean fewer of them across the map. | no |
 | Jitter (`jitter`) | float | [0, 1] | 1 |  |  | no |
 | Seed (`seed`) | int | [0, 2147483647] | 0 |  | The random seed; changing it regenerates a different variation of the same pattern. | no |
 | Offset X (`offset_x`) | int | [-10000, 10000] | 0 |  | Pans the noise pattern along the X axis without changing its shape. | no |
@@ -51,7 +51,7 @@ Feed it a low-frequency noise and the variation between cells becomes gradual ac
 
 Feed it a gradient and the cells step down across the terrain while each one stays flat. Blending a gradient in afterwards instead would tilt every cell top, and stepping the gradient would cut bands straight across the cells; sampling once per cell does neither.
 
-Frequency sets the cell size and jitter their regularity: 0 is a square grid, 1 fully organic.
+Cell size is a real width in world units, so cells stay the size you asked for when the world extent changes and a larger world simply holds more of them. Jitter sets their regularity: 0 is a square grid, 1 fully organic.
 
 Placement sets where the cells start from. `square` puts one point per square of a grid, so at jitter 0 the cells are squares. `hex` uses a triangular lattice, where every point is the same distance from its six nearest neighbours, so at jitter 0 the cells are regular hexagons.
 

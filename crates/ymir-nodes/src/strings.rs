@@ -394,9 +394,9 @@ fn lookup(key: &str) -> Option<&'static str> {
              downstream can do this: a Curve changes height, so it treats both slopes alike."
         }
 
-        "param-frequency" => "Frequency",
-        "param-frequency-desc" => {
-            "Sets the feature size of the noise; higher values pack in smaller, denser features."
+        "param-cell_size" => "Cell Size",
+        "param-cell_size-desc" => {
+            "How wide one cell is, in world units. Larger cells mean fewer of them across the map."
         }
         "param-octaves" => "Octaves",
         "param-octaves-desc" => {
@@ -621,10 +621,10 @@ mod tests {
         assert!(mode.description.is_some());
 
         // Shared: a meaning-invariant parameter resolves to the shared entry on any node.
-        let freq = resolve_param("generator.fbm", "frequency");
-        assert_eq!(freq.source, ParamSource::Shared);
-        assert_eq!(freq.label, "Frequency");
-        assert!(freq.description.is_some());
+        let size = resolve_param("generator.fbm", "wavelength");
+        assert_eq!(size.source, ParamSource::Shared);
+        assert_eq!(size.label, "Wavelength");
+        assert!(size.description.is_some());
 
         // Prettified: no catalog entry, so the label is the prettified id and there is no prose.
         let opacity = resolve_param("modifier.blend", "opacity");

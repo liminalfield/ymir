@@ -30,7 +30,7 @@ terrain sideways rather than up, so it changes the shape of features without cha
 | Parameter | Type | Range | Default | Unit | Description | Field-driven |
 |---|---|---|---|---|---|---|
 | Amount (`amount`) | float | [0, 100000] | 50 | m |  | no |
-| Frequency (`frequency`) | float | [0, 64] | 2 |  | Sets the feature size of the noise; higher values pack in smaller, denser features. | no |
+| Wavelength (`wavelength`) | float | [0, 100000] | 512 | m | The distance from one crest to the next, in world units. On a noise generator it is the size of the largest features. | no |
 | Octaves (`octaves`) | int | [1, 12] | 4 |  | The number of noise layers summed together; more octaves add finer detail. | no |
 | Seed (`seed`) | int | [0, 2147483647] | 0 |  | The random seed; changing it regenerates a different variation of the same pattern. | no |
 
@@ -43,3 +43,5 @@ Honours a mask on its input, applying everywhere the mask is absent.
 Wire the optional mask input to confine the warp to a selection: the displacement scales by the
 mask, so a Curvature selection of the ridgelines jitters only the ridges while the rest holds still.
 Where the mask is zero the terrain passes through unwarped, and a partial mask eases the warp in.
+
+Wavelength is the warp field's own feature size, in world units: how far apart the swirls sit, as against amount, which is how far each one pushes. Both are real sizes, so a warp keeps its character when the world extent changes.

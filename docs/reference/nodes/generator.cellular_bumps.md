@@ -13,7 +13,7 @@ Worley noise as cones peaking at scattered points: rock piles, bumps, and scales
 
 ## Purpose
 
-Scattered cones peaking at random points, for rock piles, bumps, and scaled surfaces. Frequency sets how densely the cones pack; reach for it to add clustered relief.
+Scattered cones peaking at random points, for rock piles, bumps, and scaled surfaces. Cell size sets how far apart the cones sit, as a real width in world units, so they keep their spacing when the world extent changes. Reach for it to add clustered relief.
 
 ## Inputs
 
@@ -27,7 +27,7 @@ This node takes no inputs.
 
 | Parameter | Type | Range | Default | Unit | Description | Field-driven |
 |---|---|---|---|---|---|---|
-| Frequency (`frequency`) | float | [0, 64] | 8 |  | Sets the feature size of the noise; higher values pack in smaller, denser features. | no |
+| Cell Size (`cell_size`) | float | [0, 100000] | 128 | m | How wide one cell is, in world units. Larger cells mean fewer of them across the map. | no |
 | Jitter (`jitter`) | float | [0, 1] | 1 |  |  | no |
 | Seed (`seed`) | int | [0, 2147483647] | 0 |  | The random seed; changing it regenerates a different variation of the same pattern. | no |
 | Offset X (`offset_x`) | int | [-10000, 10000] | 0 |  | Pans the noise pattern along the X axis without changing its shape. | no |
