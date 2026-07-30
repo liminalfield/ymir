@@ -357,7 +357,7 @@ pub(crate) fn ruler_scrub(
     };
 
     draw(
-        ui, press, ruler_left, next, *value, bounds, resolution, suffix,
+        ui, id, press, ruler_left, next, *value, bounds, resolution, suffix,
     );
 
     if resp.drag_stopped() {
@@ -392,6 +392,7 @@ fn release(ui: &egui::Ui, id: egui::Id) {
 )]
 fn draw(
     ui: &egui::Ui,
+    id: egui::Id,
     press: egui::Pos2,
     ruler_left: f32,
     phase: Phase,
@@ -419,7 +420,10 @@ fn draw(
     };
     let locked = matches!(phase, Phase::Scrub { .. });
 
-    egui::Area::new(ui.id().with("magnitude-overlay"))
+    // Seeded from the field's own id, not `ui.id()`. Every parameter row in the inspector shares one
+    // layout, so `ui.id()` is the same for all of them and the overlays collided: only a row that
+    // happened to sit inside its own `push_id` (the integer stepper) got a unique area and worked.
+    egui::Area::new(id.with("overlay"))
         .order(egui::Order::Foreground)
         .fixed_pos(origin)
         .show(ui.ctx(), |ui| {
