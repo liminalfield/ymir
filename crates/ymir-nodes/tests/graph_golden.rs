@@ -24,9 +24,16 @@ fn fbm_then_thermal_matches_golden() {
     );
     graph.connect(generator, 0, erosion, 0).unwrap();
 
-    let request = EvalRequest::new(64, 64, Region::UNIT, 42);
+    // A stated world, 1024 m across, which is what the editor starts a project at. It used to be
+    // left at the unit default, which described a 1 m map: the noise did not care, since it was
+    // sized in cycles per map, but the erosion did, since its repose angle is a real slope over real
+    // cells. Now that the noise is sized in metres too, an unstated world is not a world.
+    let request = EvalRequest::new(64, 64, Region::UNIT, 42).with_world_extent(1024.0);
     let mut cache = EvalCache::new(16);
     let out = graph.evaluate(erosion, &request, &mut cache).unwrap();
 
-    assert_eq!(out[0].content_hash().to_u64(), 0x569d_8044_01c0_9f1e);
+    // Re-pinned with the stated world above (#361). Both halves of the graph moved: the generator
+    // now samples a 512 m wavelength across 1024 m rather than 2 cycles across an unstated map, and
+    // the erosion sees 16 m cells rather than 1.6 cm ones, so its repose angle bites differently.
+    assert_eq!(out[0].content_hash().to_u64(), 0x58aa_a555_e0c5_042e);
 }

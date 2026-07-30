@@ -1,6 +1,6 @@
 //! The fBm Perlin generator: Ymir's first operator.
 //!
-//! Besides the noise shape (frequency, octaves, lacunarity, gain), it carries the output's
+//! Besides the noise shape (wavelength, octaves, lacunarity, gain), it carries the output's
 //! vertical scale directly: `amplitude` scales the [0, 1] shape and `bias` shifts it. This is
 //! the vertical counterpart to the existing `offset_x`/`offset_y` horizontal pan, and it makes
 //! the common "layer a little high-frequency detail onto a base" workflow a single control on
@@ -13,13 +13,20 @@ use std::sync::Arc;
 use ymir_core::registry::OperatorEntry;
 use ymir_core::{
     EvalContext, Field, Inputs, Layer, NodeSpec, Operator, ParamKind, ParamSpec, ParamValue,
-    Params, PortSpec, Result, layers,
+    Params, PortSpec, Result, Unit, layers,
 };
 
-use crate::noise::{FbmParams, fbm_field};
+use crate::noise::{FbmParams, cycles_per_region, fbm_field};
 
 /// Stable type identifier and registry key.
 const TYPE_ID: &str = "generator.fbm";
+
+/// Default feature size, in world units.
+///
+/// The old default was 2 cycles per map, and the default world is 1024 m across, so 512 m is the
+/// same terrain a new graph produced before. Expressed at that world size on purpose: a default in
+/// metres has to be a real size, and this is the one it already was.
+const DEFAULT_WAVELENGTH: f64 = 512.0;
 
 /// fBm Perlin noise generator. A generator by arity: no inputs, one output.
 #[derive(Clone)]
@@ -33,18 +40,22 @@ impl Operator for Fbm {
             inputs: Vec::new(),
             outputs: vec![PortSpec::new("out")],
             params: vec![
-                // Frequency is perceptually logarithmic (octaves): a log slider spreads the
-                // usable low end across the track instead of cramming it below the first tick.
-                // The floor is a small positive value, since a log axis has no zero.
+                // The base octave's period, in world units: the size of the largest features the
+                // noise makes. Replaces a cycles-per-map frequency, which meant a different
+                // landform on every world size and capped features at a 64th of the map.
+                //
+                // No longer logarithmic. The log axis existed to spread a cramped low end across a
+                // slider track; the magnitude ruler (#358) reaches four decades directly, so the
+                // control that needed the trick is gone, and this matches `waves`.
                 ParamSpec::new(
-                    "frequency",
+                    "wavelength",
                     ParamKind::Float {
-                        min: 0.25,
-                        max: 64.0,
+                        min: 0.0,
+                        max: 100_000.0,
                     },
-                    ParamValue::Float(2.0),
+                    ParamValue::Float(DEFAULT_WAVELENGTH),
                 )
-                .logarithmic(),
+                .with_unit(Unit::Meters),
                 ParamSpec::new(
                     "octaves",
                     ParamKind::Int { min: 1, max: 12 },
@@ -110,15 +121,18 @@ impl Operator for Fbm {
         }
     }
 
-    /// Pure of the world globals: no sea level, world height, or world extent, so those
-    /// world-setting sliders never invalidate this node.
+    /// Reads the world extent, which sets how many cycles of the wavelength span the map. Sea level
+    /// and world height are still nothing to do with this node.
     fn context_deps(&self) -> ymir_core::ContextDeps {
-        ymir_core::ContextDeps::NO_WORLD
+        ymir_core::ContextDeps::WORLD_EXTENT
     }
 
     fn eval(&self, _inputs: Inputs, params: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
         let fbm = FbmParams {
-            frequency: params.get_f64("frequency", 2.0),
+            frequency: cycles_per_region(
+                params.get_f64("wavelength", DEFAULT_WAVELENGTH),
+                ctx.world_extent(),
+            ),
             // Range is advisory until the graph/UI validate; clamp defensively so
             // an out-of-range octave count cannot misbehave.
             octaves: params.get_i64("octaves", 5).clamp(0, 32) as u32,
@@ -165,8 +179,12 @@ mod tests {
     use ymir_core::Region;
     use ymir_core::registry;
 
+    /// The default world, 1024 m across, which is what the editor starts a project at.
+    ///
+    /// Stated rather than left at the context's unit default: the wavelength is in world units now,
+    /// so a context with no world describes a 1 m map, on which a 512 m feature is half a cycle.
     fn default_ctx() -> EvalContext {
-        EvalContext::new(8, 8, Region::UNIT, 42)
+        EvalContext::new(8, 8, Region::UNIT, 42).with_world_extent(1024.0)
     }
 
     #[test]
@@ -229,6 +247,61 @@ mod tests {
             )
             .unwrap();
         assert_ne!(base[0].content_hash(), panned[0].content_hash());
+    }
+
+    #[test]
+    fn a_feature_keeps_its_real_size_when_the_world_grows() {
+        // The whole point of the change. A 256 m feature on a 1 km world and the same 256 m feature
+        // on a 4 km world are the same landform; the larger world simply holds more of them. Before,
+        // the parameter was cycles per map, so growing the world made every feature four times
+        // larger in metres and no graph meant anything without knowing the world size.
+        let op = Fbm;
+        let wavelength = Params::new().with("wavelength", ParamValue::Float(256.0));
+        let small = EvalContext::new(64, 64, Region::UNIT, 3).with_world_extent(1024.0);
+        let large = EvalContext::new(64, 64, Region::UNIT, 3).with_world_extent(4096.0);
+
+        let a = op
+            .eval(Inputs::required_only(&[]), &wavelength, &small)
+            .unwrap();
+        let b = op
+            .eval(Inputs::required_only(&[]), &wavelength, &large)
+            .unwrap();
+        assert_ne!(
+            a[0].content_hash(),
+            b[0].content_hash(),
+            "four times the world at a fixed feature size must sample four times as much noise"
+        );
+
+        // And the converse: the terrain that used to come out of one cycles-per-map value is still
+        // reachable, by asking for the size that value described on each world.
+        let quarter = op
+            .eval(
+                Inputs::required_only(&[]),
+                &Params::new().with("wavelength", ParamValue::Float(1024.0)),
+                &large,
+            )
+            .unwrap();
+        assert_eq!(
+            a[0].content_hash(),
+            quarter[0].content_hash(),
+            "a quarter of the world is a quarter of the world, whatever the world measures"
+        );
+    }
+
+    #[test]
+    fn a_world_with_no_extent_still_makes_noise() {
+        // A context that never had a world set describes a 1 m map. Falling back to one cycle
+        // across it beats dividing by zero, and beats a field of NaN.
+        let op = Fbm;
+        let ctx = EvalContext::new(16, 16, Region::UNIT, 1);
+        let out = op
+            .eval(Inputs::required_only(&[]), &Params::default(), &ctx)
+            .unwrap();
+        let layer = out[0].layer(layers::HEIGHT).unwrap();
+        assert!(
+            layer.as_slice().iter().all(|v| v.is_finite()),
+            "no NaN from a degenerate world"
+        );
     }
 
     #[test]

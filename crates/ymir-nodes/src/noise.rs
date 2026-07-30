@@ -25,6 +25,23 @@ use ymir_core::{Field, Layer, Region, layers};
 
 use crate::shape::smoothstep;
 
+/// Converts a feature size in world units into the cycles-per-region frequency the samplers take.
+///
+/// The samplers work in cycles across the region, which is the whole map, but a feature size is only
+/// meaningful in metres: a value of "two cycles" describes a different landform on a 1 km world than
+/// on a 10 km one, so a graph could not survive a change of world size. Every other size control in
+/// the application is already in metres, and this is what puts noise on the same footing.
+///
+/// A zero or negative size has no features to place, and a zero world extent has nowhere to place
+/// them. Both fall back to one cycle across the world, which is what [`crate::waves`] does, rather
+/// than dividing by zero and filling the field with NaN.
+pub(crate) fn cycles_per_region(size_m: f64, world_extent: f64) -> f64 {
+    if size_m <= 0.0 || world_extent <= 0.0 {
+        return 1.0;
+    }
+    world_extent / size_m
+}
+
 /// Parameters for fractional Brownian motion layering of simplex noise.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct FbmParams {
