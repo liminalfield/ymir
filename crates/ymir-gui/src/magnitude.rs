@@ -434,13 +434,17 @@ fn draw(
 ) {
     let width = overlay_width();
     let height = READOUT_H + GHOST_UP_H + RULER_H + GHOST_DOWN_H + PAD * 2.0;
-    // Below the field, clear of it. An earlier version placed the ruler a fixed distance below the
-    // *press point*, which put the overlay on top of the field it belongs to. Leaving the field
+    // Above the field, clear of it. An earlier version placed the ruler a fixed distance below the
+    // *press point*, which put the overlay on top of the field it belongs to; leaving the field
     // visible means the number can be watched changing in place, which is where the eye already is.
-    let mut top = field.bottom() + 4.0;
+    //
+    // Above rather than below because the hand is below: a ruler under the field sits where the
+    // pointer and the arm already are, and the value being changed is the thing that should not be
+    // covered. Flips below only when there is no room above.
     let screen = ui.ctx().content_rect();
-    if top + height > screen.bottom() - 8.0 {
-        top = field.top() - height - 4.0;
+    let mut top = field.top() - height - 4.0;
+    if top < screen.top() + 8.0 {
+        top = field.bottom() + 4.0;
     }
     let origin = egui::pos2(ruler_left - PAD, top);
     let ruler_top = top + PAD + READOUT_H + GHOST_UP_H;
