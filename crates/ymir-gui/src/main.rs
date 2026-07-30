@@ -5053,47 +5053,42 @@ fn paint_label(type_id: &str, suffix: &str, default: &str) -> String {
     }
 }
 
-/// Applies a released world-box gesture: the pan to the explored node, the extent to the world.
+/// Slides the explored node's pan by `delta`, a fraction of the field view on each axis.
 ///
-/// The pan arrives as a fraction of the field view, so it converts with the field's width in metres,
-/// which is the world times the pull-back. That is the whole reason the view can stay free of world
-/// units: it moved the box by so much of what it was showing, and only here is that a distance.
+/// Applied live, as the drag happens. The view is centred on the node's pan, so moving the pan by
+/// exactly what the pointer travelled moves the content by exactly that much: the pattern tracks the
+/// hand, the same way dragging a map does, and the world box stays where it is at the centre.
 ///
-/// Resizing holds the field view still. The view shows `world_extent * zoom` metres across, so
-/// growing the world by `s` and dividing the pull-back by the same `s` leaves that product unchanged:
-/// the field behind the box does not move and only the box changes size, which is what the gesture
-/// appeared to do. Letting the pull-back stand instead would zoom the view out every time the world
-/// grew, which is a surprise the gesture never asked for.
-fn apply_explore_commit(state: &mut AppState, commit: viewport2d::ExploreCommit) {
+/// The fraction becomes a distance here because this is the only place that knows how wide the field
+/// is: the world times the pull-back.
+fn pan_explored_node(state: &mut AppState, delta: egui::Vec2) {
     let Some(handle) = state.explore_target else {
         return;
     };
     let Some(id) = state.graph.node_id_of(handle) else {
         return;
     };
-
-    if commit.pan != egui::Vec2::ZERO {
-        let field_m = state.world_extent * f64::from(state.explore_zoom);
-        let mut params = state.graph.params(id).cloned().unwrap_or_default();
-        for (name, delta) in [("offset_x", commit.pan.x), ("offset_y", commit.pan.y)] {
-            let was = params.get_f64(name, 0.0);
-            let now = was + f64::from(delta) * field_m;
-            params.insert(name, ParamValue::Float(now));
-        }
-        // The node vanished mid-gesture; drop the pan rather than error every frame, as the paint
-        // path does. `exploring()` will already have gone false.
-        if state.graph.set_params(id, params).is_err() {
-            state.explore_target = None;
-            return;
-        }
+    let field_m = state.world_extent * f64::from(state.explore_zoom);
+    let mut params = state.graph.params(id).cloned().unwrap_or_default();
+    for (name, component) in [("offset_x", delta.x), ("offset_y", delta.y)] {
+        let moved = params.get_f64(name, 0.0) + f64::from(component) * field_m;
+        params.insert(name, ParamValue::Float(moved));
     }
-
-    if (commit.extent_scale - 1.0).abs() > f32::EPSILON {
-        let scale = f64::from(commit.extent_scale);
-        state.world_extent = (state.world_extent * scale).clamp(1.0, 1_000_000.0);
-        state.explore_zoom =
-            (state.explore_zoom / commit.extent_scale).clamp(MIN_EXPLORE_ZOOM, MAX_EXPLORE_ZOOM);
+    // The node vanished mid-drag; drop the pan rather than error every frame, as the paint path does.
+    if state.graph.set_params(id, params).is_err() {
+        state.explore_target = None;
     }
+}
+
+/// Scales the world extent by `scale`, from a released resize of the world box.
+///
+/// The pull-back is divided by the same factor, so `world_extent * zoom` is unchanged and the field
+/// view holds still: the pattern behind the box does not move and only the box changes size, which is
+/// what the gesture appeared to do. Letting the pull-back stand would zoom the view out every time the
+/// world grew, which the gesture never asked for.
+fn resize_explored_world(state: &mut AppState, scale: f32) {
+    state.world_extent = (state.world_extent * f64::from(scale)).clamp(1.0, 1_000_000.0);
+    state.explore_zoom = (state.explore_zoom / scale).clamp(MIN_EXPLORE_ZOOM, MAX_EXPLORE_ZOOM);
 }
 
 /// The Explore toggle for a node whose field continues past the map.
@@ -9635,8 +9630,11 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
                     * (-sample.field_scroll * EXPLORE_ZOOM_SPEED).exp())
                 .clamp(MIN_EXPLORE_ZOOM, MAX_EXPLORE_ZOOM);
             }
-            if let Some(commit) = sample.explore_commit {
-                apply_explore_commit(state, commit);
+            if sample.explore_pan != egui::Vec2::ZERO {
+                pan_explored_node(state, sample.explore_pan);
+            }
+            if let Some(scale) = sample.explore_resize {
+                resize_explored_world(state, scale);
             }
         }
     }
