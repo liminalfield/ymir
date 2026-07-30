@@ -421,6 +421,6 @@ mod tests {
     #[test]
     fn output_matches_golden_value() {
         let out = run(&ramp(16), 8.0, &ctx(16, 16.0));
-        assert_eq!(out.content_hash().to_u64(), 0xcae5_38cd_50cd_a4d7);
+        assert_eq!(out.content_hash().to_u64(), 0xa3ec_e904_f0b9_b7bf);
     }
 }

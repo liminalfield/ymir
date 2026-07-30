@@ -250,6 +250,6 @@ mod tests {
             &Params::default().with("cell_size", ParamValue::Float(cells(6.0))),
             &ctx(8),
         );
-        assert_eq!(out.content_hash().to_u64(), 0xa5c8_4714_ed1f_015a);
+        assert_eq!(out.content_hash().to_u64(), 0xa122_514b_7783_5cc8);
     }
 }

@@ -436,7 +436,7 @@ mod tests {
                 .with("antialias", ParamValue::Bool(false)),
             &ctx(8),
         );
-        assert_eq!(out.content_hash().to_u64(), 0xa4a6_a8e3_1504_4743);
+        assert_eq!(out.content_hash().to_u64(), 0x1800_b168_dc9c_8989);
     }
 
     #[test]
@@ -445,7 +445,7 @@ mod tests {
             &Params::default().with("cell_size", ParamValue::Float(cells(6.0))),
             &ctx(8),
         );
-        assert_eq!(out.content_hash().to_u64(), 0x7431_c7d1_4598_14e5);
+        assert_eq!(out.content_hash().to_u64(), 0x07bc_952d_cb90_443c);
     }
 
     #[test]

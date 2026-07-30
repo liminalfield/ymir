@@ -232,6 +232,6 @@ mod tests {
     fn output_matches_golden_value() {
         // Fixed fingerprint so a change to the ridged math fails here.
         let out = run(&Params::default(), &default_ctx());
-        assert_eq!(out.content_hash().to_u64(), 0x3c38_f4f2_77fd_cae4);
+        assert_eq!(out.content_hash().to_u64(), 0x01a8_429d_de3d_1794);
     }
 }

@@ -211,7 +211,7 @@ mod tests {
                 &default_ctx(),
             )
             .unwrap();
-        assert_eq!(out[0].content_hash().to_u64(), 0xb075_6620_1b58_4592);
+        assert_eq!(out[0].content_hash().to_u64(), 0x4ad5_ce9d_93be_739d);
     }
 
     #[test]
@@ -257,9 +257,9 @@ mod tests {
         // so its real distance was offset * world_extent: widening the world panned further, and the
         // patch you had chosen moved out from under you.
         //
-        // Checked at the shared corner. The 4 km world starts at the same field position as the 1 km
-        // one and carries on for three times as far, so its first quarter is the whole of the small
-        // world, cell for cell, at four times the resolution to put the samples in the same places.
+        // Checked at the shared centre. Both worlds are centred on the same field position, so the
+        // 4 km world's middle quarter is the whole of the 1 km world, cell for cell, at four times
+        // the resolution to put the samples in the same places.
         let op = Fbm;
         let params = Params::new()
             .with("wavelength", ParamValue::Float(256.0))
@@ -282,10 +282,12 @@ mod tests {
 
         let small_h = small[0].layer(layers::HEIGHT).unwrap();
         let large_h = large[0].layer(layers::HEIGHT).unwrap();
+        // The small world occupies the middle 32x32 of the large one's 128x128.
+        let inset = (128 - 32) / 2;
         for y in 0..32 {
             for x in 0..32 {
                 let a = small_h.get(x, y).unwrap_or(0.0);
-                let b = large_h.get(x, y).unwrap_or(0.0);
+                let b = large_h.get(x + inset, y + inset).unwrap_or(0.0);
                 assert!(
                     (a - b).abs() < 1e-6,
                     "cell ({x}, {y}) moved when the world grew: {a} then {b}"

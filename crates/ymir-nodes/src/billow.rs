@@ -232,6 +232,6 @@ mod tests {
     fn output_matches_golden_value() {
         // Fixed fingerprint so a change to the billow math fails here.
         let out = run(&Params::default(), &default_ctx());
-        assert_eq!(out.content_hash().to_u64(), 0x8ce4_ebb0_9ec2_e3f3);
+        assert_eq!(out.content_hash().to_u64(), 0xe5e6_e14d_3931_f6a5);
     }
 }

@@ -267,6 +267,6 @@ mod tests {
         // octave-envelope normalization changed from the infinite-octave closed form to the
         // finite geometric sum, which rescales the output (the form is unchanged).
         let out = run(&Params::default(), &default_ctx());
-        assert_eq!(out.content_hash().to_u64(), 0x4fa2_4f50_6559_bf1b);
+        assert_eq!(out.content_hash().to_u64(), 0x129e_e7c5_c737_0dd2);
     }
 }

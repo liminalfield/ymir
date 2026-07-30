@@ -32,8 +32,10 @@ fn fbm_then_thermal_matches_golden() {
     let mut cache = EvalCache::new(16);
     let out = graph.evaluate(erosion, &request, &mut cache).unwrap();
 
-    // Re-pinned with the stated world above (#361). Both halves of the graph moved: the generator
-    // now samples a 512 m wavelength across 1024 m rather than 2 cycles across an unstated map, and
-    // the erosion sees 16 m cells rather than 1.6 cm ones, so its repose angle bites differently.
-    assert_eq!(out[0].content_hash().to_u64(), 0x58aa_a555_e0c5_042e);
+    // Re-pinned twice over. #361 stated the world above, which moved both halves of the graph: the
+    // generator samples a 512 m wavelength across 1024 m rather than 2 cycles across an unstated map,
+    // and the erosion sees 16 m cells rather than 1.6 cm ones, so its repose angle bites differently.
+    // Then centring the noise on the field moved the sampled patch by half a world, and fixing the
+    // coordinate hash changed every lattice gradient.
+    assert_eq!(out[0].content_hash().to_u64(), 0x48ed_fdec_5040_a0b6);
 }
