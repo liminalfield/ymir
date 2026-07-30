@@ -27,7 +27,7 @@ This node takes no inputs.
 
 | Parameter | Type | Range | Default | Unit | Description | Field-driven |
 |---|---|---|---|---|---|---|
-| Wavelength (`wavelength`) | float | [0, 100000] | 64 | m | Distance from one crest to the next, in world units. | no |
+| Wavelength (`wavelength`) | float | [0, 100000] | 64 | m | The distance from one crest to the next, in world units. On a noise generator it is the size of the largest features. | no |
 | Direction (`direction`) | float | [0, 360] | 0 | ° | Which way the bands run, in degrees. The crests lie across this direction. | no |
 | Phase (`phase`) | float | [0, 1] | 0 |  | Slides the pattern along its direction, without moving or resizing the bands. | no |
 | Skew (`skew`) | float | [-1, 1] | 0 |  | Moves the crest within each wave, so one slope grows long and the other short. Positive puts the crest late, which is the way round a dune runs. Nothing downstream can do this: a Curve changes height, so it treats both slopes alike. | no |

@@ -375,7 +375,10 @@ fn lookup(key: &str) -> Option<&'static str> {
         }
 
         "param-wavelength" => "Wavelength",
-        "param-wavelength-desc" => "Distance from one crest to the next, in world units.",
+        "param-wavelength-desc" => {
+            "The distance from one crest to the next, in world units. On a noise generator it is \
+             the size of the largest features."
+        }
         "param-direction" => "Direction",
         "param-direction-desc" => {
             "Which way the bands run, in degrees. The crests lie across this direction."

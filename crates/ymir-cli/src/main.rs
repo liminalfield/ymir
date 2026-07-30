@@ -165,7 +165,10 @@ fn run() -> Result<(), Box<dyn Error>> {
     // Pulling the endpoint evaluates the chain and writes the file as a side
     // effect (endpoints are not memoized). Run erosion on the GPU when a device is reachable,
     // else on the CPU: a headless host with no adapter falls back cleanly.
-    let mut request = EvalRequest::new(size, size, Region::UNIT, seed);
+    // A 1024 m world, the size the editor starts a project at. Stated rather than left at the unit
+    // default, which is a 1 m map: the noise is sized in world units now, so a sample with no world
+    // would ask for a 512 m feature on a one-metre island and render something nearly flat.
+    let mut request = EvalRequest::new(size, size, Region::UNIT, seed).with_world_extent(1024.0);
     match ymir_gpu::GpuContext::new_headless() {
         Ok(gpu) => request = request.with_compute(std::sync::Arc::new(gpu)),
         Err(err) => log::info!("no GPU device, rendering on CPU: {err}"),

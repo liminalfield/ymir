@@ -265,20 +265,20 @@ mod tests {
         assert_eq!(fbm.display_name, "fBm Noise");
         assert!(fbm.inputs.is_empty(), "a generator has no inputs");
         assert!(!fbm.outputs.is_empty(), "a generator has an output");
-        let freq = fbm
+        let size = fbm
             .params
             .iter()
-            .find(|p| p.name == "frequency")
-            .expect("fbm has a frequency param");
-        assert_eq!(freq.kind, "float");
+            .find(|p| p.name == "wavelength")
+            .expect("fbm has a wavelength param");
+        assert_eq!(size.kind, "float");
         assert!(
-            freq.min.is_some() && freq.max.is_some(),
+            size.min.is_some() && size.max.is_some(),
             "a float param carries a numeric range"
         );
-        // frequency is a shared, meaning-invariant param: it resolves with a label and description.
-        assert_eq!(freq.label, "Frequency");
-        assert_eq!(freq.source, "shared");
-        assert!(freq.description.is_some());
+        // wavelength is a shared, meaning-invariant param: it resolves with a label and description.
+        assert_eq!(size.label, "Wavelength");
+        assert_eq!(size.source, "shared");
+        assert!(size.description.is_some());
     }
 
     #[test]
