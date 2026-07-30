@@ -40,6 +40,11 @@ pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(0xe9, 0xed, 0xf2);
 pub const TEXT_SECONDARY: Color32 = Color32::from_rgb(0xb2, 0xb9, 0xc2);
 /// Tertiary text: section labels, counts, stat lines, placeholders. Frost `ink-lo`.
 pub const TEXT_TERTIARY: Color32 = Color32::from_rgb(0x87, 0x8f, 0x99);
+/// Text drawn on top of an `ACCENT_PRIMARY` fill.
+///
+/// Darker than any background token, because the accent is a mid-tone cyan: `BG_ABYSS` on it reads
+/// at about 4:1, which is thin for small type, and white on it is worse at 3:1.
+pub const INK_ON_ACCENT: Color32 = Color32::from_rgb(0x0d, 0x14, 0x1a);
 // The aurora accents (green/violet/amber) exist in the handoff but are added when a later theming
 // step first uses one, keeping this file to the colours in play.
 

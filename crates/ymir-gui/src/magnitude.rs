@@ -279,9 +279,14 @@ use eframe::egui;
 
 /// Column width in points. Never below 20: a generous target is the point of the design, and it is
 /// what a ruler has that pointing at the digits of a number does not.
-const COLUMN_W: f32 = 34.0;
+///
+/// Wide enough that the longest label, `0.001` at five characters, fits without shrinking the type
+/// past reading size. At 34 it did not, and the digits ran over the column's edges.
+const COLUMN_W: f32 = 40.0;
 /// Ruler row height.
 const RULER_H: f32 = 40.0;
+/// The column labels' preferred size, reduced by `label_size` if a label would not fit.
+const LABEL_PT: f32 = 12.0;
 /// Readout row: the value, the step, and any clamp tag.
 const READOUT_H: f32 = 26.0;
 /// The upward preview's band. Taller than the downward one on purpose: the live cursor sits in this
@@ -306,10 +311,62 @@ const ARM_PX: f32 = 6.0;
 /// Larger than the jitter of a hand holding a vertical stroke, so scrubbing is not disarmed by
 /// noise, and small enough that a deliberate sideways move re-aims at once.
 const REAIM_PX: f32 = 3.0;
+/// How long the button is held, in seconds, before the ruler opens.
+///
+/// A click that means "type here" and a hold that means "change this" are the same press for their
+/// first moments, and only time tells them apart. Long enough that clicking into a field to type it
+/// never shows the ruler, short enough that a hold does not feel like waiting.
+const HOLD_S: f64 = 0.18;
 
 /// The overlay's full width, frame included. Constant: every magnitude is always drawn.
 fn overlay_width() -> f32 {
     COLUMN_W * MAGNITUDES.len() as f32 + PAD * 2.0
+}
+
+/// The largest label size, up to `LABEL_PT`, at which every magnitude fits its column.
+///
+/// Measured rather than assumed. The labels run to five characters at the fine end of the ruler, so a
+/// size chosen by eye against one font and one scale factor overflows the column in another, and the
+/// digits spill over the cell edges instead of the text getting smaller. `room` is the width a label
+/// may occupy inside a column.
+fn label_size(ui: &egui::Ui, room: f32) -> f32 {
+    let width = ui
+        .painter()
+        .layout_no_wrap(
+            widest_label(),
+            egui::FontId::monospace(LABEL_PT),
+            egui::Color32::WHITE,
+        )
+        .rect
+        .width();
+    fit(width, room)
+}
+
+/// The magnitude label that needs the most room, as it is drawn.
+fn widest_label() -> String {
+    MAGNITUDES
+        .iter()
+        .map(|m| trim(*m))
+        .max_by_key(String::len)
+        .unwrap_or_default()
+}
+
+/// Scales `LABEL_PT` down until a label measuring `width` at that size fits `room`.
+fn fit(width: f32, room: f32) -> f32 {
+    if width <= room || width <= 0.0 {
+        return LABEL_PT;
+    }
+    // Monospace advance is proportional to size, so scaling by the overshoot lands in one step.
+    // Floored, so rounding cannot put it back over the edge.
+    (LABEL_PT * room / width).floor()
+}
+
+/// Whether the press has become a gesture: dragged at all, or held long enough.
+///
+/// A drag opens the ruler at once, because moving the pointer while holding the button is already an
+/// unambiguous answer about what the press was for. A still press has to wait it out.
+fn opens(dragged: bool, held_for: f64) -> bool {
+    dragged || held_for >= HOLD_S
 }
 
 /// Holds the ruler's left edge inside `screen`, so no part of the overlay leaves the window.
@@ -330,8 +387,8 @@ fn clamp_ruler(left: f32, screen: egui::Rect) -> f32 {
 /// Runs the magnitude ruler for a value field, returning whether the value moved this frame.
 ///
 /// Shaped to drop into the same place `scrub_drag` occupies, so a row adopts it by swapping one call.
-/// The cursor is locked and hidden only on the transition into scrubbing, exactly as the older scrub
-/// does, and never during aim: a pinned invisible pointer cannot be aimed with.
+/// The pointer is never grabbed or hidden, unlike the older scrub: a pinned invisible pointer cannot
+/// be aimed with, and aiming is half of this gesture.
 pub(crate) fn ruler_scrub(
     ui: &mut egui::Ui,
     resp: &egui::Response,
@@ -358,7 +415,31 @@ pub(crate) fn ruler_scrub(
     // and that first movement could tick the value before its magnitude had even been shown. Holding
     // the button opens the ruler and changes nothing; the value moves when the pointer does.
     let holding = resp.is_pointer_button_down_on() || resp.dragged();
-    if holding && gesture.is_none() {
+    let since_id = id.with("since");
+    if !holding {
+        // Release ends the gesture and the wait together, so the next press is timed from its own
+        // start rather than from an abandoned one.
+        if gesture.is_some() {
+            clear(ui, id);
+        }
+        ui.data_mut(|d| d.remove_temp::<f64>(since_id));
+        return false;
+    }
+
+    if gesture.is_none() {
+        // The press waits before becoming a gesture. Opening on the first held frame meant clicking
+        // into a field to type its value flashed the whole overlay open and shut, which reads as a
+        // glitch rather than as a mode not entered.
+        let now = ui.input(|i| i.time);
+        let since = ui.data_mut(|d| *d.get_temp_mut_or_insert_with(since_id, || now));
+        if !opens(resp.dragged(), now - since) {
+            // A press held perfectly still generates no further input, so without asking for the
+            // frame the ruler would open only once the pointer moved again.
+            let left = (HOLD_S - (now - since)).max(0.0);
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f64(left));
+            return false;
+        }
         let press = resp.interact_pointer_pos().unwrap_or(resp.rect.center());
         // The ruler's position is fixed here, once, and held for the rest of the gesture.
         //
@@ -382,11 +463,6 @@ pub(crate) fn ruler_scrub(
     let Some(active) = gesture else {
         return false;
     };
-    // Alive while the button is held; released or lost, the gesture ends.
-    if !holding {
-        clear(ui, id);
-        return false;
-    }
 
     let usable = usable_columns(resolution, bounds);
     if usable.is_empty() {
@@ -442,22 +518,20 @@ pub(crate) fn ruler_scrub(
         ui, id, resp.rect, ruler_left, &usable, column, armed, *value, bounds, suffix,
     );
 
-    if resp.drag_stopped() && !resp.is_pointer_button_down_on() {
-        clear(ui, id);
-    } else {
-        ui.data_mut(|d| {
-            d.insert_temp(
-                id,
-                Some(Gesture {
-                    baseline: active.baseline,
-                    carry,
-                    armed,
-                    vertical_run,
-                    ruler_left,
-                }),
-            );
-        });
-    }
+    // Carried to the next frame. The release is handled at the top, where the wait is cleared too, so
+    // there is one place the gesture ends rather than two that have to agree.
+    ui.data_mut(|d| {
+        d.insert_temp(
+            id,
+            Some(Gesture {
+                baseline: active.baseline,
+                carry,
+                armed,
+                vertical_run,
+                ruler_left,
+            }),
+        );
+    });
     moved
 }
 
@@ -465,10 +539,7 @@ pub(crate) fn ruler_scrub(
 ///
 /// Nothing to hand back: the pointer was never grabbed.
 fn clear(ui: &egui::Ui, id: egui::Id) {
-    ui.data_mut(|d| {
-        d.insert_temp::<Option<Gesture>>(id, None);
-        d.insert_temp::<Option<egui::Pos2>>(id.with("press"), None);
-    });
+    ui.data_mut(|d| d.insert_temp::<Option<Gesture>>(id, None));
 }
 
 /// Paints the overlay: readout, both previews, and the ruler.
@@ -600,6 +671,7 @@ fn draw(
             // removed or struck through: removing them moves the survivors between parameters and
             // costs the fixed positions that make the ruler worth having, and a strike read as
             // clutter. Fading says "nothing here" while nothing moves.
+            let label_pt = label_size(ui, COLUMN_W - 6.0);
             for (slot, magnitude) in MAGNITUDES.iter().enumerate() {
                 let live = usable.contains(&slot);
                 let is_active = active == Some(slot);
@@ -623,19 +695,22 @@ fn draw(
                     ),
                     egui::StrokeKind::Inside,
                 );
+                // Small type on a mid-tone ground needs the contrast it can get: the labels are the
+                // one thing in the overlay that has to be read rather than glanced at, since the
+                // whole gesture is choosing between them.
                 let ink = if is_active {
-                    crate::theme::BG_ABYSS
+                    crate::theme::INK_ON_ACCENT
                 } else if live {
-                    crate::theme::TEXT_SECONDARY
+                    crate::theme::TEXT_PRIMARY
                 } else {
                     // Faded well back: readable as a position, plainly not a control.
-                    crate::theme::LINE
+                    crate::theme::LINE_STRONG
                 };
                 p.text(
                     cell.center(),
                     egui::Align2::CENTER_CENTER,
                     trim(*magnitude),
-                    mono(13.0),
+                    mono(label_pt),
                     ink,
                 );
             }
@@ -946,6 +1021,33 @@ mod tests {
             ruler_left: 0.0,
         };
         assert!((g.baseline - 41.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_click_never_opens_the_ruler_but_a_hold_does() {
+        // Clicking into a field to type it is a press of a few tens of milliseconds. Opening on the
+        // first held frame flashed the overlay open and shut on every one of them.
+        assert!(!opens(false, 0.0));
+        assert!(!opens(false, 0.08));
+        assert!(opens(false, HOLD_S));
+        // Moving the pointer while holding answers the question early, so it opens at once.
+        assert!(opens(true, 0.0));
+    }
+
+    #[test]
+    fn labels_shrink_only_as_far_as_the_column_makes_them() {
+        assert_eq!(
+            widest_label(),
+            "0.001",
+            "the fine end of the ruler is longest"
+        );
+        // Fits: the preferred size stands.
+        assert_eq!(fit(30.0, 34.0), LABEL_PT);
+        assert_eq!(fit(34.0, 34.0), LABEL_PT);
+        // Overshoots by a sixth, so the size comes down by about a sixth, floored under the edge.
+        assert_eq!(fit(36.0, 30.0), 10.0);
+        // A font that measures nothing is not a reason to divide by zero.
+        assert_eq!(fit(0.0, 34.0), LABEL_PT);
     }
 
     #[test]

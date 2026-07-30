@@ -36,7 +36,7 @@ In the inspector, for the selected node.
 | Step an integer by one | The − and + buttons beside it |
 | Reset a number to its default | The revert arrow, which appears once the value differs from it |
 
-Pressing a value box opens a ruler above it, with a column per magnitude: 1000, 100, 10, 1, 0.1, 0.01, 0.001. The column under the pointer is the one you are changing, and moving sideways picks another. Columns the value cannot reach are faded: an integer has nothing below the 1s, and a parameter that tops out at 64 has nothing above the 10s.
+Holding the pointer down on a value box opens a ruler above it, with a column per magnitude: 1000, 100, 10, 1, 0.1, 0.01, 0.001. A click is shorter than that hold, so clicking into a box to type its value does not bring the ruler up. The column under the pointer is the one you are changing, and moving sideways picks another. Columns the value cannot reach are faded: an integer has nothing below the 1s, and a parameter that tops out at 64 has nothing above the 10s.
 
 Choosing a column and changing the value are the same gesture, so they happen in that order. Nothing moves while you are still crossing the ruler; a vertical stroke starts the change, and the step reads bright once it does. Drag up to raise the value and down to lower it, one step per short pull, for as long as you hold. Moving sideways again goes back to choosing.
 
