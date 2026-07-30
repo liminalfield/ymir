@@ -380,31 +380,6 @@ pub(crate) fn toggle(ui: &mut egui::Ui, on: bool) -> egui::Response {
     resp.on_hover_text(if on { "On" } else { "Off" })
 }
 
-/// How far an integer scrub travels per point of pointer motion (#246). Deliberately flat rather
-/// than derived from the parameter's range: a range-proportional speed, as the sliders use, would
-/// be millions per point on fbm's seed (`0..=i32::MAX`) and a whole step per point on octaves
-/// (`1..=12`). Two points per step suits both, and typing covers the long jumps.
-const SCRUB_UNITS_PER_POINT: f64 = 0.5;
-
-/// Where an integer scrub settles: rounded to a whole step, then held inside the bounds the
-/// schema declared (#246). Both halves matter. Without the round a drag would leave a fraction
-/// that the box shows and the graph stores as a truncated value; without the clamp a scrub could
-/// carry a seed below zero or octaves past their maximum, which the widget must not allow since
-/// the range is the node author's declared intent. Pure, so it is unit-tested.
-fn settle_int(v: f64, min: i64, max: i64) -> i64 {
-    v.round().clamp(min as f64, max as f64) as i64
-}
-
-/// Splits a scrubbed position into the whole step it settles on and the sub-step remainder to carry
-/// into the next frame (#246). The position is bounded first, so the remainder is always within half
-/// a step: pushing on against a limit cannot bank an ever-growing carry that a drag back the other
-/// way would have to unwind before the value moved. Pure, so it is unit-tested.
-fn split_scrub(v: f64, min: i64, max: i64) -> (i64, f64) {
-    let bounded = v.clamp(min as f64, max as f64);
-    let settled = settle_int(bounded, min, max);
-    (settled, bounded - settled as f64)
-}
-
 /// An integer stepper: a deep field with a minus button, the value in the centre, and a plus button.
 /// The buttons step by one within `[min, max]`; the centre is the same value box the float params
 /// use, so an integer can be scrubbed with an infinite cursor-locked drag or clicked and typed
@@ -506,30 +481,24 @@ fn stepper(ui: &mut egui::Ui, value: &mut i64, min: i64, max: i64) -> bool {
     // carry is what makes a slow drag work: rounding every frame and re-seeding from the stored
     // integer would throw away a third of a pixel of motion each time, so the value would sit
     // still until the pointer moved fast enough and then jump.
-    let carry_id = value_resp.id.with("scrub-carry");
-    let mut carry: f64 = if value_resp.drag_started() {
-        0.0
-    } else {
-        ui.data(|d| d.get_temp(carry_id)).unwrap_or(0.0)
-    };
-    let mut scrubbed_value = *value as f64 + carry;
-    if scrub_drag(
+    // The magnitude ruler (#358) on a float mirror, landing back on the integer. The fractional
+    // columns are unusable here and the ruler draws them recessed and struck through rather than
+    // dropping them, so a magnitude always sits in the same place whatever the parameter's kind.
+    let mut mirror = *value as f64;
+    if crate::magnitude::ruler_scrub(
         ui,
         &value_resp,
-        &mut scrubbed_value,
-        SCRUB_UNITS_PER_POINT,
-        |v| v.clamp(min as f64, max as f64),
+        &mut mirror,
+        (min as f64, max as f64),
+        crate::magnitude::Resolution::Integer,
+        "",
     ) {
-        let (settled, remainder) = split_scrub(scrubbed_value, min, max);
-        carry = remainder;
-        // Only a real move counts: reporting a change on every dragged frame would rewrite the
-        // parameter (and re-key the preview) while the value stood still.
+        let settled = mirror.round().clamp(min as f64, max as f64) as i64;
         if settled != *value {
             *value = settled;
             changed = true;
         }
     }
-    ui.data_mut(|d| d.insert_temp(carry_id, carry));
     changed
 }
 
@@ -642,13 +611,24 @@ pub(crate) fn edit(
                             drag,
                         )
                         .on_hover_text("Drag to scrub \u{b7} click to type");
-                    let scrubbed = scrub_drag(ui, &value, &mut x, speed, |v| {
-                        if wraps {
+                    // The magnitude ruler (#358): aim at a magnitude, drag to tick by it. A wrapping
+                    // direction keeps the older continuous scrub, because the ruler snaps to the grid
+                    // of the chosen column and a bearing that rolls through 360 has no grid to snap
+                    // to; `speed` is what that path still needs.
+                    let scrubbed = if wraps {
+                        scrub_drag(ui, &value, &mut x, speed, |v| {
                             finalize_value(v, Some(360.0), None)
-                        } else {
-                            finalize_value(v, None, Some((min, max)))
-                        }
-                    });
+                        })
+                    } else {
+                        crate::magnitude::ruler_scrub(
+                            ui,
+                            &value,
+                            &mut x,
+                            (min, max),
+                            crate::magnitude::Resolution::Continuous,
+                            unit_suffix(unit),
+                        )
+                    };
                     if value.changed() || scrubbed {
                         let stored = if wraps { x.rem_euclid(360.0) } else { x };
                         result = Some(ParamValue::Float(stored));
@@ -811,53 +791,6 @@ mod tests {
 
     fn spec(kind: ParamKind, default: ParamValue) -> ParamSpec {
         ParamSpec::new("p", kind, default)
-    }
-
-    #[test]
-    fn settle_int_rounds_then_clamps_to_the_declared_range() {
-        // #246: a scrub lands on whole steps and can never leave the schema's range.
-        assert_eq!(settle_int(3.4, 0, 12), 3);
-        assert_eq!(settle_int(3.6, 0, 12), 4);
-        // fbm's seed is declared non-negative: scrubbing down stops at zero rather than going
-        // negative, and a long drag up stops at the declared maximum.
-        assert_eq!(settle_int(-8.0, 0, i64::from(i32::MAX)), 0);
-        assert_eq!(
-            settle_int(1e12, 0, i64::from(i32::MAX)),
-            i64::from(i32::MAX)
-        );
-        // A signed range keeps both ends.
-        assert_eq!(settle_int(-10_500.0, -10_000, 10_000), -10_000);
-        assert_eq!(settle_int(-2.5, -10_000, 10_000), -3);
-    }
-
-    #[test]
-    fn split_scrub_carries_the_sub_step_remainder_and_keeps_it_bounded() {
-        // #246: the remainder is what makes a slow drag work. Rounding each frame and dropping it
-        // would ignore motion below half a step, so the value would stall and then jump.
-        let (settled, carry) = split_scrub(3.3, 0, 12);
-        assert_eq!(settled, 3);
-        assert!((carry - 0.3).abs() < 1e-9);
-
-        // Three frames of a third of a step each cross one whole step, carrying the remainder.
-        let mut value = 3_i64;
-        let mut carry = 0.0;
-        for _ in 0..3 {
-            let (next, remainder) = split_scrub(value as f64 + carry + 0.34, 0, 12);
-            value = next;
-            carry = remainder;
-        }
-        assert_eq!(value, 4);
-
-        // Pushing well past a limit banks no runaway carry, so a drag back the other way moves the
-        // value at once instead of unwinding a debt first.
-        let (settled, carry) = split_scrub(500.0, 0, 12);
-        assert_eq!(settled, 12);
-        assert!(
-            carry.abs() <= 0.5,
-            "carry stayed within half a step: {carry}"
-        );
-        let (settled, _) = split_scrub(settled as f64 + carry - 0.6, 0, 12);
-        assert_eq!(settled, 11, "reversing moves immediately");
     }
 
     #[test]
