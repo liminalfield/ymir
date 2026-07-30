@@ -47,35 +47,25 @@ pub(crate) enum Resolution {
     Integer,
 }
 
-/// Which phase of the gesture the control is in.
+/// A gesture in progress.
 ///
-/// Aim and scrub are separate phases rather than one continuous drag because the cursor is locked and
-/// hidden once scrubbing starts, so nothing can be aimed at after that point. The column is therefore
-/// chosen while the pointer is still real, and held for the rest of the gesture.
+/// One state, not two. An earlier version had an aim phase and a locked scrub phase, because the
+/// pointer was grabbed and hidden once scrubbing began and so could not be aimed with. That lock was
+/// inherited from the older continuous scrub, which needs it: reaching a distant value there means
+/// dragging a long way, and a grabbed pointer can drag past the screen edge.
+///
+/// The ruler does not need it, and keeping it was the mistake. Reaching a distant value here means
+/// choosing a coarser column: ten ticks of the thousands column is ten thousand, in a hundred points
+/// of travel. Nothing wants an unbounded drag, so nothing wants a grabbed pointer, so the pointer
+/// stays visible and free and the column is always simply the one it is over. No modes, no invisible
+/// state, and a mis-aim is corrected by moving the pointer rather than by starting again.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum Phase {
-    /// The overlay is open and a column is being chosen. No value has changed yet.
-    Aim {
-        /// The column under the cursor, or `None` when the cursor is off the ruler.
-        column: Option<usize>,
-    },
-    /// A column is locked in and vertical motion is moving the value.
-    Scrub {
-        /// The chosen column.
-        column: usize,
-        /// The value when the scrub began, for Escape and for the tick arithmetic.
-        baseline: f64,
-        /// Vertical pixels travelled since the last tick, carried between frames.
-        carry: f32,
-        /// Horizontal pixels travelled since the last column change.
-        ///
-        /// The column can still be changed once scrubbing, by moving sideways. Without this a
-        /// mis-aimed lock could only be escaped by releasing and starting the whole gesture again,
-        /// which is the difference between a control that forgives and one that punishes. It has to
-        /// be relative travel rather than cursor position, because the pointer is locked by then and
-        /// has no position to read.
-        drift: f32,
-    },
+pub(crate) struct Gesture {
+    /// The value when the gesture began: the Escape target, and what history compares against.
+    pub baseline: f64,
+    /// Vertical points travelled since the last tick, carried between frames so a slow drag still
+    /// moves rather than having its motion rounded away each frame.
+    pub carry: f32,
 }
 
 /// The magnitude a column carries.
@@ -150,42 +140,6 @@ pub(crate) fn tick(value: f64, step: f64, up: bool) -> f64 {
         quotient.ceil() - 1.0
     };
     next * step
-}
-
-/// Moves to a neighbouring column after `drift` points of sideways travel, returning the column and
-/// the travel left over.
-///
-/// A column can still be changed once scrubbing has begun. Without it a mis-aimed lock could only be
-/// escaped by releasing and starting the whole gesture again, which was the difference between a
-/// control that forgives a wobble and one that punishes it. Travel is relative rather than a cursor
-/// position because the pointer is locked by then and has none.
-///
-/// Travel is discarded rather than banked at the ends of the ruler and against a disabled column.
-/// Banking it would let a long push against the end jump several columns at once the moment the way
-/// cleared, which is the opposite of the predictability the whole design is for.
-pub(crate) fn reselect(
-    column: usize,
-    drift: f32,
-    column_width: f32,
-    resolution: Resolution,
-) -> (usize, f32) {
-    if column_width <= 0.0 {
-        return (column, 0.0);
-    }
-    let mut column = column;
-    let mut drift = drift;
-    while drift.abs() >= column_width {
-        let step: isize = if drift > 0.0 { 1 } else { -1 };
-        let candidate = column as isize + step;
-        let open = (0..MAGNITUDES.len() as isize).contains(&candidate)
-            && column_enabled(candidate as usize, resolution);
-        if !open {
-            return (column, 0.0);
-        }
-        column = candidate as usize;
-        drift -= step as f32 * column_width;
-    }
-    (column, drift)
 }
 
 /// Turns vertical drag into ticks: the new value, and the pixels left over to carry.
@@ -287,15 +241,28 @@ const PAD: f32 = 8.0;
 /// Vertical distance from the press point down to the ruler row's centre, so the ruler lands inside
 /// the same eye fixation as the field and aiming is a wrist movement rather than a reach.
 const RULER_BELOW_PRESS: f32 = 14.0;
-/// Vertical travel that ends aim and begins scrubbing.
-///
-/// Generous, and it has to be. Aiming means travelling up to the ruler's full width horizontally, and
-/// a hand doing that does not hold a straight line: at ten points the gesture engaged on the drift
-/// rather than on intent, locking the wrong column before the user reached the one they wanted.
-/// Horizontal movement during aim stays free and unlimited.
-const ENGAGE_PX: f32 = 26.0;
 /// Vertical travel per tick, identical for every parameter and every column.
 const PIXELS_PER_TICK: f32 = 10.0;
+
+/// The overlay's full width, frame included.
+fn overlay_width() -> f32 {
+    COLUMN_W * MAGNITUDES.len() as f32 + PAD * 2.0
+}
+
+/// Holds the ruler's left edge inside `screen`, so no part of the overlay leaves the window.
+///
+/// Returns the left edge of the *columns*, which sits `PAD` inside the frame.
+fn clamp_ruler(left: f32, screen: egui::Rect) -> f32 {
+    let width = overlay_width();
+    if width >= screen.width() {
+        // Nothing sensible to do with a window narrower than the overlay; keep it on the left edge
+        // rather than pushing it off the other side.
+        return screen.left() + PAD;
+    }
+    let lowest = screen.left() + PAD;
+    let highest = screen.right() - width + PAD;
+    left.clamp(lowest, highest)
+}
 
 /// Runs the magnitude ruler for a value field, returning whether the value moved this frame.
 ///
@@ -311,137 +278,105 @@ pub(crate) fn ruler_scrub(
     suffix: &str,
 ) -> bool {
     let id = resp.id.with("magnitude-ruler");
-    let mut phase: Option<Phase> = ui.data(|d| d.get_temp::<Option<Phase>>(id)).flatten();
+    let mut gesture: Option<Gesture> = ui.data(|d| d.get_temp::<Option<Gesture>>(id)).flatten();
 
-    // Escape abandons the gesture and puts the value back. Checked before anything else so a
-    // cancelled drag cannot also commit on the same frame.
-    if phase.is_some() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-        if let Some(Phase::Scrub { baseline, .. }) = phase {
-            *value = baseline;
-        }
-        release(ui, id);
+    // Escape abandons the gesture and puts the value back. Checked first, so a cancelled drag cannot
+    // also commit on the same frame.
+    if let Some(active) = gesture
+        && ui.input(|i| i.key_pressed(egui::Key::Escape))
+    {
+        *value = active.baseline;
+        clear(ui, id);
         return true;
     }
 
     if resp.drag_started() {
         let press = resp.interact_pointer_pos().unwrap_or(resp.rect.center());
-        phase = Some(Phase::Aim { column: None });
+        gesture = Some(Gesture {
+            baseline: *value,
+            carry: 0.0,
+        });
         ui.data_mut(|d| d.insert_temp(id.with("press"), Some(press)));
     }
 
-    let Some(current) = phase else {
+    let Some(active) = gesture else {
         return false;
     };
+    if !resp.dragged() && !resp.drag_stopped() {
+        clear(ui, id);
+        return false;
+    }
     let press: egui::Pos2 = ui
         .data(|d| d.get_temp::<Option<egui::Pos2>>(id.with("press")))
         .flatten()
         .unwrap_or(resp.rect.center());
 
-    if !resp.dragged() && !resp.drag_stopped() {
-        // The pointer left without a release event reaching us; drop the gesture rather than leaving
-        // the overlay stranded on screen.
-        release(ui, id);
-        return false;
+    // The ruler opens with the magnitude already in play under the press point, so the first thing
+    // under the pointer is the one most likely wanted. Held inside the window, because a field on the
+    // right of the inspector would otherwise put half the ruler off the edge of the screen.
+    //
+    // Clamping here rather than at paint time is what keeps it honest: this one position decides both
+    // where the columns are drawn and which one the pointer is over, so they cannot disagree.
+    let ruler_left = clamp_ruler(
+        press.x - COLUMN_W * (leading_column(*value) as f32 + 0.5),
+        ui.ctx().content_rect(),
+    );
+
+    // The column is whatever the pointer is over. Visible, correctable, and no state to hold.
+    let cursor = ui.input(|i| i.pointer.latest_pos()).unwrap_or(press);
+    let column =
+        column_at(cursor.x - ruler_left, COLUMN_W).filter(|c| column_enabled(*c, resolution));
+
+    let mut moved = false;
+    let mut carry = active.carry;
+    if let Some(column) = column {
+        // Raw device motion where the platform reports it, the position delta otherwise. Either
+        // works now that the pointer is not grabbed.
+        let dy = match ui.input(|i| i.pointer.motion()) {
+            Some(m) => m.y,
+            None => resp.drag_delta().y,
+        };
+        let (next, next_carry) = advance(*value, step_of(column), dy, carry, PIXELS_PER_TICK);
+        let held = clamp(next, bounds);
+        if (held - *value).abs() > f64::EPSILON {
+            *value = held;
+            moved = true;
+        }
+        // Running into a bound resets the accumulator, so backing off responds at once instead of
+        // unwinding the travel spent pushing against the limit.
+        carry = if at_bound(held, bounds).is_some() {
+            0.0
+        } else {
+            next_carry
+        };
     }
 
-    let ruler_left = press.x - COLUMN_W * 0.5 - COLUMN_W * leading_column(*value) as f32;
-    let mut moved = false;
-
-    let next = match current {
-        Phase::Aim { .. } => {
-            let cursor = ui.input(|i| i.pointer.latest_pos()).unwrap_or(press);
-            let column = column_at(cursor.x - ruler_left, COLUMN_W)
-                .filter(|c| column_enabled(*c, resolution));
-            // Only vertical travel engages. Horizontal movement is free, so aiming can range across
-            // the whole ruler without committing.
-            if (cursor.y - press.y).abs() >= ENGAGE_PX {
-                match column {
-                    Some(column) => {
-                        ui.ctx()
-                            .send_viewport_cmd(egui::ViewportCommand::CursorGrab(
-                                egui::viewport::CursorGrab::Locked,
-                            ));
-                        ui.ctx()
-                            .send_viewport_cmd(egui::ViewportCommand::CursorVisible(false));
-                        Phase::Scrub {
-                            column,
-                            baseline: *value,
-                            carry: 0.0,
-                            drift: 0.0,
-                        }
-                    }
-                    // Engaged over no usable column: stay in aim rather than picking a neighbour.
-                    None => Phase::Aim { column },
-                }
-            } else {
-                Phase::Aim { column }
-            }
-        }
-        Phase::Scrub {
-            column,
-            baseline,
-            carry,
-            drift,
-        } => {
-            // Raw device motion, not the pointer's position delta. The pointer is locked by now, so
-            // it does not move on screen and a position delta reads zero: the scrub was dead for
-            // exactly this reason. `motion()` is what the older scrub has always used, and why it
-            // survives the screen edge.
-            let (dx, dy) = match ui.input(|i| i.pointer.motion()) {
-                Some(m) => (m.x, m.y),
-                None => (resp.drag_delta().x, resp.drag_delta().y),
-            };
-
-            // Sideways travel moves to the neighbouring column, so a mis-aimed lock is recoverable
-            // without restarting the gesture.
-            let (column, drift) = reselect(column, drift + dx, COLUMN_W, resolution);
-
-            let (next_value, next_carry) =
-                advance(*value, step_of(column), dy, carry, PIXELS_PER_TICK);
-            let held = clamp(next_value, bounds);
-            if (held - *value).abs() > f64::EPSILON {
-                *value = held;
-                moved = true;
-            }
-            Phase::Scrub {
-                column,
-                baseline,
-                // Running into a bound resets the accumulator, so backing off responds at once
-                // instead of unwinding the travel that was spent pushing against the limit.
-                carry: if at_bound(held, bounds).is_some() {
-                    0.0
-                } else {
-                    next_carry
-                },
-                drift,
-            }
-        }
-    };
-
     draw(
-        ui, id, press, ruler_left, next, *value, bounds, resolution, suffix,
+        ui, id, press, ruler_left, column, *value, bounds, resolution, suffix,
     );
 
     if resp.drag_stopped() {
-        release(ui, id);
+        clear(ui, id);
     } else {
-        ui.data_mut(|d| d.insert_temp(id, Some(next)));
+        ui.data_mut(|d| {
+            d.insert_temp(
+                id,
+                Some(Gesture {
+                    baseline: active.baseline,
+                    carry,
+                }),
+            );
+        });
     }
     moved
 }
 
-/// Ends the gesture: clears the stored phase and gives the pointer back.
-fn release(ui: &egui::Ui, id: egui::Id) {
-    ui.ctx()
-        .send_viewport_cmd(egui::ViewportCommand::CursorGrab(
-            egui::viewport::CursorGrab::None,
-        ));
-    ui.ctx()
-        .send_viewport_cmd(egui::ViewportCommand::CursorVisible(true));
-    // `remove_temp` wants `Default`, which a phase has no sensible value for, so the slots are
-    // overwritten with `None` instead. Reading them back as `Option<Phase>` treats that as absent.
+/// Ends the gesture, clearing its stored state.
+///
+/// Nothing to hand back: the pointer was never grabbed.
+fn clear(ui: &egui::Ui, id: egui::Id) {
     ui.data_mut(|d| {
-        d.insert_temp::<Option<Phase>>(id, None);
+        d.insert_temp::<Option<Gesture>>(id, None);
         d.insert_temp::<Option<egui::Pos2>>(id.with("press"), None);
     });
 }
@@ -457,13 +392,13 @@ fn draw(
     id: egui::Id,
     press: egui::Pos2,
     ruler_left: f32,
-    phase: Phase,
+    active: Option<usize>,
     value: f64,
     bounds: (f64, f64),
     resolution: Resolution,
     suffix: &str,
 ) {
-    let width = COLUMN_W * MAGNITUDES.len() as f32 + PAD * 2.0;
+    let width = overlay_width();
     let height = READOUT_H + GHOST_UP_H + RULER_H + GHOST_DOWN_H + PAD * 2.0;
     // The ruler's centre sits a fixed distance below the press point, which places the overlay over
     // the field it belongs to. The readout repeats the value for exactly that reason.
@@ -475,12 +410,6 @@ fn draw(
         top = press.y - height - RULER_BELOW_PRESS;
     }
     let origin = egui::pos2(ruler_left - PAD, top);
-
-    let active = match phase {
-        Phase::Aim { column } => column,
-        Phase::Scrub { column, .. } => Some(column),
-    };
-    let locked = matches!(phase, Phase::Scrub { .. });
 
     // Seeded from the field's own id, not `ui.id()`. Every parameter row in the inspector shares one
     // layout, so `ui.id()` is the same for all of them and the overlays collided: only a row that
@@ -531,11 +460,7 @@ fn draw(
             if let (Some(column), Some(s)) = (active, step) {
                 let cx = ruler_left + COLUMN_W * (column as f32 + 0.5);
                 let (up, down) = preview(value, s, bounds);
-                let ink = if locked {
-                    crate::theme::TEXT_SECONDARY
-                } else {
-                    crate::theme::TEXT_TERTIARY
-                };
+                let ink = crate::theme::TEXT_SECONDARY;
                 let bound = at_bound(value, bounds);
                 let ghost = |y: f32, v: f64, blocked: bool, align: egui::Align2| {
                     if blocked {
@@ -577,15 +502,6 @@ fn draw(
                 );
                 if is_active {
                     p.rect_filled(cell, 0.0, crate::theme::ACCENT_PRIMARY);
-                    if locked {
-                        // The lock is the visible event: the ruler stops being a menu.
-                        p.rect_stroke(
-                            cell.shrink(2.0),
-                            0.0,
-                            egui::Stroke::new(2.0, crate::theme::TEXT_PRIMARY),
-                            egui::StrokeKind::Inside,
-                        );
-                    }
                 }
                 p.rect_stroke(
                     cell,
@@ -602,11 +518,10 @@ fn draw(
                 );
                 let (ink, size) = if is_active {
                     (crate::theme::BG_ABYSS, 13.0)
-                } else if !enabled || locked {
-                    // Idle labels drop back once locked, so the one in use stands alone.
-                    (crate::theme::LINE_STRONG, 13.0)
+                } else if enabled {
+                    (crate::theme::TEXT_SECONDARY, 13.0)
                 } else {
-                    (crate::theme::TEXT_TERTIARY, 13.0)
+                    (crate::theme::LINE_STRONG, 13.0)
                 };
                 p.text(
                     cell.center(),
@@ -814,52 +729,36 @@ mod tests {
     }
 
     #[test]
-    fn sideways_travel_moves_to_the_next_column() {
-        // Reported from use: locking the wrong column meant restarting the whole gesture. One column
-        // of travel moves one column, and the remainder carries so a slow slide still arrives.
-        assert_eq!(reselect(2, 34.0, 34.0, Resolution::Continuous), (3, 0.0));
-        assert_eq!(reselect(2, -34.0, 34.0, Resolution::Continuous), (1, 0.0));
-        // Under a full column's travel, nothing moves but the travel is kept.
-        let (column, drift) = reselect(2, 20.0, 34.0, Resolution::Continuous);
-        assert_eq!(column, 2);
-        assert!((drift - 20.0).abs() < 1e-4);
-        // Two columns of travel moves two.
-        assert_eq!(reselect(1, 70.0, 34.0, Resolution::Continuous).0, 3);
-    }
-
-    #[test]
-    fn travel_is_not_banked_at_the_ends_or_against_a_disabled_column() {
-        // Banking it would let a long push against the end jump several columns the moment the way
-        // cleared, which is the opposite of what this design is for.
-        assert_eq!(reselect(0, -300.0, 34.0, Resolution::Continuous), (0, 0.0));
-        assert_eq!(reselect(5, 300.0, 34.0, Resolution::Continuous), (5, 0.0));
-        // An integer parameter stops at the ones column rather than entering the fractional ones.
-        let ones = MAGNITUDES
-            .iter()
-            .position(|m| *m == 1.0)
-            .expect("ones column");
-        assert_eq!(
-            reselect(ones, 300.0, 34.0, Resolution::Integer),
-            (ones, 0.0)
-        );
-        // But it can still move the other way.
-        assert_eq!(reselect(ones, -34.0, 34.0, Resolution::Integer).0, ones - 1);
-    }
-
-    #[test]
-    fn a_phase_carries_what_escape_and_history_both_need() {
+    fn a_gesture_carries_what_escape_and_history_both_need() {
         // The baseline is the Escape target and the value history compares against, so it is held
         // once rather than derived twice.
-        let phase = Phase::Scrub {
-            column: 2,
+        let g = Gesture {
             baseline: 41.5,
             carry: 0.0,
-            drift: 0.0,
         };
-        match phase {
-            Phase::Scrub { baseline, .. } => assert!((baseline - 41.5).abs() < 1e-9),
-            Phase::Aim { .. } => panic!("wrong phase"),
-        }
-        assert_eq!(Phase::Aim { column: None }, Phase::Aim { column: None });
+        assert!((g.baseline - 41.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_overlay_is_held_inside_the_window() {
+        // Reported from use: a field on the right of the inspector put half the ruler off the screen.
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1920.0, 1080.0));
+        let width = overlay_width();
+        // Pressed near the right edge, the ruler is pulled back so its right edge lands inside.
+        let left = clamp_ruler(1900.0, screen);
+        assert!(
+            left + width - PAD <= screen.right() + 0.001,
+            "right edge at {} overruns {}",
+            left + width - PAD,
+            screen.right()
+        );
+        // And near the left edge it is pushed in rather than off.
+        assert!(clamp_ruler(-500.0, screen) >= screen.left());
+        // A press comfortably inside is left alone.
+        let middle = clamp_ruler(800.0, screen);
+        assert!((middle - 800.0).abs() < 1e-6);
+        // A window narrower than the overlay does not produce a position off the other side.
+        let tiny = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(50.0, 400.0));
+        assert!(clamp_ruler(20.0, tiny) >= tiny.left());
     }
 }
