@@ -30,14 +30,19 @@ In the inspector, for the selected node.
 
 | Action | Input |
 |---|---|
-| Scrub a value | Drag the value box |
+| Change a value | Press and hold the value box, then drag |
 | Type a value | Click the value box, then type |
+| Abandon a change and put the value back | Escape, while still holding |
 | Step an integer by one | The − and + buttons beside it |
 | Reset a number to its default | The revert arrow, which appears once the value differs from it |
 
-A scrub keeps going while you drag, so the pointer reaching the edge of the screen does not end it. Values stay within the range the node declares, so a scrub or a typed number stops at the limit. A direction is the exception: it rolls, so scrubbing past 360° carries on from 0°.
+Pressing a value box opens a ruler above it, with a column per magnitude: 1000, 100, 10, 1, 0.1, 0.01, 0.001. The column under the pointer is the one you are changing, and moving sideways picks another. Columns the value cannot reach are faded: an integer has nothing below the 1s, and a parameter that tops out at 64 has nothing above the 10s.
 
-A scrub steps by an amount suited to the value it is on, so a length sitting at a few metres moves in centimetres and one sitting at kilometres moves in tens of metres. Type the value when you want an exact one: a length keeps two decimals, so 2.5 m stays 2.5 m.
+Choosing a column and changing the value are the same gesture, so they happen in that order. Nothing moves while you are still crossing the ruler; a vertical stroke starts the change, and the step reads bright once it does. Drag up to raise the value and down to lower it, one step per short pull, for as long as you hold. Moving sideways again goes back to choosing.
+
+Above and below the number sit the value one step up and one step down, so you can see where a pull lands before it does.
+
+Values stay within the range the node declares, so a change or a typed number stops at the limit. A direction is the exception: it rolls, so passing 360° carries on from 0°.
 
 ## Nodes pane
 
