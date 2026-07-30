@@ -75,6 +75,14 @@ pub(crate) struct Gesture {
     /// Vertical points travelled since the last tick, carried between frames so a slow drag still
     /// moves rather than having its motion rounded away each frame.
     pub carry: f32,
+    /// Whether a deliberate vertical stroke has begun, so ticking is live.
+    ///
+    /// Choosing a column and changing the value are one continuous gesture, so they are separated in
+    /// time rather than by a mode: crossing the ruler sideways aims and moves nothing, a vertical
+    /// stroke arms and ticks, and a further sideways move returns to aiming.
+    pub armed: bool,
+    /// Vertical travel accumulated toward arming.
+    pub vertical_run: f32,
     /// Where the ruler's columns start, fixed at the press and held.
     ///
     /// Held rather than recomputed because it depends on the value's leading magnitude, and the
@@ -166,6 +174,27 @@ pub(crate) fn tick(value: f64, step: f64, up: bool) -> f64 {
     }
     let next = if up { value + step } else { value - step };
     (next * 1e6).round() / 1e6
+}
+
+/// Updates the arming state from one frame of pointer motion.
+///
+/// Aiming at a column and changing the value are one continuous gesture, so they are separated in
+/// time rather than by a mode. A sideways frame returns to aiming and moves nothing, which is what
+/// makes crossing the ruler to another column safe; sustained vertical travel arms ticking.
+///
+/// Two thresholds rather than one: re-aiming is deliberately harder to trip than arming, so the
+/// sideways jitter of a hand holding a vertical stroke does not keep disarming it.
+///
+/// Returns the new armed flag and the vertical travel still accumulated toward arming.
+fn aim(armed: bool, vertical_run: f32, motion: egui::Vec2) -> (bool, f32) {
+    if motion.x.abs() > motion.y.abs() && motion.x.abs() > REAIM_PX {
+        return (false, 0.0);
+    }
+    if armed {
+        return (true, vertical_run);
+    }
+    let run = vertical_run + motion.y.abs();
+    (run >= ARM_PX, run)
 }
 
 /// Turns vertical drag into ticks: the new value, and the pixels left over to carry.
@@ -266,6 +295,17 @@ const GHOST_DOWN_H: f32 = 18.0;
 const PAD: f32 = 8.0;
 /// Vertical travel per tick, identical for every parameter and every column.
 const PIXELS_PER_TICK: f32 = 10.0;
+/// Vertical travel that arms ticking, once a column has been chosen.
+///
+/// Nothing moves until a deliberate vertical stroke. Attributing every frame to whichever axis
+/// dominated it meant a diagonal drift nudged the value while the pointer was still crossing the
+/// ruler looking for a column, so aiming and setting were one gesture and interfered.
+const ARM_PX: f32 = 6.0;
+/// Sideways travel in one frame that returns to aiming, disarming ticking.
+///
+/// Larger than the jitter of a hand holding a vertical stroke, so scrubbing is not disarmed by
+/// noise, and small enough that a deliberate sideways move re-aims at once.
+const REAIM_PX: f32 = 3.0;
 
 /// The overlay's full width, frame included. Constant: every magnitude is always drawn.
 fn overlay_width() -> f32 {
@@ -333,6 +373,8 @@ pub(crate) fn ruler_scrub(
         gesture = Some(Gesture {
             baseline: *value,
             carry: 0.0,
+            armed: false,
+            vertical_run: 0.0,
             ruler_left: left,
         });
     }
@@ -363,21 +405,21 @@ pub(crate) fn ruler_scrub(
 
     let mut moved = false;
     let mut carry = active.carry;
+    let mut armed = active.armed;
+    let mut vertical_run = active.vertical_run;
     if let Some(column) = column {
         // Raw device motion where the platform reports it, the position delta otherwise. Either
         // works now that the pointer is not grabbed.
         let motion = ui
             .input(|i| i.pointer.motion())
             .unwrap_or_else(|| resp.drag_delta());
-        // Vertical motion ticks; sideways motion chooses. Attributing each frame's movement to
-        // whichever axis dominates it means sliding across to a different column does not drag the
-        // value along with it, which it did: picking a magnitude and setting a value were the same
-        // gesture and fought each other.
-        let dy = if motion.y.abs() > motion.x.abs() {
-            motion.y
-        } else {
-            0.0
-        };
+        (armed, vertical_run) = aim(armed, vertical_run, motion);
+        if !armed {
+            // Nothing is ticking, so a part-tick left over from an earlier stroke would only surface
+            // later as a jump the aiming move never asked for.
+            carry = 0.0;
+        }
+        let dy = if armed { motion.y } else { 0.0 };
         let (next, next_carry) = advance(*value, step_of(column), dy, carry, PIXELS_PER_TICK);
         let held = clamp(next, bounds);
         if (held - *value).abs() > f64::EPSILON {
@@ -397,7 +439,7 @@ pub(crate) fn ruler_scrub(
     }
 
     draw(
-        ui, id, resp.rect, ruler_left, &usable, column, *value, bounds, suffix,
+        ui, id, resp.rect, ruler_left, &usable, column, armed, *value, bounds, suffix,
     );
 
     if resp.drag_stopped() && !resp.is_pointer_button_down_on() {
@@ -409,6 +451,8 @@ pub(crate) fn ruler_scrub(
                 Some(Gesture {
                     baseline: active.baseline,
                     carry,
+                    armed,
+                    vertical_run,
                     ruler_left,
                 }),
             );
@@ -440,6 +484,7 @@ fn draw(
     ruler_left: f32,
     usable: &[usize],
     active: Option<usize>,
+    armed: bool,
     value: f64,
     bounds: (f64, f64),
     suffix: &str,
@@ -495,7 +540,16 @@ fn draw(
                 crate::theme::TEXT_PRIMARY,
             );
             let (step_text, step_ink) = match step {
-                Some(s) => (format!("\u{b1}{}", trim(s)), crate::theme::ACCENT_PRIMARY),
+                // Bright once a vertical stroke has armed ticking, dim while a column is merely
+                // chosen. That is the whole difference between the two states, so it carries it.
+                Some(s) => (
+                    format!("\u{b1}{}", trim(s)),
+                    if armed {
+                        crate::theme::ACCENT_PRIMARY
+                    } else {
+                        crate::theme::TEXT_TERTIARY
+                    },
+                ),
                 None => ("\u{2014}".to_string(), crate::theme::TEXT_TERTIARY),
             };
             p.text(
@@ -887,8 +941,48 @@ mod tests {
         let g = Gesture {
             baseline: 41.5,
             carry: 0.0,
+            armed: false,
+            vertical_run: 0.0,
             ruler_left: 0.0,
         };
         assert!((g.baseline - 41.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn aiming_across_the_ruler_does_not_arm_ticking() {
+        // Crossing sideways to reach a column, with the drift a hand makes while doing it.
+        let mut armed = false;
+        let mut run = 0.0;
+        for _ in 0..20 {
+            (armed, run) = aim(armed, run, egui::vec2(9.0, 1.5));
+        }
+        assert!(!armed, "sideways travel must not arm, however far it goes");
+    }
+
+    #[test]
+    fn a_vertical_stroke_arms_after_a_deliberate_amount_of_travel() {
+        let (armed, run) = aim(false, 0.0, egui::vec2(0.0, 2.0));
+        assert!(!armed, "one small nudge is not a stroke");
+        let (armed, _) = aim(armed, run, egui::vec2(0.0, 5.0));
+        assert!(armed, "sustained vertical travel arms");
+    }
+
+    #[test]
+    fn moving_sideways_again_returns_to_aiming() {
+        let (armed, run) = aim(false, 0.0, egui::vec2(0.0, 8.0));
+        assert!(armed);
+        let (armed, run) = aim(armed, run, egui::vec2(-7.0, 0.5));
+        assert!(!armed, "a deliberate sideways move re-aims");
+        assert_eq!(run, 0.0, "and the next column starts from nothing");
+    }
+
+    #[test]
+    fn jitter_while_scrubbing_does_not_disarm() {
+        let (armed, run) = aim(false, 0.0, egui::vec2(0.0, 8.0));
+        let (armed, _) = aim(armed, run, egui::vec2(2.0, 0.4));
+        assert!(
+            armed,
+            "a hand holding a vertical stroke wanders a little sideways"
+        );
     }
 }
