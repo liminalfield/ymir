@@ -42,6 +42,23 @@ pub(crate) fn cycles_per_region(size_m: f64, world_extent: f64) -> f64 {
     world_extent / size_m
 }
 
+/// Converts a pan in world units into the region widths the samplers add to a cell position.
+///
+/// The samplers pan by whole and fractional region widths, but a distance through the field is only
+/// meaningful in metres. In region widths the real distance covered is `offset * world_extent`, so
+/// widening the world slid the view sideways through the field as well as taking in more of it: the
+/// patch you had framed moved out from under the frame. Held in metres, a pan is the same distance
+/// whatever the world measures, and choosing where the terrain sits stays independent of choosing how
+/// much of it you take.
+///
+/// A zero world extent has no width to pan by, so nothing moves rather than dividing by zero.
+pub(crate) fn pan_in_region_widths(offset_m: f64, world_extent: f64) -> f64 {
+    if world_extent <= 0.0 {
+        return 0.0;
+    }
+    offset_m / world_extent
+}
+
 /// Parameters for fractional Brownian motion layering of simplex noise.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct FbmParams {

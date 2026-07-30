@@ -28,8 +28,8 @@ This node takes no inputs.
 | Parameter | Type | Range | Default | Unit | Description | Field-driven |
 |---|---|---|---|---|---|---|
 | Path (`path`) | path |  |  |  |  | no |
-| Offset X (`offset_x`) | float | [-1, 1] | 0 |  | Pans the noise pattern along the X axis without changing its shape. | no |
-| Offset Y (`offset_y`) | float | [-1, 1] | 0 |  | Pans the noise pattern along the Y axis without changing its shape. | no |
+| Offset X (`offset_x`) | float | [-1, 1] | 0 |  | Shifts the image within the frame along the X axis, as a fraction of the frame's width. | no |
+| Offset Y (`offset_y`) | float | [-1, 1] | 0 |  | Shifts the image within the frame along the Y axis, as a fraction of the frame's height. | no |
 | Rotation (`rotation`) | float | [0, 360] | 0 | ° |  | no |
 | Scale (`scale`) | float | [0.05, 8] | 1 |  |  | no |
 | Edge (`edge`) | enum | extend, zero, wrap | extend |  | How the field is filled where the placement maps outside the source image. | no |

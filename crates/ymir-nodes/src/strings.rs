@@ -418,11 +418,13 @@ fn lookup(key: &str) -> Option<&'static str> {
         }
         "param-offset_x" => "Offset X",
         "param-offset_x-desc" => {
-            "Pans the noise pattern along the X axis without changing its shape."
+            "Slides the sampling window along the X axis, in world units, to take a different patch \
+             of the pattern without changing its shape."
         }
         "param-offset_y" => "Offset Y",
         "param-offset_y-desc" => {
-            "Pans the noise pattern along the Y axis without changing its shape."
+            "Slides the sampling window along the Y axis, in world units, to take a different patch \
+             of the pattern without changing its shape."
         }
 
         // Enum parameters: always node-specific, because the choice they present differs by node.
@@ -453,6 +455,16 @@ fn lookup(key: &str) -> Option<&'static str> {
         "param-generator.import-edge" => "Edge",
         "param-generator.import-edge-desc" => {
             "How the field is filled where the placement maps outside the source image."
+        }
+        // Import's offsets are not the noise pan. They shift a finite image within the frame, as a
+        // fraction of it, so they cannot take the shared description now that it names world units.
+        "param-generator.import-offset_x" => "Offset X",
+        "param-generator.import-offset_x-desc" => {
+            "Shifts the image within the frame along the X axis, as a fraction of the frame's width."
+        }
+        "param-generator.import-offset_y" => "Offset Y",
+        "param-generator.import-offset_y-desc" => {
+            "Shifts the image within the frame along the Y axis, as a fraction of the frame's height."
         }
         "param-modifier.grow_shrink-amount" => "Amount",
         "param-modifier.grow_shrink-amount-desc" => {
