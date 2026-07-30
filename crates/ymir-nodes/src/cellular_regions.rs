@@ -19,7 +19,7 @@ use ymir_core::{
 
 use crate::noise::{
     Placement, RegionOptions, RegionValues, WorleyFeature, WorleyParams, cycles_per_region,
-    worley_field,
+    pan_in_region_widths, worley_field,
 };
 
 /// Stable type identifier and registry key.
@@ -93,19 +93,21 @@ impl Operator for CellularRegions {
                 ParamSpec::new(
                     "offset_x",
                     ParamKind::Float {
-                        min: -10_000.0,
-                        max: 10_000.0,
+                        min: -100_000.0,
+                        max: 100_000.0,
                     },
                     ParamValue::Float(0.0),
-                ),
+                )
+                .with_unit(Unit::Meters),
                 ParamSpec::new(
                     "offset_y",
                     ParamKind::Float {
-                        min: -10_000.0,
-                        max: 10_000.0,
+                        min: -100_000.0,
+                        max: 100_000.0,
                     },
                     ParamValue::Float(0.0),
-                ),
+                )
+                .with_unit(Unit::Meters),
                 ParamSpec::new(
                     "antialias",
                     ParamKind::Bool,
@@ -142,8 +144,8 @@ impl Operator for CellularRegions {
                 ctx.world_extent(),
             ),
             jitter: params.get_f64("jitter", DEFAULT_JITTER).clamp(0.0, 1.0) as f32,
-            offset_x: params.get_f64("offset_x", 0.0),
-            offset_y: params.get_f64("offset_y", 0.0),
+            offset_x: pan_in_region_widths(params.get_f64("offset_x", 0.0), ctx.world_extent()),
+            offset_y: pan_in_region_widths(params.get_f64("offset_y", 0.0), ctx.world_extent()),
             placement,
         };
         let seed = ctx.seed.wrapping_add(params.get_i64("seed", 0) as u64);
@@ -390,7 +392,7 @@ mod tests {
         let c = ctx(64);
         let a = run(&Params::default(), &c);
         let b = run(
-            &Params::default().with("offset_x", ParamValue::Float(3.0)),
+            &Params::default().with("offset_x", ParamValue::Float(3.0 * 1024.0)),
             &c,
         );
         assert_ne!(a.content_hash(), b.content_hash());

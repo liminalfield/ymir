@@ -17,7 +17,7 @@ use ymir_core::{
     PortSpec, Result, Unit,
 };
 
-use crate::noise::{FbmParams, cycles_per_region, hybrid_field};
+use crate::noise::{FbmParams, cycles_per_region, hybrid_field, pan_in_region_widths};
 
 /// Stable type identifier and registry key.
 const TYPE_ID: &str = "generator.hybrid";
@@ -93,19 +93,21 @@ impl Operator for Hybrid {
                 ParamSpec::new(
                     "offset_x",
                     ParamKind::Float {
-                        min: -10_000.0,
-                        max: 10_000.0,
+                        min: -100_000.0,
+                        max: 100_000.0,
                     },
                     ParamValue::Float(0.0),
-                ),
+                )
+                .with_unit(Unit::Meters),
                 ParamSpec::new(
                     "offset_y",
                     ParamKind::Float {
-                        min: -10_000.0,
-                        max: 10_000.0,
+                        min: -100_000.0,
+                        max: 100_000.0,
                     },
                     ParamValue::Float(0.0),
-                ),
+                )
+                .with_unit(Unit::Meters),
             ],
             emitted_layers: Vec::new(),
             mask_aware: false,
@@ -128,8 +130,8 @@ impl Operator for Hybrid {
             octaves: params.get_i64("octaves", 5).clamp(0, 32) as u32,
             lacunarity: params.get_f64("lacunarity", 2.0),
             gain: params.get_f64("gain", 0.5) as f32,
-            offset_x: params.get_f64("offset_x", 0.0),
-            offset_y: params.get_f64("offset_y", 0.0),
+            offset_x: pan_in_region_widths(params.get_f64("offset_x", 0.0), ctx.world_extent()),
+            offset_y: pan_in_region_widths(params.get_f64("offset_y", 0.0), ctx.world_extent()),
         };
         let bias = params.get_f64("bias", DEFAULT_BIAS) as f32;
 

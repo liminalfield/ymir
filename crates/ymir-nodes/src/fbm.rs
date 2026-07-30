@@ -16,7 +16,7 @@ use ymir_core::{
     Params, PortSpec, Result, Unit, layers,
 };
 
-use crate::noise::{FbmParams, cycles_per_region, fbm_field};
+use crate::noise::{FbmParams, cycles_per_region, fbm_field, pan_in_region_widths};
 
 /// Stable type identifier and registry key.
 const TYPE_ID: &str = "generator.fbm";
@@ -102,19 +102,21 @@ impl Operator for Fbm {
                 ParamSpec::new(
                     "offset_x",
                     ParamKind::Float {
-                        min: -10_000.0,
-                        max: 10_000.0,
+                        min: -100_000.0,
+                        max: 100_000.0,
                     },
                     ParamValue::Float(0.0),
-                ),
+                )
+                .with_unit(Unit::Meters),
                 ParamSpec::new(
                     "offset_y",
                     ParamKind::Float {
-                        min: -10_000.0,
-                        max: 10_000.0,
+                        min: -100_000.0,
+                        max: 100_000.0,
                     },
                     ParamValue::Float(0.0),
-                ),
+                )
+                .with_unit(Unit::Meters),
             ],
             emitted_layers: Vec::new(),
             mask_aware: false,
@@ -138,8 +140,8 @@ impl Operator for Fbm {
             octaves: params.get_i64("octaves", 5).clamp(0, 32) as u32,
             lacunarity: params.get_f64("lacunarity", 2.0),
             gain: params.get_f64("gain", 0.5) as f32,
-            offset_x: params.get_f64("offset_x", 0.0),
-            offset_y: params.get_f64("offset_y", 0.0),
+            offset_x: pan_in_region_widths(params.get_f64("offset_x", 0.0), ctx.world_extent()),
+            offset_y: pan_in_region_widths(params.get_f64("offset_y", 0.0), ctx.world_extent()),
         };
 
         // Offset the node's derived seed by the per-node seed param (0 = unchanged).
@@ -241,11 +243,55 @@ mod tests {
         let panned = op
             .eval(
                 Inputs::required_only(&[]),
-                &Params::new().with("offset_x", ParamValue::Float(2.0)),
+                &Params::new().with("offset_x", ParamValue::Float(2.0 * 1024.0)),
                 &ctx,
             )
             .unwrap();
         assert_ne!(base[0].content_hash(), panned[0].content_hash());
+    }
+
+    #[test]
+    fn widening_the_world_keeps_the_terrain_where_it_was() {
+        // The reason the pan is in metres (#363). Widening the world should show more ground around
+        // what you framed, not slide the frame somewhere else. The pan used to be in region widths,
+        // so its real distance was offset * world_extent: widening the world panned further, and the
+        // patch you had chosen moved out from under you.
+        //
+        // Checked at the shared corner. The 4 km world starts at the same field position as the 1 km
+        // one and carries on for three times as far, so its first quarter is the whole of the small
+        // world, cell for cell, at four times the resolution to put the samples in the same places.
+        let op = Fbm;
+        let params = Params::new()
+            .with("wavelength", ParamValue::Float(256.0))
+            .with("offset_x", ParamValue::Float(3000.0))
+            .with("offset_y", ParamValue::Float(-1500.0));
+        let small = op
+            .eval(
+                Inputs::required_only(&[]),
+                &params,
+                &EvalContext::new(32, 32, Region::UNIT, 5).with_world_extent(1024.0),
+            )
+            .unwrap();
+        let large = op
+            .eval(
+                Inputs::required_only(&[]),
+                &params,
+                &EvalContext::new(128, 128, Region::UNIT, 5).with_world_extent(4096.0),
+            )
+            .unwrap();
+
+        let small_h = small[0].layer(layers::HEIGHT).unwrap();
+        let large_h = large[0].layer(layers::HEIGHT).unwrap();
+        for y in 0..32 {
+            for x in 0..32 {
+                let a = small_h.get(x, y).unwrap_or(0.0);
+                let b = large_h.get(x, y).unwrap_or(0.0);
+                assert!(
+                    (a - b).abs() < 1e-6,
+                    "cell ({x}, {y}) moved when the world grew: {a} then {b}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -261,7 +307,7 @@ mod tests {
         let nudged = op
             .eval(
                 Inputs::required_only(&[]),
-                &Params::new().with("offset_x", ParamValue::Float(0.01)),
+                &Params::new().with("offset_x", ParamValue::Float(10.0)),
                 &ctx,
             )
             .unwrap();

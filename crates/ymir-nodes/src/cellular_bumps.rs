@@ -18,7 +18,8 @@ use ymir_core::{
 };
 
 use crate::noise::{
-    Placement, RegionOptions, WorleyFeature, WorleyParams, cycles_per_region, worley_field,
+    Placement, RegionOptions, WorleyFeature, WorleyParams, cycles_per_region, pan_in_region_widths,
+    worley_field,
 };
 
 /// Stable type identifier and registry key.
@@ -83,20 +84,22 @@ impl Operator for CellularBumps {
                 // without rerolling, matching the fractal-noise offset.
                 ParamSpec::new(
                     "offset_x",
-                    ParamKind::Int {
-                        min: -10_000,
-                        max: 10_000,
+                    ParamKind::Float {
+                        min: -100_000.0,
+                        max: 100_000.0,
                     },
-                    ParamValue::Int(0),
-                ),
+                    ParamValue::Float(0.0),
+                )
+                .with_unit(Unit::Meters),
                 ParamSpec::new(
                     "offset_y",
-                    ParamKind::Int {
-                        min: -10_000,
-                        max: 10_000,
+                    ParamKind::Float {
+                        min: -100_000.0,
+                        max: 100_000.0,
                     },
-                    ParamValue::Int(0),
-                ),
+                    ParamValue::Float(0.0),
+                )
+                .with_unit(Unit::Meters),
                 ParamSpec::new(
                     "placement",
                     ParamKind::Enum {
@@ -128,8 +131,8 @@ impl Operator for CellularBumps {
                 ctx.world_extent(),
             ),
             jitter: params.get_f64("jitter", DEFAULT_JITTER).clamp(0.0, 1.0) as f32,
-            offset_x: params.get_i64("offset_x", 0) as f64,
-            offset_y: params.get_i64("offset_y", 0) as f64,
+            offset_x: pan_in_region_widths(params.get_f64("offset_x", 0.0), ctx.world_extent()),
+            offset_y: pan_in_region_widths(params.get_f64("offset_y", 0.0), ctx.world_extent()),
             placement,
         };
         // Offset the node's derived seed by the per-node seed param (0 = unchanged).
@@ -217,7 +220,10 @@ mod tests {
     fn the_offset_param_pans_the_field() {
         let c = ctx(64);
         let a = run(&Params::default(), &c);
-        let b = run(&Params::default().with("offset_x", ParamValue::Int(3)), &c);
+        let b = run(
+            &Params::default().with("offset_x", ParamValue::Float(3.0 * 1024.0)),
+            &c,
+        );
         assert_ne!(a.content_hash(), b.content_hash());
     }
 

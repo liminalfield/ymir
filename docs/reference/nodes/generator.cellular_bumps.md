@@ -30,8 +30,8 @@ This node takes no inputs.
 | Cell Size (`cell_size`) | float | [0, 100000] | 128 | m | How wide one cell is, in world units. Larger cells mean fewer of them across the map. | no |
 | Jitter (`jitter`) | float | [0, 1] | 1 |  |  | no |
 | Seed (`seed`) | int | [0, 2147483647] | 0 |  | The random seed; changing it regenerates a different variation of the same pattern. | no |
-| Offset X (`offset_x`) | int | [-10000, 10000] | 0 |  | Pans the noise pattern along the X axis without changing its shape. | no |
-| Offset Y (`offset_y`) | int | [-10000, 10000] | 0 |  | Pans the noise pattern along the Y axis without changing its shape. | no |
+| Offset X (`offset_x`) | float | [-100000, 100000] | 0 | m | Slides the sampling window along the X axis, in world units, to take a different patch of the pattern without changing its shape. | no |
+| Offset Y (`offset_y`) | float | [-100000, 100000] | 0 | m | Slides the sampling window along the Y axis, in world units, to take a different patch of the pattern without changing its shape. | no |
 | Placement (`placement`) | enum | square, hex | square |  |  | no |
 
 ## Layer contract

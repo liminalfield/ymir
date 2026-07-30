@@ -33,8 +33,8 @@ This node takes no inputs.
 | Gain (`gain`) | float | [0, 1] | 0.5 |  | How much each finer octave contributes; higher values make the fine detail rougher and more pronounced. | no |
 | Bias (`bias`) | float | [0, 2] | 0.7 |  |  | no |
 | Seed (`seed`) | int | [0, 2147483647] | 0 |  | The random seed; changing it regenerates a different variation of the same pattern. | no |
-| Offset X (`offset_x`) | float | [-10000, 10000] | 0 |  | Pans the noise pattern along the X axis without changing its shape. | no |
-| Offset Y (`offset_y`) | float | [-10000, 10000] | 0 |  | Pans the noise pattern along the Y axis without changing its shape. | no |
+| Offset X (`offset_x`) | float | [-100000, 100000] | 0 | m | Slides the sampling window along the X axis, in world units, to take a different patch of the pattern without changing its shape. | no |
+| Offset Y (`offset_y`) | float | [-100000, 100000] | 0 | m | Slides the sampling window along the Y axis, in world units, to take a different patch of the pattern without changing its shape. | no |
 
 ## Layer contract
 
