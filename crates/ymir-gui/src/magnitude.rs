@@ -73,47 +73,59 @@ pub(crate) fn step_of(column: usize) -> f64 {
     MAGNITUDES.get(column).copied().unwrap_or(1.0)
 }
 
-/// Whether a column can be used for this parameter.
+/// The magnitudes worth offering for a parameter, coarsest first, as indices into [`MAGNITUDES`].
 ///
-/// An integer parameter cannot take a fractional step, so those columns are unusable. They are
-/// reported as disabled rather than removed: the layout keeps every column in its place, because the
-/// whole value of a fixed ruler is that a magnitude is always in the same position.
-pub(crate) fn column_enabled(column: usize, resolution: Resolution) -> bool {
-    match resolution {
-        Resolution::Continuous => column < MAGNITUDES.len(),
-        Resolution::Integer => step_of(column) >= 1.0 && column < MAGNITUDES.len(),
-    }
+/// Two things make a column pointless, and a pointless column is not drawn. It used to be drawn
+/// struck through and recessed, on the argument that keeping every position fixed preserved muscle
+/// memory; in use that read as clutter, and a column that cannot do anything is not something to
+/// build memory of.
+///
+/// A fractional magnitude cannot apply to an integer parameter. And a magnitude larger than the
+/// parameter's whole range can only saturate it: offering `1000` on an octave count of 1 to 12 is
+/// offering a button that jumps to the maximum and then does nothing.
+///
+/// Note what is *not* consulted: the range never sets the column *spacing* or the set's origin, only
+/// which members of a fixed set survive. Deriving the spacing from a declared range is what made an
+/// earlier attempt unusable (#352), because most ranges are arbitrary outer bounds.
+pub(crate) fn usable_columns(resolution: Resolution, (low, high): (f64, f64)) -> Vec<usize> {
+    let span = if high > low { high - low } else { f64::MAX };
+    (0..MAGNITUDES.len())
+        .filter(|&c| {
+            let step = step_of(c);
+            let whole = !matches!(resolution, Resolution::Integer) || step >= 1.0;
+            whole && step <= span
+        })
+        .collect()
 }
 
-/// The column under a cursor at `offset` points from the ruler's left edge, given `column_width`.
+/// The magnitude index under a cursor `offset` points from the ruler's left edge.
 ///
-/// `None` when the cursor is outside the ruler, so the caller can show "no column" rather than
-/// guessing at the nearest one. A disabled column reports as itself, not as `None`; whether it can be
-/// used is [`column_enabled`]'s question, and conflating the two would let a press on a disabled
-/// column silently select its neighbour.
-pub(crate) fn column_at(offset: f32, column_width: f32) -> Option<usize> {
+/// `usable` is the drawn set, so the slot under the pointer indexes into that rather than into all
+/// six magnitudes. `None` only when the pointer is outside the ruler entirely: every drawn column is
+/// usable, so there are no dead columns to land on.
+pub(crate) fn column_at(offset: f32, column_width: f32, usable: &[usize]) -> Option<usize> {
     if offset < 0.0 || column_width <= 0.0 {
         return None;
     }
-    let index = (offset / column_width).floor() as usize;
-    (index < MAGNITUDES.len()).then_some(index)
+    let slot = (offset / column_width).floor() as usize;
+    usable.get(slot).copied()
 }
 
-/// The column whose magnitude leads `value`, so the ruler can open under the cursor at the magnitude
-/// already in play.
+/// Which drawn slot the magnitude already in play occupies, so the ruler can open with it under the
+/// pointer.
 ///
-/// A value of zero has no leading magnitude, so it answers with the ones column: the middle of the
-/// ruler, and the place a value is most likely to grow from.
-pub(crate) fn leading_column(value: f64) -> usize {
-    let magnitude = value.abs();
-    if magnitude < ON_GRID {
-        return MAGNITUDES.iter().position(|m| *m == 1.0).unwrap_or(3);
+/// A value of zero has no leading magnitude, so it answers with the ones column when that is drawn,
+/// and otherwise the middle of what is.
+pub(crate) fn leading_slot(value: f64, usable: &[usize]) -> usize {
+    if usable.is_empty() {
+        return 0;
     }
-    // The first column no coarser than the value itself.
-    MAGNITUDES
+    let magnitude = value.abs();
+    let wanted = if magnitude < ON_GRID { 1.0 } else { magnitude };
+    usable
         .iter()
-        .position(|m| *m <= magnitude)
-        .unwrap_or(MAGNITUDES.len() - 1)
+        .position(|&c| step_of(c) <= wanted)
+        .unwrap_or(usable.len() - 1)
 }
 
 /// One tick of `step` away from `value`, landing on the grid that `step` defines.
@@ -238,22 +250,19 @@ const GHOST_UP_H: f32 = 24.0;
 const GHOST_DOWN_H: f32 = 18.0;
 /// Padding inside the overlay frame.
 const PAD: f32 = 8.0;
-/// Vertical distance from the press point down to the ruler row's centre, so the ruler lands inside
-/// the same eye fixation as the field and aiming is a wrist movement rather than a reach.
-const RULER_BELOW_PRESS: f32 = 14.0;
 /// Vertical travel per tick, identical for every parameter and every column.
 const PIXELS_PER_TICK: f32 = 10.0;
 
-/// The overlay's full width, frame included.
-fn overlay_width() -> f32 {
-    COLUMN_W * MAGNITUDES.len() as f32 + PAD * 2.0
+/// The overlay's full width for `columns` drawn columns, frame included.
+fn overlay_width(columns: usize) -> f32 {
+    COLUMN_W * columns as f32 + PAD * 2.0
 }
 
 /// Holds the ruler's left edge inside `screen`, so no part of the overlay leaves the window.
 ///
 /// Returns the left edge of the *columns*, which sits `PAD` inside the frame.
-fn clamp_ruler(left: f32, screen: egui::Rect) -> f32 {
-    let width = overlay_width();
+fn clamp_ruler(left: f32, columns: usize, screen: egui::Rect) -> f32 {
+    let width = overlay_width(columns);
     if width >= screen.width() {
         // Nothing sensible to do with a window narrower than the overlay; keep it on the left edge
         // rather than pushing it off the other side.
@@ -311,6 +320,12 @@ pub(crate) fn ruler_scrub(
         .flatten()
         .unwrap_or(resp.rect.center());
 
+    let usable = usable_columns(resolution, bounds);
+    if usable.is_empty() {
+        clear(ui, id);
+        return false;
+    }
+
     // The ruler opens with the magnitude already in play under the press point, so the first thing
     // under the pointer is the one most likely wanted. Held inside the window, because a field on the
     // right of the inspector would otherwise put half the ruler off the edge of the screen.
@@ -318,14 +333,14 @@ pub(crate) fn ruler_scrub(
     // Clamping here rather than at paint time is what keeps it honest: this one position decides both
     // where the columns are drawn and which one the pointer is over, so they cannot disagree.
     let ruler_left = clamp_ruler(
-        press.x - COLUMN_W * (leading_column(*value) as f32 + 0.5),
+        press.x - COLUMN_W * (leading_slot(*value, &usable) as f32 + 0.5),
+        usable.len(),
         ui.ctx().content_rect(),
     );
 
     // The column is whatever the pointer is over. Visible, correctable, and no state to hold.
     let cursor = ui.input(|i| i.pointer.latest_pos()).unwrap_or(press);
-    let column =
-        column_at(cursor.x - ruler_left, COLUMN_W).filter(|c| column_enabled(*c, resolution));
+    let column = column_at(cursor.x - ruler_left, COLUMN_W, &usable);
 
     let mut moved = false;
     let mut carry = active.carry;
@@ -352,7 +367,7 @@ pub(crate) fn ruler_scrub(
     }
 
     draw(
-        ui, id, press, ruler_left, column, *value, bounds, resolution, suffix,
+        ui, id, resp.rect, ruler_left, &usable, column, *value, bounds, suffix,
     );
 
     if resp.drag_stopped() {
@@ -390,32 +405,34 @@ fn clear(ui: &egui::Ui, id: egui::Id) {
 fn draw(
     ui: &egui::Ui,
     id: egui::Id,
-    press: egui::Pos2,
+    field: egui::Rect,
     ruler_left: f32,
+    usable: &[usize],
     active: Option<usize>,
     value: f64,
     bounds: (f64, f64),
-    resolution: Resolution,
     suffix: &str,
 ) {
-    let width = overlay_width();
+    let width = overlay_width(usable.len());
     let height = READOUT_H + GHOST_UP_H + RULER_H + GHOST_DOWN_H + PAD * 2.0;
-    // The ruler's centre sits a fixed distance below the press point, which places the overlay over
-    // the field it belongs to. The readout repeats the value for exactly that reason.
-    let ruler_top = press.y + RULER_BELOW_PRESS - RULER_H * 0.5;
-    let mut top = ruler_top - GHOST_UP_H - READOUT_H - PAD;
-    // Deterministic flip when the overlay would fall off the bottom, rather than choosing per frame.
+    // Below the field, clear of it. An earlier version placed the ruler a fixed distance below the
+    // *press point*, which put the overlay on top of the field it belongs to. Leaving the field
+    // visible means the number can be watched changing in place, which is where the eye already is.
+    let mut top = field.bottom() + 4.0;
     let screen = ui.ctx().content_rect();
     if top + height > screen.bottom() - 8.0 {
-        top = press.y - height - RULER_BELOW_PRESS;
+        top = field.top() - height - 4.0;
     }
     let origin = egui::pos2(ruler_left - PAD, top);
+    let ruler_top = top + PAD + READOUT_H + GHOST_UP_H;
 
-    // Seeded from the field's own id, not `ui.id()`. Every parameter row in the inspector shares one
-    // layout, so `ui.id()` is the same for all of them and the overlays collided: only a row that
-    // happened to sit inside its own `push_id` (the integer stepper) got a unique area and worked.
     egui::Area::new(id.with("overlay"))
         .order(egui::Order::Foreground)
+        // Never takes input. Interactable by default, an area laid over the field stole the pointer
+        // from it on the following frame, so `dragged()` went false and the gesture died in silence:
+        // the value would sometimes move and sometimes not, depending only on where the overlay
+        // happened to land.
+        .interactable(false)
         .fixed_pos(origin)
         .show(ui.ctx(), |ui| {
             let (rect, _) = ui.allocate_exact_size(
@@ -434,7 +451,6 @@ fn draw(
             let mono = |size: f32| egui::FontId::monospace(size);
             let step = active.map(step_of);
 
-            // Readout: the value, then the step right-aligned.
             let readout_y = rect.top() + PAD + READOUT_H * 0.5;
             p.text(
                 egui::pos2(rect.left() + PAD, readout_y),
@@ -455,30 +471,34 @@ fn draw(
                 step_ink,
             );
 
-            // The previews, centred on the active column so each number sits on the side of the axis
-            // that produces it. That is what makes the snap rule evident before the first tick.
+            // The previews sit above and below the active column, so each number is on the side of
+            // the axis that produces it and the snap rule is evident before the first tick.
             if let (Some(column), Some(s)) = (active, step) {
-                let cx = ruler_left + COLUMN_W * (column as f32 + 0.5);
+                let slot = usable.iter().position(|c| *c == column).unwrap_or(0);
+                let cx = ruler_left + COLUMN_W * (slot as f32 + 0.5);
                 let (up, down) = preview(value, s, bounds);
-                let ink = crate::theme::TEXT_SECONDARY;
                 let bound = at_bound(value, bounds);
                 let ghost = |y: f32, v: f64, blocked: bool, align: egui::Align2| {
                     if blocked {
-                        // A dashed stub rather than a number: the direction that still works stays
-                        // legible without reading a word.
                         p.line_segment(
-                            [egui::pos2(cx - 5.0, y), egui::pos2(cx + 5.0, y)],
+                            [egui::pos2(cx - 6.0, y), egui::pos2(cx + 6.0, y)],
                             egui::Stroke::new(1.0, crate::theme::TEXT_TERTIARY),
                         );
                     } else {
-                        p.text(egui::pos2(cx, y), align, trim(v), mono(11.0), ink);
+                        p.text(
+                            egui::pos2(cx, y),
+                            align,
+                            trim(v),
+                            mono(11.0),
+                            crate::theme::TEXT_SECONDARY,
+                        );
                     }
                 };
                 ghost(
-                    ruler_top - GHOST_UP_H + 2.0,
+                    ruler_top - GHOST_UP_H * 0.5,
                     up,
                     bound == Some(Bound::High),
-                    egui::Align2::CENTER_TOP,
+                    egui::Align2::CENTER_CENTER,
                 );
                 ghost(
                     ruler_top + RULER_H + GHOST_DOWN_H * 0.5,
@@ -488,17 +508,13 @@ fn draw(
                 );
             }
 
-            // The ruler: six adjacent columns. Adjacent rather than gapped, so it reads as one scale
-            // and not as six buttons.
-            for (column, magnitude) in MAGNITUDES.iter().enumerate() {
-                let enabled = column_enabled(column, resolution);
+            // Only usable columns are drawn. Adjacent, so it reads as one scale rather than as
+            // separate buttons.
+            for (slot, &column) in usable.iter().enumerate() {
                 let is_active = active == Some(column);
-                // A disabled column keeps its place but sits lower and shorter, so it is visibly not
-                // part of the surface being pointed at. Reordering would break the fixed ruler.
-                let drop = if enabled { 0.0 } else { 6.0 };
                 let cell = egui::Rect::from_min_size(
-                    egui::pos2(ruler_left + COLUMN_W * column as f32, ruler_top + drop),
-                    egui::vec2(COLUMN_W, RULER_H - drop),
+                    egui::pos2(ruler_left + COLUMN_W * slot as f32, ruler_top),
+                    egui::vec2(COLUMN_W, RULER_H),
                 );
                 if is_active {
                     p.rect_filled(cell, 0.0, crate::theme::ACCENT_PRIMARY);
@@ -506,40 +522,20 @@ fn draw(
                 p.rect_stroke(
                     cell,
                     0.0,
-                    egui::Stroke::new(
-                        1.0,
-                        if enabled {
-                            crate::theme::LINE_STRONG
-                        } else {
-                            crate::theme::LINE
-                        },
-                    ),
+                    egui::Stroke::new(1.0, crate::theme::LINE_STRONG),
                     egui::StrokeKind::Inside,
                 );
-                let (ink, size) = if is_active {
-                    (crate::theme::BG_ABYSS, 13.0)
-                } else if enabled {
-                    (crate::theme::TEXT_SECONDARY, 13.0)
-                } else {
-                    (crate::theme::LINE_STRONG, 13.0)
-                };
                 p.text(
                     cell.center(),
                     egui::Align2::CENTER_CENTER,
-                    trim(*magnitude),
-                    mono(size),
-                    ink,
+                    trim(step_of(column)),
+                    mono(13.0),
+                    if is_active {
+                        crate::theme::BG_ABYSS
+                    } else {
+                        crate::theme::TEXT_SECONDARY
+                    },
                 );
-                if !enabled {
-                    // Struck through as well as recessed: a second channel, never colour alone.
-                    p.line_segment(
-                        [
-                            egui::pos2(cell.left() + 3.0, cell.center().y),
-                            egui::pos2(cell.right() - 3.0, cell.center().y),
-                        ],
-                        egui::Stroke::new(1.0, crate::theme::LINE_STRONG),
-                    );
-                }
             }
         });
 }
@@ -626,47 +622,91 @@ mod tests {
     }
 
     #[test]
-    fn an_integer_parameter_cannot_take_a_fractional_step() {
-        for column in 0..MAGNITUDES.len() {
-            let enabled = column_enabled(column, Resolution::Integer);
-            assert_eq!(
-                enabled,
-                step_of(column) >= 1.0,
-                "column {column} ({}) on an integer",
-                step_of(column)
-            );
-            // Continuous parameters can use all of them.
-            assert!(column_enabled(column, Resolution::Continuous));
+    fn an_integer_parameter_is_offered_no_fractional_column() {
+        let wide = usable_columns(Resolution::Integer, (0.0, 100_000.0));
+        for &c in &wide {
+            assert!(step_of(c) >= 1.0, "integer offered {}", step_of(c));
+        }
+        // A continuous parameter over the same range gets all six.
+        assert_eq!(
+            usable_columns(Resolution::Continuous, (0.0, 100_000.0)).len(),
+            6
+        );
+    }
+
+    #[test]
+    fn a_column_that_could_only_saturate_is_not_offered() {
+        // fbm's octaves, 1 to 12. Thousands and hundreds can only jump to the maximum and then do
+        // nothing, so offering them is offering a dead button. Reported from use as clutter.
+        let octaves = usable_columns(Resolution::Integer, (1.0, 12.0));
+        let steps: Vec<f64> = octaves.iter().map(|&c| step_of(c)).collect();
+        assert_eq!(
+            steps,
+            vec![10.0, 1.0],
+            "octaves should offer tens and ones only"
+        );
+
+        // A genuinely wide range keeps its coarse columns.
+        let radius = usable_columns(Resolution::Continuous, (0.0, 100_000.0));
+        assert_eq!(step_of(radius[0]), 1000.0);
+
+        // The range decides which members survive, never the spacing: whatever is offered is still a
+        // subsequence of the fixed decades, which is what #352 got wrong.
+        for pair in octaves.windows(2) {
+            assert!(step_of(pair[0]) > step_of(pair[1]));
         }
     }
 
     #[test]
-    fn the_cursor_maps_to_a_column_by_position() {
-        // 22 point columns, six of them.
-        assert_eq!(column_at(0.0, 22.0), Some(0));
-        assert_eq!(column_at(21.9, 22.0), Some(0));
-        assert_eq!(column_at(22.0, 22.0), Some(1));
-        assert_eq!(column_at(5.0 * 22.0 + 1.0, 22.0), Some(5));
-        // Off the ruler reports nothing rather than guessing, so the overlay can say so.
-        assert_eq!(column_at(-1.0, 22.0), None);
-        assert_eq!(column_at(6.0 * 22.0, 22.0), None);
-        // A degenerate width does not divide by zero.
-        assert_eq!(column_at(10.0, 0.0), None);
+    fn the_cursor_maps_to_a_drawn_column() {
+        let usable = usable_columns(Resolution::Integer, (1.0, 12.0)); // tens, ones
+        assert_eq!(column_at(0.0, 34.0, &usable).map(step_of), Some(10.0));
+        assert_eq!(column_at(40.0, 34.0, &usable).map(step_of), Some(1.0));
+        // Past the drawn columns is nothing, rather than the nearest guess.
+        assert_eq!(column_at(100.0, 34.0, &usable), None);
+        assert_eq!(column_at(-1.0, 34.0, &usable), None);
+        // Every drawn column is usable, so a hit is never dead.
+        for offset in [0.0_f32, 17.0, 34.0, 60.0] {
+            if let Some(c) = column_at(offset, 34.0, &usable) {
+                assert!(usable.contains(&c));
+            }
+        }
     }
 
     #[test]
     fn the_ruler_opens_at_the_magnitude_already_in_play() {
-        assert_eq!(step_of(leading_column(2500.0)), 1000.0);
-        assert_eq!(step_of(leading_column(250.0)), 100.0);
-        assert_eq!(step_of(leading_column(2.5)), 1.0);
-        assert_eq!(step_of(leading_column(0.25)), 0.1);
-        assert_eq!(step_of(leading_column(0.025)), 0.01);
-        // Below the finest column, the finest column.
-        assert_eq!(step_of(leading_column(0.0001)), 0.01);
-        // Zero has no leading magnitude, so the ones column: the middle, and where a value grows from.
-        assert_eq!(step_of(leading_column(0.0)), 1.0);
+        let all = usable_columns(Resolution::Continuous, (0.0, 100_000.0));
+        assert_eq!(step_of(all[leading_slot(2500.0, &all)]), 1000.0);
+        assert_eq!(step_of(all[leading_slot(2.5, &all)]), 1.0);
+        assert_eq!(step_of(all[leading_slot(0.025, &all)]), 0.01);
+        // Zero has no leading magnitude, so the ones column.
+        assert_eq!(step_of(all[leading_slot(0.0, &all)]), 1.0);
         // Sign does not change the magnitude.
-        assert_eq!(leading_column(-250.0), leading_column(250.0));
+        assert_eq!(leading_slot(-250.0, &all), leading_slot(250.0, &all));
+        // With a narrow set, it lands inside what is drawn rather than off the end.
+        let octaves = usable_columns(Resolution::Integer, (1.0, 12.0));
+        assert!(leading_slot(6.0, &octaves) < octaves.len());
+        assert!(leading_slot(0.0, &octaves) < octaves.len());
+    }
+
+    #[test]
+    fn the_overlay_is_held_inside_the_window() {
+        // Reported from use: a field on the right of the inspector put the ruler off the screen.
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1920.0, 1080.0));
+        let columns = 6;
+        let width = overlay_width(columns);
+        let left = clamp_ruler(1900.0, columns, screen);
+        assert!(
+            left + width - PAD <= screen.right() + 0.001,
+            "right edge {} overruns {}",
+            left + width - PAD,
+            screen.right()
+        );
+        assert!(clamp_ruler(-500.0, columns, screen) >= screen.left());
+        assert!((clamp_ruler(800.0, columns, screen) - 800.0).abs() < 1e-6);
+        // A window narrower than the overlay does not push it off the other side.
+        let tiny = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(50.0, 400.0));
+        assert!(clamp_ruler(20.0, columns, tiny) >= tiny.left());
     }
 
     #[test]
@@ -737,28 +777,5 @@ mod tests {
             carry: 0.0,
         };
         assert!((g.baseline - 41.5).abs() < 1e-9);
-    }
-
-    #[test]
-    fn the_overlay_is_held_inside_the_window() {
-        // Reported from use: a field on the right of the inspector put half the ruler off the screen.
-        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1920.0, 1080.0));
-        let width = overlay_width();
-        // Pressed near the right edge, the ruler is pulled back so its right edge lands inside.
-        let left = clamp_ruler(1900.0, screen);
-        assert!(
-            left + width - PAD <= screen.right() + 0.001,
-            "right edge at {} overruns {}",
-            left + width - PAD,
-            screen.right()
-        );
-        // And near the left edge it is pushed in rather than off.
-        assert!(clamp_ruler(-500.0, screen) >= screen.left());
-        // A press comfortably inside is left alone.
-        let middle = clamp_ruler(800.0, screen);
-        assert!((middle - 800.0).abs() < 1e-6);
-        // A window narrower than the overlay does not produce a position off the other side.
-        let tiny = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(50.0, 400.0));
-        assert!(clamp_ruler(20.0, tiny) >= tiny.left());
     }
 }
