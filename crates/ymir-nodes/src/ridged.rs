@@ -103,6 +103,12 @@ impl Operator for Ridged {
         ymir_core::ContextDeps::WORLD_EXTENT
     }
 
+    /// A window onto an unbounded coherent-noise field: `offset_x` / `offset_y` slide across it, so
+    /// there is more of it to look at than the map shows.
+    fn pannable_field(&self) -> bool {
+        true
+    }
+
     fn eval(&self, _inputs: Inputs, params: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
         let fractal = FbmParams {
             frequency: cycles_per_region(
