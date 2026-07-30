@@ -66,6 +66,12 @@ pub(crate) struct Gesture {
     /// Vertical points travelled since the last tick, carried between frames so a slow drag still
     /// moves rather than having its motion rounded away each frame.
     pub carry: f32,
+    /// Where the ruler's columns start, fixed at the press and held.
+    ///
+    /// Held rather than recomputed because it depends on the value's leading magnitude, and the
+    /// gesture changes the value. Recomputing it made the overlay drift sideways as the number grew,
+    /// putting a different column under a stationary cursor.
+    pub ruler_left: f32,
 }
 
 /// The magnitude a column carries.
@@ -73,20 +79,19 @@ pub(crate) fn step_of(column: usize) -> f64 {
     MAGNITUDES.get(column).copied().unwrap_or(1.0)
 }
 
-/// The magnitudes worth offering for a parameter, coarsest first, as indices into [`MAGNITUDES`].
+/// Which magnitudes can actually do something for a parameter, as indices into [`MAGNITUDES`].
 ///
-/// Two things make a column pointless, and a pointless column is not drawn. It used to be drawn
-/// struck through and recessed, on the argument that keeping every position fixed preserved muscle
-/// memory; in use that read as clutter, and a column that cannot do anything is not something to
-/// build memory of.
+/// Two things make a column inert. A fractional magnitude cannot apply to an integer parameter. And a
+/// magnitude larger than the parameter's whole range can only saturate it: `1000` on an octave count
+/// of 1 to 12 jumps to the maximum and then does nothing.
 ///
-/// A fractional magnitude cannot apply to an integer parameter. And a magnitude larger than the
-/// parameter's whole range can only saturate it: offering `1000` on an octave count of 1 to 12 is
-/// offering a button that jumps to the maximum and then does nothing.
+/// Every column is still *drawn*, at its fixed position, with the inert ones faded. Removing them was
+/// tried and moves the surviving columns between parameters, which costs the one property that makes
+/// a fixed ruler worth having: a magnitude is always in the same place. Striking them through was also
+/// tried and read as clutter. Fading says "nothing here" without moving anything.
 ///
-/// Note what is *not* consulted: the range never sets the column *spacing* or the set's origin, only
-/// which members of a fixed set survive. Deriving the spacing from a declared range is what made an
-/// earlier attempt unusable (#352), because most ranges are arbitrary outer bounds.
+/// Note what the range does and does not decide. It marks which members are inert; it never sets the
+/// spacing or the origin. Deriving the spacing from a declared range is what made #352 unusable.
 pub(crate) fn usable_columns(resolution: Resolution, (low, high): (f64, f64)) -> Vec<usize> {
     let span = if high > low { high - low } else { f64::MAX };
     (0..MAGNITUDES.len())
@@ -98,34 +103,37 @@ pub(crate) fn usable_columns(resolution: Resolution, (low, high): (f64, f64)) ->
         .collect()
 }
 
-/// The magnitude index under a cursor `offset` points from the ruler's left edge.
+/// The nearest column that can do something, for a cursor `offset` points from the ruler's left edge.
 ///
-/// `usable` is the drawn set, so the slot under the pointer indexes into that rather than into all
-/// six magnitudes. `None` only when the pointer is outside the ruler entirely: every drawn column is
-/// usable, so there are no dead columns to land on.
-pub(crate) fn column_at(offset: f32, column_width: f32, usable: &[usize]) -> Option<usize> {
-    if offset < 0.0 || column_width <= 0.0 {
+/// The layout is always all six magnitudes at fixed positions, so the offset maps straight to a
+/// column. Two adjustments make the gesture forgiving rather than fussy: the offset is clamped to the
+/// ruler, because being off the end of a ruler means nothing when the columns are the only choice;
+/// and an inert column snaps to the nearest one that is not, so pointing at a faded box does
+/// something sensible instead of nothing at all.
+pub(crate) fn nearest_usable(offset: f32, column_width: f32, usable: &[usize]) -> Option<usize> {
+    if usable.is_empty() || column_width <= 0.0 {
         return None;
     }
-    let slot = (offset / column_width).floor() as usize;
-    usable.get(slot).copied()
+    let raw = (offset / column_width)
+        .floor()
+        .clamp(0.0, (MAGNITUDES.len() - 1) as f32) as usize;
+    usable.iter().copied().min_by_key(|&c| c.abs_diff(raw))
 }
 
-/// Which drawn slot the magnitude already in play occupies, so the ruler can open with it under the
+/// Which column the magnitude already in play occupies, so the ruler can open with it under the
 /// pointer.
 ///
-/// A value of zero has no leading magnitude, so it answers with the ones column when that is drawn,
-/// and otherwise the middle of what is.
-pub(crate) fn leading_slot(value: f64, usable: &[usize]) -> usize {
-    if usable.is_empty() {
-        return 0;
-    }
+/// A value of zero has no leading magnitude, so it answers with the ones column: the middle of the
+/// ruler, and where a value is most likely to grow from.
+pub(crate) fn leading_column(value: f64) -> usize {
     let magnitude = value.abs();
-    let wanted = if magnitude < ON_GRID { 1.0 } else { magnitude };
-    usable
+    if magnitude < ON_GRID {
+        return MAGNITUDES.iter().position(|m| *m == 1.0).unwrap_or(3);
+    }
+    MAGNITUDES
         .iter()
-        .position(|&c| step_of(c) <= wanted)
-        .unwrap_or(usable.len() - 1)
+        .position(|m| *m <= magnitude)
+        .unwrap_or(MAGNITUDES.len() - 1)
 }
 
 /// One tick of `step` away from `value`, landing on the grid that `step` defines.
@@ -253,16 +261,16 @@ const PAD: f32 = 8.0;
 /// Vertical travel per tick, identical for every parameter and every column.
 const PIXELS_PER_TICK: f32 = 10.0;
 
-/// The overlay's full width for `columns` drawn columns, frame included.
-fn overlay_width(columns: usize) -> f32 {
-    COLUMN_W * columns as f32 + PAD * 2.0
+/// The overlay's full width, frame included. Constant: every magnitude is always drawn.
+fn overlay_width() -> f32 {
+    COLUMN_W * MAGNITUDES.len() as f32 + PAD * 2.0
 }
 
 /// Holds the ruler's left edge inside `screen`, so no part of the overlay leaves the window.
 ///
 /// Returns the left edge of the *columns*, which sits `PAD` inside the frame.
-fn clamp_ruler(left: f32, columns: usize, screen: egui::Rect) -> f32 {
-    let width = overlay_width(columns);
+fn clamp_ruler(left: f32, screen: egui::Rect) -> f32 {
+    let width = overlay_width();
     if width >= screen.width() {
         // Nothing sensible to do with a window narrower than the overlay; keep it on the left edge
         // rather than pushing it off the other side.
@@ -301,11 +309,21 @@ pub(crate) fn ruler_scrub(
 
     if resp.drag_started() {
         let press = resp.interact_pointer_pos().unwrap_or(resp.rect.center());
+        // The ruler's position is fixed here, once, and held for the rest of the gesture.
+        //
+        // Recomputing it per frame was a feedback loop with no stable state: ticking changed the
+        // value, the value changed which magnitude led it, that moved the ruler under the cursor, a
+        // different column came under the pointer, and the step changed. The overlay appeared to
+        // wander sideways of its own accord and the value went wherever that took it.
+        let left = clamp_ruler(
+            press.x - COLUMN_W * (leading_column(*value) as f32 + 0.5),
+            ui.ctx().content_rect(),
+        );
         gesture = Some(Gesture {
             baseline: *value,
             carry: 0.0,
+            ruler_left: left,
         });
-        ui.data_mut(|d| d.insert_temp(id.with("press"), Some(press)));
     }
 
     let Some(active) = gesture else {
@@ -315,41 +333,38 @@ pub(crate) fn ruler_scrub(
         clear(ui, id);
         return false;
     }
-    let press: egui::Pos2 = ui
-        .data(|d| d.get_temp::<Option<egui::Pos2>>(id.with("press")))
-        .flatten()
-        .unwrap_or(resp.rect.center());
 
     let usable = usable_columns(resolution, bounds);
     if usable.is_empty() {
         clear(ui, id);
         return false;
     }
+    let ruler_left = active.ruler_left;
 
-    // The ruler opens with the magnitude already in play under the press point, so the first thing
-    // under the pointer is the one most likely wanted. Held inside the window, because a field on the
-    // right of the inspector would otherwise put half the ruler off the edge of the screen.
-    //
-    // Clamping here rather than at paint time is what keeps it honest: this one position decides both
-    // where the columns are drawn and which one the pointer is over, so they cannot disagree.
-    let ruler_left = clamp_ruler(
-        press.x - COLUMN_W * (leading_slot(*value, &usable) as f32 + 0.5),
-        usable.len(),
-        ui.ctx().content_rect(),
-    );
-
-    // The column is whatever the pointer is over. Visible, correctable, and no state to hold.
-    let cursor = ui.input(|i| i.pointer.latest_pos()).unwrap_or(press);
-    let column = column_at(cursor.x - ruler_left, COLUMN_W, &usable);
+    // The column is whatever the pointer is over, clamped to the ends rather than falling off them.
+    // A narrow ruler is only a couple of columns wide, so an unclamped hit test left dead ground
+    // either side where the gesture silently did nothing.
+    let cursor = ui
+        .input(|i| i.pointer.latest_pos())
+        .unwrap_or_else(|| resp.rect.center());
+    let column = nearest_usable(cursor.x - ruler_left, COLUMN_W, &usable);
 
     let mut moved = false;
     let mut carry = active.carry;
     if let Some(column) = column {
         // Raw device motion where the platform reports it, the position delta otherwise. Either
         // works now that the pointer is not grabbed.
-        let dy = match ui.input(|i| i.pointer.motion()) {
-            Some(m) => m.y,
-            None => resp.drag_delta().y,
+        let motion = ui
+            .input(|i| i.pointer.motion())
+            .unwrap_or_else(|| resp.drag_delta());
+        // Vertical motion ticks; sideways motion chooses. Attributing each frame's movement to
+        // whichever axis dominates it means sliding across to a different column does not drag the
+        // value along with it, which it did: picking a magnitude and setting a value were the same
+        // gesture and fought each other.
+        let dy = if motion.y.abs() > motion.x.abs() {
+            motion.y
+        } else {
+            0.0
         };
         let (next, next_carry) = advance(*value, step_of(column), dy, carry, PIXELS_PER_TICK);
         let held = clamp(next, bounds);
@@ -357,12 +372,15 @@ pub(crate) fn ruler_scrub(
             *value = held;
             moved = true;
         }
-        // Running into a bound resets the accumulator, so backing off responds at once instead of
-        // unwinding the travel spent pushing against the limit.
-        carry = if at_bound(held, bounds).is_some() {
-            0.0
-        } else {
-            next_carry
+        // Travel that pushes further into a bound is discarded, so backing off responds at once
+        // instead of unwinding it. Travel heading *away* is kept, which is the whole fix: clearing
+        // the carry whenever the value sat on a bound trapped it there. fbm's frequency has a
+        // minimum of 0.25 and a default of 0.25, so it started on its own floor and could not be
+        // scrubbed up at all: the accumulator was wiped every frame before it could reach a tick.
+        carry = match at_bound(held, bounds) {
+            Some(Bound::Low) if next_carry < 0.0 => 0.0,
+            Some(Bound::High) if next_carry > 0.0 => 0.0,
+            _ => next_carry,
         };
     }
 
@@ -379,6 +397,7 @@ pub(crate) fn ruler_scrub(
                 Some(Gesture {
                     baseline: active.baseline,
                     carry,
+                    ruler_left,
                 }),
             );
         });
@@ -413,7 +432,7 @@ fn draw(
     bounds: (f64, f64),
     suffix: &str,
 ) {
-    let width = overlay_width(usable.len());
+    let width = overlay_width();
     let height = READOUT_H + GHOST_UP_H + RULER_H + GHOST_DOWN_H + PAD * 2.0;
     // Below the field, clear of it. An earlier version placed the ruler a fixed distance below the
     // *press point*, which put the overlay on top of the field it belongs to. Leaving the field
@@ -474,8 +493,7 @@ fn draw(
             // The previews sit above and below the active column, so each number is on the side of
             // the axis that produces it and the snap rule is evident before the first tick.
             if let (Some(column), Some(s)) = (active, step) {
-                let slot = usable.iter().position(|c| *c == column).unwrap_or(0);
-                let cx = ruler_left + COLUMN_W * (slot as f32 + 0.5);
+                let cx = ruler_left + COLUMN_W * (column as f32 + 0.5);
                 let (up, down) = preview(value, s, bounds);
                 let bound = at_bound(value, bounds);
                 let ghost = |y: f32, v: f64, blocked: bool, align: egui::Align2| {
@@ -508,10 +526,13 @@ fn draw(
                 );
             }
 
-            // Only usable columns are drawn. Adjacent, so it reads as one scale rather than as
-            // separate buttons.
-            for (slot, &column) in usable.iter().enumerate() {
-                let is_active = active == Some(column);
+            // Every magnitude is drawn, at its fixed position. The inert ones are faded rather than
+            // removed or struck through: removing them moves the survivors between parameters and
+            // costs the fixed positions that make the ruler worth having, and a strike read as
+            // clutter. Fading says "nothing here" while nothing moves.
+            for (slot, magnitude) in MAGNITUDES.iter().enumerate() {
+                let live = usable.contains(&slot);
+                let is_active = active == Some(slot);
                 let cell = egui::Rect::from_min_size(
                     egui::pos2(ruler_left + COLUMN_W * slot as f32, ruler_top),
                     egui::vec2(COLUMN_W, RULER_H),
@@ -522,19 +543,30 @@ fn draw(
                 p.rect_stroke(
                     cell,
                     0.0,
-                    egui::Stroke::new(1.0, crate::theme::LINE_STRONG),
+                    egui::Stroke::new(
+                        1.0,
+                        if live {
+                            crate::theme::LINE_STRONG
+                        } else {
+                            crate::theme::LINE
+                        },
+                    ),
                     egui::StrokeKind::Inside,
                 );
+                let ink = if is_active {
+                    crate::theme::BG_ABYSS
+                } else if live {
+                    crate::theme::TEXT_SECONDARY
+                } else {
+                    // Faded well back: readable as a position, plainly not a control.
+                    crate::theme::LINE
+                };
                 p.text(
                     cell.center(),
                     egui::Align2::CENTER_CENTER,
-                    trim(step_of(column)),
+                    trim(*magnitude),
                     mono(13.0),
-                    if is_active {
-                        crate::theme::BG_ABYSS
-                    } else {
-                        crate::theme::TEXT_SECONDARY
-                    },
+                    ink,
                 );
             }
         });
@@ -635,78 +667,109 @@ mod tests {
     }
 
     #[test]
-    fn a_column_that_could_only_saturate_is_not_offered() {
-        // fbm's octaves, 1 to 12. Thousands and hundreds can only jump to the maximum and then do
-        // nothing, so offering them is offering a dead button. Reported from use as clutter.
+    fn an_inert_column_is_marked_but_never_moves_out_of_place() {
+        // fbm's octaves, 1 to 12: thousands and hundreds can only saturate it, and a fractional step
+        // cannot apply to an integer at all. So two of six are live.
         let octaves = usable_columns(Resolution::Integer, (1.0, 12.0));
-        let steps: Vec<f64> = octaves.iter().map(|&c| step_of(c)).collect();
         assert_eq!(
-            steps,
-            vec![10.0, 1.0],
-            "octaves should offer tens and ones only"
+            octaves.iter().map(|&c| step_of(c)).collect::<Vec<_>>(),
+            vec![10.0, 1.0]
         );
-
-        // A genuinely wide range keeps its coarse columns.
-        let radius = usable_columns(Resolution::Continuous, (0.0, 100_000.0));
-        assert_eq!(step_of(radius[0]), 1000.0);
-
-        // The range decides which members survive, never the spacing: whatever is offered is still a
-        // subsequence of the fixed decades, which is what #352 got wrong.
-        for pair in octaves.windows(2) {
-            assert!(step_of(pair[0]) > step_of(pair[1]));
-        }
+        // But the positions are the fixed six either way: the ruler's width never changes, so a
+        // magnitude is always in the same place whatever parameter is being edited.
+        assert_eq!(
+            overlay_width(),
+            COLUMN_W * MAGNITUDES.len() as f32 + PAD * 2.0
+        );
+        // A wide continuous range has all six live.
+        assert_eq!(
+            usable_columns(Resolution::Continuous, (0.0, 100_000.0)).len(),
+            6
+        );
     }
 
     #[test]
-    fn the_cursor_maps_to_a_drawn_column() {
-        let usable = usable_columns(Resolution::Integer, (1.0, 12.0)); // tens, ones
-        assert_eq!(column_at(0.0, 34.0, &usable).map(step_of), Some(10.0));
-        assert_eq!(column_at(40.0, 34.0, &usable).map(step_of), Some(1.0));
-        // Past the drawn columns is nothing, rather than the nearest guess.
-        assert_eq!(column_at(100.0, 34.0, &usable), None);
-        assert_eq!(column_at(-1.0, 34.0, &usable), None);
-        // Every drawn column is usable, so a hit is never dead.
-        for offset in [0.0_f32, 17.0, 34.0, 60.0] {
-            if let Some(c) = column_at(offset, 34.0, &usable) {
-                assert!(usable.contains(&c));
-            }
+    fn pointing_at_an_inert_column_lands_on_the_nearest_live_one() {
+        // Rather than doing nothing, which is what a dead hit felt like: a knack to be found.
+        let octaves = usable_columns(Resolution::Integer, (1.0, 12.0)); // indices 2 and 3
+        // The thousands column (slot 0) is inert; the nearest live one is tens.
+        assert_eq!(nearest_usable(0.0, 34.0, &octaves).map(step_of), Some(10.0));
+        // The hundredths column (slot 5) is inert; the nearest live one is ones.
+        assert_eq!(
+            nearest_usable(34.0 * 5.5, 34.0, &octaves).map(step_of),
+            Some(1.0)
+        );
+        // Off either end clamps in rather than going dead.
+        assert_eq!(
+            nearest_usable(-500.0, 34.0, &octaves).map(step_of),
+            Some(10.0)
+        );
+        assert_eq!(
+            nearest_usable(9999.0, 34.0, &octaves).map(step_of),
+            Some(1.0)
+        );
+        // Whatever it answers is always live.
+        for offset in [-100.0_f32, 0.0, 40.0, 80.0, 120.0, 200.0, 5000.0] {
+            let c = nearest_usable(offset, 34.0, &octaves).expect("always a column");
+            assert!(octaves.contains(&c), "offset {offset} gave an inert column");
         }
+        assert_eq!(nearest_usable(10.0, 34.0, &[]), None);
     }
 
     #[test]
     fn the_ruler_opens_at_the_magnitude_already_in_play() {
-        let all = usable_columns(Resolution::Continuous, (0.0, 100_000.0));
-        assert_eq!(step_of(all[leading_slot(2500.0, &all)]), 1000.0);
-        assert_eq!(step_of(all[leading_slot(2.5, &all)]), 1.0);
-        assert_eq!(step_of(all[leading_slot(0.025, &all)]), 0.01);
+        assert_eq!(step_of(leading_column(2500.0)), 1000.0);
+        assert_eq!(step_of(leading_column(2.5)), 1.0);
+        assert_eq!(step_of(leading_column(0.025)), 0.01);
         // Zero has no leading magnitude, so the ones column.
-        assert_eq!(step_of(all[leading_slot(0.0, &all)]), 1.0);
-        // Sign does not change the magnitude.
-        assert_eq!(leading_slot(-250.0, &all), leading_slot(250.0, &all));
-        // With a narrow set, it lands inside what is drawn rather than off the end.
-        let octaves = usable_columns(Resolution::Integer, (1.0, 12.0));
-        assert!(leading_slot(6.0, &octaves) < octaves.len());
-        assert!(leading_slot(0.0, &octaves) < octaves.len());
+        assert_eq!(step_of(leading_column(0.0)), 1.0);
+        assert_eq!(leading_column(-250.0), leading_column(250.0));
     }
 
     #[test]
     fn the_overlay_is_held_inside_the_window() {
-        // Reported from use: a field on the right of the inspector put the ruler off the screen.
         let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1920.0, 1080.0));
-        let columns = 6;
-        let width = overlay_width(columns);
-        let left = clamp_ruler(1900.0, columns, screen);
-        assert!(
-            left + width - PAD <= screen.right() + 0.001,
-            "right edge {} overruns {}",
-            left + width - PAD,
-            screen.right()
-        );
-        assert!(clamp_ruler(-500.0, columns, screen) >= screen.left());
-        assert!((clamp_ruler(800.0, columns, screen) - 800.0).abs() < 1e-6);
-        // A window narrower than the overlay does not push it off the other side.
+        let width = overlay_width();
+        let left = clamp_ruler(1900.0, screen);
+        assert!(left + width - PAD <= screen.right() + 0.001);
+        assert!(clamp_ruler(-500.0, screen) >= screen.left());
+        assert!((clamp_ruler(800.0, screen) - 800.0).abs() < 1e-6);
         let tiny = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(50.0, 400.0));
-        assert!(clamp_ruler(20.0, columns, tiny) >= tiny.left());
+        assert!(clamp_ruler(20.0, tiny) >= tiny.left());
+    }
+
+    #[test]
+    fn a_value_sitting_on_its_own_floor_can_still_be_scrubbed_up() {
+        // fbm's frequency has a minimum of 0.25 and a default of 0.25, so it opens on its own floor.
+        // Clearing the carry whenever the value sat on a bound wiped the accumulator every frame and
+        // trapped it there: it could not be scrubbed at all. Only travel heading *into* the bound is
+        // discarded now.
+        let bounds = (0.25, 64.0);
+        let (mut v, mut carry) = (0.25_f64, 0.0_f32);
+        for _ in 0..4 {
+            let (next, next_carry) = advance(v, 0.1, -4.0, carry, PIXELS_PER_TICK);
+            v = clamp(next, bounds);
+            carry = match at_bound(v, bounds) {
+                Some(Bound::Low) if next_carry < 0.0 => 0.0,
+                Some(Bound::High) if next_carry > 0.0 => 0.0,
+                _ => next_carry,
+            };
+        }
+        assert!(v > 0.25, "still stuck on the floor at {v}");
+
+        // And pushing further down from the floor still banks nothing.
+        let (mut v, mut carry) = (0.25_f64, 0.0_f32);
+        for _ in 0..8 {
+            let (next, next_carry) = advance(v, 0.1, 4.0, carry, PIXELS_PER_TICK);
+            v = clamp(next, bounds);
+            carry = match at_bound(v, bounds) {
+                Some(Bound::Low) if next_carry < 0.0 => 0.0,
+                Some(Bound::High) if next_carry > 0.0 => 0.0,
+                _ => next_carry,
+            };
+        }
+        assert!((v - 0.25).abs() < 1e-9, "floor was breached: {v}");
+        assert_eq!(carry, 0.0, "travel into the bound was banked");
     }
 
     #[test]
@@ -775,6 +838,7 @@ mod tests {
         let g = Gesture {
             baseline: 41.5,
             carry: 0.0,
+            ruler_left: 0.0,
         };
         assert!((g.baseline - 41.5).abs() < 1e-9);
     }
