@@ -127,6 +127,7 @@ contradicting the application.
 | preview | viewport render, low-res |
 | build | full-res export, final render |
 | world extent, world height | terrain size, scale |
+| wavelength, cell size | frequency, density, noise scale |
 
 Selection and mask are worth care, because they are the same values doing two jobs. A
 Selector produces a **selection**. A selection fed into another node's **mask** input
