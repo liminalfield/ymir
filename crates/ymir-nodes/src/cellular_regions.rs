@@ -14,11 +14,12 @@
 use ymir_core::registry::OperatorEntry;
 use ymir_core::{
     EvalContext, Field, Inputs, NodeSpec, Operator, ParamKind, ParamSpec, ParamValue, Params,
-    PortSpec, Result, layers,
+    PortSpec, Result, Unit, layers,
 };
 
 use crate::noise::{
-    Placement, RegionOptions, RegionValues, WorleyFeature, WorleyParams, worley_field,
+    Placement, RegionOptions, RegionValues, WorleyFeature, WorleyParams, cycles_per_region,
+    worley_field,
 };
 
 /// Stable type identifier and registry key.
@@ -36,8 +37,11 @@ const PLACEMENTS: &[&str] = &[PLACEMENT_SQUARE, PLACEMENT_HEX];
 
 const TYPE_ID: &str = "generator.cellular_regions";
 
-/// Default cell density (region count).
-const DEFAULT_FREQUENCY: f64 = 8.0;
+/// Default cell width, in world units.
+///
+/// The old default was 8 cells per map, and the default world is 1024 m across, so 128 m is the
+/// same cells a new graph produced before.
+const DEFAULT_CELL_SIZE: f64 = 128.0;
 /// Default jitter: fully organic region shapes.
 const DEFAULT_JITTER: f64 = 1.0;
 
@@ -55,14 +59,18 @@ impl Operator for CellularRegions {
             inputs: vec![PortSpec::optional("values")],
             outputs: vec![PortSpec::new("out")],
             params: vec![
+                // The width of one cell, in world units. Replaces a cells-per-map count, which
+                // meant a different cell size on every world size and could not go below a 64th
+                // of the map.
                 ParamSpec::new(
-                    "frequency",
+                    "cell_size",
                     ParamKind::Float {
                         min: 0.0,
-                        max: 64.0,
+                        max: 100_000.0,
                     },
-                    ParamValue::Float(DEFAULT_FREQUENCY),
-                ),
+                    ParamValue::Float(DEFAULT_CELL_SIZE),
+                )
+                .with_unit(Unit::Meters),
                 ParamSpec::new(
                     "jitter",
                     ParamKind::Float { min: 0.0, max: 1.0 },
@@ -115,10 +123,10 @@ impl Operator for CellularRegions {
         }
     }
 
-    /// Pure of the world globals: no sea level, world height, or world extent, so those
-    /// world-setting sliders never invalidate this node.
+    /// Reads the world extent, which sets how many cells of the given size span the map. Sea level
+    /// and world height are still nothing to do with this node.
     fn context_deps(&self) -> ymir_core::ContextDeps {
-        ymir_core::ContextDeps::NO_WORLD
+        ymir_core::ContextDeps::WORLD_EXTENT
     }
 
     fn eval(&self, inputs: Inputs, params: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
@@ -128,7 +136,10 @@ impl Operator for CellularRegions {
             Placement::Square
         };
         let worley = WorleyParams {
-            frequency: params.get_f64("frequency", DEFAULT_FREQUENCY),
+            frequency: cycles_per_region(
+                params.get_f64("cell_size", DEFAULT_CELL_SIZE),
+                ctx.world_extent(),
+            ),
             jitter: params.get_f64("jitter", DEFAULT_JITTER).clamp(0.0, 1.0) as f32,
             offset_x: params.get_i64("offset_x", 0) as f64,
             offset_y: params.get_i64("offset_y", 0) as f64,
@@ -177,8 +188,19 @@ mod tests {
     use super::*;
     use ymir_core::{Region, layers, registry};
 
+    /// The default world, 1024 m across, which is what the editor starts a project at.
+    ///
+    /// Stated rather than left at the context's unit default: the cell size is in world units now,
+    /// so a context with no world describes a 1 m map, on which a 128 m cell covers everything.
+    /// The cell size that divides the test world into `n` cells, which is what these tests asked
+    /// for when the parameter counted cells. The round trip through the world extent is exact in
+    /// f64, so the goldens below still pin the same Worley output they always have.
+    fn cells(n: f64) -> f64 {
+        1024.0 / n
+    }
+
     fn ctx(res: usize) -> EvalContext {
-        EvalContext::new(res, res, Region::UNIT, 0)
+        EvalContext::new(res, res, Region::UNIT, 0).with_world_extent(1024.0)
     }
 
     fn run(params: &Params, ctx: &EvalContext) -> Field {
@@ -224,7 +246,7 @@ mod tests {
     fn an_unwired_input_leaves_the_output_untouched() {
         // The whole point of the soft contract here: adding the port must not change a single
         // existing project. Byte-identical, not merely similar.
-        let params = Params::default().with("frequency", ParamValue::Float(8.0));
+        let params = Params::default().with("cell_size", ParamValue::Float(cells(8.0)));
         let before = run(&params, &ctx(64));
         let after = CellularRegions
             .eval(Inputs::new(&[], &[None]), &params, &ctx(64))
@@ -240,7 +262,7 @@ mod tests {
         // Antialias off: this counts distinct cell values, and the one-pixel boundary blend #350
         // adds would show up as extra values that say nothing about the assignment being tested.
         let params = Params::default()
-            .with("frequency", ParamValue::Float(8.0))
+            .with("cell_size", ParamValue::Float(cells(8.0)))
             .with("jitter", ParamValue::Float(0.5))
             .with("antialias", ParamValue::Bool(false));
         let out = run_with(&ramp(128), &params, &ctx(128));
@@ -272,7 +294,7 @@ mod tests {
         // Antialias off, so this measures the cell assignment rather than the one-pixel blend at
         // each boundary that #350 adds. That blend is covered separately below.
         let params = Params::default()
-            .with("frequency", ParamValue::Float(6.0))
+            .with("cell_size", ParamValue::Float(cells(6.0)))
             .with("jitter", ParamValue::Float(0.0))
             .with("antialias", ParamValue::Bool(false));
         let out = run_with(&ramp(96), &params, &ctx(96));
@@ -293,7 +315,7 @@ mod tests {
 
     #[test]
     fn a_wired_input_is_deterministic() {
-        let params = Params::default().with("frequency", ParamValue::Float(8.0));
+        let params = Params::default().with("cell_size", ParamValue::Float(cells(8.0)));
         let source = ramp(64);
         let a = run_with(&source, &params, &ctx(64));
         let b = run_with(&source, &params, &ctx(64));
@@ -306,7 +328,7 @@ mod tests {
         // neighbours near it, so it reads as a solitary spike. Sourcing from a smooth field
         // should make adjacent cells much closer in value than hashing does.
         let params = Params::default()
-            .with("frequency", ParamValue::Float(12.0))
+            .with("cell_size", ParamValue::Float(cells(12.0)))
             .with("jitter", ParamValue::Float(0.6));
         let res = 192;
         let step = |field: &Field| -> f32 {
@@ -404,7 +426,7 @@ mod tests {
         // what it always has; the antialiased default has its own golden below.
         let out = run(
             &Params::default()
-                .with("frequency", ParamValue::Float(6.0))
+                .with("cell_size", ParamValue::Float(cells(6.0)))
                 .with("antialias", ParamValue::Bool(false)),
             &ctx(8),
         );
@@ -414,7 +436,7 @@ mod tests {
     #[test]
     fn the_antialiased_default_has_its_own_golden() {
         let out = run(
-            &Params::default().with("frequency", ParamValue::Float(6.0)),
+            &Params::default().with("cell_size", ParamValue::Float(cells(6.0))),
             &ctx(8),
         );
         assert_eq!(out.content_hash().to_u64(), 0x7431_c7d1_4598_14e5);
@@ -432,7 +454,7 @@ mod tests {
         // pixels away, and none further.
         let params = |aa: bool| {
             Params::default()
-                .with("frequency", ParamValue::Float(9.0))
+                .with("cell_size", ParamValue::Float(cells(9.0)))
                 .with("antialias", ParamValue::Bool(aa))
         };
         let res = 192_usize;
@@ -479,7 +501,7 @@ mod tests {
         // Measure the share of pixels sitting on a boundary blend at two resolutions.
         let share = |res: usize| -> f32 {
             let params = Params::default()
-                .with("frequency", ParamValue::Float(9.0))
+                .with("cell_size", ParamValue::Float(cells(9.0)))
                 .with("antialias", ParamValue::Bool(true));
             let hard = run(
                 &params.clone().with("antialias", ParamValue::Bool(false)),
@@ -514,7 +536,7 @@ mod tests {
 
     #[test]
     fn antialiasing_is_deterministic() {
-        let params = Params::default().with("frequency", ParamValue::Float(9.0));
+        let params = Params::default().with("cell_size", ParamValue::Float(cells(9.0)));
         assert_eq!(
             run(&params, &ctx(96)).content_hash(),
             run(&params, &ctx(96)).content_hash()

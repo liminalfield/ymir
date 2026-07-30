@@ -18,7 +18,7 @@ Feed it a low-frequency noise and the variation between cells becomes gradual ac
 
 Feed it a gradient and the cells step down across the terrain while each one stays flat. Blending a gradient in afterwards instead would tilt every cell top, and stepping the gradient would cut bands straight across the cells; sampling once per cell does neither.
 
-Frequency sets the cell size and jitter their regularity: 0 is a square grid, 1 fully organic.
+Cell size is a real width in world units, so cells stay the size you asked for when the world extent changes and a larger world simply holds more of them. Jitter sets their regularity: 0 is a square grid, 1 fully organic.
 
 Placement sets where the cells start from. `square` puts one point per square of a grid, so at jitter 0 the cells are squares. `hex` uses a triangular lattice, where every point is the same distance from its six nearest neighbours, so at jitter 0 the cells are regular hexagons.
 

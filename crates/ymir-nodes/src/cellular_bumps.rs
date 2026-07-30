@@ -14,10 +14,12 @@
 use ymir_core::registry::OperatorEntry;
 use ymir_core::{
     EvalContext, Field, Inputs, NodeSpec, Operator, ParamKind, ParamSpec, ParamValue, Params,
-    PortSpec, Result,
+    PortSpec, Result, Unit,
 };
 
-use crate::noise::{Placement, RegionOptions, WorleyFeature, WorleyParams, worley_field};
+use crate::noise::{
+    Placement, RegionOptions, WorleyFeature, WorleyParams, cycles_per_region, worley_field,
+};
 
 /// Stable type identifier and registry key.
 /// Placement ids: where the feature points sit before jitter moves them. `square` is the original
@@ -29,9 +31,11 @@ const PLACEMENTS: &[&str] = &[PLACEMENT_SQUARE, PLACEMENT_HEX];
 
 const TYPE_ID: &str = "generator.cellular_bumps";
 
-/// Default cell density. Higher than fBm's base frequency because each cell is one
-/// feature, so a usable field needs more of them than noise needs octave cycles.
-const DEFAULT_FREQUENCY: f64 = 8.0;
+/// Default cell width, in world units.
+///
+/// The old default was 8 cells per map, and the default world is 1024 m across, so 128 m is the
+/// same cells a new graph produced before.
+const DEFAULT_CELL_SIZE: f64 = 128.0;
 /// Default jitter: fully organic point placement.
 const DEFAULT_JITTER: f64 = 1.0;
 
@@ -47,14 +51,18 @@ impl Operator for CellularBumps {
             inputs: Vec::new(),
             outputs: vec![PortSpec::new("out")],
             params: vec![
+                // The width of one cell, in world units. Replaces a cells-per-map count, which
+                // meant a different cell size on every world size and could not go below a 64th
+                // of the map.
                 ParamSpec::new(
-                    "frequency",
+                    "cell_size",
                     ParamKind::Float {
                         min: 0.0,
-                        max: 64.0,
+                        max: 100_000.0,
                     },
-                    ParamValue::Float(DEFAULT_FREQUENCY),
-                ),
+                    ParamValue::Float(DEFAULT_CELL_SIZE),
+                )
+                .with_unit(Unit::Meters),
                 ParamSpec::new(
                     "jitter",
                     ParamKind::Float { min: 0.0, max: 1.0 },
@@ -102,10 +110,10 @@ impl Operator for CellularBumps {
         }
     }
 
-    /// Pure of the world globals: no sea level, world height, or world extent, so those
-    /// world-setting sliders never invalidate this node.
+    /// Reads the world extent, which sets how many cells of the given size span the map. Sea level
+    /// and world height are still nothing to do with this node.
     fn context_deps(&self) -> ymir_core::ContextDeps {
-        ymir_core::ContextDeps::NO_WORLD
+        ymir_core::ContextDeps::WORLD_EXTENT
     }
 
     fn eval(&self, _inputs: Inputs, params: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
@@ -115,7 +123,10 @@ impl Operator for CellularBumps {
             Placement::Square
         };
         let worley = WorleyParams {
-            frequency: params.get_f64("frequency", DEFAULT_FREQUENCY),
+            frequency: cycles_per_region(
+                params.get_f64("cell_size", DEFAULT_CELL_SIZE),
+                ctx.world_extent(),
+            ),
             jitter: params.get_f64("jitter", DEFAULT_JITTER).clamp(0.0, 1.0) as f32,
             offset_x: params.get_i64("offset_x", 0) as f64,
             offset_y: params.get_i64("offset_y", 0) as f64,
@@ -149,8 +160,19 @@ mod tests {
     use super::*;
     use ymir_core::{Region, layers, registry};
 
+    /// The default world, 1024 m across, which is what the editor starts a project at.
+    ///
+    /// Stated rather than left at the context's unit default: the cell size is in world units now,
+    /// so a context with no world describes a 1 m map, on which a 128 m cell covers everything.
+    /// The cell size that divides the test world into `n` cells, which is what these tests asked
+    /// for when the parameter counted cells. The round trip through the world extent is exact in
+    /// f64, so the goldens below still pin the same Worley output they always have.
+    fn cells(n: f64) -> f64 {
+        1024.0 / n
+    }
+
     fn ctx(res: usize) -> EvalContext {
-        EvalContext::new(res, res, Region::UNIT, 0)
+        EvalContext::new(res, res, Region::UNIT, 0).with_world_extent(1024.0)
     }
 
     fn run(params: &Params, ctx: &EvalContext) -> Field {
@@ -219,7 +241,7 @@ mod tests {
     #[test]
     fn output_matches_golden_value() {
         let out = run(
-            &Params::default().with("frequency", ParamValue::Float(6.0)),
+            &Params::default().with("cell_size", ParamValue::Float(cells(6.0))),
             &ctx(8),
         );
         assert_eq!(out.content_hash().to_u64(), 0xa5c8_4714_ed1f_015a);

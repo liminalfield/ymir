@@ -27,7 +27,7 @@ This node takes no inputs.
 
 | Parameter | Type | Range | Default | Unit | Description | Field-driven |
 |---|---|---|---|---|---|---|
-| Frequency (`frequency`) | float | [0, 64] | 2 |  | Sets the feature size of the noise; higher values pack in smaller, denser features. | no |
+| Wavelength (`wavelength`) | float | [0, 100000] | 512 | m | The distance from one crest to the next, in world units. On a noise generator it is the size of the largest features. | no |
 | Octaves (`octaves`) | int | [1, 12] | 5 |  | The number of noise layers summed together; more octaves add finer detail. | no |
 | Lacunarity (`lacunarity`) | float | [1, 4] | 2 |  | How much finer each octave is than the one before it; higher values widen the gap between coarse and fine detail. | no |
 | Gain (`gain`) | float | [0, 1] | 0.5 |  | How much each finer octave contributes; higher values make the fine detail rougher and more pronounced. | no |
@@ -39,3 +39,7 @@ This node takes no inputs.
 ## Layer contract
 
 Reads and writes the height layer.
+
+## Behaviour
+
+Wavelength is a real size. A 500 m feature stays 500 m when the world extent changes, so growing the world gives you more ground at the same scale rather than the same terrain stretched over it.

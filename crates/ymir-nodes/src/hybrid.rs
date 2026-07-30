@@ -14,13 +14,19 @@
 use ymir_core::registry::OperatorEntry;
 use ymir_core::{
     EvalContext, Field, Inputs, NodeSpec, Operator, ParamKind, ParamSpec, ParamValue, Params,
-    PortSpec, Result,
+    PortSpec, Result, Unit,
 };
 
-use crate::noise::{FbmParams, hybrid_field};
+use crate::noise::{FbmParams, cycles_per_region, hybrid_field};
 
 /// Stable type identifier and registry key.
 const TYPE_ID: &str = "generator.hybrid";
+
+/// Default feature size, in world units.
+///
+/// The old default was 2 cycles per map, and the default world is 1024 m across, so 512 m is the
+/// same terrain a new graph produced before.
+const DEFAULT_WAVELENGTH: f64 = 512.0;
 
 /// Default altitude bias (Musgrave's offset). Around 0.7 gives a balanced mix of smooth
 /// lowland and rough highland.
@@ -38,14 +44,18 @@ impl Operator for Hybrid {
             inputs: Vec::new(),
             outputs: vec![PortSpec::new("out")],
             params: vec![
+                // The base octave's period, in world units: the size of the largest features the
+                // noise makes. Replaces a cycles-per-map frequency, which meant a different
+                // landform on every world size and capped features at a 64th of the map.
                 ParamSpec::new(
-                    "frequency",
+                    "wavelength",
                     ParamKind::Float {
                         min: 0.0,
-                        max: 64.0,
+                        max: 100_000.0,
                     },
-                    ParamValue::Float(2.0),
-                ),
+                    ParamValue::Float(DEFAULT_WAVELENGTH),
+                )
+                .with_unit(Unit::Meters),
                 ParamSpec::new(
                     "octaves",
                     ParamKind::Int { min: 1, max: 12 },
@@ -102,15 +112,18 @@ impl Operator for Hybrid {
         }
     }
 
-    /// Pure of the world globals: no sea level, world height, or world extent, so those
-    /// world-setting sliders never invalidate this node.
+    /// Reads the world extent, which sets how many cycles of the wavelength span the map. Sea level
+    /// and world height are still nothing to do with this node.
     fn context_deps(&self) -> ymir_core::ContextDeps {
-        ymir_core::ContextDeps::NO_WORLD
+        ymir_core::ContextDeps::WORLD_EXTENT
     }
 
     fn eval(&self, _inputs: Inputs, params: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
         let fractal = FbmParams {
-            frequency: params.get_f64("frequency", 2.0),
+            frequency: cycles_per_region(
+                params.get_f64("wavelength", DEFAULT_WAVELENGTH),
+                ctx.world_extent(),
+            ),
             // Range is advisory until the graph/UI validate; clamp defensively.
             octaves: params.get_i64("octaves", 5).clamp(0, 32) as u32,
             lacunarity: params.get_f64("lacunarity", 2.0),
@@ -142,8 +155,12 @@ mod tests {
     use ymir_core::layers;
     use ymir_core::registry;
 
+    /// The default world, 1024 m across, which is what the editor starts a project at.
+    ///
+    /// Stated rather than left at the context's unit default: the wavelength is in world units now,
+    /// so a context with no world describes a 1 m map, on which a 512 m feature is half a cycle.
     fn default_ctx() -> EvalContext {
-        EvalContext::new(8, 8, Region::UNIT, 42)
+        EvalContext::new(8, 8, Region::UNIT, 42).with_world_extent(1024.0)
     }
 
     fn run(params: &Params, ctx: &EvalContext) -> Field {
