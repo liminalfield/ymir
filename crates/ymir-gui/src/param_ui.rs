@@ -174,7 +174,7 @@ fn angle_wraps(min: f64, max: f64) -> bool {
     max - min >= 360.0
 }
 
-/// Display precision (decimal places) for a metric quantity: always hundredths of a metre.
+/// Display precision (decimal places) for a metric quantity: always thousandths of a metre.
 ///
 /// Fixed rather than derived. It used to come from the parameter's declared maximum, which meant
 /// every length in the app was edited in whole metres, because all of them declare a 100 km ceiling
@@ -185,9 +185,13 @@ fn angle_wraps(min: f64, max: f64) -> bool {
 /// when the build resolution changes is invisible coupling: the same project would present
 /// differently between a preview and a final build, with nothing on screen to explain why.
 ///
+/// Three rather than two, to match the unitless floats and the magnitude ruler's finest column. A
+/// value that can be scrubbed to a thousandth has to be able to show one; the ruler reaches as far
+/// below one as above it, so the display does too.
+///
 /// `max_decimals` trims trailing zeros, so a whole value still reads `5 m` and only a fractional one
 /// shows its decimals. The scrub speed is a separate question, answered by [`metric_scrub_speed`].
-const METRIC_DECIMALS: usize = 2;
+const METRIC_DECIMALS: usize = 3;
 
 /// Scrub step for a metric quantity, from the value being dragged.
 ///
@@ -474,13 +478,6 @@ fn stepper(ui: &mut egui::Ui, value: &mut i64, min: i64, max: i64) -> bool {
             )
         })
         .inner;
-    // Suppressed while dragging, for the same reason as the float rows: the tooltip layer sits above
-    // the magnitude overlay.
-    let value_resp = if value_resp.dragged() || value_resp.drag_stopped() {
-        value_resp
-    } else {
-        value_resp.on_hover_text("Drag to scrub \u{b7} click to type")
-    };
     changed |= value_resp.changed();
     // The scrub runs on a float mirror (that is what `scrub_drag` drives) and lands back on the
     // integer, keeping the sub-step remainder across frames in this widget's own temp state. That
@@ -550,11 +547,6 @@ pub(crate) fn edit(
                             .speed(0.0)
                             .fixed_decimals(3),
                     );
-                    let value = if value.dragged() || value.drag_stopped() {
-                        value
-                    } else {
-                        value.on_hover_text("Drag to scrub \u{b7} click to type")
-                    };
                     // The magnitude ruler here too (#358). This is the majority of the numeric
                     // parameters in the application: only 40 of 154 carry a unit, so wiring the
                     // unit-bearing rows alone left most of the inspector on the old scrub and made
@@ -629,18 +621,6 @@ pub(crate) fn edit(
                         egui::vec2(VALUE_W + 16.0, ui.spacing().interact_size.y),
                         drag,
                     );
-                    // The tooltip is suppressed for the duration of a drag. It sits on a layer above
-                    // the magnitude overlay and covered the ruler the moment the gesture that opens
-                    // it began, which made the control unusable rather than merely untidy.
-                    let value = if value.dragged() || value.drag_stopped() {
-                        value
-                    } else {
-                        value.on_hover_text("Drag to scrub \u{b7} click to type")
-                    };
-                    // The magnitude ruler (#358): aim at a magnitude, drag to tick by it. A wrapping
-                    // direction keeps the older continuous scrub, because the ruler snaps to the grid
-                    // of the chosen column and a bearing that rolls through 360 has no grid to snap
-                    // to; `speed` is what that path still needs.
                     let scrubbed = if wraps {
                         scrub_drag(ui, &value, &mut x, speed, |v| {
                             finalize_value(v, Some(360.0), None)
@@ -983,11 +963,14 @@ mod tests {
     }
 
     #[test]
-    fn a_length_shows_hundredths_whatever_its_range() {
-        // The precision used to come from the declared max, and every length in the app declares a
-        // 100 km ceiling, so all of them edited in whole metres and a typed 2.5 rounded to 3 (#352).
-        // It is now fixed, so the range cannot take the decimals away.
-        assert_eq!(METRIC_DECIMALS, 2);
+    fn a_length_shows_thousandths_whatever_its_range() {
+        // The precision used to come from the declared max, and every length declares a 100 km
+        // ceiling, so all of them edited in whole metres and a typed 2.5 rounded to 3 (#352). It is
+        // now fixed, so the range cannot take the decimals away.
+        //
+        // Three rather than two, to match the unitless floats and the magnitude ruler's finest
+        // column: a value that can be scrubbed to a thousandth has to be able to show one.
+        assert_eq!(METRIC_DECIMALS, 3);
     }
 
     #[test]

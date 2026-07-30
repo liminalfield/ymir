@@ -23,20 +23,29 @@
 //! And the set does not vary between parameters. Identical columns everywhere is what lets the
 //! gesture transfer from a blur radius to a wavelength without relearning, which is most of why a
 //! ruler beats pointing at the digits of the number itself.
+//!
+//! # A tick adds, it does not snap
+//!
+//! Ticking used to round to the grid the chosen magnitude defines. It does not any more, and the
+//! reason is worth keeping: you arrive at a column having just set the finer digits yourself, so
+//! snapping discards them. Moving from hundredths to tenths on a value of 0.35 turned it into 0.4 and
+//! threw away the 0.05 that had been dialled in on purpose. Plain addition also means every tick moves
+//! by exactly the step, where snapping made the first one move by whatever the remainder was.
 
 /// The magnitudes a column can carry, coarsest first.
 ///
-/// Six columns spanning a millionfold: enough that any parameter in the application has usable
-/// columns, few enough that each can be a generous target. Out-of-range columns are not removed but
-/// disabled, so their positions never move.
-pub(crate) const MAGNITUDES: [f64; 6] = [1000.0, 100.0, 10.0, 1.0, 0.1, 0.01];
-
-/// How close to a grid multiple counts as already on it.
+/// Symmetric about one: three decades above, three below. The symmetry is the argument. A float is
+/// displayed to three decimals, so stopping the ruler at hundredths showed a digit that could be read
+/// and not reached, while the coarse end went to thousands. Reaching as far down as up removes the
+/// asymmetry rather than explaining it.
 ///
-/// A value that *is* on the grid must step off it, and floating point makes that a judgement rather
-/// than a comparison: `2.5 / 0.1` is `24.999999...`, so flooring it and adding one lands back on 2.5
-/// and the value never moves. Quantising through a tolerance is what makes ticking reliable.
-const ON_GRID: f64 = 1e-6;
+/// Seven columns spanning a millionfold: enough that any parameter in the application has usable
+/// ones, few enough that each is a generous target. Inert columns are faded rather than removed, so
+/// their positions never move.
+pub(crate) const MAGNITUDES: [f64; 7] = [1000.0, 100.0, 10.0, 1.0, 0.1, 0.01, 0.001];
+
+/// Below this, a value counts as zero when asking which magnitude leads it.
+const NEAR_ZERO: f64 = 1e-6;
 
 /// What a value can be stepped by, given the parameter's kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,7 +136,7 @@ pub(crate) fn nearest_usable(offset: f32, column_width: f32, usable: &[usize]) -
 /// ruler, and where a value is most likely to grow from.
 pub(crate) fn leading_column(value: f64) -> usize {
     let magnitude = value.abs();
-    if magnitude < ON_GRID {
+    if magnitude < NEAR_ZERO {
         return MAGNITUDES.iter().position(|m| *m == 1.0).unwrap_or(3);
     }
     MAGNITUDES
@@ -136,30 +145,27 @@ pub(crate) fn leading_column(value: f64) -> usize {
         .unwrap_or(MAGNITUDES.len() - 1)
 }
 
-/// One tick of `step` away from `value`, landing on the grid that `step` defines.
+/// One tick of `step` away from `value`: plain addition.
 ///
-/// Choosing a column declares the resolution you care about, so the result is always a multiple of
-/// the step: ticking up from 2.47 by tenths gives 2.5, not 2.57. That differs from incrementing a
-/// digit, which would leave the lower digits as residue, and it is deliberate. If you wanted 2.57 you
-/// would have chosen hundredths.
+/// It used to snap to the grid the step defines, so ticking up from 2.47 by tenths gave 2.5 rather
+/// than 2.57. The argument was that choosing a column declares the resolution you care about. That
+/// argument assumed you arrive at a column with a value someone else chose. In use you arrive having
+/// just set the finer digits yourself: set 0.35 on the hundredths column, move to tenths for a coarser
+/// adjustment, and snapping discarded the 0.05 you had deliberately dialled in.
 ///
-/// The same rule serves the first tick and every later one. Once a value is on the grid, "the next
-/// multiple in this direction" is simply plus or minus one step, so no special case is needed.
+/// Addition is also strictly more predictable, which was the design's whole purpose. Under snapping
+/// the first tick moved by whatever the remainder happened to be and every later one by the step;
+/// now every tick moves by the step, always.
+///
+/// The result is rounded to six decimals, which is finer than anything the inspector displays. That
+/// is only to keep repeated addition from accumulating float noise: `0.35 + 0.1` is
+/// `0.45000000000000007` in binary floating point, and a few hundred ticks of that would show.
 pub(crate) fn tick(value: f64, step: f64, up: bool) -> f64 {
     if step <= 0.0 {
         return value;
     }
-    let quotient = value / step;
-    let rounded = quotient.round();
-    let next = if (quotient - rounded).abs() < ON_GRID {
-        // Already on the grid: step off it.
-        if up { rounded + 1.0 } else { rounded - 1.0 }
-    } else if up {
-        quotient.floor() + 1.0
-    } else {
-        quotient.ceil() - 1.0
-    };
-    next * step
+    let next = if up { value + step } else { value - step };
+    (next * 1e6).round() / 1e6
 }
 
 /// Turns vertical drag into ticks: the new value, and the pixels left over to carry.
@@ -576,9 +582,12 @@ fn draw(
         });
 }
 
-/// A number without trailing zeros, so a column reads `1000` and `0.01` rather than `1000.00`.
+/// A number without trailing zeros, so a column reads `1000` and `0.001` rather than `1000.000`.
+///
+/// Three decimals, matching what the inspector displays: rendering to two would have shown the
+/// finest column as `0.00`.
 fn trim(v: f64) -> String {
-    let s = format!("{v:.2}");
+    let s = format!("{v:.3}");
     s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
@@ -600,7 +609,18 @@ mod tests {
     fn the_columns_are_the_same_for_every_parameter() {
         // The property the whole design rests on. If this set were derived from a parameter's range,
         // the gesture would not transfer between parameters and pointing at digits would be no worse.
-        assert_eq!(MAGNITUDES.len(), 6);
+        assert_eq!(MAGNITUDES.len(), 7);
+        // Symmetric about one: as far below as above, so no digit can be displayed without being
+        // reachable.
+        let ones = MAGNITUDES
+            .iter()
+            .position(|m| *m == 1.0)
+            .expect("ones column");
+        assert_eq!(
+            ones,
+            MAGNITUDES.len() - 1 - ones,
+            "the ruler is not symmetric about one"
+        );
         for pair in MAGNITUDES.windows(2) {
             assert!(
                 (pair[0] / pair[1] - 10.0).abs() < 1e-9,
@@ -610,24 +630,72 @@ mod tests {
     }
 
     #[test]
-    fn ticking_lands_on_the_grid_of_the_chosen_magnitude() {
-        // Grabbing tenths on 2.47 gives 2.5, not 2.57. Choosing a column declares the resolution.
-        assert!((tick(2.47, 0.1, true) - 2.5).abs() < 1e-9);
-        assert!((tick(2.47, 0.1, false) - 2.4).abs() < 1e-9);
-        // And coarser columns snap harder, which is the point of having them.
-        assert!((tick(2.47, 1.0, true) - 3.0).abs() < 1e-9);
-        assert!((tick(2.47, 1.0, false) - 2.0).abs() < 1e-9);
-        assert!((tick(1234.0, 1000.0, true) - 2000.0).abs() < 1e-9);
+    fn an_integer_parameter_is_offered_no_fractional_column() {
+        let wide = usable_columns(Resolution::Integer, (0.0, 100_000.0));
+        for &c in &wide {
+            assert!(step_of(c) >= 1.0, "integer offered {}", step_of(c));
+        }
+        // A continuous parameter over the same range gets all of them.
+        assert_eq!(
+            usable_columns(Resolution::Continuous, (0.0, 100_000.0)).len(),
+            MAGNITUDES.len()
+        );
     }
 
     #[test]
-    fn a_value_already_on_the_grid_still_moves() {
-        // The floating-point trap: 2.5 / 0.1 is 24.999999..., so a naive floor-and-add lands back on
-        // 2.5 and the value never budges. This is why ticking quantises through a tolerance.
-        assert!((tick(2.5, 0.1, true) - 2.6).abs() < 1e-9);
-        assert!((tick(2.5, 0.1, false) - 2.4).abs() < 1e-9);
-        assert!((tick(3.0, 1.0, true) - 4.0).abs() < 1e-9);
-        assert!((tick(0.3, 0.1, true) - 0.4).abs() < 1e-9);
+    fn a_tick_adds_the_step_and_keeps_the_finer_digits() {
+        // Reported from use, and the reason snapping was removed: 0.35 was set deliberately on the
+        // hundredths column, so moving to tenths must add a tenth rather than rounding to 0.4 and
+        // discarding the work.
+        assert!((tick(0.35, 0.1, true) - 0.45).abs() < 1e-9);
+        assert!((tick(0.35, 0.1, false) - 0.25).abs() < 1e-9);
+        // The same holds at any scale and any column.
+        assert!((tick(2.47, 1.0, true) - 3.47).abs() < 1e-9);
+        assert!((tick(1234.0, 1000.0, true) - 2234.0).abs() < 1e-9);
+        assert!((tick(0.37, 0.01, true) - 0.38).abs() < 1e-9);
+    }
+
+    #[test]
+    fn every_tick_moves_by_exactly_the_step() {
+        // Predictability, the criterion every earlier attempt failed. Under snapping the first tick
+        // moved by whatever the remainder happened to be; now the step is the step.
+        for (start, step) in [
+            (5.0, 10.0),
+            (5000.0, 10.0),
+            (0.35, 0.1),
+            (0.0, 1.0),
+            (-7.3, 1.0),
+        ] {
+            let up = tick(start, step, true);
+            let down = tick(start, step, false);
+            assert!(
+                (up - (start + step)).abs() < 1e-6,
+                "{start} + {step} gave {up}"
+            );
+            assert!(
+                (down - (start - step)).abs() < 1e-6,
+                "{start} - {step} gave {down}"
+            );
+        }
+    }
+
+    #[test]
+    fn repeated_ticks_do_not_accumulate_float_noise() {
+        // `0.35 + 0.1` is 0.45000000000000007 in binary floating point, and a few hundred ticks of
+        // that would show in the inspector. The result is rounded finer than anything displayed.
+        let mut v = 0.0;
+        for _ in 0..300 {
+            v = tick(v, 0.1, true);
+        }
+        assert!((v - 30.0).abs() < 1e-6, "300 tenths came to {v}");
+        let mut v = 0.35;
+        for _ in 0..10 {
+            v = tick(v, 0.01, true);
+        }
+        assert!(
+            (v - 0.45).abs() < 1e-9,
+            "ten hundredths from 0.35 came to {v}"
+        );
     }
 
     #[test]
@@ -636,38 +704,21 @@ mod tests {
         // arbitrary floor. A fixed magnitude has no such problem.
         assert!((tick(0.0, 1.0, true) - 1.0).abs() < 1e-9);
         assert!((tick(0.0, 1.0, false) + 1.0).abs() < 1e-9);
-        assert!((tick(0.5, 1.0, false) - 0.0).abs() < 1e-9);
+        assert!((tick(0.5, 1.0, false) + 0.5).abs() < 1e-9);
         assert!((tick(-2.5, 0.1, true) + 2.4).abs() < 1e-9);
-        assert!((tick(-2.5, 0.1, false) + 2.6).abs() < 1e-9);
-        // Crossing zero is unremarkable.
-        assert!((tick(0.05, 0.1, false) - 0.0).abs() < 1e-9);
-        assert!((tick(-0.05, 0.1, true) - 0.0).abs() < 1e-9);
+        assert!((tick(0.05, 0.1, false) + 0.05).abs() < 1e-9);
     }
 
     #[test]
-    fn the_same_gesture_moves_the_same_amount_at_any_scale() {
-        // Predictability, the criterion every earlier attempt failed. One tick of the tens column is
-        // ten, whether the value is 5 or 5000.
-        let small = tick(5.0, 10.0, true) - 5.0;
-        let large = tick(5000.0, 10.0, true) - 5000.0;
-        assert!((small - 5.0).abs() < 1e-9, "5 -> {}", tick(5.0, 10.0, true));
-        assert!((large - 10.0).abs() < 1e-9);
-        // From on-grid values the step is exactly the magnitude at both scales.
-        assert!((tick(10.0, 10.0, true) - 20.0).abs() < 1e-9);
-        assert!((tick(5000.0, 10.0, true) - 5010.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn an_integer_parameter_is_offered_no_fractional_column() {
-        let wide = usable_columns(Resolution::Integer, (0.0, 100_000.0));
-        for &c in &wide {
-            assert!(step_of(c) >= 1.0, "integer offered {}", step_of(c));
-        }
-        // A continuous parameter over the same range gets all six.
-        assert_eq!(
-            usable_columns(Resolution::Continuous, (0.0, 100_000.0)).len(),
-            6
-        );
+    fn the_preview_shows_both_directions_within_bounds() {
+        let (up, down) = preview(0.35, 0.1, (0.0, 10.0));
+        assert!((up - 0.45).abs() < 1e-9);
+        assert!((down - 0.25).abs() < 1e-9);
+        // Against a bound the blocked direction reports the bound itself, so the overlay marks it
+        // rather than showing an impossible number.
+        let (up, down) = preview(10.0, 1.0, (0.0, 10.0));
+        assert!((up - 10.0).abs() < 1e-9, "up should hold at the maximum");
+        assert!((down - 9.0).abs() < 1e-9);
     }
 
     #[test]
@@ -685,10 +736,10 @@ mod tests {
             overlay_width(),
             COLUMN_W * MAGNITUDES.len() as f32 + PAD * 2.0
         );
-        // A wide continuous range has all six live.
+        // A wide continuous range has all of them live.
         assert_eq!(
             usable_columns(Resolution::Continuous, (0.0, 100_000.0)).len(),
-            6
+            MAGNITUDES.len()
         );
     }
 
@@ -811,18 +862,6 @@ mod tests {
         let (v, carry) = advance(7.0, 1.0, -100.0, 0.0, 0.0);
         assert!((v - 7.0).abs() < 1e-9);
         assert_eq!(carry, 0.0);
-    }
-
-    #[test]
-    fn the_preview_shows_both_directions_within_bounds() {
-        let (up, down) = preview(2.47, 0.1, (0.0, 10.0));
-        assert!((up - 2.5).abs() < 1e-9);
-        assert!((down - 2.4).abs() < 1e-9);
-        // Against a bound the blocked direction reports the bound itself, so the overlay can mark it
-        // rather than showing an impossible number.
-        let (up, down) = preview(10.0, 1.0, (0.0, 10.0));
-        assert!((up - 10.0).abs() < 1e-9, "up should be held at the maximum");
-        assert!((down - 9.0).abs() < 1e-9);
     }
 
     #[test]
