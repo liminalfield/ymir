@@ -118,6 +118,43 @@ const SIMPLEX_G2: f32 = 0.211_324_87;
 /// mappers clamp regardless).
 const SIMPLEX_SCALE: f32 = 100.0;
 
+/// The field position a cell samples, in noise units, for every sampled generator.
+///
+/// One mapping rather than a copy per generator. It was six copies of these four lines, which is how
+/// the Warp node ended up with a seventh that differs, and any divergence between them would show up
+/// as two generators failing to register against each other rather than as an obvious bug.
+///
+/// # Where the world sits in the field
+///
+/// The map is **centred** on the field: a cell in the middle of the terrain samples the field at the
+/// pan, and the edges reach half a world either side. So enlarging the world takes in more ground
+/// evenly on all four sides and whatever was framed stays framed, which is the point of holding the
+/// pan in metres (#363) and matches what Radial Falloff already does by centring its dome.
+///
+/// It used to be anchored at the origin corner, so the top-left cell sampled the field at the pan and
+/// growing the world only ever added ground to the right and below. That was never a decision, only
+/// what `u` running from 0 to 1 happened to give, and it worked against the reason for enlarging a
+/// world: making room around something you have already found.
+///
+/// The pan is added after the region mapping rather than inside it, so it is a distance across the
+/// whole world and not across whatever sub-rectangle is being evaluated.
+fn field_position(
+    (x, y): (usize, usize),
+    (width, height): (usize, usize),
+    region: Region,
+    (pan_x, pan_y): (f64, f64),
+    frequency: f64,
+) -> (f64, f64) {
+    let centred = |i: usize, n: usize, min: f64, span: f64, pan: f64| {
+        let cell = (i as f64 + 0.5) / n as f64;
+        (min + cell * span - 0.5 + pan) * frequency
+    };
+    (
+        centred(x, width, region.min_x, region.width(), pan_x),
+        centred(y, height, region.min_y, region.height(), pan_y),
+    )
+}
+
 /// Generates a field whose `height` layer is fBm noise mapped to `[0, 1]`.
 ///
 /// The noise is sampled across `region` in world space, so the same `seed`,
@@ -131,12 +168,13 @@ pub(crate) fn fbm_field(
     seed: u64,
 ) -> Field {
     let layer = Layer::from_par_fn(width, height, |x, y| {
-        // Cell centre as a normalized position within the region, panned by the
-        // offset (in region widths) so a different region of the field is sampled.
-        let u = (x as f64 + 0.5) / width as f64 + params.offset_x;
-        let v = (y as f64 + 0.5) / height as f64 + params.offset_y;
-        let wx = (region.min_x + u * region.width()) * params.frequency;
-        let wy = (region.min_y + v * region.height()) * params.frequency;
+        let (wx, wy) = field_position(
+            (x, y),
+            (width, height),
+            region,
+            (params.offset_x, params.offset_y),
+            params.frequency,
+        );
 
         let n = fbm2(seed, wx as f32, wy as f32, params);
         // fBm is in roughly [-1, 1]; map to the nominal height range.
@@ -160,12 +198,14 @@ pub(crate) fn ridged_field(
     seed: u64,
 ) -> Field {
     let layer = Layer::from_par_fn(width, height, |x, y| {
-        // Same world-space sampling as fbm_field, so the two generators register against
-        // the same coordinates and stay resolution-independent.
-        let u = (x as f64 + 0.5) / width as f64 + params.offset_x;
-        let v = (y as f64 + 0.5) / height as f64 + params.offset_y;
-        let wx = (region.min_x + u * region.width()) * params.frequency;
-        let wy = (region.min_y + v * region.height()) * params.frequency;
+        // The shared mapping, so this generator registers against the others cell for cell.
+        let (wx, wy) = field_position(
+            (x, y),
+            (width, height),
+            region,
+            (params.offset_x, params.offset_y),
+            params.frequency,
+        );
 
         ridged2(seed, wx as f32, wy as f32, params)
     });
@@ -188,12 +228,14 @@ pub(crate) fn billow_field(
     seed: u64,
 ) -> Field {
     let layer = Layer::from_par_fn(width, height, |x, y| {
-        // Same world-space sampling as fbm_field, so the generators register against the
-        // same coordinates and stay resolution-independent.
-        let u = (x as f64 + 0.5) / width as f64 + params.offset_x;
-        let v = (y as f64 + 0.5) / height as f64 + params.offset_y;
-        let wx = (region.min_x + u * region.width()) * params.frequency;
-        let wy = (region.min_y + v * region.height()) * params.frequency;
+        // The shared mapping, so this generator registers against the others cell for cell.
+        let (wx, wy) = field_position(
+            (x, y),
+            (width, height),
+            region,
+            (params.offset_x, params.offset_y),
+            params.frequency,
+        );
 
         let n = billow2(seed, wx as f32, wy as f32, params);
         // Billow is in roughly [-1, 1]; map to the nominal height range.
@@ -221,10 +263,13 @@ pub(crate) fn hybrid_field(
     seed: u64,
 ) -> Field {
     let layer = Layer::from_par_fn(width, height, |x, y| {
-        let u = (x as f64 + 0.5) / width as f64 + params.offset_x;
-        let v = (y as f64 + 0.5) / height as f64 + params.offset_y;
-        let wx = (region.min_x + u * region.width()) * params.frequency;
-        let wy = (region.min_y + v * region.height()) * params.frequency;
+        let (wx, wy) = field_position(
+            (x, y),
+            (width, height),
+            region,
+            (params.offset_x, params.offset_y),
+            params.frequency,
+        );
 
         hybrid2(seed, wx as f32, wy as f32, params, bias)
     });
@@ -279,10 +324,14 @@ pub(crate) fn flow_field(
     let mut fy_buf = Vec::with_capacity(width * height);
     for y in 0..height {
         for x in 0..width {
-            let u = (x as f64 + 0.5) / width as f64 + params.offset_x;
-            let v = (y as f64 + 0.5) / height as f64 + params.offset_y;
-            let wx = ((region.min_x + u * region.width()) * params.frequency) as f32;
-            let wy = ((region.min_y + v * region.height()) * params.frequency) as f32;
+            let (fx, fy) = field_position(
+                (x, y),
+                (width, height),
+                region,
+                (params.offset_x, params.offset_y),
+                params.frequency,
+            );
+            let (wx, wy) = (fx as f32, fy as f32);
 
             let (vx, vy) = curl2(seed, wx, wy, params);
             // Warp the base-noise lookup along the flow vector.
@@ -401,12 +450,15 @@ pub(crate) fn worley_field(
 ) -> Field {
     let layer = Layer::from_par_fn(width, height, |x, y| {
         // Same world-space sampling as the other generators, so frequency sets cell size
-        // and the field registers against the same coordinates at any resolution. The
-        // offset pans the window (in region widths) exactly as the fractal-noise path does.
-        let u = (x as f64 + 0.5) / width as f64 + params.offset_x;
-        let v = (y as f64 + 0.5) / height as f64 + params.offset_y;
-        let wx = (region.min_x + u * region.width()) * params.frequency;
-        let wy = (region.min_y + v * region.height()) * params.frequency;
+        // and the field registers against the same coordinates at any resolution. The shared
+        // mapping, so Worley lands on the same coordinates as the fractal generators.
+        let (wx, wy) = field_position(
+            (x, y),
+            (width, height),
+            region,
+            (params.offset_x, params.offset_y),
+            params.frequency,
+        );
 
         let hit = worley(seed, wx as f32, wy as f32, params.jitter, params.placement);
         let (f1, f2, cell) = (hit.f1, hit.f2, hit.nearest);
@@ -571,7 +623,9 @@ fn noise_to_cell(
         } else {
             span
         };
-        let u = (f64::from(p) / frequency - min) / span - offset;
+        // Inverts `field_position`: undo the frequency, the region origin, the half-world centring
+        // and the pan, in that order, to recover the cell position.
+        let u = (f64::from(p) / frequency - min + 0.5 - offset) / span;
         let idx = u * n as f64 - 0.5;
         // `clamp` before the cast: an out-of-range float cast saturates, but doing it explicitly
         // keeps the intent readable and the bound obvious.
@@ -790,9 +844,25 @@ fn hash_coords(seed: u64, ix: i32, iy: i32) -> u64 {
     const PRIME_X: u64 = 0x9E37_79B9_7F4A_7C15;
     const PRIME_Y: u64 = 0xC2B2_AE3D_27D4_EB4F;
 
-    let mut h = seed;
-    h ^= (ix as i64 as u64).wrapping_mul(PRIME_X);
-    h ^= (iy as i64 as u64).wrapping_mul(PRIME_Y);
+    // Coordinates are combined by addition, not XOR, and only then avalanched.
+    //
+    // XOR-combining collided mirrored cells. Negating an odd `u` is exactly `u ^ 0xFF..FE`, and
+    // `a * PRIME` keeps the trailing zeros of `a` because the primes are odd, so whenever `ix` and
+    // `iy` shared a 2-adic valuation the two masks cancelled and `(ix, iy)` hashed identically to
+    // `(-ix, -iy)`. Interleaving a multiply between the two XORs does not help: the mask relation
+    // survives an odd multiply, so it cancels again at the second XOR.
+    //
+    // Addition has no such structure. Two cells collide only if
+    // `(dx * PRIME_X + dy * PRIME_Y) % 2^64 == 0`, which for small offsets between neighbouring
+    // cells needs coefficients far larger than any lattice reaches.
+    //
+    // The bug was invisible while every sampled coordinate was positive, since a cell and its mirror
+    // were never in view together. Centring the world on the field put the origin in the middle of
+    // the default map, which put them there: two Worley cells sharing a value read as one region,
+    // and two simplex lattice points sharing a gradient put a mirror line through the noise.
+    let mut h = seed
+        .wrapping_add((ix as i64 as u64).wrapping_mul(PRIME_X))
+        .wrapping_add((iy as i64 as u64).wrapping_mul(PRIME_Y));
     h ^= h >> 30;
     h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
     h ^= h >> 27;
@@ -860,7 +930,7 @@ mod tests {
         // Fixed fingerprint, unchanged from before the math moved out of
         // ymir-core: this proves the relocation altered zero bytes of output.
         let field = fbm_field(8, 8, Region::UNIT, FbmParams::default(), 42);
-        assert_eq!(field.content_hash().to_u64(), 0xb075_6620_1b58_4592);
+        assert_eq!(field.content_hash().to_u64(), 0x4ad5_ce9d_93be_739d);
     }
 
     fn worley_params() -> WorleyParams {
@@ -1151,5 +1221,124 @@ mod tests {
             )
         };
         assert_ne!(make(0.0).content_hash(), make(0.9).content_hash());
+    }
+
+    #[test]
+    fn distinct_lattice_cells_get_distinct_hashes_on_both_sides_of_the_origin() {
+        // Two cells sharing a hash is not a cosmetic problem: in Worley they become one region, and
+        // in simplex they take the same gradient, which puts a mirror line through the noise.
+        //
+        // This is a regression test for XOR-combining the coordinates. Negating an odd `u` is exactly
+        // `u ^ 0xFF..FE`, and `a * PRIME` keeps the trailing zeros of `a`, so whenever `ix` and `iy`
+        // shared a 2-adic valuation the masks cancelled and `(ix, iy)` collided with `(-ix, -iy)`:
+        // 100 collisions in the 25x25 lattice around the origin.
+        //
+        // The seeds include one salted with `WORLEY_SALT_REGION`, which is the same constant as
+        // `PRIME_X`. An earlier attempt at this fix passed with a plain seed and still collided under
+        // that one, so a plain seed is not enough to trust.
+        // Tested on the full 64-bit hash rather than `hash_unit`, which quantises to 24 bits so its
+        // fraction is exact in f32. Over 6561 cells that quantisation collides about once by chance,
+        // which is the birthday paradox doing its job and says nothing about the mixing.
+        for seed in [
+            0,
+            1,
+            7,
+            42,
+            u64::MAX,
+            7 ^ WORLEY_SALT_REGION,
+            7 ^ WORLEY_SALT_Y,
+        ] {
+            let mut seen = std::collections::HashMap::new();
+            let mut collisions = Vec::new();
+            for iy in -40i32..=40 {
+                for ix in -40i32..=40 {
+                    let bits = hash_coords(seed, ix, iy);
+                    if let Some(prev) = seen.insert(bits, (ix, iy)) {
+                        collisions.push((prev, (ix, iy)));
+                    }
+                }
+            }
+            assert!(
+                collisions.is_empty(),
+                "seed {seed:#x} collides: {:?} (and {} more)",
+                collisions.first(),
+                collisions.len().saturating_sub(1)
+            );
+        }
+    }
+
+    #[test]
+    fn an_unjittered_hex_lattice_is_six_sided_wherever_it_is_sampled() {
+        // Measured on the rendered field rather than the lattice: every cell of a regular hexagonal
+        // tiling touches exactly six others, and where in the field the window sits cannot change
+        // that. It did. A window straddling the origin averaged 7.07 sides, because mirrored cells
+        // shared a hash and each merged pair counted as one region bordering twelve.
+        //
+        // Both windows are checked, since the all-positive one passed throughout and so proves
+        // nothing on its own. Centring made the straddling window the default (#361).
+        let mean_sides = |pan: f64| {
+            let params = WorleyParams {
+                frequency: 12.0,
+                jitter: 0.0,
+                offset_x: pan,
+                offset_y: pan,
+                placement: Placement::Hex,
+            };
+            let res = 256usize;
+            let field = worley_field(
+                res,
+                res,
+                Region::UNIT,
+                params,
+                WorleyFeature::Regions,
+                7,
+                RegionOptions::default(),
+            );
+            let layer = field.layer_or(layers::HEIGHT, 0.0);
+            let mut borders: std::collections::HashMap<u32, std::collections::HashSet<u32>> =
+                std::collections::HashMap::new();
+            for y in 1..res - 1 {
+                for x in 1..res - 1 {
+                    let here = layer.get(x, y).unwrap_or(0.0).to_bits();
+                    for (nx, ny) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] {
+                        let other = layer.get(nx, ny).unwrap_or(0.0).to_bits();
+                        if other != here {
+                            borders.entry(here).or_default().insert(other);
+                        }
+                    }
+                }
+            }
+            // A cell reaching the image border has neighbours outside the field, so it counts short
+            // however regular the lattice is. Drop any cell that reaches the margin: the question is
+            // what the lattice does, not what cropping does to it.
+            let margin = 24;
+            let mut edge: std::collections::HashSet<u32> = std::collections::HashSet::new();
+            for y in 0..res {
+                for x in 0..res {
+                    if x < margin || y < margin || x >= res - margin || y >= res - margin {
+                        edge.insert(layer.get(x, y).unwrap_or(0.0).to_bits());
+                    }
+                }
+            }
+            let kept: Vec<usize> = borders
+                .iter()
+                .filter(|(value, _)| !edge.contains(value))
+                .map(|(_, set)| set.len())
+                .collect();
+            assert!(!kept.is_empty(), "no interior cells to measure");
+            kept.iter().sum::<usize>() as f32 / kept.len() as f32
+        };
+        // Centred on the origin, which is where a default graph sits.
+        let straddling = mean_sides(0.0);
+        assert!(
+            (straddling - 6.0).abs() < 0.01,
+            "hex cells across the origin averaged {straddling} sides, expected six"
+        );
+        // Half a world over, so the window is entirely positive: how it was only ever sampled before.
+        let positive = mean_sides(0.5);
+        assert!(
+            (positive - 6.0).abs() < 0.01,
+            "hex cells away from the origin averaged {positive} sides, expected six"
+        );
     }
 }

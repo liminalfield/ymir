@@ -255,6 +255,6 @@ mod tests {
     fn output_matches_golden_value() {
         // Fixed fingerprint so a change to the flow math fails here.
         let out = run(&Params::default(), &default_ctx());
-        assert_eq!(out.content_hash().to_u64(), 0x91bc_223e_4db1_0fe3);
+        assert_eq!(out.content_hash().to_u64(), 0xacef_52df_91d7_2474);
     }
 }
