@@ -27,7 +27,7 @@ use ymir_core::{
     Params, PortSpec, Result, layers,
 };
 
-use crate::expr::Program;
+use ymir_core::expr::Program;
 
 /// Stable type identifier and registry key.
 const TYPE_ID: &str = "modifier.expression";

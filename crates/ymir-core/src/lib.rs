@@ -27,6 +27,7 @@
 
 pub mod app_dirs;
 pub mod export;
+pub mod expr;
 pub mod import;
 pub mod layers;
 pub mod logging;
