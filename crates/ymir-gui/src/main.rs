@@ -5442,11 +5442,20 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
         // stay: the picture is for seeing the relationship, the numbers for setting one exactly.
         if let Some(ParamGroup::Levels) = group {
             ui.add_space(6.0);
-            levels_edit::levels_picture(
+            let edited = levels_edit::levels_editor(
                 ui,
+                &spec.params[range.clone()],
                 ymir_core::LevelsTransfer::from_params(&params),
                 histogram.as_ref(),
             );
+            // The editor reports its members by position within the run, so the name comes from
+            // the schema rather than being spelled out again here.
+            if let Some((member, value)) = edited
+                && let Some(pspec) = spec.params.get(range.start + member)
+            {
+                params.insert(pspec.name.clone(), ParamValue::Float(value));
+                changed = true;
+            }
         }
         for (index, pspec) in spec.params[range.clone()].iter().enumerate() {
             let index = range.start + index;

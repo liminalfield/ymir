@@ -44,6 +44,20 @@ Above and below the number sit the value one step up and one step down, so you c
 
 Values stay within the range the node declares, so a change or a typed number stops at the limit. A direction is the exception: it rolls, so passing 360° carries on from 0°.
 
+### The Levels editor
+
+Levels draws its five parameters as one picture, with the incoming distribution along the bottom and the transfer curve across it. The window bounds are draggable on the axis each one acts along.
+
+| Action | Input |
+|---|---|
+| Move an input bound | Drag its marker along the bottom edge |
+| Move an output bound | Drag its marker along the left edge |
+| Set a bound exactly | Its row beneath the picture, as any other value |
+
+The horizontal axis is the incoming data's own range, and the vertical one is the `[0, 1]` a height works in. Neither moves when you drag a bound, so the distribution you are aiming at stays where it is and a handle goes where you put it.
+
+Dragging reaches as far as the axis. To put a bound beyond the data, or an output bound outside `[0, 1]`, type it in its row. A bound already out there parks its marker at that edge, drawn hollow, since the axis does not stretch to reach it.
+
 ## Nodes pane
 
 The left dock's list of every node in the graph, in dependency order.
