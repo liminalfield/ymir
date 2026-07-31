@@ -8,6 +8,8 @@
 use eframe::egui;
 use ymir_core::{ParamKind, ParamSpec, ParamValue, Params, Scale, Unit};
 
+use crate::preview::Histogram;
+
 /// The editor widget a parameter kind maps to. Derived purely from the schema, so
 /// the mapping is unit-testable without egui.
 #[derive(Debug, Clone, PartialEq)]
@@ -515,7 +517,7 @@ pub(crate) fn edit(
     type_id: &str,
     spec: &ParamSpec,
     current: &ParamValue,
-    histogram: Option<&[f32]>,
+    histogram: Option<&Histogram>,
     popout: &mut bool,
 ) -> Option<ParamValue> {
     let name = spec.name.as_str();
