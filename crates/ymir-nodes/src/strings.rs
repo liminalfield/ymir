@@ -452,6 +452,14 @@ fn lookup(key: &str) -> Option<&'static str> {
         "param-modifier.directional_blur-direction-desc" => {
             "Whether smoothing runs along the guide direction or across it."
         }
+        // Distance's contour source. Node-specific: "from" means something different wherever else
+        // it appears, so it cannot take a shared entry.
+        "param-modifier.distance-from" => "From",
+        "param-modifier.distance-from-desc" => {
+            "Which contour to measure from: a height you name, or the world's sea level. Under \
+             sea level, only water joined to the map edge counts, so an enclosed hollow measures \
+             its distance to the real coast rather than making a shore of its own."
+        }
         "param-generator.import-edge" => "Edge",
         "param-generator.import-edge-desc" => {
             "How the field is filled where the placement maps outside the source image."

@@ -37,21 +37,25 @@ impl Operator for Levels {
             inputs: vec![PortSpec::new("in")],
             outputs: vec![PortSpec::new("out")],
             params: vec![
-                // Input window stretched to full. Allowed past [0, 1] so out-of-range
-                // height (e.g. after an Add) can be normalized back.
+                // Input window stretched to full. Allowed far past [0, 1], because the window has to
+                // reach whatever the incoming field actually carries, and not every field is a
+                // height: Distance emits metres from a contour, which on a wide world runs to
+                // thousands. A window that stopped at 4 could not normalize the very fields this node
+                // exists to normalize. The output window below stays narrow on purpose, since what
+                // comes *out* of Levels is a height and heights work in [0, 1].
                 ParamSpec::new(
                     "in_low",
                     ParamKind::Float {
-                        min: -4.0,
-                        max: 4.0,
+                        min: -100_000.0,
+                        max: 100_000.0,
                     },
                     ParamValue::Float(0.0),
                 ),
                 ParamSpec::new(
                     "in_high",
                     ParamKind::Float {
-                        min: -4.0,
-                        max: 4.0,
+                        min: -100_000.0,
+                        max: 100_000.0,
                     },
                     ParamValue::Float(1.0),
                 ),

@@ -22,11 +22,13 @@ Selects a band around a height contour, measured by true distance in metres so t
 ## Outputs
 
 - `out`
+- `distance`
 
 ## Parameters
 
 | Parameter | Type | Range | Default | Unit | Description | Field-driven |
 |---|---|---|---|---|---|---|
+| From (`from`) | enum | height, sea | height |  | Which contour to measure from: a height you name, or the world's sea level. Under sea level, only water joined to the map edge counts, so an enclosed hollow measures its distance to the real coast rather than making a shore of its own. | no |
 | Level (`level`) | float | [-4, 4] | 0.5 |  |  | no |
 | Range (`range`) | float | [0, 100000] | 100 | m |  | no |
 | Side (`side`) | enum | both, outside, inside | both |  | Which side of the contour the band covers: both, only above, or only below. | no |
@@ -38,3 +40,7 @@ Reads and writes the height layer.
 ## Behaviour
 
 The distance is an isotropic eikonal solve, so the band width does not vary with direction. It can cover both sides of the contour or only one.
+
+Set From to sea to track the world's sea level instead of a height you name. That reading also asks what the water is connected to: only water reaching the map edge counts as sea, so a hollow below sea level in the middle of an island measures its distance to the real coast rather than making a shore of its own.
+
+The second output, `distance`, is the measurement itself in metres, negative on the far side of the contour and positive on the near side. The first output is a band that peaks on the contour and fades over Range, which is what a selection wants; this one keeps the sign and does not fade, which is what shaping wants. Feed it through Levels and Curve to make anything a function of how far it is from the contour: a beach profile rising from the shore, a snow line that thickens with altitude above it, a material that changes with distance from a terrace edge. The measurement is the contour's own coordinate system, so shaping along it needs no direction maths.
