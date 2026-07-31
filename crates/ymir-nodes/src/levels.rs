@@ -18,8 +18,8 @@ use std::sync::Arc;
 
 use ymir_core::registry::OperatorEntry;
 use ymir_core::{
-    EvalContext, Field, Inputs, Layer, NodeSpec, Operator, ParamKind, ParamSpec, ParamValue,
-    Params, PortSpec, Result, layers,
+    EvalContext, Field, Inputs, Layer, NodeSpec, Operator, ParamGroup, ParamKind, ParamSpec,
+    ParamValue, Params, PortSpec, Result, layers,
 };
 
 /// Stable type identifier and registry key.
@@ -36,6 +36,10 @@ impl Operator for Levels {
             category: "adjust",
             inputs: vec![PortSpec::new("in")],
             outputs: vec![PortSpec::new("out")],
+            // All five declare one composite control (#369). They are a window, a bend and a
+            // window, and read as five unrelated sliders only because nothing said otherwise;
+            // the relationship between them is the tool. They stay five separate named
+            // parameters, so each is still settable and addressable on its own.
             params: vec![
                 // Input window stretched to full. Allowed far past [0, 1], because the window has to
                 // reach whatever the incoming field actually carries, and not every field is a
@@ -50,7 +54,8 @@ impl Operator for Levels {
                         max: 100_000.0,
                     },
                     ParamValue::Float(0.0),
-                ),
+                )
+                .in_group(ParamGroup::Levels),
                 ParamSpec::new(
                     "in_high",
                     ParamKind::Float {
@@ -58,8 +63,12 @@ impl Operator for Levels {
                         max: 100_000.0,
                     },
                     ParamValue::Float(1.0),
-                ),
-                // Midtone bias: > 1 lifts the mids, < 1 lowers them.
+                )
+                .in_group(ParamGroup::Levels),
+                // Midtone bias: > 1 lifts the mids, < 1 lowers them. Logarithmically distributed,
+                // because 1.0 is neutral and is the geometric midpoint of the range: on a linear
+                // control every value below neutral is crushed into a tenth of the travel, so
+                // halving and doubling the bias would cost wildly different drags.
                 ParamSpec::new(
                     "gamma",
                     ParamKind::Float {
@@ -67,7 +76,9 @@ impl Operator for Levels {
                         max: 10.0,
                     },
                     ParamValue::Float(1.0),
-                ),
+                )
+                .logarithmic()
+                .in_group(ParamGroup::Levels),
                 // Output window mapped into. A narrow window scales amplitude down (a
                 // gentle plain). Allowed past [0, 1] and negative, symmetric with the input
                 // window, so Levels can produce signed or over-range output: a small signed
@@ -80,7 +91,8 @@ impl Operator for Levels {
                         max: 4.0,
                     },
                     ParamValue::Float(0.0),
-                ),
+                )
+                .in_group(ParamGroup::Levels),
                 ParamSpec::new(
                     "out_high",
                     ParamKind::Float {
@@ -88,7 +100,8 @@ impl Operator for Levels {
                         max: 4.0,
                     },
                     ParamValue::Float(1.0),
-                ),
+                )
+                .in_group(ParamGroup::Levels),
             ],
             emitted_layers: Vec::new(),
             mask_aware: true,
@@ -165,7 +178,44 @@ inventory::submit! {
 mod tests {
     use super::*;
     use ymir_core::Region;
-    use ymir_core::registry;
+    use ymir_core::{param_runs, registry};
+
+    #[test]
+    fn all_five_params_form_one_composite_control() {
+        // The five are one control, and `param_runs` only merges a *consecutive* run, so
+        // inserting an ungrouped parameter between them would silently split the editor in two.
+        // Asserted here rather than left to review.
+        let spec = Levels.spec();
+        let runs = param_runs(&spec.params);
+        assert_eq!(runs.len(), 1, "expected one run, got {runs:?}");
+        assert_eq!(runs[0], (Some(ParamGroup::Levels), 0..5));
+        let names: Vec<&str> = spec.params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["in_low", "in_high", "gamma", "out_low", "out_high"],
+            "the composite editor reads its members by position, so their order is contractual"
+        );
+    }
+
+    #[test]
+    fn gamma_is_logarithmic_so_neutral_sits_mid_travel() {
+        let spec = Levels.spec();
+        let gamma = spec
+            .params
+            .iter()
+            .find(|p| p.name == "gamma")
+            .expect("gamma is declared");
+        assert_eq!(gamma.scale, ymir_core::Scale::Logarithmic);
+        // Neutral is the geometric midpoint of the range, which is what makes a logarithmic
+        // control put it at the centre of the track.
+        let ParamKind::Float { min, max } = gamma.kind else {
+            panic!("gamma is a float");
+        };
+        assert!(
+            ((min * max).sqrt() - 1.0).abs() < 1e-9,
+            "neutral 1.0 should be the geometric midpoint of [{min}, {max}]"
+        );
+    }
 
     fn ctx() -> EvalContext {
         EvalContext::new(8, 8, Region::UNIT, 0)
