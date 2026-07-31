@@ -2,11 +2,20 @@
 
 # Design note: subgraphs (container nodes)
 
-Status: **design agreed, not yet built (#106, mechanism from #79).** This supersedes the
-earlier "catalogue of pasteable fragments" sketch. The decision below is to build the
-dive-in container directly, which #79 had deferred behind a cheap flat-paste form. We are
-reordering: build the container, skip the flat form. The container still follows #79's
-locked mechanism (template instantiation: copy on use, no link back to a definition).
+Status: **built and shipped (#106, mechanism from #79); one decision superseded.** For an
+accurate description of what shipped, see [`authoring-handoff.md`](authoring-handoff.md) §3.0.
+
+The "library-drop is a copy with no link back" decision below is **superseded** by
+[`subgraphs-as-authored-nodes.md`](subgraphs-as-authored-nodes.md) §3.3, which replaces it with
+embed-with-provenance: a project embeds one definition per subgraph type, carrying a stable id, a
+version and a content hash, with instances holding only their own values. The copy still happens,
+at definition granularity rather than instance granularity, so a project stays self-contained. See
+the note under the decision table. That change also answers the "editing a library entry in place"
+item under Deferred or open.
+
+This document supersedes the earlier "catalogue of pasteable fragments" sketch. The decision below
+is to build the dive-in container directly, which #79 had deferred behind a cheap flat-paste form.
+We reordered: build the container, skip the flat form.
 
 ## What a subgraph is
 
@@ -123,6 +132,13 @@ one output port, same as any node.
 | Library-drop is a copy with no link back | #79's template instantiation: no definition-versioning or fork-on-edit rabbit hole |
 | Built-ins ship inside the app; user library at `~/.config/ymir/subgraphs/` | Built-ins cannot be clobbered; user files stay portable and git-friendly |
 
+**Superseded row: "library-drop is a copy with no link back".** The reasoning held while a
+subgraph was a template. It does not survive a subgraph being an authored node: fix a bug in a
+coastal node used four times in a project and the copy model means four manual replacements with
+no way to see which instances are stale. See
+[`subgraphs-as-authored-nodes.md`](subgraphs-as-authored-nodes.md) §3.3 for the replacement, which
+keeps the self-containment this row was protecting while dropping the manual-replacement cost.
+
 ## What this asks of the engine
 
 This is the honest cost. The container is the nesting engine #79 said arrives "once the
@@ -163,9 +179,12 @@ In dependency order. Each step ends compiling, tested, and runnable, per the hou
 
 - **Bypass semantics for a multi-port container.** What "bypass" routes when a node has
   several inputs and outputs is not obvious; settled in step 8, not now.
-- **Editing a library entry in place.** Drops are copies with no link back, so "update
-  the library" means re-saving. Whether to offer an explicit "open library entry, edit,
-  save back" flow is a later question.
+- **Editing a library entry in place.** *Answered* by
+  [`subgraphs-as-authored-nodes.md`](subgraphs-as-authored-nodes.md) §3.3: edit the definition
+  wherever it lives, and the content hash tells every project holding a copy that an update
+  exists, offered on open as an explicit, user-initiated act. The original question is kept below
+  for the record. Drops are copies with no link back, so "update the library" means re-saving.
+  Whether to offer an explicit "open library entry, edit, save back" flow is a later question.
 - **Nested subgraphs (a subgraph inside a subgraph).** The recursion should fall out of
   the engine nesting naturally; we will confirm it works rather than special-case it, and
   not chase arbitrary depth until something needs it.
