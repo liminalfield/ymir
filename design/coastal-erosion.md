@@ -6,6 +6,32 @@ Revision 1. Companion to `ymir-erosion-DESIGN.md`. This document specs the coast
 water-line model, the substrate it needs, and the research and decisions required before
 implementation. It is written to be reviewed, revised, and then decomposed into issues.
 
+Status: **partly superseded; annotated rather than rewritten.** The thesis (§1), the survey, the
+priority order (§1.1) and the geomorphological brief (§3) stand and are still the grounding for
+this work. Four things have moved, all recorded in
+[`subgraphs-as-authored-nodes.md`](subgraphs-as-authored-nodes.md) and
+[`authoring-handoff.md`](authoring-handoff.md):
+
+- **Stage 8's analytic profile is superseded.** Building the beach as
+  `min(berm_height, beach_face_tan * φ)` produces the same hard crease the shipped v0 was
+  criticised for, and exposure changes where beaches appear and how big, never the cross-section's
+  shape. The replacement is an artist-editable curve parameterised by signed shore distance, with
+  Dean's equilibrium curve and the grain-size slope tables of §7 becoming *presets* on that curve
+  rather than the mechanism. That is what §1.1's own priority order asks for; specifying the
+  constants as "derived from grain size and wave climate, not exposed as free sliders by default"
+  is physics as mechanism, which §1.1 forbids.
+- **The node decomposition in §4 is superseded.** The coast is composed from separate nodes rather
+  than delivered as one `Coastal` model. `Exposure` is promoted from the optional later utility of
+  §4.3 to a node in its own right, because it is the one piece with no cheap fake and it serves
+  sun, wind and snow independently of any coast.
+- **The architectural prerequisites in §5 are largely met.** The eikonal distance solver (§5.1) is
+  shipped and is what the `Distance` node uses, and the sea-level global (§5.5) is shipped, with
+  the sea reading counting only water connected to the map edge.
+- **`modifier.coastal` is parked**, not deleted. No further work goes into the bevel.
+
+Re-ground this document only when the composed coast ships, so it is rewritten against something
+real rather than against a second plan.
+
 ---
 
 ## 1. Thesis
