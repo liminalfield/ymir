@@ -558,6 +558,73 @@ pub enum ParamGroup {
     Levels,
 }
 
+/// The transfer a [`ParamGroup::Levels`] control denotes: clamp into an input window, bend the
+/// midtones, then map onto an output window.
+///
+/// This lives beside the group declaration rather than inside the node that first used it,
+/// because the inspector has to draw exactly the curve the node applies. Two implementations of
+/// the same five numbers would be free to drift, and a drawn curve quietly disagreeing with the
+/// result is the failure a visual control exists to prevent.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LevelsTransfer {
+    /// Input window lower bound.
+    pub in_low: f32,
+    /// Input window upper bound.
+    pub in_high: f32,
+    /// Midtone bias: above 1 lifts the midtones, below 1 lowers them.
+    pub gamma: f32,
+    /// Output window lower bound.
+    pub out_low: f32,
+    /// Output window upper bound.
+    pub out_high: f32,
+}
+
+impl LevelsTransfer {
+    /// The neutral transfer: the unit window onto itself, no bend. Passes a `[0, 1]` value
+    /// through unchanged.
+    pub const NEUTRAL: Self = Self {
+        in_low: 0.0,
+        in_high: 1.0,
+        gamma: 1.0,
+        out_low: 0.0,
+        out_high: 1.0,
+    };
+
+    /// Reads the five values from a node's parameters by their conventional names, falling
+    /// back to [`NEUTRAL`](Self::NEUTRAL) for any that are absent.
+    #[must_use]
+    pub fn from_params(params: &Params) -> Self {
+        Self {
+            in_low: params.get_f64("in_low", f64::from(Self::NEUTRAL.in_low)) as f32,
+            in_high: params.get_f64("in_high", f64::from(Self::NEUTRAL.in_high)) as f32,
+            gamma: params.get_f64("gamma", f64::from(Self::NEUTRAL.gamma)) as f32,
+            out_low: params.get_f64("out_low", f64::from(Self::NEUTRAL.out_low)) as f32,
+            out_high: params.get_f64("out_high", f64::from(Self::NEUTRAL.out_high)) as f32,
+        }
+    }
+
+    /// Maps one value through the transfer.
+    ///
+    /// A zero-width input window has no span to normalize against, so it degrades to a hard
+    /// step at that threshold rather than dividing by zero. A non-positive gamma would make a
+    /// degenerate exponent, so it is floored here, at the one place it is used, rather than
+    /// left to each caller to remember.
+    #[must_use]
+    pub fn apply(&self, value: f32) -> f32 {
+        let span = self.in_high - self.in_low;
+        let t = if span.abs() > f32::EPSILON {
+            ((value - self.in_low) / span).clamp(0.0, 1.0)
+        } else if value >= self.in_high {
+            1.0
+        } else {
+            0.0
+        };
+        // Gamma above 1 lifts the midtones, since the exponent 1/gamma is then below 1.
+        let t = t.powf(1.0 / self.gamma.max(1e-3));
+        self.out_low + t * (self.out_high - self.out_low)
+    }
+}
+
 /// The schema for one parameter: its name, kind, default value, optional unit, value
 /// distribution, and optional composite group.
 #[derive(Clone, Debug, PartialEq)]
@@ -683,6 +750,50 @@ mod tests {
             ParamKind::Float { min: 0.0, max: 1.0 },
             ParamValue::Float(0.0),
         )
+    }
+
+    #[test]
+    fn the_neutral_transfer_passes_a_unit_value_through() {
+        for v in [0.0, 0.25, 0.5, 1.0] {
+            assert!((LevelsTransfer::NEUTRAL.apply(v) - v).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn a_zero_width_window_is_a_hard_step_not_a_division_by_zero() {
+        let t = LevelsTransfer {
+            in_low: 0.5,
+            in_high: 0.5,
+            ..LevelsTransfer::NEUTRAL
+        };
+        assert_eq!(t.apply(0.49), 0.0);
+        assert_eq!(t.apply(0.5), 1.0);
+        assert_eq!(t.apply(0.51), 1.0);
+    }
+
+    #[test]
+    fn a_non_positive_gamma_is_floored_rather_than_producing_a_degenerate_exponent() {
+        for gamma in [0.0, -1.0] {
+            let t = LevelsTransfer {
+                gamma,
+                ..LevelsTransfer::NEUTRAL
+            };
+            let out = t.apply(0.5);
+            assert!(out.is_finite(), "gamma {gamma} gave {out}");
+        }
+    }
+
+    #[test]
+    fn values_outside_the_input_window_clamp_to_the_output_window() {
+        let t = LevelsTransfer {
+            in_low: 100.0,
+            in_high: 400.0,
+            ..LevelsTransfer::NEUTRAL
+        };
+        // A field carrying metres, windowed onto [0, 1]: below the window floors, above ceils.
+        assert_eq!(t.apply(0.0), 0.0);
+        assert_eq!(t.apply(1000.0), 1.0);
+        assert!((t.apply(250.0) - 0.5).abs() < 1e-6);
     }
 
     #[test]

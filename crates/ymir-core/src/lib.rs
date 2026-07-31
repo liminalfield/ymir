@@ -67,7 +67,8 @@ pub use layer::Layer;
 pub use operator::{ContextDeps, Inputs, Operator, OperatorClone};
 pub use paint::{BrushShape, Stroke, StrokeMode, StrokePoint, Strokes};
 pub use param::{
-    Curve, ParamGroup, ParamKind, ParamSpec, ParamValue, Params, Scale, Unit, param_runs,
+    Curve, LevelsTransfer, ParamGroup, ParamKind, ParamSpec, ParamValue, Params, Scale, Unit,
+    param_runs,
 };
 pub use progress::{Progress, ProgressSink};
 pub use project::{
