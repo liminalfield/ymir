@@ -294,6 +294,16 @@ const SIDE_BOTH: &str = "both";
 const SIDE_OUTSIDE: &str = "outside";
 const SIDE_INSIDE: &str = "inside";
 
+/// Where the contour is: a height the user names, or the world's sea level.
+const FROMS: &[&str] = &[FROM_HEIGHT, FROM_SEA];
+/// Take the contour from the `level` parameter. The original behaviour, and the default, so a
+/// project saved before this choice existed reads the same contour it always did.
+const FROM_HEIGHT: &str = "height";
+/// Take the contour from the world's sea level, and treat only water connected to the map border as
+/// sea. Not merely `level = sea_level`: an enclosed below-sea basin is land under this reading, so it
+/// seeds no shoreline of its own and measures its distance to the real coast.
+const FROM_SEA: &str = "sea";
+
 /// Default contour level on the input height.
 const DEFAULT_LEVEL: f64 = 0.5;
 /// Default falloff distance (world metres) over which the selection fades from the contour.
@@ -310,8 +320,25 @@ impl Operator for Distance {
             type_id: TYPE_ID,
             category: "selector",
             inputs: vec![PortSpec::new("in")],
-            outputs: vec![PortSpec::new("out").selection()],
+            outputs: vec![
+                PortSpec::new("out").selection(),
+                // The signed distance itself, in world metres: negative on the far side of the
+                // contour, positive on the near side, zero on it. Not a selection, so it is not
+                // marked as one: it is unbounded data, and clamping it to [0, 1] for display would
+                // hide everything past a metre.
+                //
+                // This is the contour's own coordinate system, which is what makes it worth emitting
+                // rather than recomputing downstream. The gradient is the contour normal and the
+                // level sets run parallel to it, so any "distance from the shore" shaping becomes a
+                // one-dimensional transfer function of this field with no tangent math anywhere.
+                PortSpec::new("distance"),
+            ],
             params: vec![
+                ParamSpec::new(
+                    "from",
+                    ParamKind::Enum { options: FROMS },
+                    ParamValue::Text(FROM_HEIGHT.to_string()),
+                ),
                 ParamSpec::new(
                     "level",
                     ParamKind::Float {
@@ -340,10 +367,18 @@ impl Operator for Distance {
         }
     }
 
-    /// Reads only the world horizontal extent (a world-unit param), not the world height or
-    /// sea level, so those two sliders never invalidate this node.
+    /// Reads the world horizontal extent (a world-unit param) and the sea level, but not the world
+    /// height.
+    ///
+    /// The sea level is only read when `from` is `sea`, but `context_deps` sees no parameters, so the
+    /// union is declared. Over-declaring costs a needless invalidation when the sea-level slider
+    /// moves and a `height` contour is selected; under-declaring would memoize a stale field, which
+    /// is the failure that corrupts rather than the one that wastes.
     fn context_deps(&self) -> ymir_core::ContextDeps {
-        ymir_core::ContextDeps::WORLD_EXTENT
+        ymir_core::ContextDeps {
+            world_height: false,
+            ..ymir_core::ContextDeps::ALL
+        }
     }
 
     fn eval(&self, inputs: Inputs, params: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
@@ -351,13 +386,17 @@ impl Operator for Distance {
         let (width, height) = (input.width(), input.height());
         let h = input.layer_or(layers::HEIGHT, 0.0);
 
-        let level = params.get_f64("level", DEFAULT_LEVEL) as f32;
         // A zero range would divide by zero; clamp to a hair so it degrades to a hard edge.
         let range = params.get_f64("range", DEFAULT_RANGE).max(1e-6) as f32;
         let side = params.get_str("side", SIDE_BOTH);
         let cell_size = ctx.meters_per_cell() as f32;
 
-        let signed = signed_distance_to_contour(&h, level, cell_size);
+        let signed = if params.get_str("from", FROM_HEIGHT) == FROM_SEA {
+            sea_signed_distance(&h, ctx.sea_level() as f32, cell_size)
+        } else {
+            let level = params.get_f64("level", DEFAULT_LEVEL) as f32;
+            signed_distance_to_contour(&h, level, cell_size)
+        };
         let selection = Layer::from_fn(width, height, |x, y| {
             let d = signed.get(x, y).unwrap_or(0.0);
             let inside = d < 0.0;
@@ -375,7 +414,13 @@ impl Operator for Distance {
 
         let mut out = input.clone();
         out.set_layer(layers::HEIGHT, Arc::new(selection));
-        Ok(vec![out])
+
+        // The signed distance as a field of its own, carried on `height` because that is the layer
+        // every downstream node reads. It is metres, not a [0, 1] weight, so a consumer shaping by it
+        // windows the range it cares about rather than assuming one.
+        let mut raw = input.clone();
+        raw.set_layer(layers::HEIGHT, Arc::new(signed));
+        Ok(vec![out, raw])
     }
 }
 
@@ -536,8 +581,109 @@ mod tests {
             .remove(0)
     }
 
+    /// Both outputs, for the tests that care about the second one.
+    fn run_both(input: &Field, params: &Params, sea_level: f64) -> Vec<Field> {
+        let ctx = EvalContext::new(input.width(), input.height(), input.region(), 0)
+            .with_world_extent(input.width() as f64)
+            .with_sea_level(sea_level);
+        Distance
+            .eval(Inputs::required_only(&[input]), params, &ctx)
+            .unwrap()
+    }
+
     fn at(field: &Field, x: usize, y: usize) -> f32 {
         field.layer(layers::HEIGHT).unwrap().get(x, y).unwrap()
+    }
+
+    #[test]
+    fn the_second_output_is_the_signed_distance_in_metres() {
+        // The selection collapses the distance into a [0, 1] band and throws the sign away. The
+        // second output is the field itself, which is what a profile shaped by distance needs: it has
+        // to tell inland from offshore, and it has to reach past a metre.
+        let island = radial_island(65);
+        let out = run_both(&island, &Params::new(), 0.0);
+        assert_eq!(out.len(), 2, "a selection and the raw distance");
+
+        let raw = out[1].layer(layers::HEIGHT).unwrap();
+        let centre = raw.get(32, 32).unwrap();
+        let corner = raw.get(1, 1).unwrap();
+        // Inside the contour and outside it carry opposite signs, which is the whole point.
+        assert!(
+            centre * corner < 0.0,
+            "inside and outside must differ in sign, got {centre} and {corner}"
+        );
+        // And it is a real distance, not a weight: the island's centre is tens of cells from a
+        // contour that a [0, 1] selection would have flattened to zero long before.
+        assert!(
+            centre.abs() > 4.0,
+            "the centre is far from the contour, got {centre}"
+        );
+        // meters_per_cell is 1 here, so the value is directly comparable to the cell count.
+        let expected = 32.0 - 65.0 * 0.3;
+        assert!(
+            (centre.abs() - expected).abs() < 3.0,
+            "expected about {expected} from the contour, got {}",
+            centre.abs()
+        );
+    }
+
+    #[test]
+    fn the_sea_contour_is_the_world_sea_level_and_ignores_enclosed_basins() {
+        // `from = sea` is not just `level = sea_level`: only water reaching the map border counts, so
+        // an enclosed hollow below the level measures its distance to the real coast instead of
+        // seeding a shoreline of its own.
+        let island = radial_island(65);
+        let sea = Params::new().with("from", ParamValue::Text(FROM_SEA.to_string()));
+        let by_sea = run_both(&island, &sea, 0.5);
+        let by_height = run_both(
+            &island,
+            &Params::new().with("level", ParamValue::Float(0.5)),
+            0.0,
+        );
+        // Naming the same contour two ways agrees, since this island has no enclosed basin.
+        let a = by_sea[1].layer(layers::HEIGHT).unwrap();
+        let b = by_height[1].layer(layers::HEIGHT).unwrap();
+        for (x, y) in [(32, 32), (10, 32), (32, 60), (5, 5)] {
+            let (u, v) = (a.get(x, y).unwrap(), b.get(x, y).unwrap());
+            assert!(
+                (u - v).abs() < 1e-4,
+                "cell ({x}, {y}) differs: {u} by sea, {v} by height"
+            );
+        }
+
+        // And the sea reading follows the world setting rather than the `level` param, which it must
+        // ignore entirely.
+        let higher = run_both(&island, &sea, 0.7);
+        let deeper = higher[1]
+            .layer(layers::HEIGHT)
+            .unwrap()
+            .get(32, 32)
+            .unwrap();
+        assert!(
+            deeper < a.get(32, 32).unwrap(),
+            "a higher sea puts the shore further up the island, so the peak is nearer it"
+        );
+    }
+
+    #[test]
+    fn an_existing_project_reads_the_contour_it_always_did() {
+        // `from` defaults to `height`, so a Distance node saved before the choice existed keeps its
+        // `level` contour rather than silently jumping to the sea.
+        let island = radial_island(65);
+        let saved = Params::new().with("level", ParamValue::Float(0.5));
+        let now = run_both(&island, &saved, 0.9);
+        let explicit = run_both(
+            &island,
+            &saved
+                .clone()
+                .with("from", ParamValue::Text(FROM_HEIGHT.to_string())),
+            0.9,
+        );
+        assert_eq!(
+            now[0].content_hash(),
+            explicit[0].content_hash(),
+            "an absent `from` must mean `height`"
+        );
     }
 
     #[test]

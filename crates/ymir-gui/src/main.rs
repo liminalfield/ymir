@@ -1003,7 +1003,7 @@ impl AppState {
             },
             workspace_mode: WorkspaceMode::Split,
             workspace_mode_prev: None,
-            viewport_frac: 0.4,
+            viewport_frac: DEFAULT_VIEWPORT_FRAC,
             viewport_anim_from: 0.0,
             viewport_anim_start: 0.0,
             viewport_last_h: 0.0,
@@ -10304,6 +10304,20 @@ fn default_layout() -> Layout {
 /// button padding and the rail's own margin.
 const DOCK_RAIL_WIDTH: f32 = 36.0;
 
+/// The workspace's split when it first opens: how much of the body the viewport takes, the canvas
+/// getting the rest. An even half, so neither pane is presented as the lesser one and the divider
+/// starts somewhere with no opinion in it.
+const DEFAULT_VIEWPORT_FRAC: f32 = 0.5;
+
+/// The width of a dock icon button, both in the rail and in the switcher header.
+///
+/// Fixed, so a row of them is a row rather than a huddle. Two things vary otherwise. Each icon is a
+/// different glyph, so a row sized to its content is unevenly spaced; and egui's button padding is
+/// derived per widget *state* (`Style::button_style` folds the expansion and the frame stroke into
+/// the inner margin), so hovering or selecting one can change its width and shove its neighbours
+/// along. Fixing the width removes both, and is what a row of icons wanted anyway.
+const DOCK_ICON_W: f32 = 26.0;
+
 /// The width of the flanking side panels (the left dock and the right inspector), kept equal so
 /// the workspace is symmetric. Sized to the right panel's square preview plus a small margin.
 const SIDE_PANEL_WIDTH: f32 = 260.0;
@@ -10540,10 +10554,14 @@ fn mount_dock(ui: &mut egui::Ui, state: &mut AppState) -> egui::InnerResponse<()
             .show_inside(ui, |ui| {
                 // Switcher header: the pane icons on the left, a collapse button on the right.
                 header_strip(ui, |ui| {
+                    let h = ui.spacing().interact_size.y;
                     for pane in &panes {
                         let selected = pane.id == active_id;
                         if ui
-                            .selectable_label(selected, pane.icon)
+                            .add_sized(
+                                [DOCK_ICON_W, h],
+                                egui::Button::selectable(selected, pane.icon),
+                            )
                             .on_hover_text(pane.title)
                             .clicked()
                         {
@@ -10581,9 +10599,14 @@ fn mount_dock(ui: &mut egui::Ui, state: &mut AppState) -> egui::InnerResponse<()
                 egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::symmetric(4, 6)),
             )
             .show_inside(ui, |ui| {
+                let h = ui.spacing().interact_size.y;
                 ui.vertical_centered(|ui| {
                     for pane in &panes {
-                        if ui.button(pane.icon).on_hover_text(pane.title).clicked() {
+                        if ui
+                            .add_sized([DOCK_ICON_W, h], egui::Button::new(pane.icon))
+                            .on_hover_text(pane.title)
+                            .clicked()
+                        {
                             state.dock.open = true;
                             state.dock.active = pane.id.to_string();
                         }
