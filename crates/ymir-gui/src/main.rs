@@ -24,8 +24,8 @@ use egui_snarl::{NodeId as SnarlNodeId, Snarl};
 use ymir_core::registry;
 use ymir_core::{
     BrushShape, EvalCache, EvalRequest, Extraction, Field, FieldStore, Graph, INPUT_TYPE_ID,
-    NodeId, OUTPUT_TYPE_ID, ParamKind, ParamValue, Params, ProjectDocument, SUBGRAPH_TYPE_ID,
-    Stroke, StrokeMode, StrokePoint, Strokes, marker_port_label,
+    NodeId, OUTPUT_TYPE_ID, ParamGroup, ParamKind, ParamValue, Params, ProjectDocument,
+    SUBGRAPH_TYPE_ID, Stroke, StrokeMode, StrokePoint, Strokes, marker_port_label,
 };
 use ymir_nodes::{CategoryDef, categories, find_category, node_group, tr};
 
@@ -40,6 +40,8 @@ mod output_kind;
 mod param_ui;
 // The visual curve editor widget (GUI step A2), rendered for ParamKind::Curve.
 mod curve_edit;
+// The visual Levels editor (#369), rendered for a ParamGroup::Levels run of parameters.
+mod levels_edit;
 // Background preview evaluation (GUI step 6b): off-thread, latest-wins.
 mod preview;
 use preview::{Histogram, PreviewEngine};
@@ -5432,38 +5434,54 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
         }
         changed = true;
     }
-    for (index, pspec) in spec.params.iter().enumerate() {
-        // A little vertical breathing room between parameters, so the panel does not read as a
-        // dense stack (#90). Between rows only: none before the first or after the last.
-        if index > 0 {
+    // Walked as runs rather than as a flat parameter list, so a node can declare that several of
+    // its parameters are one control (#369) and have it drawn once for the whole group. A node
+    // that declares nothing yields one run per parameter, which is the loop this replaced.
+    for (group, range) in ymir_core::param_runs(&spec.params) {
+        // The composite control for a declared group, drawn above its members' rows. The rows
+        // stay: the picture is for seeing the relationship, the numbers for setting one exactly.
+        if let Some(ParamGroup::Levels) = group {
             ui.add_space(6.0);
+            levels_edit::levels_picture(
+                ui,
+                ymir_core::LevelsTransfer::from_params(&params),
+                histogram.as_ref(),
+            );
         }
-        let current = param_ui::current_value(&params, pspec);
-        // A painted-mask param is authored by brushing on the 2D map, not by a value widget, so it
-        // gets its own controls (brush + paint toggle + undo/clear) instead of `edit`.
-        if matches!(pspec.kind, ParamKind::Strokes) {
-            paint_controls(ui, state, handle, &current, &mut params, &mut changed);
-            continue;
-        }
-        // The curve editor's corner pop-out icon (#70-style) reports through this flag,
-        // opening the larger, draggable window for this node's curve param.
-        let mut popout = false;
-        if let Some(new_value) = param_ui::edit(
-            ui,
-            spec.type_id,
-            pspec,
-            &current,
-            histogram.as_ref(),
-            &mut popout,
-        ) {
-            params.insert(pspec.name.clone(), new_value);
-            changed = true;
-        }
-        if popout {
-            state.curve_popout = Some(CurvePopout {
-                node: handle,
-                param: pspec.name.clone(),
-            });
+        for (index, pspec) in spec.params[range.clone()].iter().enumerate() {
+            let index = range.start + index;
+            // A little vertical breathing room between parameters, so the panel does not read as a
+            // dense stack (#90). Between rows only: none before the first or after the last.
+            if index > 0 {
+                ui.add_space(6.0);
+            }
+            let current = param_ui::current_value(&params, pspec);
+            // A painted-mask param is authored by brushing on the 2D map, not by a value widget, so it
+            // gets its own controls (brush + paint toggle + undo/clear) instead of `edit`.
+            if matches!(pspec.kind, ParamKind::Strokes) {
+                paint_controls(ui, state, handle, &current, &mut params, &mut changed);
+                continue;
+            }
+            // The curve editor's corner pop-out icon (#70-style) reports through this flag,
+            // opening the larger, draggable window for this node's curve param.
+            let mut popout = false;
+            if let Some(new_value) = param_ui::edit(
+                ui,
+                spec.type_id,
+                pspec,
+                &current,
+                histogram.as_ref(),
+                &mut popout,
+            ) {
+                params.insert(pspec.name.clone(), new_value);
+                changed = true;
+            }
+            if popout {
+                state.curve_popout = Some(CurvePopout {
+                    node: handle,
+                    param: pspec.name.clone(),
+                });
+            }
         }
     }
 
