@@ -66,7 +66,9 @@ pub use hash::ContentHash;
 pub use layer::Layer;
 pub use operator::{ContextDeps, Inputs, Operator, OperatorClone};
 pub use paint::{BrushShape, Stroke, StrokeMode, StrokePoint, Strokes};
-pub use param::{Curve, ParamKind, ParamSpec, ParamValue, Params, Scale, Unit};
+pub use param::{
+    Curve, ParamGroup, ParamKind, ParamSpec, ParamValue, Params, Scale, Unit, param_runs,
+};
 pub use progress::{Progress, ProgressSink};
 pub use project::{
     Connection, FORMAT_VERSION, NodeDocument, PROJECT_FILE_VERSION, ProjectDocument, ProjectFile,

@@ -531,8 +531,35 @@ pub enum Scale {
     Logarithmic,
 }
 
-/// The schema for one parameter: its name, kind, default value, optional unit, and value
-/// distribution.
+/// A composite control that several of a node's parameters render as together, declared
+/// per-parameter via [`ParamSpec::in_group`].
+///
+/// Some controls are a relationship between parameters rather than a stack of independent
+/// values, and drawing them as separate rows hides the very thing being edited. A group lets
+/// a node *declare* that relationship so the inspector can render one control for it, without
+/// the inspector ever asking which node it is looking at: it reads the declaration, exactly as
+/// it reads [`ParamKind`] to pick a widget.
+///
+/// Consecutive parameters declaring the same group form one run. Declaration order is the
+/// order the composite control receives them, and a parameter without a group renders as its
+/// own row as usual. This is a presentation declaration only: the parameters stay separate
+/// values with separate names, so each is still addressable on its own (settable, hashable,
+/// and referenceable by a future expression).
+///
+/// Semantic, not a widget choice: the schema names the *kind of control*, and the inspector
+/// picks how to draw it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ParamGroup {
+    /// An input window, a midtone bend, and an output window: the "levels" control archetype
+    /// familiar from image editors. Names the control, not any particular node; any node with
+    /// this shape declares it. Members in order: input low, input high, bend, output low,
+    /// output high.
+    Levels,
+}
+
+/// The schema for one parameter: its name, kind, default value, optional unit, value
+/// distribution, and optional composite group.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParamSpec {
     /// Parameter name, the key used in [`Params`].
@@ -547,6 +574,9 @@ pub struct ParamSpec {
     /// How the value is distributed across its range, for choosing a linear or logarithmic
     /// control. [`Scale::Linear`] unless declared otherwise.
     pub scale: Scale,
+    /// The composite control this parameter is part of, if any. `None` (the usual case) renders
+    /// as its own row.
+    pub group: Option<ParamGroup>,
 }
 
 impl ParamSpec {
@@ -564,6 +594,7 @@ impl ParamSpec {
             default,
             unit: None,
             scale: Scale::Linear,
+            group: None,
         }
     }
 
@@ -584,6 +615,39 @@ impl ParamSpec {
         self.scale = Scale::Logarithmic;
         self
     }
+
+    /// Declares this parameter part of a composite control (see [`ParamGroup`]). Consecutive
+    /// parameters declaring the same group render as one control, in declaration order.
+    #[must_use]
+    pub fn in_group(mut self, group: ParamGroup) -> Self {
+        self.group = Some(group);
+        self
+    }
+}
+
+/// Splits a parameter schema into its display runs: each run is either a single ungrouped
+/// parameter or a maximal run of consecutive parameters declaring the same [`ParamGroup`].
+///
+/// The inspector walks these instead of the raw parameter list, so a composite control renders
+/// once for its whole group. Returned as index ranges into `params` rather than borrowed
+/// slices of it, so a caller can index the schema and a node's values side by side.
+///
+/// Runs are maximal and consecutive: two separate groups of the same kind stay separate if
+/// anything is declared between them, which is what lets a node carry more than one composite
+/// control of the same sort.
+#[must_use]
+pub fn param_runs(params: &[ParamSpec]) -> Vec<(Option<ParamGroup>, core::ops::Range<usize>)> {
+    let mut runs: Vec<(Option<ParamGroup>, core::ops::Range<usize>)> = Vec::new();
+    for (i, spec) in params.iter().enumerate() {
+        match (spec.group, runs.last_mut()) {
+            // Extend the open run only for a grouped parameter matching it. An ungrouped
+            // parameter always starts its own run, so two adjacent ungrouped parameters do not
+            // merge into one.
+            (Some(group), Some((Some(open), range))) if *open == group => range.end = i + 1,
+            _ => runs.push((spec.group, i..i + 1)),
+        }
+    }
+    runs
 }
 
 /// Whether a default value's variant is consistent with the declared kind. An
@@ -610,6 +674,85 @@ mod tests {
         let mut h = Fnv1a64::new();
         value.hash_into(&mut h);
         h.finish().to_u64()
+    }
+
+    /// A bare float parameter, for the run-splitting tests below.
+    fn float_spec(name: &str) -> ParamSpec {
+        ParamSpec::new(
+            name,
+            ParamKind::Float { min: 0.0, max: 1.0 },
+            ParamValue::Float(0.0),
+        )
+    }
+
+    #[test]
+    fn ungrouped_params_each_get_their_own_run() {
+        let params = vec![float_spec("a"), float_spec("b"), float_spec("c")];
+        let runs = param_runs(&params);
+        assert_eq!(runs, vec![(None, 0..1), (None, 1..2), (None, 2..3)]);
+    }
+
+    #[test]
+    fn consecutive_params_of_one_group_form_a_single_run() {
+        let params = vec![
+            float_spec("before"),
+            float_spec("in_low").in_group(ParamGroup::Levels),
+            float_spec("in_high").in_group(ParamGroup::Levels),
+            float_spec("gamma").in_group(ParamGroup::Levels),
+            float_spec("after"),
+        ];
+        let runs = param_runs(&params);
+        assert_eq!(
+            runs,
+            vec![(None, 0..1), (Some(ParamGroup::Levels), 1..4), (None, 4..5),]
+        );
+    }
+
+    #[test]
+    fn a_group_broken_by_an_ungrouped_param_yields_two_runs() {
+        // Maximal-and-consecutive, so a node can carry two composite controls of the same kind
+        // without them merging into one.
+        let params = vec![
+            float_spec("first").in_group(ParamGroup::Levels),
+            float_spec("between"),
+            float_spec("second").in_group(ParamGroup::Levels),
+        ];
+        let runs = param_runs(&params);
+        assert_eq!(
+            runs,
+            vec![
+                (Some(ParamGroup::Levels), 0..1),
+                (None, 1..2),
+                (Some(ParamGroup::Levels), 2..3),
+            ]
+        );
+    }
+
+    #[test]
+    fn runs_cover_every_param_exactly_once_and_in_order() {
+        let params = vec![
+            float_spec("a"),
+            float_spec("b").in_group(ParamGroup::Levels),
+            float_spec("c").in_group(ParamGroup::Levels),
+            float_spec("d"),
+        ];
+        let runs = param_runs(&params);
+        let covered: Vec<usize> = runs.iter().flat_map(|(_, r)| r.clone()).collect();
+        assert_eq!(covered, (0..params.len()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn no_runs_for_an_empty_schema() {
+        assert!(param_runs(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_param_declares_no_group_by_default() {
+        assert_eq!(float_spec("a").group, None);
+        assert_eq!(
+            float_spec("a").in_group(ParamGroup::Levels).group,
+            Some(ParamGroup::Levels)
+        );
     }
 
     #[test]
