@@ -18,8 +18,8 @@ use std::sync::Arc;
 
 use ymir_core::registry::OperatorEntry;
 use ymir_core::{
-    EvalContext, Field, Inputs, Layer, NodeSpec, Operator, ParamGroup, ParamKind, ParamSpec,
-    ParamValue, Params, PortSpec, Result, layers,
+    EvalContext, Field, Inputs, Layer, LevelsTransfer, NodeSpec, Operator, ParamGroup, ParamKind,
+    ParamSpec, ParamValue, Params, PortSpec, Result, layers,
 };
 
 /// Stable type identifier and registry key.
@@ -121,18 +121,13 @@ impl Operator for Levels {
         let h = input.layer_or(layers::HEIGHT, 0.0);
         let mask = input.layer_or(layers::MASK, 1.0);
 
-        let levels = LevelParams {
-            in_low: params.get_f64("in_low", 0.0) as f32,
-            in_high: params.get_f64("in_high", 1.0) as f32,
-            // Guard against a non-positive gamma producing a degenerate exponent.
-            gamma: (params.get_f64("gamma", 1.0) as f32).max(1e-3),
-            out_low: params.get_f64("out_low", 0.0) as f32,
-            out_high: params.get_f64("out_high", 1.0) as f32,
-        };
+        // The transfer lives in `ymir-core` beside the `ParamGroup::Levels` declaration, so the
+        // inspector draws the same curve this applies rather than a second copy of it.
+        let levels = LevelsTransfer::from_params(params);
 
         let shaped = Layer::from_fn(width, height, |x, y| {
             let original = h.get(x, y).unwrap_or(0.0);
-            let leveled = level_value(original, levels);
+            let leveled = levels.apply(original);
             let m = mask.get(x, y).unwrap_or(1.0);
             original + (leveled - original) * m
         });
@@ -141,33 +136,6 @@ impl Operator for Levels {
         out.set_layer(layers::HEIGHT, Arc::new(shaped));
         Ok(vec![out])
     }
-}
-
-/// The five Levels controls, precomputed once per evaluation.
-#[derive(Clone, Copy)]
-struct LevelParams {
-    in_low: f32,
-    in_high: f32,
-    gamma: f32,
-    out_low: f32,
-    out_high: f32,
-}
-
-/// Maps one height value through the Levels transfer: clamp into the input window, apply
-/// gamma, then map onto the output window. A zero-width input window degrades to a hard
-/// step at that threshold.
-fn level_value(value: f32, p: LevelParams) -> f32 {
-    let span = p.in_high - p.in_low;
-    let t = if span.abs() > f32::EPSILON {
-        ((value - p.in_low) / span).clamp(0.0, 1.0)
-    } else if value >= p.in_high {
-        1.0
-    } else {
-        0.0
-    };
-    // Gamma > 1 lifts the midtones (t^(1/gamma) with 1/gamma < 1).
-    let t = t.powf(1.0 / p.gamma);
-    p.out_low + t * (p.out_high - p.out_low)
 }
 
 inventory::submit! {
@@ -195,6 +163,33 @@ mod tests {
             ["in_low", "in_high", "gamma", "out_low", "out_high"],
             "the composite editor reads its members by position, so their order is contractual"
         );
+    }
+
+    #[test]
+    fn the_transfers_fallbacks_match_the_declared_defaults() {
+        // `LevelsTransfer::NEUTRAL` and the schema defaults state the same five numbers in two
+        // places, so an edit to one has to be an edit to both. Reading an empty parameter map
+        // must land on exactly what an unset node would use.
+        let from_empty = LevelsTransfer::from_params(&Params::new());
+        let spec = Levels.spec();
+        let declared = |name: &str| {
+            let ParamValue::Float(v) = spec
+                .params
+                .iter()
+                .find(|p| p.name == name)
+                .expect("declared")
+                .default
+            else {
+                panic!("{name} defaults to a float");
+            };
+            v as f32
+        };
+        assert_eq!(from_empty.in_low, declared("in_low"));
+        assert_eq!(from_empty.in_high, declared("in_high"));
+        assert_eq!(from_empty.gamma, declared("gamma"));
+        assert_eq!(from_empty.out_low, declared("out_low"));
+        assert_eq!(from_empty.out_high, declared("out_high"));
+        assert_eq!(from_empty, LevelsTransfer::NEUTRAL);
     }
 
     #[test]
