@@ -30,7 +30,6 @@ mod erosion;
 mod export;
 mod export_exr;
 mod export_r16;
-mod expr;
 mod expression;
 mod falloff;
 mod fbm;

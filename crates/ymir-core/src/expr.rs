@@ -1,16 +1,23 @@
-//! A tiny arithmetic-expression engine for the Expression node.
+//! A tiny arithmetic-expression engine.
 //!
-//! An expression is parsed once into a flat bytecode program, then evaluated per cell
-//! against a fixed variable environment. The per-cell hot path is a stack machine over a
-//! `Vec<Op>` (no AST pointer-chasing, no per-cell allocation), so it stays fast over
-//! millions of cells and parallelizes trivially: [`Program::eval`] is `&self` plus a
-//! local stack, so each rayon worker evaluates independently.
+//! An expression is parsed once into a flat bytecode program, then evaluated against a fixed
+//! variable environment. The engine does not know what its variables mean, so the same program
+//! serves two callers with different environments: the Expression node evaluates one per cell
+//! against the input layers and cell coordinates, and a parameter whose value is computed rather
+//! than stored evaluates one per node against a scalar environment (#371).
+//!
+//! It lives in `ymir-core` rather than beside the node because the second caller is the
+//! evaluator resolving a parameter before `eval`, and that cannot depend on the node crate.
+//!
+//! The hot path is a stack machine over a `Vec<Op>` (no AST pointer-chasing, no per-cell
+//! allocation), so it stays fast over millions of cells and parallelizes trivially:
+//! [`Program::eval`] is `&self` plus a local stack, so each rayon worker evaluates
+//! independently.
 //!
 //! It is an expression language, not a script: no statements, control flow, or
 //! assignment. Branching is done with `select(cond, a, b)` and `clamp`. Identifiers
-//! resolve to the caller's variables (the input layers and cell coordinates) or to the
-//! built-in constants and functions; an unknown name is a compile error, so a typo is
-//! reported rather than silently zero.
+//! resolve to the caller's variables or to the built-in constants and functions; an unknown
+//! name is a compile error, so a typo is reported rather than silently zero.
 //!
 //! Hand-rolled rather than pulling an eval crate, for the same reason `noise.rs` is: the
 //! function set and numeric behavior are fully under our control and byte-stable, and the
@@ -18,7 +25,7 @@
 //! easy crates (`evalexpr`, `rhai`) are tree-walkers, the slow per-cell path.
 
 /// Largest evaluation-stack depth a program may need. Real expressions are far shallower;
-/// the cap bounds the per-cell stack array and is checked once at compile time.
+/// the cap bounds the evaluation stack array and is checked once at compile time.
 const STACK_MAX: usize = 128;
 
 /// A built-in function, with a fixed arity.
@@ -174,7 +181,7 @@ enum Op {
 
 /// A compile/parse failure, carrying a human-readable message for the node to surface.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ExprError {
+pub struct ExprError {
     /// The message, e.g. `unknown name "heigth"` or `expected ')'`.
     pub message: String,
 }
@@ -193,9 +200,9 @@ impl std::fmt::Display for ExprError {
     }
 }
 
-/// A compiled expression, evaluated per cell. Compile once, evaluate many.
+/// A compiled expression. Compile once, evaluate many.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Program {
+pub struct Program {
     ops: Vec<Op>,
 }
 
@@ -207,7 +214,7 @@ impl Program {
     ///
     /// Returns an [`ExprError`] with a message on a syntax error, an unknown name, a
     /// function-arity mismatch, or an expression too deep to evaluate.
-    pub(crate) fn compile(source: &str, vars: &[&str]) -> Result<Self, ExprError> {
+    pub fn compile(source: &str, vars: &[&str]) -> Result<Self, ExprError> {
         let tokens = tokenize(source)?;
         let mut parser = Parser {
             tokens,
@@ -230,7 +237,7 @@ impl Program {
     /// Evaluates the program with `values[i]` bound to the `i`th variable from
     /// [`compile`](Self::compile). The caller guarantees `values.len()` covers every
     /// variable index the program references.
-    pub(crate) fn eval(&self, values: &[f32]) -> f32 {
+    pub fn eval(&self, values: &[f32]) -> f32 {
         // A fixed stack array, so the per-cell hot path never allocates. The compile-time
         // depth check guarantees the indices below stay in bounds.
         let mut stack = [0.0_f32; STACK_MAX];
