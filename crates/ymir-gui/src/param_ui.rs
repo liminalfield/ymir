@@ -21,11 +21,15 @@ pub(crate) enum Widget {
         max: f64,
         logarithmic: bool,
     },
-    /// A value field over `[min, max]` for a float carrying a unit (an open physical
-    /// quantity, e.g. a world-unit length), shown with the unit as a suffix. A slider
-    /// over a wide world-unit range is too coarse and unlabelled; this is precise and
-    /// type-able instead.
-    Quantity { min: f64, max: f64, unit: Unit },
+    /// A value field over `[min, max]` for an open quantity: a float carrying a unit (e.g. a
+    /// world-unit length), or one whose range is simply too wide to steer with a slider. Shown
+    /// with the unit as a suffix when it has one. A slider over such a range is too coarse and
+    /// unlabelled; this is precise and type-able instead.
+    Quantity {
+        min: f64,
+        max: f64,
+        unit: Option<Unit>,
+    },
     /// A drag value over `[min, max]` for an integer.
     IntDrag { min: i64, max: i64 },
     /// A checkbox for a boolean.
@@ -46,22 +50,34 @@ pub(crate) enum Widget {
     ReadOnly,
 }
 
+/// The widest range a slider can still be steered across.
+///
+/// The inspector panel is a few hundred points wide, so a range beyond this moves by hundreds of
+/// units per pixel: the control cannot express a change the value can, and it reads as broken
+/// because a real edit leaves the handle where it was. Every range the node set declares is
+/// either well under this or two orders above it, so nothing sits near the line.
+const MAX_SLIDER_SPAN: f64 = 1000.0;
+
 /// Maps a parameter schema to its editor widget. Takes the whole spec, since a
 /// float's widget depends on whether it carries a unit (an open quantity edits as a
 /// value field, a bare ratio as a slider).
 pub(crate) fn widget_for(spec: &ParamSpec) -> Widget {
     match &spec.kind {
-        ParamKind::Float { min, max } => match spec.unit {
-            Some(unit) => Widget::Quantity {
+        // An open quantity edits as a value field. A unit says so outright; so does a range too
+        // wide to steer, whether or not anyone could name its unit. Levels' input window is the
+        // second case: it has to reach whatever the incoming field carries, so it spans 200,000,
+        // but its unit belongs to that field rather than to the parameter.
+        ParamKind::Float { min, max } if spec.unit.is_some() || max - min > MAX_SLIDER_SPAN => {
+            Widget::Quantity {
                 min: *min,
                 max: *max,
-                unit,
-            },
-            None => Widget::Slider {
-                min: *min,
-                max: *max,
-                logarithmic: spec.scale == Scale::Logarithmic,
-            },
+                unit: spec.unit,
+            }
+        }
+        ParamKind::Float { min, max } => Widget::Slider {
+            min: *min,
+            max: *max,
+            logarithmic: spec.scale == Scale::Logarithmic,
         },
         ParamKind::Int { min, max } => Widget::IntDrag {
             min: *min,
@@ -590,7 +606,9 @@ pub(crate) fn edit(
                 ParamValue::Float(d) => *d,
                 _ => x,
             };
-            let degrees = matches!(unit, Unit::Degrees);
+            let degrees = unit == Some(Unit::Degrees);
+            // No unit means no suffix: an open range without a nameable unit still edits as a value.
+            let suffix = unit.map_or("", unit_suffix);
             let wraps = degrees && angle_wraps(min, max);
             let mut result = None;
             ui.horizontal(|ui| {
@@ -606,9 +624,7 @@ pub(crate) fn edit(
                     // DragValue supplies display, click-to-type, and formatting; its own drag is
                     // made inert (speed 0) so the infinite scrub below is the only thing that moves
                     // the value.
-                    let mut drag = egui::DragValue::new(&mut x)
-                        .suffix(unit_suffix(unit))
-                        .speed(0.0);
+                    let mut drag = egui::DragValue::new(&mut x).suffix(suffix).speed(0.0);
                     drag = if degrees {
                         drag.fixed_decimals(1)
                     } else {
@@ -634,7 +650,7 @@ pub(crate) fn edit(
                             &mut x,
                             (min, max),
                             crate::magnitude::Resolution::Continuous,
-                            unit_suffix(unit),
+                            suffix,
                         )
                     };
                     if value.changed() || scrubbed {
@@ -948,9 +964,45 @@ mod tests {
             Widget::Quantity {
                 min: 0.0,
                 max: 100.0,
-                unit: Unit::Meters
+                unit: Some(Unit::Meters)
             }
         );
+    }
+
+    #[test]
+    fn a_range_too_wide_to_steer_is_a_value_field_even_with_no_unit() {
+        // Levels' input window has to reach whatever the incoming field carries, so it spans
+        // 200,000. As a slider that is hundreds of units per pixel: a real edit leaves the handle
+        // where it was, and the control reads as disconnected from the value.
+        let window = spec(
+            ParamKind::Float {
+                min: -100_000.0,
+                max: 100_000.0,
+            },
+            ParamValue::Float(0.0),
+        );
+        assert_eq!(
+            widget_for(&window),
+            Widget::Quantity {
+                min: -100_000.0,
+                max: 100_000.0,
+                unit: None
+            }
+        );
+    }
+
+    #[test]
+    fn an_ordinary_range_stays_a_slider() {
+        // The rule must not quietly take sliders away from the ranges they suit. The widest the
+        // node set declares below the line is a full turn of degrees, which carries a unit; the
+        // widest unit-less one is far narrower.
+        for max in [1.0, 8.0, 90.0, 360.0, MAX_SLIDER_SPAN] {
+            let ratio = spec(ParamKind::Float { min: 0.0, max }, ParamValue::Float(0.0));
+            assert!(
+                matches!(widget_for(&ratio), Widget::Slider { .. }),
+                "a 0..{max} range should stay a slider"
+            );
+        }
     }
 
     #[test]
