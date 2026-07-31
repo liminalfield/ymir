@@ -10,6 +10,8 @@
 use eframe::egui;
 use ymir_core::Curve;
 
+use crate::preview::Histogram;
+
 /// Widget height in points.
 const HEIGHT: f32 = 160.0;
 /// Maximum widget width in points (the inspector panel is narrow).
@@ -56,7 +58,7 @@ fn unit_from_screen(pos: egui::Pos2, rect: egui::Rect) -> (f32, f32) {
 pub(crate) fn curve_editor(
     ui: &mut egui::Ui,
     curve: &Curve,
-    histogram: Option<&[f32]>,
+    histogram: Option<&Histogram>,
 ) -> InlineCurveResult {
     let size = egui::vec2(ui.available_width().min(MAX_WIDTH), HEIGHT);
     let mut popout = false;
@@ -76,7 +78,7 @@ pub(crate) fn curve_editor(
 pub(crate) fn curve_editor_sized(
     ui: &mut egui::Ui,
     curve: &Curve,
-    histogram: Option<&[f32]>,
+    histogram: Option<&Histogram>,
     size: egui::Vec2,
     show_readout: bool,
     popout: Option<&mut bool>,
@@ -99,19 +101,32 @@ pub(crate) fn curve_editor_sized(
         egui::StrokeKind::Inside,
     );
     // The input histogram, drawn faintly behind everything so the curve can be shaped
-    // against where the data sits. Bins span the [0, 1] domain left to right; a spike at
-    // the right edge means data above 1 (clamped in), i.e. normalize first.
-    if let Some(bins) = histogram.filter(|h| !h.is_empty()) {
+    // against where the data sits.
+    //
+    // A curve's domain is [0, 1] by definition, but the distribution it is shown against need
+    // not be: the bins span the input field's own range. So each bin is placed by the *value*
+    // it covers, and a bin outside [0, 1] falls off the edge rather than being squeezed in.
+    // A field that is already normalized fills the width exactly, as before.
+    if let Some(hist) = histogram.filter(|h| !h.bins.is_empty()) {
         let bar_color = visuals.weak_text_color().gamma_multiply(0.5);
-        let bar_w = rect.width() / bins.len() as f32;
-        for (i, &h) in bins.iter().enumerate() {
+        let width = hist.bin_width();
+        for (i, &h) in hist.bins.iter().enumerate() {
             if h <= 0.0 {
                 continue;
             }
-            let x0 = rect.left() + i as f32 * bar_w;
+            // The bin's value span, clipped to the curve's domain. A degenerate range (every
+            // value identical) has no width, so the bin is drawn as a hairline at its value.
+            let lo = hist.value_at_bin(i);
+            let hi = if width > 0.0 { lo + width } else { lo };
+            let (lo, hi) = (lo.clamp(0.0, 1.0), hi.clamp(0.0, 1.0));
+            if hi < lo || (hi == lo && !(0.0..=1.0).contains(&lo)) {
+                continue;
+            }
+            let x0 = rect.left() + lo * rect.width();
+            let x1 = (rect.left() + hi * rect.width()).max(x0 + 1.0);
             let bar = egui::Rect::from_min_max(
                 egui::pos2(x0, rect.bottom() - h * rect.height()),
-                egui::pos2(x0 + bar_w, rect.bottom()),
+                egui::pos2(x1, rect.bottom()),
             );
             painter.rect_filled(bar, 0, bar_color);
         }

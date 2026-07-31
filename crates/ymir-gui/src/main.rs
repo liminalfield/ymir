@@ -42,7 +42,7 @@ mod param_ui;
 mod curve_edit;
 // Background preview evaluation (GUI step 6b): off-thread, latest-wins.
 mod preview;
-use preview::PreviewEngine;
+use preview::{Histogram, PreviewEngine};
 
 mod shade;
 
@@ -5416,9 +5416,9 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
     // The input distribution for the histogram behind the curve editor (#15), copied to
     // an owned buffer so it does not borrow `state.preview` across the params write below.
     // `None` unless this node is the one being previewed, so the histogram matches.
-    let histogram: Option<Vec<f32>> = state
+    let histogram: Option<Histogram> = state
         .primary
-        .and_then(|h| state.preview.input_histogram(h).map(|h| h.to_vec()));
+        .and_then(|h| state.preview.input_histogram(h).cloned());
 
     // Edit against a clone of the current params, then write back once if anything
     // changed. The graph stays the single source of truth.
@@ -5453,7 +5453,7 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
             spec.type_id,
             pspec,
             &current,
-            histogram.as_deref(),
+            histogram.as_ref(),
             &mut popout,
         ) {
             params.insert(pspec.name.clone(), new_value);
@@ -10998,10 +10998,7 @@ fn curve_popout_window(ctx: &egui::Context, state: &mut AppState) {
     let identity = ymir_core::Curve::identity();
     let params = state.graph.params(id).cloned().unwrap_or_default();
     let curve = params.get_curve(&popout.param, &identity).clone();
-    let histogram: Option<Vec<f32>> = state
-        .preview
-        .input_histogram(popout.node)
-        .map(|h| h.to_vec());
+    let histogram: Option<Histogram> = state.preview.input_histogram(popout.node).cloned();
 
     let mut open = true;
     egui::Window::new(title)
@@ -11032,7 +11029,7 @@ fn curve_popout_window(ctx: &egui::Context, state: &mut AppState) {
             let side = ui.available_width().clamp(280.0, 720.0);
             let size = egui::vec2(side, (side * 0.8).max(240.0));
             if let Some(new_curve) =
-                curve_edit::curve_editor_sized(ui, &curve, histogram.as_deref(), size, true, None)
+                curve_edit::curve_editor_sized(ui, &curve, histogram.as_ref(), size, true, None)
             {
                 let mut next = params.clone();
                 next.insert(popout.param.clone(), ParamValue::Curve(new_curve));

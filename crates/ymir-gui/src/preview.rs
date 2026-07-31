@@ -67,10 +67,10 @@ enum Outcome {
         materials: Vec<u64>,
         /// Their weights, in the same order.
         material_weights: Vec<Field>,
-        /// Normalized bin heights of the node's *input* distribution (the field feeding
-        /// it), for the editor histogram. `None` for a generator (no input) or a failed
-        /// input eval.
-        histogram: Option<Vec<f32>>,
+        /// The node's *input* distribution (the field feeding it) with the range it spans,
+        /// for the editor histogram. `None` for a generator (no input), a failed input eval,
+        /// or an input with no finite values.
+        histogram: Option<Histogram>,
         /// Which nodes hold a cache entry still keyed to what they would produce now, by
         /// `stable_id` (#279). Computed here because the cache lives on this thread, and the
         /// node pane must never recompute keys per frame.
@@ -196,9 +196,9 @@ pub(crate) struct PreviewEngine {
     cache_report: HashMap<u64, bool>,
     /// The node the last evaluation failed on, if it failed.
     failed_node: Option<u64>,
-    /// The input histogram of the most recent result, and the node it is for. Surfaced
+    /// The input distribution of the most recent result, and the node it is for. Surfaced
     /// to the curve/levels editors via [`input_histogram`](Self::input_histogram).
-    last_histogram: Option<Vec<f32>>,
+    last_histogram: Option<Histogram>,
     histogram_target: Option<u64>,
     texture: Option<egui::TextureHandle>,
     /// The (field hash, output index, mode, scale, light bits, sea-level bits, show-water) the
@@ -339,12 +339,12 @@ impl PreviewEngine {
         self.display_output = index;
     }
 
-    /// The input distribution (normalized bin heights over `[0, 1]`) of `node`, for the
-    /// histogram behind its curve/levels editor (#15). `None` unless the most recent
-    /// preview result is for that node, so the histogram always matches the editor.
-    pub(crate) fn input_histogram(&self, node: u64) -> Option<&[f32]> {
+    /// The input distribution of `node`, with the range it spans, for the histogram behind
+    /// its curve/levels editor (#15). `None` unless the most recent preview result is for
+    /// that node, so the histogram always matches the editor.
+    pub(crate) fn input_histogram(&self, node: u64) -> Option<&Histogram> {
         if self.histogram_target == Some(node) {
-            self.last_histogram.as_deref()
+            self.last_histogram.as_ref()
         } else {
             None
         }
@@ -847,11 +847,11 @@ fn input_histogram(
     target: NodeId,
     request: &EvalRequest,
     cache: &mut EvalCache,
-) -> Option<Vec<f32>> {
+) -> Option<Histogram> {
     let (source, port) = graph.input_source(target, 0)?;
     let fields = graph.evaluate(source, request, cache).ok()?;
     let field = fields.get(port)?;
-    Some(field_histogram(field, HISTOGRAM_BINS))
+    field_histogram(field, HISTOGRAM_BINS)
 }
 
 /// Like [`input_histogram`], but inside a subgraph (#106): the input source is evaluated
@@ -863,28 +863,85 @@ fn bound_input_histogram(
     request: &EvalRequest,
     cache: &mut EvalCache,
     bound: &[(NodeId, Field)],
-) -> Option<Vec<f32>> {
+) -> Option<Histogram> {
     let (source, port) = graph.input_source(target, 0)?;
     let fields = graph
         .evaluate_bound(bound, &[(source, port)], request, cache)
         .ok()?;
-    Some(field_histogram(fields.first()?, HISTOGRAM_BINS))
+    field_histogram(fields.first()?, HISTOGRAM_BINS)
 }
 
-/// Bins a field's `height` layer into `bins` buckets over `[0, 1]`, returning each
-/// bin's count normalized to the tallest bin (so heights are in `[0, 1]` for drawing).
-/// Values outside `[0, 1]` clamp into the end bins, so out-of-range data shows as a
-/// spike against the edge. Order-independent, so it is deterministic.
-fn field_histogram(field: &Field, bins: usize) -> Vec<f32> {
+/// A field's value distribution, together with the range its bins span.
+///
+/// The range is the field's own minimum and maximum rather than a fixed `[0, 1]`. Binning
+/// into `[0, 1]` would be right only for a normalized height: `Distance` emits metres from a
+/// contour, which on a wide world runs to thousands, and clamping that into `[0, 1]` collapses
+/// every cell into one edge spike. A window control shown that distribution can only be set by
+/// guesswork, which is the complaint this exists to answer (#369).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Histogram {
+    /// Bin heights normalized to the tallest bin (so each is in `[0, 1]` for drawing), left to
+    /// right across [`min`, `max`].
+    pub(crate) bins: Vec<f32>,
+    /// The lowest finite value in the field.
+    pub(crate) min: f32,
+    /// The highest finite value in the field.
+    pub(crate) max: f32,
+}
+
+impl Histogram {
+    /// The value a bin's left edge sits at.
+    pub(crate) fn value_at_bin(&self, index: usize) -> f32 {
+        let width = (self.max - self.min) / self.bins.len().max(1) as f32;
+        self.min + index as f32 * width
+    }
+
+    /// The width of one bin in field values. Zero when every value is identical, which a
+    /// caller drawing an axis has to widen rather than divide by.
+    pub(crate) fn bin_width(&self) -> f32 {
+        (self.max - self.min) / self.bins.len().max(1) as f32
+    }
+}
+
+/// Bins a field's `height` layer into `bins` buckets across the field's own value range,
+/// returning each bin's count normalized to the tallest bin.
+///
+/// Non-finite values are skipped rather than poisoning the range, and a field with no finite
+/// values at all reports `None` instead of a fabricated distribution. When every value is
+/// identical the range is degenerate (`min == max`) and all of the count lands in the first
+/// bin; that is reported honestly and left for the caller to draw. Order-independent, so it is
+/// deterministic.
+fn field_histogram(field: &Field, bins: usize) -> Option<Histogram> {
     let layer = field.layer_or(layers::HEIGHT, 0.0);
+    let (min, max) = layer
+        .as_slice()
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), v| {
+            (lo.min(v), hi.max(v))
+        });
+    if !min.is_finite() || !max.is_finite() {
+        return None;
+    }
+    let span = max - min;
     let mut counts = vec![0u32; bins];
-    for &value in layer.as_slice() {
-        let t = value.clamp(0.0, 1.0);
-        let idx = ((t * bins as f32) as usize).min(bins - 1);
+    for &value in layer.as_slice().iter().filter(|v| v.is_finite()) {
+        // A degenerate range has no width to divide by; every value is the same, so it all
+        // belongs to the first bin.
+        let idx = if span > 0.0 {
+            (((value - min) / span * bins as f32) as usize).min(bins - 1)
+        } else {
+            0
+        };
         counts[idx] += 1;
     }
-    let max = counts.iter().copied().max().unwrap_or(0).max(1);
-    counts.iter().map(|&c| c as f32 / max as f32).collect()
+    let peak = counts.iter().copied().max().unwrap_or(0).max(1);
+    Some(Histogram {
+        bins: counts.iter().map(|&c| c as f32 / peak as f32).collect(),
+        min,
+        max,
+    })
 }
 
 impl PreviewEngine {
@@ -946,21 +1003,68 @@ fn material_color(graph: &Graph, stable_id: u64) -> Option<egui::Color32> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn field_histogram_bins_clamps_and_normalizes() {
+    /// A 2x2 field whose height layer holds `values`, row-major.
+    fn field_of(values: [f32; 4]) -> Field {
         use std::sync::Arc;
         use ymir_core::{Layer, Region, layers};
 
-        // Values 0.0, 0.5, 2.0 (clamps to 1.0), -1.0 (clamps to 0.0) across a 4-bin range.
-        let field = Field::new(2, 2, Region::UNIT).with_layer(
+        Field::new(2, 2, Region::UNIT).with_layer(
             layers::HEIGHT,
-            Arc::new(Layer::from_fn(2, 2, |x, y| {
-                [0.0, 0.5, 2.0, -1.0][y * 2 + x]
-            })),
+            Arc::new(Layer::from_fn(2, 2, |x, y| values[y * 2 + x])),
+        )
+    }
+
+    #[test]
+    fn field_histogram_spans_the_fields_own_range() {
+        // Values -1.0, 0.0, 0.5, 2.0 over 4 bins. The range is [-1, 2], so each bin is 0.75
+        // wide: bin 0 covers [-1, -0.25), bin 1 [-0.25, 0.5), bin 2 [0.5, 1.25), bin 3 the rest.
+        let hist = field_histogram(&field_of([0.0, 0.5, 2.0, -1.0]), 4).expect("finite values");
+        assert_eq!(hist.min, -1.0);
+        assert_eq!(hist.max, 2.0);
+        // One value in each bin, so every bin normalizes to the same height.
+        assert_eq!(hist.bins, vec![1.0, 1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn a_field_of_metres_is_not_collapsed_into_one_spike() {
+        // The case that motivated this (#369): a Distance field carrying metres. Binning into
+        // [0, 1] would put every cell in the last bin and tell the user nothing.
+        let hist = field_histogram(&field_of([0.0, 100.0, 200.0, 400.0]), 4).expect("finite");
+        assert_eq!((hist.min, hist.max), (0.0, 400.0));
+        assert!(
+            hist.bins.iter().filter(|&&h| h > 0.0).count() > 1,
+            "expected the distribution spread across bins, got {:?}",
+            hist.bins
         );
-        // bin 0: 0.0 and the clamped -1.0 (count 2); bin 2: 0.5; bin 3: the clamped 2.0.
-        // Normalized to the tallest bin (count 2): [1.0, 0.0, 0.5, 0.5].
-        assert_eq!(field_histogram(&field, 4), vec![1.0, 0.0, 0.5, 0.5]);
+    }
+
+    #[test]
+    fn a_flat_field_reports_a_degenerate_range_rather_than_dividing_by_zero() {
+        let hist = field_histogram(&field_of([0.25; 4]), 4).expect("finite");
+        assert_eq!((hist.min, hist.max), (0.25, 0.25));
+        assert_eq!(hist.bin_width(), 0.0);
+        // All of the count lands in the first bin, normalized against itself.
+        assert_eq!(hist.bins, vec![1.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn non_finite_values_are_skipped_rather_than_poisoning_the_range() {
+        let hist = field_histogram(&field_of([0.0, f32::NAN, 1.0, f32::INFINITY]), 4)
+            .expect("two finite values");
+        assert_eq!((hist.min, hist.max), (0.0, 1.0));
+    }
+
+    #[test]
+    fn a_field_with_no_finite_values_reports_nothing() {
+        assert!(field_histogram(&field_of([f32::NAN; 4]), 4).is_none());
+    }
+
+    #[test]
+    fn bin_values_walk_the_range_left_to_right() {
+        let hist = field_histogram(&field_of([0.0, 100.0, 200.0, 400.0]), 4).expect("finite");
+        assert_eq!(hist.value_at_bin(0), 0.0);
+        assert_eq!(hist.bin_width(), 100.0);
+        assert_eq!(hist.value_at_bin(3), 300.0);
     }
 
     #[test]
