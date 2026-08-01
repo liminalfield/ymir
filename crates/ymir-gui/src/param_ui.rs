@@ -122,6 +122,9 @@ pub(crate) fn value_text(value: &ParamValue) -> String {
         ParamValue::Text(v) => v.clone(),
         ParamValue::Curve(c) => format!("curve ({} points)", c.points().len()),
         ParamValue::Strokes(s) => format!("painted ({} strokes)", s.len()),
+        // The source, not the number it computes: the number is visible in the result, and what
+        // a reader cannot otherwise recover is what produced it.
+        ParamValue::Expr(source) => format!("= {source}"),
         // Hex, because that is how a colour is written down everywhere else a user will meet
         // this one: a picker, a manifest, an engine's material settings.
         ParamValue::Color(rgb) => {

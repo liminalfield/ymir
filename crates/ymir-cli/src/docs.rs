@@ -191,7 +191,10 @@ fn param(type_id: &str, p: &ParamSpec) -> Param {
             json!(format!("#{:02X}{:02X}{:02X}", byte(*r), byte(*g), byte(*b)))
         }
         // A curve or stroke default is not a scalar; represent it as null in the reference.
-        ParamValue::Curve(_) | ParamValue::Strokes(_) => Value::Null,
+        // Nor is an expression, which is additionally not a legal default at all (a default
+        // travels with a definition into projects that know nothing about the names it would
+        // reference), so this arm only exists because the match must be total.
+        ParamValue::Curve(_) | ParamValue::Strokes(_) | ParamValue::Expr(_) => Value::Null,
     };
     let unit = p.unit.map(|u| match u {
         Unit::Meters => "meters",
