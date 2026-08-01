@@ -23,7 +23,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::param::{ParamKind, ParamSpec, ParamValue, Unit};
+use std::collections::BTreeMap;
+
+use crate::param::{ParamKind, ParamSpec, ParamValue, Params, Unit};
 
 /// The kinds an authored parameter may declare.
 ///
@@ -134,6 +136,35 @@ impl InterfaceParam {
     }
 }
 
+/// The values an authored node's parameters currently hold, by name, for the expression
+/// environment inside it.
+///
+/// A parameter nobody has set contributes its declared default: an instance's `Params` holds only
+/// what has been touched, and a freshly placed authored node has touched nothing, so reading the
+/// stored map alone would make every reference inside fail until the thing it names had been
+/// nudged once.
+///
+/// Only the numeric kinds. A curve or a colour is not a name an expression can read, which is the
+/// same rule a node's own parameters follow.
+///
+/// Shared by the evaluator and the inspector deliberately. Two copies of this mapping would drift,
+/// and the symptom would be an editor reporting a different value from the one the node runs on.
+#[must_use]
+pub fn interface_values(interface: &[InterfaceParam], params: &Params) -> BTreeMap<String, f64> {
+    interface
+        .iter()
+        .filter_map(|declared| {
+            let value = params.get(&declared.name).unwrap_or(&declared.default);
+            let number = match value {
+                ParamValue::Float(v) => *v,
+                ParamValue::Int(v) => *v as f64,
+                _ => return None,
+            };
+            Some((declared.name.clone(), number))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,6 +214,29 @@ mod tests {
                 "{kind:?} fell through to an unrelated kind"
             );
         }
+    }
+
+    #[test]
+    fn an_untouched_parameter_contributes_its_default() {
+        let values = interface_values(&[width()], &Params::new());
+        assert_eq!(values.get("beach_width"), Some(&20.0));
+    }
+
+    #[test]
+    fn a_set_value_wins_over_the_default() {
+        let params = Params::new().with("beach_width", ParamValue::Float(45.0));
+        let values = interface_values(&[width()], &params);
+        assert_eq!(values.get("beach_width"), Some(&45.0));
+    }
+
+    #[test]
+    fn a_non_numeric_parameter_is_not_a_name_inside() {
+        let curve = InterfaceParam::new(
+            "profile",
+            InterfaceKind::Curve,
+            ParamValue::Curve(crate::param::Curve::identity()),
+        );
+        assert!(interface_values(&[curve], &Params::new()).is_empty());
     }
 
     #[test]

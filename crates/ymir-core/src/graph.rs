@@ -231,6 +231,14 @@ impl Graph {
         self.node(id).and_then(|n| n.operator.nested())
     }
 
+    /// The parameters an authored node declares, or `None` for an ordinary one. Structural, via
+    /// the [`Operator::interface`](crate::Operator::interface) hook, not a check on a concrete
+    /// type.
+    #[must_use]
+    pub fn interface(&self, id: NodeId) -> Option<&[crate::interface::InterfaceParam]> {
+        self.node(id).and_then(|n| n.operator.interface())
+    }
+
     /// Installs `inner` as a container node's inner graph, refreshing the node's ports to
     /// match. The editor uses this to write edits made while diving into a subgraph back
     /// into its container. It goes through the operator's

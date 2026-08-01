@@ -66,7 +66,7 @@ pub use field_cache::{read_fields, write_fields};
 pub use field_store::FieldStore;
 pub use graph::{Extraction, Graph, NodeId};
 pub use hash::ContentHash;
-pub use interface::{InterfaceKind, InterfaceParam};
+pub use interface::{InterfaceKind, InterfaceParam, interface_values};
 pub use layer::Layer;
 pub use operator::{ContextDeps, Inputs, Operator, OperatorClone};
 pub use paint::{BrushShape, Stroke, StrokeMode, StrokePoint, Strokes};

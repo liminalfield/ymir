@@ -289,19 +289,7 @@ impl Operator for SubgraphNode {
         //
         // Only the numeric ones. A curve or a colour is not a name an expression can read, which
         // is the same rule an inner node's own parameters follow.
-        let interface: std::collections::BTreeMap<String, f64> = self
-            .interface
-            .iter()
-            .filter_map(|declared| {
-                let value = params.get(&declared.name).or(Some(&declared.default))?;
-                let number = match value {
-                    ParamValue::Float(v) => *v,
-                    ParamValue::Int(v) => *v as f64,
-                    _ => return None,
-                };
-                Some((declared.name.clone(), number))
-            })
-            .collect();
+        let interface = crate::interface::interface_values(&self.interface, params);
 
         let mut request = EvalRequest::new(ctx.width, ctx.height, ctx.region, inner_seed)
             .with_interface(interface)
