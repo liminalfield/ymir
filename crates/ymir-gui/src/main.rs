@@ -5425,6 +5425,19 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
     // Edit against a clone of the current params, then write back once if anything
     // changed. The graph stays the single source of truth.
     let mut params = state.graph.params(id).cloned().unwrap_or_default();
+    // What any computed parameter currently works out to, by the same resolver the evaluator
+    // uses, so the inspector cannot report a different number from the one the node runs on.
+    // An `Err` means the set does not resolve at all, and the error names the parameter at fault;
+    // the rest genuinely have no value to show, since resolution never completed.
+    let resolved = ymir_core::resolve::resolve_params(
+        &params,
+        ymir_core::resolve::WorldGlobals {
+            sea_level: state.sea_level,
+            world_height: state.world_height,
+            world_extent: state.world_extent,
+        },
+        spec.type_id,
+    );
     let mut changed = false;
     // Reset all: overwrite every parameter with its spec default before the rows read them, so the
     // controls show the defaults and the single write-back below persists them.
@@ -5474,11 +5487,18 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
             // The curve editor's corner pop-out icon (#70-style) reports through this flag,
             // opening the larger, draggable window for this node's curve param.
             let mut popout = false;
+            let computed = resolved
+                .as_ref()
+                .ok()
+                .and_then(|r| r.as_ref())
+                .map(|r| r.get_f64(&pspec.name, f64::NAN))
+                .filter(|v| v.is_finite());
             if let Some(new_value) = param_ui::edit(
                 ui,
                 spec.type_id,
                 pspec,
                 &current,
+                computed,
                 histogram.as_ref(),
                 &mut popout,
             ) {

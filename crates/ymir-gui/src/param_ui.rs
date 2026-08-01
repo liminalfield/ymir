@@ -151,6 +151,49 @@ fn srgb_from_bytes(bytes: [u8; 3]) -> [f64; 3] {
 /// Fixed width of a parameter row's value box.
 const VALUE_W: f32 = 54.0;
 
+/// Catches a value box's typed text when it starts an expression rather than a number.
+///
+/// A numeric field never needs a literal `=`, so the prefix is free to mean this, and it is the
+/// convention anyone who has met a spreadsheet already has. It is a side channel because egui's
+/// parser can only answer with a number, and this input is deliberately not one: the parser
+/// stashes the source, declines to produce a value, and the caller turns it into an edit.
+///
+/// Only offered on float rows. An expression resolves to a float, so accepting one on an integer
+/// parameter would leave that parameter holding a value its own typed read cannot get back.
+#[derive(Default)]
+struct ExprCapture(std::cell::RefCell<Option<String>>);
+
+impl ExprCapture {
+    /// Parses `text` as a number, or stashes it as an expression when it opens with `=`.
+    ///
+    /// The number path matches egui's own default parser rather than a plain `parse`: whitespace
+    /// anywhere is ignored (thousands separators), and the typographic minus reads as a minus.
+    /// Diverging from that would silently make some values untypeable in a box that used to take
+    /// them.
+    fn parse(&self, text: &str) -> Option<f64> {
+        let trimmed = text.trim();
+        if let Some(rest) = trimmed.strip_prefix('=') {
+            let source = rest.trim();
+            // A bare `=` is someone part-way through typing, not an empty expression.
+            if !source.is_empty() {
+                *self.0.borrow_mut() = Some(source.to_owned());
+            }
+            return None;
+        }
+        let cleaned: String = text
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .map(|c| if c == '−' { '-' } else { c })
+            .collect();
+        cleaned.parse().ok()
+    }
+
+    /// The stashed expression, if the last parse caught one.
+    fn take(self) -> Option<String> {
+        self.0.into_inner()
+    }
+}
+
 /// A small faint revert glyph, shown when a value is off its default; clicking it resets that one
 /// parameter. Returns its response.
 fn reset_icon(ui: &mut egui::Ui) -> egui::Response {
@@ -370,6 +413,61 @@ pub(crate) fn plain_label(ui: &mut egui::Ui, text: &str) {
     render_label(ui, text);
 }
 
+/// The row for a parameter whose value is computed: the same label grammar as any other, then an
+/// `=` marking it computed and the number it currently works out to.
+///
+/// The number is what the row shows, because that is the question being asked while working; the
+/// source is one hover away and is what the field edits. The marker is a glyph rather than a
+/// colour, which sidesteps rather than works around the constraint that a state must not be
+/// distinguished by hue alone: every tool that ships expressions signals them by colour and then
+/// has to solve that problem.
+///
+/// `computed` is `None` when the expression did not resolve, which is a real state a user needs
+/// to see rather than an impossible one: the row then shows the source itself and says why on
+/// hover. Returns the edited value when the expression text changed this frame.
+fn expression_row(
+    ui: &mut egui::Ui,
+    type_id: &str,
+    name: &str,
+    source: &str,
+    computed: Option<f64>,
+) -> Option<ParamValue> {
+    let mut text = source.to_owned();
+    let mut result = None;
+    ui.horizontal(|ui| {
+        param_label(ui, type_id, name);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let edited = ui.add_sized(
+                egui::vec2(VALUE_W + 16.0, ui.spacing().interact_size.y),
+                egui::TextEdit::singleline(&mut text).font(egui::TextStyle::Monospace),
+            );
+            let hover = match computed {
+                Some(_) => format!("= {source}"),
+                None => format!("= {source}\n\nthis does not resolve, so the node cannot run"),
+            };
+            if edited.changed() {
+                result = Some(ParamValue::Expr(text.clone()));
+            }
+            edited.on_hover_text(hover);
+            // The marker sits between the label and the field, so a column of parameters shows at
+            // a glance which of them are computed.
+            let (glyph, color) = match computed {
+                Some(_) => ("=", crate::theme::ACCENT_PRIMARY),
+                None => ("=!", crate::theme::TEXT_TERTIARY),
+            };
+            ui.label(egui::RichText::new(glyph).monospace().color(color).strong());
+            if let Some(value) = computed {
+                ui.label(
+                    egui::RichText::new(format!("{value:.3}"))
+                        .monospace()
+                        .color(crate::theme::TEXT_SECONDARY),
+                );
+            }
+        });
+    });
+    result
+}
+
 /// Draws a row label in the shared muted-mono style and returns its response, so a caller can
 /// attach a hover tooltip.
 fn render_label(ui: &mut egui::Ui, text: &str) -> egui::Response {
@@ -536,10 +634,16 @@ pub(crate) fn edit(
     type_id: &str,
     spec: &ParamSpec,
     current: &ParamValue,
+    computed: Option<f64>,
     histogram: Option<&Histogram>,
     popout: &mut bool,
 ) -> Option<ParamValue> {
     let name = spec.name.as_str();
+    // A computed parameter is edited as its expression, not through the widget its kind would
+    // otherwise get: what a slider or a value field would show is a result nothing can drag.
+    if let ParamValue::Expr(source) = current {
+        return expression_row(ui, type_id, name, source, computed);
+    }
     match (widget_for(spec), current) {
         (
             Widget::Slider {
@@ -558,6 +662,7 @@ pub(crate) fn edit(
                 _ => x,
             };
             let mut result = None;
+            let capture = ExprCapture::default();
             ui.horizontal(|ui| {
                 param_label(ui, type_id, name);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -566,7 +671,9 @@ pub(crate) fn edit(
                         egui::DragValue::new(&mut x)
                             .range(min..=max)
                             .speed(0.0)
-                            .fixed_decimals(3),
+                            .fixed_decimals(3)
+                            .update_while_editing(false)
+                            .custom_parser(|text| capture.parse(text)),
                     );
                     // The magnitude ruler here too (#358). This is the majority of the numeric
                     // parameters in the application: only 40 of 154 carry a unit, so wiring the
@@ -595,6 +702,11 @@ pub(crate) fn edit(
             if slider(ui, &mut x, min, max, logarithmic).changed() {
                 result = Some(ParamValue::Float(x));
             }
+            // An expression wins over whatever number the box was showing: it is the newer
+            // instruction, and the box's value never changed.
+            if let Some(source) = capture.take() {
+                result = Some(ParamValue::Expr(source));
+            }
             result
         }
         (Widget::Quantity { min, max, unit }, ParamValue::Float(v)) => {
@@ -614,6 +726,7 @@ pub(crate) fn edit(
             let suffix = unit.map_or("", unit_suffix);
             let wraps = degrees && angle_wraps(min, max);
             let mut result = None;
+            let capture = ExprCapture::default();
             ui.horizontal(|ui| {
                 param_label(ui, type_id, name);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -627,7 +740,15 @@ pub(crate) fn edit(
                     // DragValue supplies display, click-to-type, and formatting; its own drag is
                     // made inert (speed 0) so the infinite scrub below is the only thing that moves
                     // the value.
-                    let mut drag = egui::DragValue::new(&mut x).suffix(suffix).speed(0.0);
+                    // Parsed once, on Enter or when focus leaves, rather than on every
+                    // keystroke. Typing `=beach_width * 2` has to arrive whole: parsed per
+                    // keystroke, `=b` would convert the parameter to an expression the moment the
+                    // second character landed and pull the field out from under the typing.
+                    let mut drag = egui::DragValue::new(&mut x)
+                        .suffix(suffix)
+                        .speed(0.0)
+                        .update_while_editing(false)
+                        .custom_parser(|text| capture.parse(text));
                     drag = if degrees {
                         drag.fixed_decimals(1)
                     } else {
@@ -666,6 +787,11 @@ pub(crate) fn edit(
                     }
                 });
             });
+            // An expression wins over whatever number the box was showing: it is the newer
+            // instruction, and the box's value never changed.
+            if let Some(source) = capture.take() {
+                result = Some(ParamValue::Expr(source));
+            }
             result
         }
         (Widget::IntDrag { min, max }, ParamValue::Int(v)) => {
@@ -970,6 +1096,58 @@ mod tests {
                 unit: Some(Unit::Meters)
             }
         );
+    }
+
+    #[test]
+    fn a_plain_number_parses_as_a_number() {
+        let capture = ExprCapture::default();
+        assert_eq!(capture.parse("12.5"), Some(12.5));
+        assert_eq!(capture.take(), None, "nothing was an expression");
+    }
+
+    #[test]
+    fn the_number_path_still_accepts_what_egui_accepted() {
+        // Diverging from egui's own parser would silently make some values untypeable in a box
+        // that used to take them: spaced thousands, and the typographic minus.
+        let capture = ExprCapture::default();
+        assert_eq!(capture.parse("1 000"), Some(1000.0));
+        assert_eq!(capture.parse("\u{2212}4"), Some(-4.0));
+    }
+
+    #[test]
+    fn a_leading_equals_is_caught_as_an_expression_and_yields_no_number() {
+        let capture = ExprCapture::default();
+        assert_eq!(
+            capture.parse("=beach_width * 0.15"),
+            None,
+            "an expression is not a number, so the box must not take a value from it"
+        );
+        assert_eq!(capture.take(), Some("beach_width * 0.15".to_string()));
+    }
+
+    #[test]
+    fn surrounding_space_does_not_hide_the_prefix() {
+        let capture = ExprCapture::default();
+        assert_eq!(capture.parse("  = sea_level * world_height  "), None);
+        assert_eq!(capture.take(), Some("sea_level * world_height".to_string()));
+    }
+
+    #[test]
+    fn a_bare_equals_is_someone_still_typing_not_an_empty_expression() {
+        let capture = ExprCapture::default();
+        assert_eq!(capture.parse("="), None);
+        assert_eq!(
+            capture.take(),
+            None,
+            "committing an empty expression would break the node for a half-typed keystroke"
+        );
+    }
+
+    #[test]
+    fn an_unparseable_number_is_neither_a_value_nor_an_expression() {
+        let capture = ExprCapture::default();
+        assert_eq!(capture.parse("twelve"), None);
+        assert_eq!(capture.take(), None);
     }
 
     #[test]
