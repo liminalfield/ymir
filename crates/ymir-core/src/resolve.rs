@@ -30,7 +30,7 @@ use std::collections::BTreeMap;
 
 use crate::error::{Error, Result};
 use crate::expr::Program;
-use crate::param::{ParamValue, Params};
+use crate::param::{ParamSpec, ParamValue, Params};
 use crate::project::WorldSettings;
 
 /// The world settings an expression on a parameter may reference, by the names it uses.
@@ -168,13 +168,32 @@ fn visit<'a>(
 ///
 /// [`Error::ParamCycle`] when parameters reference each other in a loop, so no order resolves
 /// them. Reported rather than hung.
+pub fn has_expression(params: &Params) -> bool {
+    params.iter().any(|(_, v)| matches!(v, ParamValue::Expr(_)))
+}
+
+/// Resolves every computed parameter to a plain value, leaving stored ones untouched.
 pub fn resolve_params(
     params: &Params,
+    schema: &[ParamSpec],
     world: WorldGlobals,
     type_id: &'static str,
 ) -> Result<Option<Params>> {
-    if !params.iter().any(|(_, v)| matches!(v, ParamValue::Expr(_))) {
+    if !has_expression(params) {
         return Ok(None);
+    }
+
+    // What the node would actually run with: the stored value where there is one, the declared
+    // default where there is not. `Params` holds only what has been *set*, and a freshly dropped
+    // node has set nothing at all, so reading the stored map alone would report every untouched
+    // sibling as an unknown name and make a reference work only after you had happened to edit
+    // the thing it names.
+    let mut effective: BTreeMap<&str, &ParamValue> = BTreeMap::new();
+    for spec in schema {
+        effective.insert(spec.name.as_str(), &spec.default);
+    }
+    for (name, value) in params.iter() {
+        effective.insert(name, value);
     }
 
     // The variable environment: the world globals, then the node's own numeric parameters. A
@@ -184,7 +203,7 @@ pub fn resolve_params(
     let mut names: Vec<&str> = WORLD_VARS.to_vec();
     let mut values: Vec<f32> = world.values().to_vec();
     let mut slot_of: BTreeMap<&str, usize> = BTreeMap::new();
-    for (name, value) in params.iter() {
+    for (&name, &value) in &effective {
         if WORLD_VARS.contains(&name) {
             continue;
         }
@@ -198,7 +217,7 @@ pub fn resolve_params(
     // Compile each expression once against the whole environment, and read back which of it the
     // expression actually depends on.
     let mut programs: BTreeMap<&str, (Program, Vec<usize>)> = BTreeMap::new();
-    for (name, value) in params.iter() {
+    for (&name, &value) in &effective {
         if let ParamValue::Expr(source) = value {
             let program = Program::compile(source, &names).map_err(|e| Error::BadExpression {
                 type_id,
@@ -253,8 +272,9 @@ mod tests {
         Params::new().with(name, value)
     }
 
+    /// Resolves against an empty schema: every value the expressions read is stored.
     fn resolved(params: &Params) -> Params {
-        resolve_params(params, world(), "test.node")
+        resolve_params(params, &[], world(), "test.node")
             .expect("compiles")
             .expect("something to resolve")
     }
@@ -266,7 +286,7 @@ mod tests {
     #[test]
     fn a_map_of_literals_resolves_to_nothing_to_do() {
         let params = params_with("height", ParamValue::Float(0.5));
-        let out = resolve_params(&params, world(), "test.node").expect("nothing to compile");
+        let out = resolve_params(&params, &[], world(), "test.node").expect("nothing to compile");
         assert!(
             out.is_none(),
             "a map with no expression should allocate nothing"
@@ -309,6 +329,57 @@ mod tests {
         assert_eq!(out.get("c"), Some(&ParamValue::Text("keep".into())));
     }
 
+    /// A declared float parameter, for the schema-default tests.
+    fn declared(name: &str, default: f64) -> ParamSpec {
+        ParamSpec::new(
+            name,
+            crate::param::ParamKind::Float {
+                min: -1000.0,
+                max: 1000.0,
+            },
+            ParamValue::Float(default),
+        )
+    }
+
+    #[test]
+    fn a_sibling_left_at_its_default_is_still_readable() {
+        // `Params` holds only what has been *set*, and a freshly dropped node has set nothing, so
+        // reading the stored map alone made a reference work only after you happened to edit the
+        // thing it names. The schema is where an untouched parameter's value lives.
+        let schema = [declared("beach_width", 20.0), declared("amplitude", 3.0)];
+        let stored = Params::new().with("amplitude", expr("beach_width * 0.15"));
+        let out = resolve_params(&stored, &schema, world(), "test.node")
+            .expect("the default must be in scope")
+            .expect("resolved");
+        assert_eq!(out.get_f64("amplitude", 0.0), 3.0);
+    }
+
+    #[test]
+    fn a_stored_value_wins_over_the_declared_default() {
+        let schema = [declared("beach_width", 20.0), declared("amplitude", 3.0)];
+        let stored = Params::new()
+            .with("beach_width", ParamValue::Float(40.0))
+            .with("amplitude", expr("beach_width * 0.15"));
+        let out = resolve_params(&stored, &schema, world(), "test.node")
+            .expect("compiles")
+            .expect("resolved");
+        assert_eq!(out.get_f64("amplitude", 0.0), 6.0);
+    }
+
+    #[test]
+    fn defaults_do_not_leak_into_the_resolved_values() {
+        // Only the computed entries change. Folding every default into the map would alter the
+        // parameter hash of every node carrying an expression, and with it its cache key, for no
+        // reason a user could see.
+        let schema = [declared("beach_width", 20.0), declared("amplitude", 3.0)];
+        let stored = Params::new().with("amplitude", expr("beach_width * 0.15"));
+        let out = resolve_params(&stored, &schema, world(), "test.node")
+            .expect("compiles")
+            .expect("resolved");
+        let names: Vec<&str> = out.iter().map(|(n, _)| n).collect();
+        assert_eq!(names, ["amplitude"], "only what was stored comes back");
+    }
+
     #[test]
     fn an_expression_reads_a_sibling_parameter_on_the_same_node() {
         // The motivating case, at an authored node's call site: relating amplitude to width
@@ -332,7 +403,7 @@ mod tests {
         let params = Params::new()
             .with("mode", ParamValue::Text("ridged".into()))
             .with("p", expr("mode"));
-        let err = resolve_params(&params, world(), "test.node").expect_err("not in scope");
+        let err = resolve_params(&params, &[], world(), "test.node").expect_err("not in scope");
         assert!(matches!(err, Error::BadExpression { .. }));
     }
 
@@ -362,7 +433,7 @@ mod tests {
         let params = Params::new()
             .with("a", expr("b + 1"))
             .with("b", expr("a + 1"));
-        let err = resolve_params(&params, world(), "test.node").expect_err("a cycle");
+        let err = resolve_params(&params, &[], world(), "test.node").expect_err("a cycle");
         assert!(
             matches!(err, Error::ParamCycle { .. }),
             "expected a ParamCycle, got {err:?}"
@@ -372,7 +443,7 @@ mod tests {
     #[test]
     fn a_parameter_referencing_itself_is_a_cycle() {
         let params = params_with("a", expr("a + 1"));
-        let err = resolve_params(&params, world(), "test.node").expect_err("a self-cycle");
+        let err = resolve_params(&params, &[], world(), "test.node").expect_err("a self-cycle");
         let Error::ParamCycle { param, .. } = err else {
             panic!("expected a ParamCycle, got {err:?}");
         };
@@ -385,7 +456,8 @@ mod tests {
             .with("a", expr("b"))
             .with("b", expr("c"))
             .with("c", expr("a"));
-        let err = resolve_params(&params, world(), "test.node").expect_err("a three-way cycle");
+        let err =
+            resolve_params(&params, &[], world(), "test.node").expect_err("a three-way cycle");
         assert!(matches!(err, Error::ParamCycle { .. }));
     }
 
@@ -406,7 +478,7 @@ mod tests {
         // The whole point of the compiler rejecting unknown identifiers: a typo must not read as
         // zero and quietly flatten someone's terrain.
         let params = params_with("p", expr("sea_levle"));
-        let err = resolve_params(&params, world(), "test.node").expect_err("unknown name");
+        let err = resolve_params(&params, &[], world(), "test.node").expect_err("unknown name");
         let Error::BadExpression { param, message, .. } = err else {
             panic!("expected a BadExpression, got {err:?}");
         };
@@ -417,7 +489,7 @@ mod tests {
     #[test]
     fn a_syntax_error_is_reported_against_the_parameter_it_is_on() {
         let params = params_with("radius", expr("2 * (1 +"));
-        let err = resolve_params(&params, world(), "test.node").expect_err("syntax error");
+        let err = resolve_params(&params, &[], world(), "test.node").expect_err("syntax error");
         let Error::BadExpression { param, type_id, .. } = err else {
             panic!("expected a BadExpression, got {err:?}");
         };

@@ -30,7 +30,7 @@ use crate::param::Params;
 use crate::progress::{Progress, ProgressSink};
 use crate::project::WorldSettings;
 use crate::region::Region;
-use crate::resolve::{WorldGlobals, resolve_params};
+use crate::resolve::{WorldGlobals, has_expression, resolve_params};
 
 /// The global parameters of one evaluation request: resolution, region, the
 /// global seed, and the world extent. The target node is a separate argument to
@@ -535,7 +535,19 @@ impl Graph {
         // (#371). The key folds the *resolved* number, and the operator below receives a literal
         // map, so no node learns that expressions exist. `None` means there were none, which is
         // the usual case and costs no allocation.
-        let resolved = resolve_params(&node.params, request.world_globals(), node.type_id)?;
+        // Gated on the cheap check so a node with no expression never builds its spec, which
+        // allocates. The schema is needed for the ones that do: an expression may name a sibling
+        // the user has never edited, which lives in the declaration rather than in the stored map.
+        let resolved = if has_expression(&node.params) {
+            resolve_params(
+                &node.params,
+                &node.operator.spec().params,
+                request.world_globals(),
+                node.type_id,
+            )?
+        } else {
+            None
+        };
         let params = resolved.as_ref().unwrap_or(&node.params);
         let key = compute_key(
             node.type_id,
@@ -731,7 +743,16 @@ impl Graph {
         // Resolved here too, and it must be: this is the same key the evaluation path computes,
         // so hashing the source text on one side and the number on the other would report every
         // node with an expression as permanently stale.
-        let resolved = resolve_params(&node.params, request.world_globals(), node.type_id)?;
+        let resolved = if has_expression(&node.params) {
+            resolve_params(
+                &node.params,
+                &node.operator.spec().params,
+                request.world_globals(),
+                node.type_id,
+            )?
+        } else {
+            None
+        };
         let key = compute_key(
             node.type_id,
             resolved.as_ref().unwrap_or(&node.params),
