@@ -5499,8 +5499,11 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
                 spec.type_id,
                 pspec,
                 &current,
-                computed,
-                histogram.as_ref(),
+                &param_ui::RowContext {
+                    node: handle,
+                    computed,
+                    histogram: histogram.as_ref(),
+                },
                 &mut popout,
             ) {
                 params.insert(pspec.name.clone(), new_value);

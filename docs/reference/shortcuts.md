@@ -51,9 +51,11 @@ A number can be worked out rather than entered. Type `=` in a value box, followe
 | Action | Input |
 |---|---|
 | Compute a value | Click the value box, type `=` and an expression, then Enter |
-| Edit an expression | Its field, which holds the expression rather than the number |
-| See what it works out to | The number beside the `=`, or hover for the expression |
-| Go back to a plain number | Clear the field and type the number |
+| Edit an expression | Its own field, on the line beneath the label |
+| See what it works out to | The number beside the `=` |
+| Go back to a plain number | Type the number on its own, then Enter |
+| Go back to the default | Clear the field, or the revert arrow |
+| Abandon an edit | Escape, before you leave the field |
 
 An expression can read the world settings, `sea_level`, `world_height` and `world_extent`, and any other numeric parameter on the same node by its name. It cannot read another node. Anything a subgraph needs from outside is wired in or declared on it, so that a subgraph does not stop working when it is used somewhere else.
 
@@ -69,7 +71,9 @@ So `sea_level * world_height` is the sea in metres, and `sea_level + 0.05` is a 
 
 The row shows the number it currently computes, with `=` beside it. `=!` means the expression does not resolve, and hovering says why; the node cannot run until it does. Parameters that reference each other in a loop are reported the same way rather than hanging.
 
-Values commit when you press Enter or click away, not as you type, so a half-finished expression is never applied.
+A computed parameter gets its own full-width line, since an expression does not fit in a value box.
+
+Nothing commits until you press Enter or leave the field, so a half-finished expression is never applied and the preview does not rebuild on every keystroke.
 
 ### The Levels editor
 
