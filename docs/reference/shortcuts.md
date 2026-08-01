@@ -46,11 +46,11 @@ Values stay within the range the node declares, so a change or a typed number st
 
 ### Computing a value instead of typing one
 
-A number can be worked out rather than entered. Type `=` in a value box, followed by an expression, and the parameter is computed from then on.
+A number can be worked out rather than entered. Press `=` in a value box to open an expression field, write one, and the parameter is computed from then on.
 
 | Action | Input |
 |---|---|
-| Compute a value | Click the value box, type `=` and an expression, then Enter |
+| Compute a value | Click the value box and press `=` |
 | Edit an expression | Its own field, on the line beneath the label |
 | See what it works out to | The number beside the `=` |
 | Go back to a plain number | Type the number on its own, then Enter |
@@ -71,7 +71,11 @@ So `sea_level * world_height` is the sea in metres, and `sea_level + 0.05` is a 
 
 The row shows the number it currently computes, with `=` beside it. `=!` means the expression does not resolve, and hovering says why; the node cannot run until it does. Parameters that reference each other in a loop are reported the same way rather than hanging.
 
+Pressing `=` opens the field straight away and puts the caret in it, so asking for an expression and writing one are a single gesture. It opens empty and stores nothing: the parameter keeps the value it had until you commit something, so opening the field and changing your mind costs nothing.
+
 A computed parameter gets its own full-width line, since an expression does not fit in a value box.
+
+While the field has focus it says what you have typed so far works out to, or why it does not: an unknown name, a syntax error, or a loop of parameters referencing each other. The message is the one the node would report, so what you see while typing is what you will get.
 
 Nothing commits until you press Enter or leave the field, so a half-finished expression is never applied and the preview does not rebuild on every keystroke.
 
