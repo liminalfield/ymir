@@ -164,6 +164,90 @@ pub(crate) struct RowContext<'a> {
     pub computed: Option<f64>,
     /// The input distribution, drawn behind a curve or levels editor.
     pub histogram: Option<&'a Histogram>,
+    /// The node's committed parameters, its declared schema, and the world settings: what a
+    /// half-typed expression is resolved against so the row can say what it currently means
+    /// before it is committed.
+    pub resolve_against: Option<&'a DraftEnv<'a>>,
+}
+
+/// What a draft expression is checked against.
+///
+/// The check goes through the engine's own resolver rather than a copy of the rule in the GUI.
+/// The resolver builds the variable environment itself, so a second implementation here would
+/// drift and start accepting names the engine rejects, or the reverse, which is worse than no
+/// check at all.
+pub(crate) struct DraftEnv<'a> {
+    /// The node's committed parameters, with the draft substituted over the one being edited.
+    pub params: &'a Params,
+    /// The node's declared schema, so a sibling nobody has edited is still a name.
+    pub schema: &'a [ParamSpec],
+    /// The world settings the expression may read.
+    pub world: ymir_core::resolve::WorldGlobals,
+    /// The node's type id, for the error the resolver reports.
+    pub type_id: &'static str,
+}
+
+/// What a draft expression currently means: the number it computes, or why it does not.
+///
+/// Pure, so the interesting part is testable without egui.
+fn draft_status(draft: &str, param: &str, env: &DraftEnv<'_>) -> Result<f64, String> {
+    let mut probe = env.params.clone();
+    probe.insert(
+        param,
+        ParamValue::Expr(draft.trim().trim_start_matches('=').into()),
+    );
+    match ymir_core::resolve::resolve_params(&probe, env.schema, env.world, env.type_id) {
+        Ok(Some(resolved)) => Ok(resolved.get_f64(param, f64::NAN)),
+        // Unreachable: an expression was just inserted, so there is always one to resolve.
+        Ok(None) => Err("nothing to resolve".to_owned()),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+/// Where the "focus this parameter's expression field" flag lives between the frame that opens
+/// the editor and the frame that draws it.
+fn expr_focus_id(node: u64, name: &str) -> egui::Id {
+    egui::Id::new(("param-expr-focus", node, name))
+}
+
+/// Whether `=` was pressed while the value box had focus.
+///
+/// The editor opens on the keystroke rather than when the box is committed. Waiting for the
+/// commit meant typing the expression blind in a seventy-point box and only then being handed the
+/// full-width field and the live check, which is the wrong way round: the help arrived after the
+/// part that needed it.
+fn opened_expression(ui: &egui::Ui, value: &egui::Response) -> bool {
+    value.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Equals))
+}
+
+/// Where the "this parameter is being written as an expression" flag lives.
+///
+/// Editor state, not a value. Pressing `=` opens the field and stores *nothing*: the parameter
+/// keeps whatever it had until something is committed. That is what lets the field open empty.
+/// Seeding it with the old number instead, which is what an immediate `Expr` would have to do to
+/// avoid failing the node on an expression of zero characters, meant the number came back even
+/// when you had just cleared the box to be rid of it.
+fn expr_editing_id(node: u64, name: &str) -> egui::Id {
+    egui::Id::new(("param-expr-editing", node, name))
+}
+
+/// Whether this parameter is currently being written as an expression.
+fn editing_expression(ui: &egui::Ui, node: u64, name: &str) -> bool {
+    ui.data(|d| d.get_temp::<bool>(expr_editing_id(node, name)))
+        .unwrap_or(false)
+}
+
+/// Opens the expression field on this parameter, changing no value.
+fn open_expression(ui: &egui::Ui, node: u64, name: &str) {
+    ui.data_mut(|d| {
+        d.insert_temp(expr_editing_id(node, name), true);
+        d.insert_temp(expr_focus_id(node, name), true);
+    });
+}
+
+/// Closes the expression field, whether it committed something or was abandoned.
+fn close_expression(ui: &egui::Ui, node: u64, name: &str) {
+    ui.data_mut(|d| d.remove::<bool>(expr_editing_id(node, name)));
 }
 
 /// Catches a value box's typed text when it starts an expression rather than a number.
@@ -450,12 +534,13 @@ pub(crate) fn plain_label(ui: &mut egui::Ui, text: &str) {
 fn expression_row(
     ui: &mut egui::Ui,
     type_id: &str,
-    node: u64,
+    ctx: &RowContext<'_>,
     spec: &ParamSpec,
     source: &str,
     computed: Option<f64>,
 ) -> Option<ParamValue> {
     let name = spec.name.as_str();
+    let node = ctx.node;
     // The draft is keyed by node and parameter, never by the widget's auto-generated id. The
     // params pane does not push an id per node, so row ids are positional: a draft keyed that way
     // would follow the position and leak into whatever parameter sat there for the next node.
@@ -472,11 +557,12 @@ fn expression_row(
             // only escape from a computed parameter was resetting the whole node.
             if reset_icon(ui).clicked() {
                 ui.data_mut(|d| d.remove::<String>(draft_id));
+                close_expression(ui, node, name);
                 result = Some(spec.default.clone());
             }
             let (glyph, color) = match computed {
                 Some(_) => ("=", crate::theme::ACCENT_PRIMARY),
-                None => ("=!", crate::theme::TEXT_TERTIARY),
+                None => ("=!", crate::theme::ERROR),
             };
             ui.label(egui::RichText::new(glyph).monospace().color(color).strong());
             if let Some(value) = computed {
@@ -499,6 +585,13 @@ fn expression_row(
         None => format!("= {source}\n\nthis does not resolve, so the node cannot run"),
     };
     let edited = edited.on_hover_text(hover);
+    // Opened by `=` in the value box a frame ago: hand the caret straight over, so the keystroke
+    // that asks for an expression and the typing of one are a single gesture.
+    let focus_id = expr_focus_id(node, name);
+    if ui.data(|d| d.get_temp::<bool>(focus_id)).unwrap_or(false) {
+        edited.request_focus();
+        ui.data_mut(|d| d.remove::<bool>(focus_id));
+    }
 
     // Held as a draft while typing and committed once, on Enter or when focus leaves. Writing
     // through on every keystroke commits one expression per character, all but the last of them
@@ -507,8 +600,43 @@ fn expression_row(
     if edited.changed() {
         ui.data_mut(|d| d.insert_temp(draft_id, text.clone()));
     }
+    // While the field has focus, say what the draft currently means. The check is the engine's
+    // own resolver, so the number shown is the number the node would run on and the message is
+    // the compiler's, naming the mistake rather than reporting that there was one. Compiling is
+    // pure and cheap (one node's parameters), so doing it per frame while focused is fine.
+    // An empty field means "put the default back", not a broken expression, so it says nothing
+    // rather than reporting that the parser ran out of input.
+    if edited.has_focus()
+        && !text.trim().is_empty()
+        && let Some(env) = ctx.resolve_against
+    {
+        match draft_status(&text, name, env) {
+            Ok(value) => {
+                ui.label(
+                    egui::RichText::new(format!("= {value:.4}"))
+                        .monospace()
+                        .small()
+                        .color(crate::theme::TEXT_SECONDARY),
+                );
+            }
+            Err(message) => {
+                // Amber, not rose: while you are still typing this is unfinished rather than
+                // broken. The text carries the meaning either way, so nothing rests on the hue.
+                ui.label(
+                    egui::RichText::new(message)
+                        .small()
+                        .color(crate::theme::WARNING),
+                );
+            }
+        }
+    }
+
     if edited.lost_focus() {
         ui.data_mut(|d| d.remove::<String>(draft_id));
+        // Whether it committed or was abandoned, the field is done: a parameter that ends up
+        // holding an expression renders as one from its own value, and one that does not goes
+        // back to its value box.
+        close_expression(ui, node, name);
         // Escape abandons the edit and puts the value back, matching every other parameter row.
         if !ui.input(|i| i.key_pressed(egui::Key::Escape)) && text != source {
             result = Some(committed_value(&text, spec));
@@ -714,8 +842,16 @@ pub(crate) fn edit(
     let (computed, histogram) = (ctx.computed, ctx.histogram);
     // A computed parameter is edited as its expression, not through the widget its kind would
     // otherwise get: what a slider or a value field would show is a result nothing can drag.
-    if let ParamValue::Expr(source) = current {
-        return expression_row(ui, type_id, ctx.node, spec, source, computed);
+    // Shown for a parameter that already holds an expression, and for one being written: the
+    // second has nothing stored yet, which is the point.
+    match current {
+        ParamValue::Expr(source) => {
+            return expression_row(ui, type_id, ctx, spec, source, computed);
+        }
+        _ if editing_expression(ui, ctx.node, name) => {
+            return expression_row(ui, type_id, ctx, spec, "", None);
+        }
+        _ => {}
     }
     match (widget_for(spec), current) {
         (
@@ -765,6 +901,9 @@ pub(crate) fn edit(
                     );
                     if value.changed() || scrubbed {
                         result = Some(ParamValue::Float(x));
+                    }
+                    if opened_expression(ui, &value) {
+                        open_expression(ui, ctx.node, name);
                     }
                     if (x - default).abs() > f64::EPSILON && reset_icon(ui).clicked() {
                         x = default;
@@ -853,6 +992,9 @@ pub(crate) fn edit(
                     if value.changed() || scrubbed {
                         let stored = if wraps { x.rem_euclid(360.0) } else { x };
                         result = Some(ParamValue::Float(stored));
+                    }
+                    if opened_expression(ui, &value) {
+                        open_expression(ui, ctx.node, name);
                     }
                     if (x - default).abs() > f64::EPSILON && reset_icon(ui).clicked() {
                         x = default;
@@ -1198,6 +1340,86 @@ mod tests {
         assert_eq!(
             committed_value("beach_width * 0.15", &spec),
             ParamValue::Expr("beach_width * 0.15".into())
+        );
+    }
+
+    /// A node with one stored width and one declared amplitude, for the draft checks.
+    fn draft_schema() -> Vec<ParamSpec> {
+        vec![
+            ParamSpec::new(
+                "beach_width",
+                ParamKind::Float {
+                    min: 0.0,
+                    max: 1000.0,
+                },
+                ParamValue::Float(20.0),
+            ),
+            ParamSpec::new(
+                "amplitude",
+                ParamKind::Float {
+                    min: 0.0,
+                    max: 1000.0,
+                },
+                ParamValue::Float(3.0),
+            ),
+        ]
+    }
+
+    fn draft_env<'a>(schema: &'a [ParamSpec], params: &'a Params) -> DraftEnv<'a> {
+        DraftEnv {
+            params,
+            schema,
+            world: ymir_core::resolve::WorldGlobals {
+                sea_level: 0.25,
+                world_height: 512.0,
+                world_extent: 1000.0,
+            },
+            type_id: "test.node",
+        }
+    }
+
+    #[test]
+    fn a_valid_draft_reports_the_number_it_computes() {
+        let schema = draft_schema();
+        let params = Params::new();
+        let env = draft_env(&schema, &params);
+        assert_eq!(
+            draft_status("beach_width * 0.15", "amplitude", &env),
+            Ok(3.0)
+        );
+        // Reads the world settings too, and tolerates the character that opened the field.
+        assert_eq!(draft_status("=sea_level", "amplitude", &env), Ok(0.25));
+    }
+
+    #[test]
+    fn a_draft_naming_something_unknown_reports_the_compilers_own_message() {
+        // The point of showing it at all: it names the mistake rather than saying there was one.
+        let schema = draft_schema();
+        let params = Params::new();
+        let env = draft_env(&schema, &params);
+        let err = draft_status("beach_widht * 2", "amplitude", &env).expect_err("unknown name");
+        assert!(err.contains("beach_widht"), "message was {err:?}");
+    }
+
+    #[test]
+    fn a_draft_that_would_close_a_loop_reports_it_before_it_is_committed() {
+        let schema = draft_schema();
+        // `beach_width` already reads `amplitude`, so a draft reading back is a cycle.
+        let params = Params::new().with("beach_width", ParamValue::Expr("amplitude + 1".into()));
+        let env = draft_env(&schema, &params);
+        let err = draft_status("beach_width + 1", "amplitude", &env).expect_err("a cycle");
+        assert!(err.contains("cycle"), "message was {err:?}");
+    }
+
+    #[test]
+    fn a_draft_is_judged_against_the_committed_values() {
+        let schema = draft_schema();
+        let params = Params::new().with("beach_width", ParamValue::Float(40.0));
+        let env = draft_env(&schema, &params);
+        // The stored 40 wins over the declared 20, so the draft reports what the node would run.
+        assert_eq!(
+            draft_status("beach_width * 0.15", "amplitude", &env),
+            Ok(6.0)
         );
     }
 
