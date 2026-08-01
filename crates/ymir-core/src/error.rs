@@ -49,6 +49,19 @@ pub enum Error {
     #[error("graph contains a cycle")]
     Cycle,
 
+    /// A parameter's expression could not be compiled, so the node has no value to evaluate
+    /// with. Reported like any other node failure rather than falling back to a number nobody
+    /// asked for: a typo that read as zero would quietly change the terrain instead of saying so.
+    #[error("operator {type_id:?} parameter {param:?}: {message}")]
+    BadExpression {
+        /// The node's type id.
+        type_id: &'static str,
+        /// The parameter the expression sits on.
+        param: String,
+        /// The compiler's own message, naming the mistake.
+        message: String,
+    },
+
     /// A required input port had no connection at evaluation time.
     #[error("operator {type_id:?} input port {port} is not connected")]
     DisconnectedInput {

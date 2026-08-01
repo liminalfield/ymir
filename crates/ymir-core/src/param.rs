@@ -32,6 +32,18 @@ pub enum ParamValue {
     Curve(Curve),
     /// A set of hand-painted brush strokes, for the Paint node.
     Strokes(Strokes),
+    /// A value computed rather than stored: the source text of an arithmetic expression,
+    /// resolved to a number before the node evaluates (#371).
+    ///
+    /// This is a *source* for a value, not a kind of value: the parameter it sits on is still
+    /// whatever its schema declares, and the expression must produce that. It is deliberately
+    /// not a legal schema default, since a default travels with a definition into projects that
+    /// know nothing about the names it would reference.
+    ///
+    /// An operator never sees one. The evaluator resolves every expression before it reads the
+    /// parameters, for the cache key and for `eval` alike, so a node reads plain values exactly
+    /// as it always has and never learns that expressions exist.
+    Expr(String),
     /// An opaque colour: red, green and blue in `[0, 1]`, in sRGB.
     ///
     /// sRGB because that is the space a picker shows and the space a hex colour in an exported
@@ -275,6 +287,10 @@ impl PartialEq for ParamValue {
             (ParamValue::Text(a), ParamValue::Text(b)) => a == b,
             (ParamValue::Curve(a), ParamValue::Curve(b)) => a == b,
             (ParamValue::Strokes(a), ParamValue::Strokes(b)) => a == b,
+            // By source text, so two parameters computing the same number from different
+            // expressions stay distinguishable, and the same expression twice compares equal.
+            // Only unresolved values reach here; a resolved one is a plain number.
+            (ParamValue::Expr(a), ParamValue::Expr(b)) => a == b,
             // Channel by channel through the same normalization as a float, so two colours that
             // are equal produce equal cache keys.
             (ParamValue::Color(a), ParamValue::Color(b)) => a
@@ -322,6 +338,14 @@ impl ParamValue {
                 for channel in rgb {
                     h.write_u64(canonical_f64_bits(*channel));
                 }
+            }
+            // The cache key folds the *resolved* value, not this text, because two expressions
+            // computing the same number must hit the same entry and one whose referenced value
+            // changed must miss. Hashing the text still has to be defined and distinct, for a
+            // params map hashed before it was resolved.
+            ParamValue::Expr(source) => {
+                h.write_bytes(&[7]);
+                h.write_str(source);
             }
         }
     }

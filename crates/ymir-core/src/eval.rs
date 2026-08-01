@@ -30,6 +30,7 @@ use crate::param::Params;
 use crate::progress::{Progress, ProgressSink};
 use crate::project::WorldSettings;
 use crate::region::Region;
+use crate::resolve::{WorldGlobals, resolve_params};
 
 /// The global parameters of one evaluation request: resolution, region, the
 /// global seed, and the world extent. The target node is a separate argument to
@@ -78,6 +79,15 @@ pub struct EvalRequest {
 }
 
 impl EvalRequest {
+    /// The world settings a parameter's expression may reference (#371).
+    pub(crate) fn world_globals(&self) -> WorldGlobals {
+        WorldGlobals {
+            sea_level: self.sea_level,
+            world_height: self.world_height,
+            world_extent: self.world_extent,
+        }
+    }
+
     /// Creates an evaluation request with no cancellation attached.
     #[must_use]
     pub fn new(width: usize, height: usize, region: Region, seed: u64) -> Self {
@@ -521,9 +531,15 @@ impl Graph {
         }
 
         let seed = derive_seed(request.seed, node.stable_id);
+        // Any computed parameter becomes a plain number here, before anything reads the values
+        // (#371). The key folds the *resolved* number, and the operator below receives a literal
+        // map, so no node learns that expressions exist. `None` means there were none, which is
+        // the usual case and costs no allocation.
+        let resolved = resolve_params(&node.params, request.world_globals(), node.type_id)?;
+        let params = resolved.as_ref().unwrap_or(&node.params);
         let key = compute_key(
             node.type_id,
-            &node.params,
+            params,
             &input_keys,
             request,
             seed,
@@ -596,7 +612,7 @@ impl Graph {
         request.report(Progress::Started {
             node: node.stable_id,
         });
-        let outputs = Arc::new(node.operator.eval(inputs, &node.params, &ctx)?);
+        let outputs = Arc::new(node.operator.eval(inputs, params, &ctx)?);
         request.report(Progress::Finished {
             node: node.stable_id,
         });
@@ -712,9 +728,13 @@ impl Graph {
         }
 
         let seed = derive_seed(request.seed, node.stable_id);
+        // Resolved here too, and it must be: this is the same key the evaluation path computes,
+        // so hashing the source text on one side and the number on the other would report every
+        // node with an expression as permanently stale.
+        let resolved = resolve_params(&node.params, request.world_globals(), node.type_id)?;
         let key = compute_key(
             node.type_id,
-            &node.params,
+            resolved.as_ref().unwrap_or(&node.params),
             &input_keys,
             request,
             seed,
@@ -2338,5 +2358,127 @@ mod tests {
             active, bypassed,
             "a bypass toggle must invalidate the cache key"
         );
+    }
+
+    /// A graph whose one modifier's `delta` is `value`, with that modifier's call counter so a
+    /// test can tell a cache hit from a recomputation.
+    fn graph_with_delta(value: ParamValue) -> (Graph, NodeId, Arc<AtomicUsize>) {
+        let mut graph = Graph::new();
+        let head = graph.add_op(
+            Box::new(CountingGen {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Params::new(),
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let add = graph.add_op(
+            Box::new(CountingAdd {
+                calls: Arc::clone(&calls),
+            }),
+            Params::new().with("delta", value),
+        );
+        graph.connect(head, 0, add, 0).unwrap();
+        (graph, add, calls)
+    }
+
+    /// The height of the first cell `add` produces.
+    fn first_cell(graph: &Graph, add: NodeId, request: &EvalRequest) -> f32 {
+        let mut cache = EvalCache::new(8);
+        let out = graph.evaluate(add, request, &mut cache).unwrap();
+        out[0]
+            .layer_or(layers::HEIGHT, 0.0)
+            .get(0, 0)
+            .expect("a cell")
+    }
+
+    /// The delta the modifier actually applied, measured against the same graph with no delta at
+    /// all, so the generator's own base height drops out.
+    fn applied_delta(value: ParamValue, request: &EvalRequest) -> f32 {
+        let (base_graph, base_add, _b) = graph_with_delta(ParamValue::Float(0.0));
+        let (graph, add, _c) = graph_with_delta(value);
+        first_cell(&graph, add, request) - first_cell(&base_graph, base_add, request)
+    }
+
+    #[test]
+    fn a_node_evaluates_with_the_number_its_expression_computes() {
+        // The operator reads `delta` through the ordinary typed accessor and knows nothing about
+        // expressions; it simply receives 2.25.
+        let applied = applied_delta(
+            ParamValue::Expr("sea_level + 2".into()),
+            &request().with_sea_level(0.25),
+        );
+        assert!((applied - 2.25).abs() < 1e-6, "applied {applied}");
+    }
+
+    #[test]
+    fn changing_a_referenced_world_setting_changes_the_result() {
+        let expr = ParamValue::Expr("sea_level + 2".into());
+        let low = applied_delta(expr.clone(), &request().with_sea_level(0.25));
+        let high = applied_delta(expr, &request().with_sea_level(1.0));
+        assert!((low - 2.25).abs() < 1e-6, "low was {low}");
+        assert!((high - 3.0).abs() < 1e-6, "high was {high}");
+    }
+
+    #[test]
+    fn a_referenced_world_setting_invalidates_a_node_that_ignores_the_world() {
+        // The load-bearing reason the *resolved* value goes into the key rather than the source
+        // text. `CountingAdd` declares the default `ContextDeps`, but a node like Levels declares
+        // `NO_WORLD`, so sea level is excluded from its key by context. Its parameter referencing
+        // sea level must still invalidate it, and does, because what is hashed is the number.
+        let (graph, add, _calls) = graph_with_delta(ParamValue::Expr("sea_level".into()));
+        let low = graph
+            .output_key(add, &request().with_sea_level(0.0))
+            .unwrap();
+        let high = graph
+            .output_key(add, &request().with_sea_level(9.0))
+            .unwrap();
+        assert_ne!(low, high, "the key must follow the computed value");
+    }
+
+    #[test]
+    fn an_expression_and_the_literal_it_computes_share_a_cache_entry() {
+        // Two routes to the same number are the same work, so they must be the same key. This is
+        // what hashing the resolved value buys and what hashing the source text would lose.
+        let (expr_graph, expr_add, _e) = graph_with_delta(ParamValue::Expr("1 + 1".into()));
+        let (lit_graph, lit_add, _l) = graph_with_delta(ParamValue::Float(2.0));
+        assert_eq!(
+            expr_graph.output_key(expr_add, &request()).unwrap(),
+            lit_graph.output_key(lit_add, &request()).unwrap()
+        );
+    }
+
+    #[test]
+    fn the_key_the_evaluator_uses_matches_the_key_reported_for_staleness() {
+        // The two are computed on separate paths. If only one resolved, every node carrying an
+        // expression would report as permanently stale.
+        let (graph, add, calls) = graph_with_delta(ParamValue::Expr("world_height / 2".into()));
+        let request = request().with_world_height(8.0);
+        let reported = graph.output_key(add, &request).unwrap();
+        let mut cache = EvalCache::new(8);
+        graph.evaluate(add, &request, &mut cache).unwrap();
+        assert_eq!(graph.output_key(add, &request).unwrap(), reported);
+        // And the entry it just wrote is found again rather than missed, which is what would
+        // break if the two paths disagreed about the key.
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        graph.evaluate(add, &request, &mut cache).unwrap();
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "the second pull must hit cache, not recompute"
+        );
+    }
+
+    #[test]
+    fn a_broken_expression_is_a_node_error_not_a_panic() {
+        let (graph, add, _calls) = graph_with_delta(ParamValue::Expr("sea_levle + 1".into()));
+        let mut cache = EvalCache::new(8);
+        let err = graph
+            .evaluate(add, &request(), &mut cache)
+            .expect_err("an unknown name must fail the node");
+        let Error::BadExpression { param, message, .. } = &err else {
+            panic!("expected a BadExpression, got {err:?}");
+        };
+        assert_eq!(param, "delta");
+        assert!(message.contains("sea_levle"), "message was {message:?}");
     }
 }

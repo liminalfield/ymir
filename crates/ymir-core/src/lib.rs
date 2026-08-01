@@ -51,6 +51,7 @@ mod paint;
 mod param;
 mod progress;
 mod region;
+mod resolve;
 mod spec;
 mod subgraph;
 
