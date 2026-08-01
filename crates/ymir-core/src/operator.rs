@@ -249,6 +249,30 @@ pub trait Operator: OperatorClone + Send + Sync {
     fn rebuild_nested(&self, _inner: crate::graph::Graph) -> Box<dyn Operator> {
         self.clone_box()
     }
+
+    /// The parameter interface this operator declares, if it is an authored node (#373).
+    ///
+    /// `None` for a native node, whose parameters are declared in its [`spec`](Self::spec) and
+    /// live in its source rather than in a file. A subgraph returns the list it was authored
+    /// with, which the document loader saves and restores without naming a concrete type, the
+    /// same arrangement as [`nested`](Self::nested).
+    ///
+    /// Kept separate from `nested` rather than folded into it because the two are unrelated: an
+    /// interface describes what a node exposes, an inner graph is what it contains, and welding
+    /// them would mean every caller that wants one carries the other.
+    fn interface(&self) -> Option<&[crate::interface::InterfaceParam]> {
+        None
+    }
+
+    /// Rebuilds this operator with `interface` installed, used when loading an authored node.
+    /// The default ignores it and clones self, correct for an ordinary operator since a
+    /// well-formed file carries no interface for one.
+    fn rebuild_interface(
+        &self,
+        _interface: Vec<crate::interface::InterfaceParam>,
+    ) -> Box<dyn Operator> {
+        self.clone_box()
+    }
 }
 
 /// Clones a `Box<dyn Operator>`. Blanket-implemented for every `Clone` operator, so

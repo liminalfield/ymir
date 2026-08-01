@@ -202,6 +202,13 @@ pub struct NodeDocument {
     /// naming a concrete node type.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subgraph: Option<Box<ProjectDocument>>,
+    /// For an authored node (a subgraph with a declared parameter interface), the parameters it
+    /// exposes; empty (omitted) for an ordinary node and for a subgraph nobody has authored an
+    /// interface on, so existing projects load unchanged and the format version need not bump.
+    /// Structural, via the operator's [`interface`](crate::Operator::interface) hook, never by
+    /// naming a concrete node type.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interface: Vec<crate::interface::InterfaceParam>,
 }
 
 /// Serde predicate: omit a `bool` field from the file when it is `false`.
@@ -250,6 +257,7 @@ mod tests {
                     connections: Vec::new(),
                     bypassed: false,
                     subgraph: None,
+                    interface: Vec::new(),
                 },
                 NodeDocument {
                     stable_id: 1,
@@ -263,6 +271,7 @@ mod tests {
                     }],
                     bypassed: true,
                     subgraph: None,
+                    interface: Vec::new(),
                 },
             ],
         }
@@ -330,6 +339,7 @@ mod tests {
                 connections: Vec::new(),
                 bypassed: false,
                 subgraph: None,
+                interface: Vec::new(),
             }],
         };
         let text = serde_json::to_string(&doc).expect("serialize");
