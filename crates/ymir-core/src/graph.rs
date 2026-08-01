@@ -922,6 +922,9 @@ impl Graph {
                         .operator
                         .nested()
                         .map(|inner| Box::new(inner.to_document())),
+                    // An authored node captures the parameters it declares, the same way and for
+                    // the same reason as its inner graph.
+                    interface: node.operator.interface().unwrap_or_default().to_vec(),
                 }
             })
             .collect();
@@ -1029,6 +1032,18 @@ impl Graph {
                 node.stable_id = nd.stable_id;
                 node.name = nd.name.clone();
                 node.bypassed = nd.bypassed;
+            }
+            // Restore an authored node's declared parameters before its inner graph, since
+            // `rebuild_nested` carries the interface across and would otherwise carry an empty
+            // one. An ordinary node's default hook ignores this, so a file that names an
+            // interface for one leaves it as it was rather than corrupting it.
+            if !nd.interface.is_empty() {
+                let rebuilt = graph
+                    .node(id)
+                    .ok_or(Error::NodeNotFound)?
+                    .operator
+                    .rebuild_interface(nd.interface.clone());
+                graph.set_operator(id, rebuilt)?;
             }
             // Restore a container's inner graph (recursively), then refresh this node's arity from
             // it so pass-two connections land on the right ports. A subgraph that cannot be
@@ -1550,6 +1565,7 @@ mod tests {
                 connections: Vec::new(),
                 bypassed: false,
                 subgraph: None,
+                interface: Vec::new(),
             }],
         };
         let (graph, warnings) =
@@ -1576,6 +1592,7 @@ mod tests {
             connections: Vec::new(),
             bypassed: false,
             subgraph: None,
+            interface: Vec::new(),
         };
         let doc = ProjectDocument {
             format_version: FORMAT_VERSION,
@@ -1633,6 +1650,7 @@ mod tests {
                 }],
                 bypassed: false,
                 subgraph: None,
+                interface: Vec::new(),
             }],
         };
         let (graph, warnings) =
@@ -1659,6 +1677,7 @@ mod tests {
             connections,
             bypassed: false,
             subgraph: None,
+            interface: Vec::new(),
         };
         let doc = ProjectDocument {
             format_version: FORMAT_VERSION,
@@ -1705,6 +1724,7 @@ mod tests {
                     connections: Vec::new(),
                     bypassed: false,
                     subgraph: None,
+                    interface: Vec::new(),
                 },
                 NodeDocument {
                     stable_id: 1,
@@ -1718,6 +1738,7 @@ mod tests {
                     }],
                     bypassed: false,
                     subgraph: None,
+                    interface: Vec::new(),
                 },
             ],
         };

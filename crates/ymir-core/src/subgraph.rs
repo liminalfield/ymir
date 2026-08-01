@@ -21,6 +21,7 @@ use crate::error::{Error, Result};
 use crate::eval::{EvalCache, EvalRequest};
 use crate::field::Field;
 use crate::graph::{Graph, NodeId};
+use crate::interface::InterfaceParam;
 use crate::layer::Layer;
 use crate::layers;
 use crate::operator::{Inputs, Operator};
@@ -130,6 +131,9 @@ inventory::submit! { OperatorEntry { type_id: OUTPUT_TYPE_ID, make: || Box::new(
 #[derive(Clone)]
 pub struct SubgraphNode {
     inner: Graph,
+    /// The parameters this subgraph declares for itself (#373). Empty until authored, which is
+    /// every subgraph made before interfaces existed, so those keep exactly the schema they had.
+    interface: Vec<InterfaceParam>,
     /// Precomputed content hash of `inner`, returned from [`Operator::content_hash`] and
     /// folded into the node's cache key so editing the inside invalidates the cached output.
     /// Precomputed because the evaluator calls `content_hash` per key.
@@ -141,7 +145,18 @@ impl SubgraphNode {
     #[must_use]
     pub fn new(inner: Graph) -> Self {
         let inner_hash = inner.content_hash();
-        Self { inner, inner_hash }
+        Self {
+            inner,
+            interface: Vec::new(),
+            inner_hash,
+        }
+    }
+
+    /// Declares this subgraph's parameter interface.
+    #[must_use]
+    pub fn with_interface(mut self, interface: Vec<InterfaceParam>) -> Self {
+        self.interface = interface;
+        self
     }
 
     /// An empty subgraph (no markers, so no ports): the registry default, which the editor
@@ -182,14 +197,20 @@ impl Operator for SubgraphNode {
             // graph (not an offset to the host's world seed, as a generator's seed is).
             // That self-containment is what lets a shared subgraph reproduce the same
             // terrain in any project; reseeding here is the "vary this instance" switch.
-            params: vec![ParamSpec::new(
+            // The seed first, then whatever this subgraph was authored to expose. An authored
+            // parameter renders through exactly the same introspection as a native one, which is
+            // the point of converting to `ParamSpec` rather than teaching the inspector a second
+            // shape.
+            params: std::iter::once(ParamSpec::new(
                 "seed",
                 ParamKind::Int {
                     min: 0,
                     max: i64::from(i32::MAX),
                 },
                 ParamValue::Int(0),
-            )],
+            ))
+            .chain(self.interface.iter().map(InterfaceParam::to_spec))
+            .collect(),
             emitted_layers: Vec::new(),
             mask_aware: false,
         }
@@ -204,7 +225,17 @@ impl Operator for SubgraphNode {
     }
 
     fn rebuild_nested(&self, inner: Graph) -> Box<dyn Operator> {
-        Box::new(SubgraphNode::new(inner))
+        // The interface travels with the rebuild: it belongs to the same definition as the inner
+        // graph, and dropping it here would silently strip an authored node's parameters on load.
+        Box::new(SubgraphNode::new(inner).with_interface(self.interface.clone()))
+    }
+
+    fn interface(&self) -> Option<&[InterfaceParam]> {
+        Some(&self.interface)
+    }
+
+    fn rebuild_interface(&self, interface: Vec<InterfaceParam>) -> Box<dyn Operator> {
+        Box::new(SubgraphNode::new(self.inner.clone()).with_interface(interface))
     }
 
     fn eval(&self, inputs: Inputs, params: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
@@ -279,6 +310,73 @@ inventory::submit! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A subgraph declaring one width parameter.
+    fn authored() -> SubgraphNode {
+        SubgraphNode::new(Graph::new()).with_interface(vec![
+            crate::interface::InterfaceParam::new(
+                "beach_width",
+                crate::interface::InterfaceKind::Float {
+                    min: 0.0,
+                    max: 1000.0,
+                },
+                ParamValue::Float(20.0),
+            )
+            .with_unit(crate::param::Unit::Meters),
+        ])
+    }
+
+    #[test]
+    fn an_authored_parameter_joins_the_subgraphs_schema() {
+        let spec = authored().spec();
+        let names: Vec<&str> = spec.params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["seed", "beach_width"],
+            "the seed stays, and the authored parameter follows it"
+        );
+        assert_eq!(spec.params[1].unit, Some(crate::param::Unit::Meters));
+    }
+
+    #[test]
+    fn a_subgraph_with_no_interface_keeps_exactly_the_schema_it_had() {
+        // Every subgraph made before interfaces existed is this one. It must not gain or lose a
+        // parameter, or a saved project would come back with a different node.
+        let spec = SubgraphNode::empty().spec();
+        let names: Vec<&str> = spec.params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["seed"]);
+    }
+
+    #[test]
+    fn rebuilding_the_inner_graph_carries_the_interface_across() {
+        // Loading a project rebuilds the inner graph after the interface is installed. Dropping
+        // it here would strip an authored node's parameters on every open.
+        let rebuilt = authored().rebuild_nested(Graph::new());
+        let names: Vec<String> = rebuilt
+            .spec()
+            .params
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
+        assert_eq!(names, ["seed", "beach_width"]);
+    }
+
+    #[test]
+    fn an_authored_interface_survives_a_save_and_load() {
+        let mut graph = Graph::new();
+        let id = graph.add_op(Box::new(authored()), Params::new());
+        let stable = graph.stable_id(id).expect("stable id");
+        let reloaded = Graph::from_document(&graph.to_document()).expect("loads");
+        let back = reloaded.node_id_of(stable).expect("the node");
+        let names: Vec<String> = reloaded
+            .spec(back)
+            .expect("spec")
+            .params
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
+        assert_eq!(names, ["seed", "beach_width"]);
+    }
     use crate::region::Region;
     use crate::spec::NodeKind;
 

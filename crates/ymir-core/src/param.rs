@@ -532,7 +532,10 @@ pub enum ParamKind {
 /// suffix (and any localization) is resolved downstream, so the schema stays free of
 /// presentation text. A unit also marks a float as an *open quantity* rather than a
 /// bounded ratio, which the inspector uses to choose a value field over a slider.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Serializes in `snake_case`, so an authored node's declared unit survives a project file
+/// without the on-disk format tracking the Rust identifier names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Unit {
     /// A world-unit length, in meters.
     Meters,
