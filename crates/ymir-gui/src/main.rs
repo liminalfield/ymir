@@ -5431,6 +5431,7 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
     // the rest genuinely have no value to show, since resolution never completed.
     let resolved = ymir_core::resolve::resolve_params(
         &params,
+        &spec.params,
         ymir_core::resolve::WorldGlobals {
             sea_level: state.sea_level,
             world_height: state.world_height,
