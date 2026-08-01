@@ -2441,6 +2441,48 @@ fn menu_row_text(row: MenuRow) -> String {
 /// (#106) only make sense inside a subgraph, so outside one they are *disabled* rather than
 /// hidden: the palette and node menu still show them (so their existence and category stay
 /// discoverable) but they cannot be created at the top level.
+/// The scope an expression on the inspected node is checked against: the world settings, and the
+/// interface of the subgraph currently being edited, if any.
+///
+/// Walks the navigation stack outermost first, so nesting works: each container's own parameters
+/// are resolved against the scope accumulated so far, and the values that produces become the
+/// interface the next level down can name. Resolving as it descends matters because an interface
+/// value may itself be computed at the call site, and what the inside sees is the number that
+/// worked out to, not the expression.
+///
+/// A container whose own parameters do not resolve contributes what it can rather than aborting:
+/// the inspector is a display, and a broken expression on the container is already reported
+/// where it lives.
+fn inspector_scope(state: &AppState) -> ymir_core::resolve::Scope {
+    let mut scope = ymir_core::resolve::Scope {
+        world: ymir_core::resolve::WorldGlobals {
+            sea_level: state.sea_level,
+            world_height: state.world_height,
+            world_extent: state.world_extent,
+        },
+        ..Default::default()
+    };
+    for frame in &state.nav {
+        let Some(id) = frame.graph.node_id_of(frame.container) else {
+            continue;
+        };
+        let Some(interface) = frame.graph.interface(id) else {
+            continue;
+        };
+        let params = frame.graph.params(id).cloned().unwrap_or_default();
+        let Some(spec) = frame.graph.spec(id) else {
+            continue;
+        };
+        let resolved =
+            ymir_core::resolve::resolve_params(&params, &spec.params, &scope, spec.type_id)
+                .ok()
+                .flatten();
+        let effective = resolved.as_ref().unwrap_or(&params);
+        scope.interface = ymir_core::interface_values(interface, effective);
+    }
+    scope
+}
+
 fn node_addable(type_id: &str, inside_subgraph: bool) -> bool {
     inside_subgraph || (type_id != INPUT_TYPE_ID && type_id != OUTPUT_TYPE_ID)
 }
@@ -5429,17 +5471,7 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
     // uses, so the inspector cannot report a different number from the one the node runs on.
     // An `Err` means the set does not resolve at all, and the error names the parameter at fault;
     // the rest genuinely have no value to show, since resolution never completed.
-    // The scope the inspector checks an expression against. The enclosing interface is left
-    // empty: a node being edited inside a dived-in subgraph would want it, and until that is
-    // wired the inspector reports a name the engine accepts as unknown (see #373 Phase 2).
-    let scope = ymir_core::resolve::Scope {
-        world: ymir_core::resolve::WorldGlobals {
-            sea_level: state.sea_level,
-            world_height: state.world_height,
-            world_extent: state.world_extent,
-        },
-        ..Default::default()
-    };
+    let scope = inspector_scope(state);
     // A snapshot for checking a half-typed expression against. Taken before the rows run, so the
     // borrow does not fight the writes below and a draft is judged against the committed state
     // rather than against a value edited moments earlier in the same frame.
