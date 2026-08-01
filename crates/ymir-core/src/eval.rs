@@ -14,7 +14,7 @@
 //! key a faithful proxy for its output, which keeps the key cheap. True
 //! output-byte hashing stays reserved for golden tests.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::cancel::CancelToken;
@@ -30,7 +30,7 @@ use crate::param::Params;
 use crate::progress::{Progress, ProgressSink};
 use crate::project::WorldSettings;
 use crate::region::Region;
-use crate::resolve::{WorldGlobals, has_expression, resolve_params};
+use crate::resolve::{Scope, WorldGlobals, has_expression, resolve_params};
 
 /// The global parameters of one evaluation request: resolution, region, the
 /// global seed, and the world extent. The target node is a separate argument to
@@ -57,6 +57,11 @@ pub struct EvalRequest {
     /// world global several nodes agree on (coastal reshaping, stream-power base level, the
     /// viewport water). Defaults to `0.0`.
     sea_level: f64,
+    /// The enclosing subgraph's declared parameters and their resolved values, empty at the top
+    /// level. Set by a container for its inner evaluation so an inner node's expression can name
+    /// them (#373). Not part of any cache key of its own: the values reach a node's key through
+    /// the resolved parameter that read them.
+    interface: BTreeMap<String, f64>,
     /// Subgraph nesting depth this request evaluates at; 0 at the top level. The evaluator
     /// threads it into each node's context, and a subgraph container raises it by one for
     /// its inner evaluation. Not part of the cache key: depth never changes a node's output.
@@ -79,13 +84,25 @@ pub struct EvalRequest {
 }
 
 impl EvalRequest {
-    /// The world settings a parameter's expression may reference (#371).
-    pub(crate) fn world_globals(&self) -> WorldGlobals {
-        WorldGlobals {
-            sea_level: self.sea_level,
-            world_height: self.world_height,
-            world_extent: self.world_extent,
+    /// Everything a parameter's expression may name beyond its own node (#371, #373): the world
+    /// settings, and the enclosing authored node's parameters when this evaluates inside one.
+    pub(crate) fn scope(&self) -> Scope {
+        Scope {
+            world: WorldGlobals {
+                sea_level: self.sea_level,
+                world_height: self.world_height,
+                world_extent: self.world_extent,
+            },
+            interface: self.interface.clone(),
         }
+    }
+
+    /// Declares the enclosing subgraph's resolved parameter values for the inner evaluation, so
+    /// an inner node's expression can name them (#373).
+    #[must_use]
+    pub fn with_interface(mut self, interface: BTreeMap<String, f64>) -> Self {
+        self.interface = interface;
+        self
     }
 
     /// Creates an evaluation request with no cancellation attached.
@@ -99,6 +116,7 @@ impl EvalRequest {
             world_extent: 1.0,
             world_height: 1.0,
             sea_level: 0.0,
+            interface: BTreeMap::new(),
             depth: 0,
             cancel: CancelToken::new(),
             compute: None,
@@ -542,7 +560,7 @@ impl Graph {
             resolve_params(
                 &node.params,
                 &node.operator.spec().params,
-                request.world_globals(),
+                &request.scope(),
                 node.type_id,
             )?
         } else {
@@ -747,7 +765,7 @@ impl Graph {
             resolve_params(
                 &node.params,
                 &node.operator.spec().params,
-                request.world_globals(),
+                &request.scope(),
                 node.type_id,
             )?
         } else {

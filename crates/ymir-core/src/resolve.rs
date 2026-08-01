@@ -53,8 +53,23 @@ use crate::project::WorldSettings;
 /// - `world_extent` is **metres** across the map, a horizontal length.
 const WORLD_VARS: [&str; 3] = ["sea_level", "world_height", "world_extent"];
 
+/// Everything an expression on a parameter may name, beyond the node's own parameters.
+///
+/// Grouped because the two travel together and are both properties of where the node sits rather
+/// than of the node: the world it is in, and the authored node it is inside, if any.
+#[derive(Clone, Debug, Default)]
+pub struct Scope {
+    /// The world settings.
+    pub world: WorldGlobals,
+    /// The enclosing subgraph's declared parameters and their resolved values, empty at the top
+    /// level (#373). Values, not expressions: the outer evaluator resolves the container's own
+    /// parameters before it runs, so an interface value that is itself computed at the call site
+    /// arrives here as the number it worked out to.
+    pub interface: BTreeMap<String, f64>,
+}
+
 /// The world settings an expression resolves against, in [`WORLD_VARS`] order.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct WorldGlobals {
     /// The project's sea level.
     pub sea_level: f64,
@@ -176,7 +191,7 @@ pub fn has_expression(params: &Params) -> bool {
 pub fn resolve_params(
     params: &Params,
     schema: &[ParamSpec],
-    world: WorldGlobals,
+    scope: &Scope,
     type_id: &'static str,
 ) -> Result<Option<Params>> {
     if !has_expression(params) {
@@ -201,7 +216,7 @@ pub fn resolve_params(
     // one, and a fixed vocabulary that adding a parameter cannot quietly reassign is the more
     // predictable rule of the two.
     let mut names: Vec<&str> = WORLD_VARS.to_vec();
-    let mut values: Vec<f32> = world.values().to_vec();
+    let mut values: Vec<f32> = scope.world.values().to_vec();
     let mut slot_of: BTreeMap<&str, usize> = BTreeMap::new();
     for (&name, &value) in &effective {
         if WORLD_VARS.contains(&name) {
@@ -212,6 +227,18 @@ pub fn resolve_params(
             names.push(name);
             values.push(v);
         }
+    }
+    // The enclosing interface last, so a name declared in more than one place resolves to the
+    // nearer of the two. A node must never lose access to its own parameter because the subgraph
+    // around it happened to choose the same name; the author of the interface can rename, the
+    // author of a built-in node cannot. The three world globals stay above both, being a fixed
+    // vocabulary that nothing should be able to reassign.
+    for (name, value) in &scope.interface {
+        if names.contains(&name.as_str()) {
+            continue;
+        }
+        names.push(name);
+        values.push(*value as f32);
     }
 
     // Compile each expression once against the whole environment, and read back which of it the
@@ -260,12 +287,22 @@ pub fn resolve_params(
 mod tests {
     use super::*;
 
-    fn world() -> WorldGlobals {
-        WorldGlobals {
-            sea_level: 0.25,
-            world_height: 512.0,
-            world_extent: 1000.0,
+    fn world() -> Scope {
+        Scope {
+            world: WorldGlobals {
+                sea_level: 0.25,
+                world_height: 512.0,
+                world_extent: 1000.0,
+            },
+            ..Default::default()
         }
+    }
+
+    /// The same world, plus an enclosing subgraph declaring `beach_width`.
+    fn inside_subgraph(width: f64) -> Scope {
+        let mut scope = world();
+        scope.interface.insert("beach_width".to_owned(), width);
+        scope
     }
 
     fn params_with(name: &str, value: ParamValue) -> Params {
@@ -274,7 +311,7 @@ mod tests {
 
     /// Resolves against an empty schema: every value the expressions read is stored.
     fn resolved(params: &Params) -> Params {
-        resolve_params(params, &[], world(), "test.node")
+        resolve_params(params, &[], &world(), "test.node")
             .expect("compiles")
             .expect("something to resolve")
     }
@@ -286,7 +323,7 @@ mod tests {
     #[test]
     fn a_map_of_literals_resolves_to_nothing_to_do() {
         let params = params_with("height", ParamValue::Float(0.5));
-        let out = resolve_params(&params, &[], world(), "test.node").expect("nothing to compile");
+        let out = resolve_params(&params, &[], &world(), "test.node").expect("nothing to compile");
         assert!(
             out.is_none(),
             "a map with no expression should allocate nothing"
@@ -348,7 +385,7 @@ mod tests {
         // thing it names. The schema is where an untouched parameter's value lives.
         let schema = [declared("beach_width", 20.0), declared("amplitude", 3.0)];
         let stored = Params::new().with("amplitude", expr("beach_width * 0.15"));
-        let out = resolve_params(&stored, &schema, world(), "test.node")
+        let out = resolve_params(&stored, &schema, &world(), "test.node")
             .expect("the default must be in scope")
             .expect("resolved");
         assert_eq!(out.get_f64("amplitude", 0.0), 3.0);
@@ -360,7 +397,7 @@ mod tests {
         let stored = Params::new()
             .with("beach_width", ParamValue::Float(40.0))
             .with("amplitude", expr("beach_width * 0.15"));
-        let out = resolve_params(&stored, &schema, world(), "test.node")
+        let out = resolve_params(&stored, &schema, &world(), "test.node")
             .expect("compiles")
             .expect("resolved");
         assert_eq!(out.get_f64("amplitude", 0.0), 6.0);
@@ -373,7 +410,7 @@ mod tests {
         // reason a user could see.
         let schema = [declared("beach_width", 20.0), declared("amplitude", 3.0)];
         let stored = Params::new().with("amplitude", expr("beach_width * 0.15"));
-        let out = resolve_params(&stored, &schema, world(), "test.node")
+        let out = resolve_params(&stored, &schema, &world(), "test.node")
             .expect("compiles")
             .expect("resolved");
         let names: Vec<&str> = out.iter().map(|(n, _)| n).collect();
@@ -403,7 +440,7 @@ mod tests {
         let params = Params::new()
             .with("mode", ParamValue::Text("ridged".into()))
             .with("p", expr("mode"));
-        let err = resolve_params(&params, &[], world(), "test.node").expect_err("not in scope");
+        let err = resolve_params(&params, &[], &world(), "test.node").expect_err("not in scope");
         assert!(matches!(err, Error::BadExpression { .. }));
     }
 
@@ -433,7 +470,7 @@ mod tests {
         let params = Params::new()
             .with("a", expr("b + 1"))
             .with("b", expr("a + 1"));
-        let err = resolve_params(&params, &[], world(), "test.node").expect_err("a cycle");
+        let err = resolve_params(&params, &[], &world(), "test.node").expect_err("a cycle");
         assert!(
             matches!(err, Error::ParamCycle { .. }),
             "expected a ParamCycle, got {err:?}"
@@ -443,7 +480,7 @@ mod tests {
     #[test]
     fn a_parameter_referencing_itself_is_a_cycle() {
         let params = params_with("a", expr("a + 1"));
-        let err = resolve_params(&params, &[], world(), "test.node").expect_err("a self-cycle");
+        let err = resolve_params(&params, &[], &world(), "test.node").expect_err("a self-cycle");
         let Error::ParamCycle { param, .. } = err else {
             panic!("expected a ParamCycle, got {err:?}");
         };
@@ -457,7 +494,7 @@ mod tests {
             .with("b", expr("c"))
             .with("c", expr("a"));
         let err =
-            resolve_params(&params, &[], world(), "test.node").expect_err("a three-way cycle");
+            resolve_params(&params, &[], &world(), "test.node").expect_err("a three-way cycle");
         assert!(matches!(err, Error::ParamCycle { .. }));
     }
 
@@ -478,7 +515,7 @@ mod tests {
         // The whole point of the compiler rejecting unknown identifiers: a typo must not read as
         // zero and quietly flatten someone's terrain.
         let params = params_with("p", expr("sea_levle"));
-        let err = resolve_params(&params, &[], world(), "test.node").expect_err("unknown name");
+        let err = resolve_params(&params, &[], &world(), "test.node").expect_err("unknown name");
         let Error::BadExpression { param, message, .. } = err else {
             panic!("expected a BadExpression, got {err:?}");
         };
@@ -489,11 +526,66 @@ mod tests {
     #[test]
     fn a_syntax_error_is_reported_against_the_parameter_it_is_on() {
         let params = params_with("radius", expr("2 * (1 +"));
-        let err = resolve_params(&params, &[], world(), "test.node").expect_err("syntax error");
+        let err = resolve_params(&params, &[], &world(), "test.node").expect_err("syntax error");
         let Error::BadExpression { param, type_id, .. } = err else {
             panic!("expected a BadExpression, got {err:?}");
         };
         assert_eq!((param.as_str(), type_id), ("radius", "test.node"));
+    }
+
+    #[test]
+    fn an_inner_expression_can_name_the_enclosing_interface() {
+        // The premise of the whole epic: one conceptual parameter, written once on the container,
+        // reaching a node inside it.
+        let params = params_with("range", expr("beach_width"));
+        let out = resolve_params(&params, &[], &inside_subgraph(20.0), "test.node")
+            .expect("in scope")
+            .expect("resolved");
+        assert_eq!(out.get_f64("range", 0.0), 20.0);
+    }
+
+    #[test]
+    fn the_interface_reaches_arithmetic_at_the_reference_site() {
+        // The unit conversion the handoff settled on: metres in, normalized out, written where it
+        // is used rather than built into a promotion mechanism.
+        let params = params_with("amplitude", expr("beach_width / world_height"));
+        let out = resolve_params(&params, &[], &inside_subgraph(512.0), "test.node")
+            .expect("in scope")
+            .expect("resolved");
+        assert_eq!(out.get_f64("amplitude", 0.0), 1.0);
+    }
+
+    #[test]
+    fn at_the_top_level_an_interface_name_is_simply_unknown() {
+        let params = params_with("range", expr("beach_width"));
+        let err = resolve_params(&params, &[], &world(), "test.node").expect_err("no interface");
+        assert!(matches!(err, Error::BadExpression { .. }));
+    }
+
+    #[test]
+    fn a_nodes_own_parameter_wins_over_an_interface_of_the_same_name() {
+        // A node must never lose access to its own value because the subgraph around it happened
+        // to choose the same name. The interface author can rename; the author of a built-in node
+        // cannot reach into someone's project to do so.
+        let params = Params::new()
+            .with("beach_width", ParamValue::Float(7.0))
+            .with("range", expr("beach_width"));
+        let out = resolve_params(&params, &[], &inside_subgraph(20.0), "test.node")
+            .expect("compiles")
+            .expect("resolved");
+        assert_eq!(out.get_f64("range", 0.0), 7.0);
+    }
+
+    #[test]
+    fn a_world_global_still_wins_over_an_interface_of_the_same_name() {
+        // Three fixed names that nothing should be able to reassign, interface included.
+        let mut scope = world();
+        scope.interface.insert("sea_level".to_owned(), 99.0);
+        let params = params_with("p", expr("sea_level"));
+        let out = resolve_params(&params, &[], &scope, "test.node")
+            .expect("compiles")
+            .expect("resolved");
+        assert_eq!(out.get_f64("p", 0.0), 0.25);
     }
 
     #[test]
