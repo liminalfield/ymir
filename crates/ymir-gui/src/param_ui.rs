@@ -151,6 +151,21 @@ fn srgb_from_bytes(bytes: [u8; 3]) -> [f64; 3] {
 /// Fixed width of a parameter row's value box.
 const VALUE_W: f32 = 54.0;
 
+/// What a parameter row needs beyond its own schema and value.
+///
+/// Grouped rather than passed loose because these arrive together, are all about the row's
+/// surroundings rather than the parameter itself, and a row that wants one usually wants another.
+pub(crate) struct RowContext<'a> {
+    /// The node the parameter belongs to, for keying per-row state that must not follow a
+    /// widget's position in the panel.
+    pub node: u64,
+    /// What a computed value currently works out to, or `None` when it did not resolve or is not
+    /// computed at all.
+    pub computed: Option<f64>,
+    /// The input distribution, drawn behind a curve or levels editor.
+    pub histogram: Option<&'a Histogram>,
+}
+
 /// Catches a value box's typed text when it starts an expression rather than a number.
 ///
 /// A numeric field never needs a literal `=`, so the prefix is free to mean this, and it is the
@@ -423,34 +438,42 @@ pub(crate) fn plain_label(ui: &mut egui::Ui, text: &str) {
 /// has to solve that problem.
 ///
 /// `computed` is `None` when the expression did not resolve, which is a real state a user needs
-/// to see rather than an impossible one: the row then shows the source itself and says why on
-/// hover. Returns the edited value when the expression text changed this frame.
+/// to see rather than an impossible one: the row then shows `=!` and says why on hover.
+///
+/// Two lines, like a slider row: the label, marker and number above, the expression across the
+/// full panel width beneath. A value box is about ten monospace characters wide, and
+/// `world_height * sea_level` is twenty-four, so the expression cannot share that line with
+/// anything.
+///
+/// Returns the committed value: an expression, or a plain number when what was typed is one, so
+/// there is a way back out of being computed.
 fn expression_row(
     ui: &mut egui::Ui,
     type_id: &str,
-    name: &str,
+    node: u64,
+    spec: &ParamSpec,
     source: &str,
     computed: Option<f64>,
 ) -> Option<ParamValue> {
-    let mut text = source.to_owned();
+    let name = spec.name.as_str();
+    // The draft is keyed by node and parameter, never by the widget's auto-generated id. The
+    // params pane does not push an id per node, so row ids are positional: a draft keyed that way
+    // would follow the position and leak into whatever parameter sat there for the next node.
+    let draft_id = egui::Id::new(("param-expr-draft", node, name));
+    let mut text: String = ui
+        .data(|d| d.get_temp::<String>(draft_id))
+        .unwrap_or_else(|| source.to_owned());
     let mut result = None;
+
     ui.horizontal(|ui| {
         param_label(ui, type_id, name);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let edited = ui.add_sized(
-                egui::vec2(VALUE_W + 16.0, ui.spacing().interact_size.y),
-                egui::TextEdit::singleline(&mut text).font(egui::TextStyle::Monospace),
-            );
-            let hover = match computed {
-                Some(_) => format!("= {source}"),
-                None => format!("= {source}\n\nthis does not resolve, so the node cannot run"),
-            };
-            if edited.changed() {
-                result = Some(ParamValue::Expr(text.clone()));
+            // Back to a stored value, the same affordance every other row has. Without it the
+            // only escape from a computed parameter was resetting the whole node.
+            if reset_icon(ui).clicked() {
+                ui.data_mut(|d| d.remove::<String>(draft_id));
+                result = Some(spec.default.clone());
             }
-            edited.on_hover_text(hover);
-            // The marker sits between the label and the field, so a column of parameters shows at
-            // a glance which of them are computed.
             let (glyph, color) = match computed {
                 Some(_) => ("=", crate::theme::ACCENT_PRIMARY),
                 None => ("=!", crate::theme::TEXT_TERTIARY),
@@ -465,7 +488,49 @@ fn expression_row(
             }
         });
     });
+
+    let edited = ui.add(
+        egui::TextEdit::singleline(&mut text)
+            .font(egui::TextStyle::Monospace)
+            .desired_width(f32::INFINITY),
+    );
+    let hover = match computed {
+        Some(_) => format!("= {source}"),
+        None => format!("= {source}\n\nthis does not resolve, so the node cannot run"),
+    };
+    let edited = edited.on_hover_text(hover);
+
+    // Held as a draft while typing and committed once, on Enter or when focus leaves. Writing
+    // through on every keystroke commits one expression per character, all but the last of them
+    // broken, and each one re-evaluates the graph and blanks the preview. The numeric rows beside
+    // this one already defer for the same reason.
+    if edited.changed() {
+        ui.data_mut(|d| d.insert_temp(draft_id, text.clone()));
+    }
+    if edited.lost_focus() {
+        ui.data_mut(|d| d.remove::<String>(draft_id));
+        // Escape abandons the edit and puts the value back, matching every other parameter row.
+        if !ui.input(|i| i.key_pressed(egui::Key::Escape)) && text != source {
+            result = Some(committed_value(&text, spec));
+        }
+    }
     result
+}
+
+/// What committed text means: a plain number where it is one, an expression otherwise.
+///
+/// A parameter has to be able to stop being computed. Typing a bare number is the obvious way to
+/// say so, and storing `Expr("5")` instead would leave it computed forever with nothing to
+/// indicate why. Empty means the same as reset, since there is no expression left to evaluate.
+fn committed_value(text: &str, spec: &ParamSpec) -> ParamValue {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return spec.default.clone();
+    }
+    match trimmed.parse::<f64>() {
+        Ok(number) => ParamValue::Float(number),
+        Err(_) => ParamValue::Expr(trimmed.to_owned()),
+    }
 }
 
 /// Draws a row label in the shared muted-mono style and returns its response, so a caller can
@@ -634,15 +699,15 @@ pub(crate) fn edit(
     type_id: &str,
     spec: &ParamSpec,
     current: &ParamValue,
-    computed: Option<f64>,
-    histogram: Option<&Histogram>,
+    ctx: &RowContext<'_>,
     popout: &mut bool,
 ) -> Option<ParamValue> {
     let name = spec.name.as_str();
+    let (computed, histogram) = (ctx.computed, ctx.histogram);
     // A computed parameter is edited as its expression, not through the widget its kind would
     // otherwise get: what a slider or a value field would show is a result nothing can drag.
     if let ParamValue::Expr(source) = current {
-        return expression_row(ui, type_id, name, source, computed);
+        return expression_row(ui, type_id, ctx.node, spec, source, computed);
     }
     match (widget_for(spec), current) {
         (
@@ -1096,6 +1161,49 @@ mod tests {
                 unit: Some(Unit::Meters)
             }
         );
+    }
+
+    #[test]
+    fn a_committed_bare_number_stops_the_parameter_being_computed() {
+        // Without this there is no way out: clearing the field and typing 5 stored `Expr("5")`,
+        // computed forever with nothing to say why.
+        let spec = spec(
+            ParamKind::Float {
+                min: 0.0,
+                max: 10.0,
+            },
+            ParamValue::Float(1.0),
+        );
+        assert_eq!(committed_value("5", &spec), ParamValue::Float(5.0));
+        assert_eq!(committed_value("  2.5 ", &spec), ParamValue::Float(2.5));
+    }
+
+    #[test]
+    fn a_committed_expression_stays_an_expression() {
+        let spec = spec(
+            ParamKind::Float {
+                min: 0.0,
+                max: 10.0,
+            },
+            ParamValue::Float(1.0),
+        );
+        assert_eq!(
+            committed_value("beach_width * 0.15", &spec),
+            ParamValue::Expr("beach_width * 0.15".into())
+        );
+    }
+
+    #[test]
+    fn clearing_the_field_puts_the_default_back() {
+        let spec = spec(
+            ParamKind::Float {
+                min: 0.0,
+                max: 10.0,
+            },
+            ParamValue::Float(1.0),
+        );
+        assert_eq!(committed_value("", &spec), ParamValue::Float(1.0));
+        assert_eq!(committed_value("   ", &spec), ParamValue::Float(1.0));
     }
 
     #[test]
