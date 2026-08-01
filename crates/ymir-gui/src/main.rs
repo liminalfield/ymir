@@ -5429,17 +5429,22 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
     // uses, so the inspector cannot report a different number from the one the node runs on.
     // An `Err` means the set does not resolve at all, and the error names the parameter at fault;
     // the rest genuinely have no value to show, since resolution never completed.
-    let world_globals = ymir_core::resolve::WorldGlobals {
-        sea_level: state.sea_level,
-        world_height: state.world_height,
-        world_extent: state.world_extent,
+    // The scope the inspector checks an expression against. The enclosing interface is left
+    // empty: a node being edited inside a dived-in subgraph would want it, and until that is
+    // wired the inspector reports a name the engine accepts as unknown (see #373 Phase 2).
+    let scope = ymir_core::resolve::Scope {
+        world: ymir_core::resolve::WorldGlobals {
+            sea_level: state.sea_level,
+            world_height: state.world_height,
+            world_extent: state.world_extent,
+        },
+        ..Default::default()
     };
     // A snapshot for checking a half-typed expression against. Taken before the rows run, so the
     // borrow does not fight the writes below and a draft is judged against the committed state
     // rather than against a value edited moments earlier in the same frame.
     let committed = params.clone();
-    let resolved =
-        ymir_core::resolve::resolve_params(&params, &spec.params, world_globals, spec.type_id);
+    let resolved = ymir_core::resolve::resolve_params(&params, &spec.params, &scope, spec.type_id);
     let mut changed = false;
     // Reset all: overwrite every parameter with its spec default before the rows read them, so the
     // controls show the defaults and the single write-back below persists them.
@@ -5507,7 +5512,7 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
                     resolve_against: Some(&param_ui::DraftEnv {
                         params: &committed,
                         schema: &spec.params,
-                        world: world_globals,
+                        scope: scope.clone(),
                         type_id: spec.type_id,
                     }),
                 },

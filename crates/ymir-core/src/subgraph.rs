@@ -280,7 +280,31 @@ impl Operator for SubgraphNode {
         // itself memoizes in the outer cache, so an unchanged subgraph is never re-run, and
         // within this one call the evaluator's working set pins the active path regardless of
         // cache capacity.
+        // The values this subgraph was given, by the names it declared, so an inner node's
+        // expression can say `beach_width` and mean the one on the container above it (#373).
+        //
+        // These are already resolved: the outer evaluator resolves a node's parameters before it
+        // runs, so an interface value that is itself computed at the call site arrives here as
+        // the number it worked out to, and nothing inside has to know that.
+        //
+        // Only the numeric ones. A curve or a colour is not a name an expression can read, which
+        // is the same rule an inner node's own parameters follow.
+        let interface: std::collections::BTreeMap<String, f64> = self
+            .interface
+            .iter()
+            .filter_map(|declared| {
+                let value = params.get(&declared.name).or(Some(&declared.default))?;
+                let number = match value {
+                    ParamValue::Float(v) => *v,
+                    ParamValue::Int(v) => *v as f64,
+                    _ => return None,
+                };
+                Some((declared.name.clone(), number))
+            })
+            .collect();
+
         let mut request = EvalRequest::new(ctx.width, ctx.height, ctx.region, inner_seed)
+            .with_interface(interface)
             .with_world_extent(ctx.world_extent())
             .with_world_height(ctx.world_height())
             .with_sea_level(ctx.sea_level())
@@ -451,6 +475,42 @@ mod tests {
                 Field::new(ctx.width, ctx.height, ctx.region).with_layer(
                     layers::HEIGHT,
                     Arc::new(Layer::filled(ctx.width, ctx.height, self.value)),
+                ),
+            ])
+        }
+    }
+
+    /// A test-only generator whose uniform height is a parameter, so a test can read back what
+    /// value an inner node actually evaluated with. Never registered.
+    #[derive(Clone)]
+    struct ParamGen;
+
+    impl Operator for ParamGen {
+        fn spec(&self) -> NodeSpec {
+            NodeSpec {
+                type_id: "test.paramgen",
+                category: "test",
+                inputs: Vec::new(),
+                outputs: vec![PortSpec::new("out")],
+                params: vec![ParamSpec::new(
+                    "level",
+                    ParamKind::Float {
+                        min: -1000.0,
+                        max: 1000.0,
+                    },
+                    ParamValue::Float(0.0),
+                )],
+                emitted_layers: Vec::new(),
+                mask_aware: false,
+            }
+        }
+
+        fn eval(&self, _: Inputs, params: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
+            let level = params.get_f64("level", 0.0) as f32;
+            Ok(vec![
+                Field::new(ctx.width, ctx.height, ctx.region).with_layer(
+                    layers::HEIGHT,
+                    Arc::new(Layer::filled(ctx.width, ctx.height, level)),
                 ),
             ])
         }
@@ -793,6 +853,69 @@ mod tests {
             spec.params.iter().any(|p| p.name == "seed"),
             "the captured seed is a visible param"
         );
+    }
+
+    /// A subgraph declaring `beach_width`, containing one node whose `level` reads it.
+    fn subgraph_reading_its_interface(expr: &str) -> SubgraphNode {
+        let mut inner = Graph::new();
+        let g = inner.add_op(
+            Box::new(ParamGen),
+            Params::new().with("level", ParamValue::Expr(expr.to_owned())),
+        );
+        let out = inner.add_op(Box::new(OutputNode), Params::new());
+        inner.connect(g, 0, out, 0).unwrap();
+        SubgraphNode::new(inner).with_interface(vec![crate::interface::InterfaceParam::new(
+            "beach_width",
+            crate::interface::InterfaceKind::Float {
+                min: 0.0,
+                max: 1000.0,
+            },
+            ParamValue::Float(20.0),
+        )])
+    }
+
+    /// The uniform height `sg` produces for `params`.
+    fn inner_value(sg: &SubgraphNode, params: &Params) -> f32 {
+        let ctx = EvalContext::new(4, 4, Region::UNIT, 0);
+        sg.eval(Inputs::required_only(&[]), params, &ctx).unwrap()[0]
+            .layer(layers::HEIGHT)
+            .unwrap()
+            .as_slice()[0]
+    }
+
+    #[test]
+    fn an_inner_node_reads_the_value_set_on_the_container() {
+        // The point of the whole epic, end to end: one parameter on the outside, written once,
+        // reaching a node inside.
+        let sg = subgraph_reading_its_interface("beach_width");
+        let set = Params::new().with("beach_width", ParamValue::Float(42.0));
+        assert!((inner_value(&sg, &set) - 42.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn an_untouched_interface_parameter_reaches_inside_as_its_default() {
+        // A freshly placed authored node has stored nothing, so the declared default is what the
+        // inside must see. Otherwise every authored node would be broken until each of its
+        // parameters had been nudged once.
+        let sg = subgraph_reading_its_interface("beach_width");
+        assert!((inner_value(&sg, &Params::new()) - 20.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn one_interface_parameter_reaches_arithmetic_inside() {
+        // Written once outside, converted where it is used: the answer the handoff settled on
+        // instead of promotion carrying a unit conversion.
+        let sg = subgraph_reading_its_interface("beach_width * 0.15");
+        let set = Params::new().with("beach_width", ParamValue::Float(20.0));
+        assert!((inner_value(&sg, &set) - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn changing_the_container_changes_what_the_inside_computes() {
+        let sg = subgraph_reading_its_interface("beach_width");
+        let narrow = Params::new().with("beach_width", ParamValue::Float(10.0));
+        let wide = Params::new().with("beach_width", ParamValue::Float(30.0));
+        assert!((inner_value(&sg, &narrow) - inner_value(&sg, &wide)).abs() > 1.0);
     }
 
     #[test]

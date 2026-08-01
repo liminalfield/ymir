@@ -181,8 +181,9 @@ pub(crate) struct DraftEnv<'a> {
     pub params: &'a Params,
     /// The node's declared schema, so a sibling nobody has edited is still a name.
     pub schema: &'a [ParamSpec],
-    /// The world settings the expression may read.
-    pub world: ymir_core::resolve::WorldGlobals,
+    /// What the expression may name beyond the node itself: the world settings, and the
+    /// enclosing authored node's parameters when the node sits inside one.
+    pub scope: ymir_core::resolve::Scope,
     /// The node's type id, for the error the resolver reports.
     pub type_id: &'static str,
 }
@@ -196,7 +197,7 @@ fn draft_status(draft: &str, param: &str, env: &DraftEnv<'_>) -> Result<f64, Str
         param,
         ParamValue::Expr(draft.trim().trim_start_matches('=').into()),
     );
-    match ymir_core::resolve::resolve_params(&probe, env.schema, env.world, env.type_id) {
+    match ymir_core::resolve::resolve_params(&probe, env.schema, &env.scope, env.type_id) {
         Ok(Some(resolved)) => Ok(resolved.get_f64(param, f64::NAN)),
         // Unreachable: an expression was just inserted, so there is always one to resolve.
         Ok(None) => Err("nothing to resolve".to_owned()),
@@ -1369,10 +1370,13 @@ mod tests {
         DraftEnv {
             params,
             schema,
-            world: ymir_core::resolve::WorldGlobals {
-                sea_level: 0.25,
-                world_height: 512.0,
-                world_extent: 1000.0,
+            scope: ymir_core::resolve::Scope {
+                world: ymir_core::resolve::WorldGlobals {
+                    sea_level: 0.25,
+                    world_height: 512.0,
+                    world_extent: 1000.0,
+                },
+                ..Default::default()
             },
             type_id: "test.node",
         }
