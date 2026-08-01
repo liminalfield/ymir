@@ -234,6 +234,26 @@ impl Program {
         Ok(Self { ops: parser.ops })
     }
 
+    /// The indices of the variables this program actually reads, ascending and deduplicated.
+    ///
+    /// Lets a caller that compiled against a wide environment discover which of it a given
+    /// expression depends on, which is what orders the resolution of parameters that reference
+    /// each other and what makes a reference cycle detectable.
+    #[must_use]
+    pub fn variables(&self) -> Vec<usize> {
+        let mut used: Vec<usize> = self
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Var(i) => Some(*i as usize),
+                _ => None,
+            })
+            .collect();
+        used.sort_unstable();
+        used.dedup();
+        used
+    }
+
     /// Evaluates the program with `values[i]` bound to the `i`th variable from
     /// [`compile`](Self::compile). The caller guarantees `values.len()` covers every
     /// variable index the program references.
@@ -512,6 +532,25 @@ impl Parser<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn variables_reports_only_what_an_expression_reads() {
+        let vars = ["a", "b", "c"];
+        let used = |source: &str| {
+            Program::compile(source, &vars)
+                .expect("compiles")
+                .variables()
+        };
+        assert_eq!(used("a + c"), vec![0, 2], "b is not read");
+        assert_eq!(used("1 + 2"), Vec::<usize>::new(), "no variables at all");
+        // Deduplicated and ascending, so a caller can use it as a dependency set directly.
+        assert_eq!(used("b * b + b"), vec![1]);
+        assert_eq!(
+            used("c + a"),
+            vec![0, 2],
+            "ascending, not order of appearance"
+        );
+    }
 
     /// Compiles and evaluates `source` against `vars`/`values`, panicking on a compile
     /// error (the test asserts the value).

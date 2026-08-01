@@ -62,6 +62,17 @@ pub enum Error {
         message: String,
     },
 
+    /// A node's parameters reference each other in a loop, so no order resolves them. Because an
+    /// expression's scope stops at its own node, a loop can only form within one node's parameter
+    /// set, which is what keeps this a small local check rather than a graph walk.
+    #[error("operator {type_id:?} parameter {param:?} is part of a cycle of parameter references")]
+    ParamCycle {
+        /// The node's type id.
+        type_id: &'static str,
+        /// A parameter on the cycle.
+        param: String,
+    },
+
     /// A required input port had no connection at evaluation time.
     #[error("operator {type_id:?} input port {port} is not connected")]
     DisconnectedInput {
