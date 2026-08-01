@@ -2404,19 +2404,19 @@ mod tests {
         // The operator reads `delta` through the ordinary typed accessor and knows nothing about
         // expressions; it simply receives 2.25.
         let applied = applied_delta(
-            ParamValue::Expr("sea_level + 2".into()),
+            ParamValue::Expr("sea_level * 2".into()),
             &request().with_sea_level(0.25),
         );
-        assert!((applied - 2.25).abs() < 1e-6, "applied {applied}");
+        assert!((applied - 0.5).abs() < 1e-6, "applied {applied}");
     }
 
     #[test]
     fn changing_a_referenced_world_setting_changes_the_result() {
-        let expr = ParamValue::Expr("sea_level + 2".into());
+        let expr = ParamValue::Expr("sea_level * 2".into());
         let low = applied_delta(expr.clone(), &request().with_sea_level(0.25));
         let high = applied_delta(expr, &request().with_sea_level(1.0));
-        assert!((low - 2.25).abs() < 1e-6, "low was {low}");
-        assert!((high - 3.0).abs() < 1e-6, "high was {high}");
+        assert!((low - 0.5).abs() < 1e-6, "low was {low}");
+        assert!((high - 2.0).abs() < 1e-6, "high was {high}");
     }
 
     #[test]

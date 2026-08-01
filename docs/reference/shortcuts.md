@@ -44,6 +44,33 @@ Above and below the number sit the value one step up and one step down, so you c
 
 Values stay within the range the node declares, so a change or a typed number stops at the limit. A direction is the exception: it rolls, so passing 360° carries on from 0°.
 
+### Computing a value instead of typing one
+
+A number can be worked out rather than entered. Type `=` in a value box, followed by an expression, and the parameter is computed from then on.
+
+| Action | Input |
+|---|---|
+| Compute a value | Click the value box, type `=` and an expression, then Enter |
+| Edit an expression | Its field, which holds the expression rather than the number |
+| See what it works out to | The number beside the `=`, or hover for the expression |
+| Go back to a plain number | Clear the field and type the number |
+
+An expression can read the world settings, `sea_level`, `world_height` and `world_extent`, and any other numeric parameter on the same node by its name. It cannot read another node. Anything a subgraph needs from outside is wired in or declared on it, so that a subgraph does not stop working when it is used somewhere else.
+
+They are not all in the same units, and the rule is the one Ymir uses throughout: heights are normalized, horizontal lengths are metres.
+
+| Name | Unit |
+|---|---|
+| `sea_level` | A height in `0` to `1`, the same as any height parameter |
+| `world_height` | Metres: the elevation a height of `1` represents |
+| `world_extent` | Metres across the map |
+
+So `sea_level * world_height` is the sea in metres, and `sea_level + 0.05` is a little above the water. `sea_level + 2` is two whole world heights up, which is almost certainly not what you meant.
+
+The row shows the number it currently computes, with `=` beside it. `=!` means the expression does not resolve, and hovering says why; the node cannot run until it does. Parameters that reference each other in a loop are reported the same way rather than hanging.
+
+Values commit when you press Enter or click away, not as you type, so a half-finished expression is never applied.
+
 ### The Levels editor
 
 Levels draws its five parameters as one picture, with the incoming distribution along the bottom and the transfer curve across it. The window bounds are draggable on the axis each one acts along.

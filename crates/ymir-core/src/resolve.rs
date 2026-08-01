@@ -31,23 +31,47 @@ use std::collections::BTreeMap;
 use crate::error::{Error, Result};
 use crate::expr::Program;
 use crate::param::{ParamValue, Params};
+use crate::project::WorldSettings;
 
 /// The world settings an expression on a parameter may reference, by the names it uses.
 ///
 /// These are safe to expose to any expression because every project has them: depending on one
 /// says nothing about where a graph can be used. A user-defined project global would not be
 /// (see #374), which is why none is offered here.
+///
+/// # Units
+///
+/// They are not all in the same units, and the rule is the one the rest of Ymir follows:
+/// **vertical is normalized, horizontal is metres.**
+///
+/// - `sea_level` is a **normalized height** in `[0, 1]`, the same quantity as the `height` layer
+///   and as a height parameter such as `Distance`'s `level`. It has to be: those are compared
+///   against each other directly, and `Distance` feeds either one into the same function
+///   depending on its `from`.
+/// - `world_height` is **metres**, the elevation a normalized height of `1.0` represents. It is
+///   the conversion factor between the two, so `sea_level * world_height` is the sea in metres.
+/// - `world_extent` is **metres** across the map, a horizontal length.
 const WORLD_VARS: [&str; 3] = ["sea_level", "world_height", "world_extent"];
 
 /// The world settings an expression resolves against, in [`WORLD_VARS`] order.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct WorldGlobals {
+pub struct WorldGlobals {
     /// The project's sea level.
     pub sea_level: f64,
     /// The world's vertical scale.
     pub world_height: f64,
     /// The world's horizontal extent.
     pub world_extent: f64,
+}
+
+impl From<&WorldSettings> for WorldGlobals {
+    fn from(world: &WorldSettings) -> Self {
+        Self {
+            sea_level: world.sea_level,
+            world_height: world.world_height,
+            world_extent: world.world_extent,
+        }
+    }
 }
 
 impl WorldGlobals {
@@ -144,7 +168,7 @@ fn visit<'a>(
 ///
 /// [`Error::ParamCycle`] when parameters reference each other in a loop, so no order resolves
 /// them. Reported rather than hung.
-pub(crate) fn resolve_params(
+pub fn resolve_params(
     params: &Params,
     world: WorldGlobals,
     type_id: &'static str,
@@ -251,8 +275,14 @@ mod tests {
 
     #[test]
     fn an_expression_becomes_the_number_it_computes() {
-        let params = params_with("height", expr("sea_level + 2"));
-        assert_eq!(resolved(&params).get_f64("height", 0.0), 2.25);
+        // A little above the water, in the normalized units a height works in. Not `sea_level + 2`,
+        // which would be two whole world heights up and is the mistake the units invite.
+        //
+        // Compared approximately, because the engine evaluates in `f32`: 0.25 + 0.05 widens back
+        // to 0.30000001192092896, which is the documented precision rather than a fault.
+        let value =
+            resolved(&params_with("height", expr("sea_level + 0.05"))).get_f64("height", 0.0);
+        assert!((value - 0.3).abs() < 1e-6, "got {value}");
     }
 
     #[test]
