@@ -527,6 +527,14 @@ fn committed_value(text: &str, spec: &ParamSpec) -> ParamValue {
     if trimmed.is_empty() {
         return spec.default.clone();
     }
+    // A leading `=` is the gesture that opens this field, not part of the expression: the grammar
+    // has no `=` and would reject it. It is stripped rather than refused because someone who
+    // typed it once to get here will type it again, and storing `="foo"` verbatim would leave the
+    // field that exists for expressions rejecting the very syntax that creates them.
+    let trimmed = trimmed.strip_prefix('=').map_or(trimmed, str::trim_start);
+    if trimmed.is_empty() {
+        return spec.default.clone();
+    }
     match trimmed.parse::<f64>() {
         Ok(number) => ParamValue::Float(number),
         Err(_) => ParamValue::Expr(trimmed.to_owned()),
@@ -1191,6 +1199,34 @@ mod tests {
             committed_value("beach_width * 0.15", &spec),
             ParamValue::Expr("beach_width * 0.15".into())
         );
+    }
+
+    #[test]
+    fn the_expression_field_tolerates_the_character_that_opened_it() {
+        // `=` activates the field; it is not part of the grammar. Someone who typed it once to
+        // get here will type it again, and keeping it would store an expression that cannot
+        // compile in the one field that exists for editing expressions.
+        let spec = spec(
+            ParamKind::Float {
+                min: 0.0,
+                max: 10.0,
+            },
+            ParamValue::Float(1.0),
+        );
+        let expected = ParamValue::Expr("world_height * sea_level".into());
+        assert_eq!(committed_value("world_height * sea_level", &spec), expected);
+        assert_eq!(
+            committed_value("=world_height * sea_level", &spec),
+            expected
+        );
+        assert_eq!(
+            committed_value("= world_height * sea_level", &spec),
+            expected
+        );
+        // And it does not stop a bare number ending the computed state.
+        assert_eq!(committed_value("=5", &spec), ParamValue::Float(5.0));
+        // A lone `=` has nothing after it, so it means the same as clearing the field.
+        assert_eq!(committed_value("=", &spec), ParamValue::Float(1.0));
     }
 
     #[test]
