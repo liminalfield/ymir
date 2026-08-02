@@ -6,7 +6,7 @@
 //! are written back to the canonical graph by the caller via `Graph::set_params`.
 
 use eframe::egui;
-use ymir_core::{ParamKind, ParamSpec, ParamValue, Params, Scale, Unit};
+use ymir_core::{ParamKind, ParamSpec, ParamValue, Params, Unit};
 
 use crate::preview::Histogram;
 
@@ -14,17 +14,8 @@ use crate::preview::Histogram;
 /// the mapping is unit-testable without egui.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Widget {
-    /// A slider over `[min, max]` for a bounded, unit-less float (a ratio). `logarithmic`
-    /// distributes the track by ratio rather than increment (for a frequency or a scale).
-    Slider {
-        min: f64,
-        max: f64,
-        logarithmic: bool,
-    },
-    /// A value field over `[min, max]` for an open quantity: a float carrying a unit (e.g. a
-    /// world-unit length), or one whose range is simply too wide to steer with a slider. Shown
-    /// with the unit as a suffix when it has one. A slider over such a range is too coarse and
-    /// unlabelled; this is precise and type-able instead.
+    /// A value field over `[min, max]` for a float: typed exactly, or scrubbed with the magnitude
+    /// ruler. Shown with the unit as a suffix when it has one.
     Quantity {
         min: f64,
         max: f64,
@@ -50,34 +41,21 @@ pub(crate) enum Widget {
     ReadOnly,
 }
 
-/// The widest range a slider can still be steered across.
-///
-/// The inspector panel is a few hundred points wide, so a range beyond this moves by hundreds of
-/// units per pixel: the control cannot express a change the value can, and it reads as broken
-/// because a real edit leaves the handle where it was. Every range the node set declares is
-/// either well under this or two orders above it, so nothing sits near the line.
-const MAX_SLIDER_SPAN: f64 = 1000.0;
-
 /// Maps a parameter schema to its editor widget. Takes the whole spec, since a
 /// float's widget depends on whether it carries a unit (an open quantity edits as a
 /// value field, a bare ratio as a slider).
 pub(crate) fn widget_for(spec: &ParamSpec) -> Widget {
     match &spec.kind {
-        // An open quantity edits as a value field. A unit says so outright; so does a range too
-        // wide to steer, whether or not anyone could name its unit. Levels' input window is the
-        // second case: it has to reach whatever the incoming field carries, so it spans 200,000,
-        // but its unit belongs to that field rather than to the parameter.
-        ParamKind::Float { min, max } if spec.unit.is_some() || max - min > MAX_SLIDER_SPAN => {
-            Widget::Quantity {
-                min: *min,
-                max: *max,
-                unit: spec.unit,
-            }
-        }
-        ParamKind::Float { min, max } => Widget::Slider {
+        // Every float is a value box. There used to be a slider under bounded, unit-less ones,
+        // and it was the weaker of the two controls at everything: it cannot show a unit, it
+        // cannot reach a value finer than a pixel, and its range decides its precision, so a wide
+        // one is unusable and a narrow one wastes the row. The box types an exact value and the
+        // magnitude ruler scrubs one across orders of magnitude, which is what the slider was
+        // reached for and did worse.
+        ParamKind::Float { min, max } => Widget::Quantity {
             min: *min,
             max: *max,
-            logarithmic: spec.scale == Scale::Logarithmic,
+            unit: spec.unit,
         },
         ParamKind::Int { min, max } => Widget::IntDrag {
             min: *min,
@@ -855,73 +833,6 @@ pub(crate) fn edit(
         _ => {}
     }
     match (widget_for(spec), current) {
-        (
-            Widget::Slider {
-                min,
-                max,
-                logarithmic,
-            },
-            ParamValue::Float(v),
-        ) => {
-            // A two-line row: the mono label and, right-aligned, a reset icon (only when off default)
-            // plus the scrub/type value; then a full-width slider beneath. The single-line label ->
-            // control -> value was too tight for the panel width.
-            let mut x = *v;
-            let default = match &spec.default {
-                ParamValue::Float(d) => *d,
-                _ => x,
-            };
-            let mut result = None;
-            let capture = ExprCapture::default();
-            ui.horizontal(|ui| {
-                param_label(ui, type_id, name);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let value = ui.add_sized(
-                        egui::vec2(VALUE_W, ui.spacing().interact_size.y),
-                        egui::DragValue::new(&mut x)
-                            .range(min..=max)
-                            .speed(0.0)
-                            .fixed_decimals(3)
-                            .update_while_editing(false)
-                            .custom_parser(|text| capture.parse(text)),
-                    );
-                    // The magnitude ruler here too (#358). This is the majority of the numeric
-                    // parameters in the application: only 40 of 154 carry a unit, so wiring the
-                    // unit-bearing rows alone left most of the inspector on the old scrub and made
-                    // the ruler look as though it did not work for floats at all.
-                    //
-                    // The slider beneath is untouched and keeps its own drag. Whether it still earns
-                    // its row is a separate question, and one this control exists to answer.
-                    let scrubbed = crate::magnitude::ruler_scrub(
-                        ui,
-                        &value,
-                        &mut x,
-                        (min, max),
-                        crate::magnitude::Resolution::Continuous,
-                        "",
-                    );
-                    if value.changed() || scrubbed {
-                        result = Some(ParamValue::Float(x));
-                    }
-                    if opened_expression(ui, &value) {
-                        open_expression(ui, ctx.node, name);
-                    }
-                    if (x - default).abs() > f64::EPSILON && reset_icon(ui).clicked() {
-                        x = default;
-                        result = Some(ParamValue::Float(default));
-                    }
-                });
-            });
-            if slider(ui, &mut x, min, max, logarithmic).changed() {
-                result = Some(ParamValue::Float(x));
-            }
-            // An expression wins over whatever number the box was showing: it is the newer
-            // instruction, and the box's value never changed.
-            if let Some(source) = capture.take() {
-                result = Some(ParamValue::Expr(source));
-            }
-            result
-        }
         (Widget::Quantity { min, max, unit }, ParamValue::Float(v)) => {
             // Same row grammar as the other params (mono label left, control right), but a
             // type/scrub value field with the unit as a suffix and no slider beneath: a wide
@@ -1206,36 +1117,64 @@ mod tests {
     }
 
     #[test]
-    fn a_logarithmic_float_maps_to_a_log_slider() {
-        let linear = spec(
+    fn every_float_is_a_value_box_whatever_its_range_or_unit() {
+        // There is one float control now. A slider could not show a unit, could not reach a value
+        // finer than a pixel, and let its range decide its precision; the box plus the magnitude
+        // ruler does all of that better.
+        let cases = [
+            spec(
+                ParamKind::Float { min: 0.0, max: 1.0 },
+                ParamValue::Float(0.0),
+            ),
+            spec(
+                ParamKind::Float {
+                    min: 1.0,
+                    max: 64.0,
+                },
+                ParamValue::Float(2.0),
+            )
+            .logarithmic(),
+            spec(
+                ParamKind::Float {
+                    min: 0.0,
+                    max: 100.0,
+                },
+                ParamValue::Float(8.0),
+            )
+            .with_unit(Unit::Meters),
+            spec(
+                ParamKind::Float {
+                    min: -100_000.0,
+                    max: 100_000.0,
+                },
+                ParamValue::Float(0.0),
+            ),
+        ];
+        for spec in cases {
+            assert!(
+                matches!(widget_for(&spec), Widget::Quantity { .. }),
+                "{:?} should edit as a value box",
+                spec.kind
+            );
+        }
+    }
+
+    #[test]
+    fn a_float_carries_its_declared_bounds_and_unit_to_its_widget() {
+        let length = spec(
             ParamKind::Float {
-                min: 1.0,
-                max: 64.0,
+                min: 0.0,
+                max: 100.0,
             },
-            ParamValue::Float(2.0),
-        );
-        assert_eq!(
-            widget_for(&linear),
-            Widget::Slider {
-                min: 1.0,
-                max: 64.0,
-                logarithmic: false,
-            }
-        );
-        let log = spec(
-            ParamKind::Float {
-                min: 1.0,
-                max: 64.0,
-            },
-            ParamValue::Float(2.0),
+            ParamValue::Float(8.0),
         )
-        .logarithmic();
+        .with_unit(Unit::Meters);
         assert_eq!(
-            widget_for(&log),
-            Widget::Slider {
-                min: 1.0,
-                max: 64.0,
-                logarithmic: true,
+            widget_for(&length),
+            Widget::Quantity {
+                min: 0.0,
+                max: 100.0,
+                unit: Some(Unit::Meters)
             }
         );
     }
@@ -1247,10 +1186,10 @@ mod tests {
                 ParamKind::Float { min: 0.0, max: 1.0 },
                 ParamValue::Float(0.0)
             )),
-            Widget::Slider {
+            Widget::Quantity {
                 min: 0.0,
                 max: 1.0,
-                logarithmic: false,
+                unit: None,
             }
         );
         assert_eq!(
@@ -1518,42 +1457,6 @@ mod tests {
         let capture = ExprCapture::default();
         assert_eq!(capture.parse("twelve"), None);
         assert_eq!(capture.take(), None);
-    }
-
-    #[test]
-    fn a_range_too_wide_to_steer_is_a_value_field_even_with_no_unit() {
-        // Levels' input window has to reach whatever the incoming field carries, so it spans
-        // 200,000. As a slider that is hundreds of units per pixel: a real edit leaves the handle
-        // where it was, and the control reads as disconnected from the value.
-        let window = spec(
-            ParamKind::Float {
-                min: -100_000.0,
-                max: 100_000.0,
-            },
-            ParamValue::Float(0.0),
-        );
-        assert_eq!(
-            widget_for(&window),
-            Widget::Quantity {
-                min: -100_000.0,
-                max: 100_000.0,
-                unit: None
-            }
-        );
-    }
-
-    #[test]
-    fn an_ordinary_range_stays_a_slider() {
-        // The rule must not quietly take sliders away from the ranges they suit. The widest the
-        // node set declares below the line is a full turn of degrees, which carries a unit; the
-        // widest unit-less one is far narrower.
-        for max in [1.0, 8.0, 90.0, 360.0, MAX_SLIDER_SPAN] {
-            let ratio = spec(ParamKind::Float { min: 0.0, max }, ParamValue::Float(0.0));
-            assert!(
-                matches!(widget_for(&ratio), Widget::Slider { .. }),
-                "a 0..{max} range should stay a slider"
-            );
-        }
     }
 
     #[test]

@@ -32,6 +32,7 @@ In the inspector, for the selected node.
 |---|---|
 | Change a value | Press and hold the value box, then drag |
 | Type a value | Click the value box, then type |
+| Compute it instead | Press `=` in the value box |
 | Abandon a change and put the value back | Escape, while still holding |
 | Step an integer by one | The − and + buttons beside it |
 | Reset a number to its default | The revert arrow, which appears once the value differs from it |
@@ -41,6 +42,8 @@ Holding the pointer down on a value box opens a ruler above it, with a column pe
 Choosing a column and changing the value are the same gesture, so they happen in that order. Nothing moves while you are still crossing the ruler; a vertical stroke starts the change, and the step reads bright once it does. Drag up to raise the value and down to lower it, one step per short pull, for as long as you hold. Moving sideways again goes back to choosing.
 
 Above and below the number sit the value one step up and one step down, so you can see where a pull lands before it does.
+
+Every number is a value box. There is no slider: a slider cannot show a unit, cannot reach a value finer than one pixel, and lets its range decide its precision. The box takes an exact number, and the ruler covers the range.
 
 Values stay within the range the node declares, so a change or a typed number stops at the limit. A direction is the exception: it rolls, so passing 360° carries on from 0°.
 
@@ -78,6 +81,24 @@ A computed parameter gets its own full-width line, since an expression does not 
 While the field has focus it says what you have typed so far works out to, or why it does not: an unknown name, a syntax error, or a loop of parameters referencing each other. The message is the one the node would report, so what you see while typing is what you will get.
 
 Nothing commits until you press Enter or leave the field, so a half-finished expression is never applied and the preview does not rebuild on every keystroke.
+
+### Declaring a subgraph's own parameters
+
+Select a subgraph and its inspector ends with an Interface list: the parameters that node exposes. Add one with `+`, and anything inside the subgraph can read it by name in an expression.
+
+| Action | Input |
+|---|---|
+| Declare a parameter | `+` beside Interface |
+| Rename it | Its name field |
+| Change its type | The dropdown beside the name |
+| Declare it a length in metres | The `m` box |
+| Remove it | `−` at the end of its row |
+
+The name is what an expression inside writes, so it is an identifier: letters, digits and `_`, not starting with a digit. A name that could not be written in an expression, or one already taken, is reported under the row.
+
+The list belongs to the node itself, not to the copy you are looking at, so a parameter added here appears on every instance. The values are per instance and are set in the rows above, like any other node's.
+
+Renaming or removing a parameter does not rewrite the expressions inside that read it. Those report the old name as unknown until you edit them.
 
 ### The Levels editor
 

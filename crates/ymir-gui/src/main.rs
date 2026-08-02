@@ -42,6 +42,8 @@ mod param_ui;
 mod curve_edit;
 // The visual Levels editor (#369), rendered for a ParamGroup::Levels run of parameters.
 mod levels_edit;
+// Authoring a subgraph's parameter interface (#373).
+mod interface_ui;
 // Background preview evaluation (GUI step 6b): off-thread, latest-wins.
 mod preview;
 use preview::{Histogram, PreviewEngine};
@@ -1334,6 +1336,52 @@ impl AppState {
         fold_to_top(self.graph.clone(), &self.nav).unwrap_or_else(|_| self.nav[0].graph.clone())
     }
 
+    /// The parameters the enclosing subgraph declares, with the values it currently holds, for
+    /// expressions on nodes inside it (#373). Empty at the top level.
+    ///
+    /// Walks the navigation stack outermost first, so nesting works: each container's own
+    /// parameters are resolved against the scope built so far, and the result becomes the
+    /// interface the next level down can name. Resolving on the way down matters because an
+    /// interface value may itself be an expression at the call site, and what the inside reads is
+    /// the number it worked out to.
+    ///
+    /// A container whose own parameters do not resolve contributes nothing rather than stopping
+    /// the walk. Its own broken expression is reported where it lives.
+    ///
+    /// Used by both the inspector and the preview. When a subgraph is dived into, the preview
+    /// evaluates the inner graph directly rather than through the container, so the container's
+    /// `eval` never runs and never supplies these. Without this the inside evaluates with no
+    /// interface at all and every reference fails as an unknown name.
+    fn enclosing_interface(&self) -> BTreeMap<String, f64> {
+        let mut scope = ymir_core::resolve::Scope {
+            world: ymir_core::resolve::WorldGlobals {
+                sea_level: self.sea_level,
+                world_height: self.world_height,
+                world_extent: self.world_extent,
+            },
+            ..Default::default()
+        };
+        for frame in &self.nav {
+            let Some(id) = frame.graph.node_id_of(frame.container) else {
+                continue;
+            };
+            let Some(interface) = frame.graph.interface(id) else {
+                continue;
+            };
+            let Some(spec) = frame.graph.spec(id) else {
+                continue;
+            };
+            let params = frame.graph.params(id).cloned().unwrap_or_default();
+            let resolved =
+                ymir_core::resolve::resolve_params(&params, &spec.params, &scope, spec.type_id)
+                    .ok()
+                    .flatten();
+            let effective = resolved.as_ref().unwrap_or(&params);
+            scope.interface = ymir_core::interface_values(interface, effective);
+        }
+        scope.interface
+    }
+
     /// The current navigation path: the `stable_id`s of the containers dived through, from
     /// the top. Empty at the top level; identifies the active context for layout memory.
     fn current_path(&self) -> Vec<u64> {
@@ -1927,7 +1975,7 @@ impl AppState {
                 built: HashSet::new(),
                 pinned: self.preview_pin,
             };
-            self.node_status = status::statuses(&self.graph, &report);
+            self.node_status = status::statuses(&self.graph, &report, &self.enclosing_interface());
             self.node_status_key = Some(key);
         }
     }
@@ -2169,7 +2217,11 @@ impl AppState {
         if self.exploring() {
             world.world_extent *= f64::from(self.explore_zoom);
         }
-        let mut request = EvalRequest::from_world(&world, res);
+        // Inside a subgraph the preview evaluates the inner graph directly, so the container's
+        // `eval` never runs and never hands the interface down. Supplied here instead, or every
+        // expression inside that names one fails as an unknown name.
+        let mut request =
+            EvalRequest::from_world(&world, res).with_interface(self.enclosing_interface());
         // Run the preview on the GPU when the device is shared, so the tweak-adjust loop stays fast
         // at higher resolutions. The handle is not part of a node's cache key, so a GPU and a CPU
         // result are interchangeable in the cache.
@@ -2441,46 +2493,17 @@ fn menu_row_text(row: MenuRow) -> String {
 /// (#106) only make sense inside a subgraph, so outside one they are *disabled* rather than
 /// hidden: the palette and node menu still show them (so their existence and category stay
 /// discoverable) but they cannot be created at the top level.
-/// The scope an expression on the inspected node is checked against: the world settings, and the
-/// interface of the subgraph currently being edited, if any.
-///
-/// Walks the navigation stack outermost first, so nesting works: each container's own parameters
-/// are resolved against the scope accumulated so far, and the values that produces become the
-/// interface the next level down can name. Resolving as it descends matters because an interface
-/// value may itself be computed at the call site, and what the inside sees is the number that
-/// worked out to, not the expression.
-///
-/// A container whose own parameters do not resolve contributes what it can rather than aborting:
-/// the inspector is a display, and a broken expression on the container is already reported
-/// where it lives.
+/// The scope an expression on a node in the current context resolves against: the world settings,
+/// and the interface of the subgraph being edited, if any.
 fn inspector_scope(state: &AppState) -> ymir_core::resolve::Scope {
-    let mut scope = ymir_core::resolve::Scope {
+    ymir_core::resolve::Scope {
         world: ymir_core::resolve::WorldGlobals {
             sea_level: state.sea_level,
             world_height: state.world_height,
             world_extent: state.world_extent,
         },
-        ..Default::default()
-    };
-    for frame in &state.nav {
-        let Some(id) = frame.graph.node_id_of(frame.container) else {
-            continue;
-        };
-        let Some(interface) = frame.graph.interface(id) else {
-            continue;
-        };
-        let params = frame.graph.params(id).cloned().unwrap_or_default();
-        let Some(spec) = frame.graph.spec(id) else {
-            continue;
-        };
-        let resolved =
-            ymir_core::resolve::resolve_params(&params, &spec.params, &scope, spec.type_id)
-                .ok()
-                .flatten();
-        let effective = resolved.as_ref().unwrap_or(&params);
-        scope.interface = ymir_core::interface_values(interface, effective);
+        interface: state.enclosing_interface(),
     }
-    scope
 }
 
 fn node_addable(type_id: &str, inside_subgraph: bool) -> bool {
@@ -5568,6 +5591,15 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
         ui.colored_label(ui.visuals().error_fg_color, err.to_string());
     }
 
+    // An authored node's own declaration, edited on the container. Offered by asking the node
+    // whether it has an interface, never by asking which node it is.
+    if let Some(interface) = state.graph.interface(id).map(<[_]>::to_vec)
+        && let Some(edited) = interface_ui::interface_editor(ui, &interface)
+        && let Err(err) = state.graph.set_interface(id, edited)
+    {
+        ui.colored_label(ui.visuals().error_fg_color, err.to_string());
+    }
+
     // A subgraph container: its input/output ports are named by the inner boundary nodes, so let
     // them be renamed here without diving in (a container always has the `seed` param, so the
     // empty-params early return above never skips this). Placed after the params to match the
@@ -7873,7 +7905,11 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
 
     // Per-node thumbnails (#42): evaluate every output-producing node at thumbnail
     // resolution off-thread, and draw each result in its node body below.
-    let thumb_request = EvalRequest::from_world(&state.world_settings(), thumbnails::THUMB_RES);
+    // Same reason as the preview: inside a subgraph these nodes are evaluated directly, so the
+    // container never hands the interface down and a thumbnail of a node that names one would
+    // fail rather than draw.
+    let thumb_request = EvalRequest::from_world(&state.world_settings(), thumbnails::THUMB_RES)
+        .with_interface(state.enclosing_interface());
     // The working set is culled to the last-frame view (#74): off-screen nodes and a
     // zoomed-out canvas (where a thumbnail is too small to read) are skipped, so a
     // large graph evaluates only what is on screen. Disabled entirely from the View
