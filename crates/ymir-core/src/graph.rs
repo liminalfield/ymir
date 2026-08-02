@@ -261,6 +261,31 @@ impl Graph {
         self.set_operator(id, rebuilt)
     }
 
+    /// Declares an authored node's parameter interface, replacing whatever it had.
+    ///
+    /// Mirrors [`set_nested`](Self::set_nested): the operator rebuilds itself around the new
+    /// declaration through its own hook, so the graph never names a concrete node type. Bumps the
+    /// revision and clears the cached hash, since the node's schema and therefore its cache key
+    /// have changed.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NodeNotFound`] if `id` is not in the graph.
+    pub fn set_interface(
+        &mut self,
+        id: NodeId,
+        interface: Vec<crate::interface::InterfaceParam>,
+    ) -> Result<()> {
+        self.hash = OnceLock::new();
+        self.revision = self.revision.wrapping_add(1);
+        let rebuilt = self
+            .node(id)
+            .ok_or(Error::NodeNotFound)?
+            .operator
+            .rebuild_interface(interface);
+        self.set_operator(id, rebuilt)
+    }
+
     /// Replaces a node's parameters.
     ///
     /// # Errors

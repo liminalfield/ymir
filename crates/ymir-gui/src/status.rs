@@ -185,15 +185,24 @@ pub(crate) struct StatusReport {
 ///
 /// Ties (nodes with no ordering between them) break on `stable_id`, so the list is stable across
 /// runs and does not reshuffle when an unrelated node is added.
-pub(crate) fn statuses(graph: &Graph, report: &StatusReport) -> Vec<NodeStatus> {
+pub(crate) fn statuses(
+    graph: &Graph,
+    report: &StatusReport,
+    interface: &BTreeMap<String, f64>,
+) -> Vec<NodeStatus> {
     dependency_order(graph)
         .into_iter()
-        .filter_map(|id| status_of(graph, id, report))
+        .filter_map(|id| status_of(graph, id, report, interface))
         .collect()
 }
 
 /// One node's status, or `None` if it vanished from the graph between enumeration and lookup.
-fn status_of(graph: &Graph, id: NodeId, report: &StatusReport) -> Option<NodeStatus> {
+fn status_of(
+    graph: &Graph,
+    id: NodeId,
+    report: &StatusReport,
+    interface: &BTreeMap<String, f64>,
+) -> Option<NodeStatus> {
     let handle = graph.stable_id(id)?;
     let spec = graph.spec(id)?;
 
@@ -201,7 +210,7 @@ fn status_of(graph: &Graph, id: NodeId, report: &StatusReport) -> Option<NodeSta
     // cannot run, so how fresh its last result was is not what the reader needs to know.
     let state = if required_input_missing(graph, id, &spec) {
         NodeState::NoInput
-    } else if report.failed.contains(&handle) || structurally_broken(graph, id) {
+    } else if report.failed.contains(&handle) || structurally_broken(graph, id, interface) {
         NodeState::Failed
     } else if graph.is_bypassed(id) {
         NodeState::Bypassed
@@ -229,7 +238,12 @@ fn status_of(graph: &Graph, id: NodeId, report: &StatusReport) -> Option<NodeSta
 
     Some(NodeStatus {
         handle,
-        children: graph.nested(id).map(children_of).unwrap_or_default(),
+        // The container's own declaration reaches the nodes inside it, so a child that names an
+        // interface parameter keys correctly instead of reading as broken.
+        children: graph
+            .nested(id)
+            .map(|inner| children_of(inner, &interface_of(graph, id)))
+            .unwrap_or_default(),
         name: graph.name(id).map_or_else(
             || ymir_nodes::tr(&format!("node-{}", spec.type_id)).to_string(),
             ToString::to_string,
@@ -248,10 +262,23 @@ fn status_of(graph: &Graph, id: NodeId, report: &StatusReport) -> Option<NodeSta
 ///
 /// This is the check the canvas used to run for every node on every frame. It runs here instead,
 /// when the status list is rebuilt, which is the whole point of having a model.
-fn structurally_broken(graph: &Graph, id: NodeId) -> bool {
-    graph
-        .output_key(id, &EvalRequest::new(1, 1, Region::UNIT, 0))
-        .is_err()
+fn structurally_broken(graph: &Graph, id: NodeId, interface: &BTreeMap<String, f64>) -> bool {
+    // The enclosing subgraph's parameters are supplied, because keying a node resolves its
+    // expressions and one of them may name an interface parameter. Without them a perfectly good
+    // node inside an authored subgraph fails to key and reads as broken, which is a fault of the
+    // probe rather than of the node (#373).
+    let request = EvalRequest::new(1, 1, Region::UNIT, 0).with_interface(interface.clone());
+    graph.output_key(id, &request).is_err()
+}
+
+/// The parameters an authored node declares, with the values it holds, for probing the nodes
+/// inside it. Empty for an ordinary node.
+fn interface_of(graph: &Graph, id: NodeId) -> BTreeMap<String, f64> {
+    let Some(interface) = graph.interface(id) else {
+        return BTreeMap::new();
+    };
+    let params = graph.params(id).cloned().unwrap_or_default();
+    ymir_core::interface_values(interface, &params)
 }
 
 /// Whether any *required* input port of `id` is unwired. Optional ports degrade gracefully by the
@@ -434,14 +461,14 @@ pub(crate) fn suffixes(nodes: &[&NodeStatus]) -> Vec<Option<String>> {
 /// No freshness and no build progress: a container runs its contents as one unit with a transient
 /// cache, so those facts do not exist per inner node. Dive in and they do, because the inner graph
 /// is then the graph being evaluated.
-fn children_of(inner: &Graph) -> Vec<ChildStatus> {
+fn children_of(inner: &Graph, interface: &BTreeMap<String, f64>) -> Vec<ChildStatus> {
     dependency_order(inner)
         .into_iter()
         .filter_map(|id| {
             let spec = inner.spec(id)?;
             let fault = if required_input_missing(inner, id, &spec) {
                 Some(ChildFault::NoInput)
-            } else if structurally_broken(inner, id) {
+            } else if structurally_broken(inner, id, interface) {
                 Some(ChildFault::Failed)
             } else if inner.is_bypassed(id) {
                 Some(ChildFault::Bypassed)
@@ -605,7 +632,7 @@ mod tests {
         g.connect(fbm, 0, invert, 0).expect("fbm -> invert");
         g.connect(invert, 0, export, 0).expect("invert -> export");
 
-        let order: Vec<Handle> = statuses(&g, &StatusReport::default())
+        let order: Vec<Handle> = statuses(&g, &StatusReport::default(), &BTreeMap::new())
             .iter()
             .map(|s| s.handle)
             .collect();
@@ -627,7 +654,7 @@ mod tests {
         g.connect(a, 0, blend, 0).expect("a -> blend");
         g.connect(b, 0, blend, 1).expect("b -> blend");
 
-        let order: Vec<Handle> = statuses(&g, &StatusReport::default())
+        let order: Vec<Handle> = statuses(&g, &StatusReport::default(), &BTreeMap::new())
             .iter()
             .map(|s| s.handle)
             .collect();
@@ -649,7 +676,7 @@ mod tests {
         report.cache.insert(handle(&g, invert), false);
         // `blend` is absent from the report entirely.
 
-        let list = statuses(&g, &report);
+        let list = statuses(&g, &report, &BTreeMap::new());
         assert_eq!(state_of(&list, handle(&g, fbm)), NodeState::Current);
         assert_eq!(state_of(&list, handle(&g, invert)), NodeState::Stale);
         assert_eq!(state_of(&list, handle(&g, blend)), NodeState::NotEvaluated);
@@ -668,12 +695,12 @@ mod tests {
         report.cache.insert(handle(&g, blend), false);
 
         assert_eq!(
-            state_of(&statuses(&g, &report), handle(&g, blend)),
+            state_of(&statuses(&g, &report, &BTreeMap::new()), handle(&g, blend)),
             NodeState::NoInput
         );
         // A generator has no inputs at all, so it can never be blocked on one.
         assert_ne!(
-            state_of(&statuses(&g, &report), handle(&g, fbm)),
+            state_of(&statuses(&g, &report, &BTreeMap::new()), handle(&g, fbm)),
             NodeState::NoInput
         );
     }
@@ -693,7 +720,7 @@ mod tests {
         report.cache.insert(handle(&g, failed), true);
         report.failed.insert(handle(&g, failed));
 
-        let list = statuses(&g, &report);
+        let list = statuses(&g, &report, &BTreeMap::new());
         assert_eq!(state_of(&list, handle(&g, bypassed)), NodeState::Bypassed);
         assert_eq!(state_of(&list, handle(&g, failed)), NodeState::Failed);
 
@@ -702,7 +729,7 @@ mod tests {
         let orphan = add(&mut g, &mut s, INVERT);
         g.set_bypassed(orphan, true).expect("bypass");
         assert_eq!(
-            state_of(&statuses(&g, &report), handle(&g, orphan)),
+            state_of(&statuses(&g, &report, &BTreeMap::new()), handle(&g, orphan)),
             NodeState::NoInput
         );
     }
@@ -722,7 +749,7 @@ mod tests {
             .with("build", ParamValue::Bool(false));
         g.set_params(excluded, params).expect("set build = false");
 
-        let list = statuses(&g, &StatusReport::default());
+        let list = statuses(&g, &StatusReport::default(), &BTreeMap::new());
         let of = |h: Handle| {
             list.iter()
                 .find(|s| s.handle == h)
@@ -751,7 +778,7 @@ mod tests {
         report.built.insert(handle(&g, built));
         report.pinned = Some(handle(&g, previewed));
 
-        let list = statuses(&g, &report);
+        let list = statuses(&g, &report, &BTreeMap::new());
         let of = |h: Handle| list.iter().find(|s| s.handle == h).expect("listed");
         assert_eq!(of(handle(&g, built)).fidelity, Fidelity::Build);
         assert_eq!(of(handle(&g, previewed)).fidelity, Fidelity::Preview);
@@ -777,7 +804,7 @@ mod tests {
         let mut report = StatusReport::default();
         report.cache.insert(handle(&g, fbm), true);
         report.cache.insert(handle(&g, invert), false);
-        let base = statuses(&g, &report);
+        let base = statuses(&g, &report, &BTreeMap::new());
         let names =
             |list: &[&NodeStatus]| -> Vec<String> { list.iter().map(|n| n.name.clone()).collect() };
         fn borrowed(list: &[NodeStatus]) -> Vec<&NodeStatus> {
@@ -821,7 +848,7 @@ mod tests {
 
         let mut report = StatusReport::default();
         report.cache.insert(handle(&g, invert), false);
-        let list = statuses(&g, &report);
+        let list = statuses(&g, &report, &BTreeMap::new());
         let of = |name: &str| {
             list.iter()
                 .find(|n| n.name == name)
@@ -885,7 +912,7 @@ mod tests {
         g.set_name(b, Some("Smooth".into())).expect("name");
         g.set_name(c, Some("Smooth".into())).expect("name");
 
-        let list = statuses(&g, &StatusReport::default());
+        let list = statuses(&g, &StatusReport::default(), &BTreeMap::new());
         let out = suffixes(&list.iter().collect::<Vec<_>>());
         let suffix_of = |name_index: usize| out[name_index].clone();
 
@@ -938,7 +965,7 @@ mod tests {
         g.set_nested(container, inner)
             .expect("install the inner graph");
 
-        let list = statuses(&g, &StatusReport::default());
+        let list = statuses(&g, &StatusReport::default(), &BTreeMap::new());
         let of = |h: Handle| list.iter().find(|n| n.handle == h).expect("listed");
 
         assert!(
@@ -983,7 +1010,7 @@ mod tests {
         g.connect(a, 0, blend, 0).expect("a -> blend");
         g.connect(b, 0, blend, 1).expect("b -> blend");
 
-        let list = statuses(&g, &StatusReport::default());
+        let list = statuses(&g, &StatusReport::default(), &BTreeMap::new());
         assert_eq!(list.len(), 4);
         let mut handles: Vec<Handle> = list.iter().map(|s| s.handle).collect();
         handles.sort_unstable();
