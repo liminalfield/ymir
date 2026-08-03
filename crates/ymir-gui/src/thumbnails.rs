@@ -277,7 +277,7 @@ fn evaluate_thumb_job(job: &Job, cache: &mut EvalCache) -> Vec<Shaded> {
     let bound = job
         .binding
         .as_ref()
-        .map(|b| b.bound_fields(&job.graph, &job.request));
+        .map(|b| b.bound_fields(&job.graph, &job.request, cache));
     for t in &job.targets {
         let Some(node_id) = job.graph.node_id_of(t.handle) else {
             continue;
