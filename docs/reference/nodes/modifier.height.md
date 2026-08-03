@@ -27,9 +27,9 @@ Selects a band of elevation, high where the height falls within a range and soft
 
 | Parameter | Type | Range | Default | Unit | Description | Field-driven |
 |---|---|---|---|---|---|---|
-| Min (`min`) | float | [0, 1] | 0.4 |  |  | no |
-| Max (`max`) | float | [0, 1] | 0.7 |  |  | no |
-| Falloff (`falloff`) | float | [0, 1] | 0.1 |  |  | no |
+| Min (`min`) | float | [0, 100000] | 100 | m |  | no |
+| Max (`max`) | float | [0, 100000] | 180 | m |  | no |
+| Falloff (`falloff`) | float | [0, 100000] | 25 | m |  | no |
 | Output (`output`) | enum | selection, measure | selection |  |  | no |
 
 ## Layer contract

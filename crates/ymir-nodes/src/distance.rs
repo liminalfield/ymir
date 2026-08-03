@@ -305,7 +305,7 @@ const FROM_HEIGHT: &str = "height";
 const FROM_SEA: &str = "sea";
 
 /// Default contour level on the input height.
-const DEFAULT_LEVEL: f64 = 0.5;
+const DEFAULT_LEVEL: f64 = 128.0;
 /// Default falloff distance (world metres) over which the selection fades from the contour.
 const DEFAULT_RANGE: f64 = 100.0;
 
@@ -343,11 +343,12 @@ impl Operator for Distance {
                 ParamSpec::new(
                     "level",
                     ParamKind::Float {
-                        min: -4.0,
-                        max: 4.0,
+                        min: -100_000.0,
+                        max: 100_000.0,
                     },
                     ParamValue::Float(DEFAULT_LEVEL),
-                ),
+                )
+                .with_unit(Unit::Meters),
                 ParamSpec::new(
                     "range",
                     ParamKind::Float {
@@ -376,10 +377,9 @@ impl Operator for Distance {
     /// moves and a `height` contour is selected; under-declaring would memoize a stale field, which
     /// is the failure that corrupts rather than the one that wastes.
     fn context_deps(&self) -> ymir_core::ContextDeps {
-        ymir_core::ContextDeps {
-            world_height: false,
-            ..ymir_core::ContextDeps::ALL
-        }
+        // World height joined the union when `level` became an elevation in metres (#377): it is
+        // converted against the vertical scale, so a change there moves the contour.
+        ymir_core::ContextDeps::ALL
     }
 
     fn eval(&self, inputs: Inputs, params: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
@@ -395,7 +395,8 @@ impl Operator for Distance {
         let signed = if params.get_str("from", FROM_HEIGHT) == FROM_SEA {
             sea_signed_distance(&h, ctx.sea_level() as f32, cell_size)
         } else {
-            let level = params.get_f64("level", DEFAULT_LEVEL) as f32;
+            // An elevation in metres against a normalized layer, converted here (#377).
+            let level = ctx.height_from_meters(params.get_f64("level", DEFAULT_LEVEL));
             signed_distance_to_contour(&h, level, cell_size)
         };
         let selection = Layer::from_fn(width, height, |x, y| {
@@ -572,10 +573,15 @@ mod tests {
         )
     }
 
+    /// A world 256 m tall, so `level` in metres maps onto the `[0, 1]` fields these tests build:
+    /// the default 128 m is the halfway contour (#377).
+    const TEST_WORLD_HEIGHT: f64 = 256.0;
+
     fn run(input: &Field, params: &Params) -> Field {
         // world_extent = width makes meters_per_cell 1, so `range` reads in cells for the test.
         let ctx = EvalContext::new(input.width(), input.height(), input.region(), 0)
-            .with_world_extent(input.width() as f64);
+            .with_world_extent(input.width() as f64)
+            .with_world_height(TEST_WORLD_HEIGHT);
         Distance
             .eval(Inputs::required_only(&[input]), params, &ctx)
             .unwrap()
@@ -586,6 +592,7 @@ mod tests {
     fn run_both(input: &Field, params: &Params, sea_level: f64) -> Vec<Field> {
         let ctx = EvalContext::new(input.width(), input.height(), input.region(), 0)
             .with_world_extent(input.width() as f64)
+            .with_world_height(TEST_WORLD_HEIGHT)
             .with_sea_level(sea_level);
         Distance
             .eval(Inputs::required_only(&[input]), params, &ctx)
@@ -636,9 +643,12 @@ mod tests {
         let island = radial_island(65);
         let sea = Params::new().with("from", ParamValue::Text(FROM_SEA.to_string()));
         let by_sea = run_both(&island, &sea, 0.5);
+        // The same contour named two ways. `sea_level` is a normalized height and `level` is an
+        // elevation in metres (#377), so naming it by height means half of the world's vertical
+        // scale, not the number 0.5.
         let by_height = run_both(
             &island,
-            &Params::new().with("level", ParamValue::Float(0.5)),
+            &Params::new().with("level", ParamValue::Float(TEST_WORLD_HEIGHT * 0.5)),
             0.0,
         );
         // Naming the same contour two ways agrees, since this island has no enclosed basin.
@@ -749,7 +759,9 @@ mod tests {
     fn registry_make_matches_direct_construction() {
         let island = radial_island(16);
         let made = registry::make(TYPE_ID).expect("distance operator is registered");
-        let ctx = EvalContext::new(16, 16, island.region(), 0).with_world_extent(16.0);
+        let ctx = EvalContext::new(16, 16, island.region(), 0)
+            .with_world_extent(16.0)
+            .with_world_height(TEST_WORLD_HEIGHT);
         let via_registry = made
             .eval(Inputs::required_only(&[&island]), &Params::default(), &ctx)
             .unwrap();

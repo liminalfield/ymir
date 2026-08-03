@@ -14,7 +14,7 @@ use std::sync::Arc;
 use ymir_core::registry::OperatorEntry;
 use ymir_core::{
     ContextDeps, EvalContext, Field, Inputs, Layer, NodeSpec, Operator, ParamKind, ParamSpec,
-    ParamValue, Params, PortSpec, Result, layers,
+    ParamValue, Params, PortSpec, Result, Unit, layers,
 };
 
 /// Stable type identifier and registry key.
@@ -23,7 +23,7 @@ const TYPE_ID: &str = "modifier.clamp";
 /// Default lower bound: the bottom of the working greyscale.
 const DEFAULT_MIN: f64 = 0.0;
 /// Default upper bound: the top of the working greyscale.
-const DEFAULT_MAX: f64 = 1.0;
+const DEFAULT_MAX: f64 = 256.0;
 
 /// Clamp modifier: one input, one output.
 #[derive(Clone)]
@@ -40,19 +40,21 @@ impl Operator for Clamp {
                 ParamSpec::new(
                     "min",
                     ParamKind::Float {
-                        min: -4.0,
-                        max: 4.0,
+                        min: -100_000.0,
+                        max: 100_000.0,
                     },
                     ParamValue::Float(DEFAULT_MIN),
-                ),
+                )
+                .with_unit(Unit::Meters),
                 ParamSpec::new(
                     "max",
                     ParamKind::Float {
-                        min: -4.0,
-                        max: 4.0,
+                        min: -100_000.0,
+                        max: 100_000.0,
                     },
                     ParamValue::Float(DEFAULT_MAX),
-                ),
+                )
+                .with_unit(Unit::Meters),
             ],
             emitted_layers: Vec::new(),
             mask_aware: true,
@@ -61,19 +63,22 @@ impl Operator for Clamp {
 
     /// A pure per-cell transform of the height value: it reads no world global, so no world-setting
     /// slider invalidates this node.
+    /// The bounds are metres, converted against the world's vertical scale, so a change to world
+    /// height changes what they mean and must invalidate this node (#377).
     fn context_deps(&self) -> ContextDeps {
-        ContextDeps::NO_WORLD
+        ContextDeps::WORLD_HEIGHT
     }
 
-    fn eval(&self, inputs: Inputs, params: &Params, _ctx: &EvalContext) -> Result<Vec<Field>> {
+    fn eval(&self, inputs: Inputs, params: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
         let input = inputs[0];
         let width = input.width();
         let height = input.height();
         let h = input.layer_or(layers::HEIGHT, 0.0);
         let mask = input.layer_or(layers::MASK, 1.0);
 
-        let a = params.get_f64("min", DEFAULT_MIN) as f32;
-        let b = params.get_f64("max", DEFAULT_MAX) as f32;
+        // Declared in metres, applied to a normalized layer, so converted here (#377).
+        let a = ctx.height_from_meters(params.get_f64("min", DEFAULT_MIN));
+        let b = ctx.height_from_meters(params.get_f64("max", DEFAULT_MAX));
         // Order the bounds so `min` above `max` is a flat clamp rather than a panic in `f32::clamp`.
         let lo = a.min(b);
         let hi = a.max(b);
@@ -100,14 +105,23 @@ mod tests {
     use super::*;
     use ymir_core::Region;
 
+    /// A world with a real vertical scale. Left at the default of one metre, metres and
+    /// normalized height are the same number and nothing below would notice the bounds being
+    /// converted at all, which is exactly how a conversion bug survives a green suite (#377).
+    const TEST_WORLD_HEIGHT: f64 = 256.0;
+
     fn ctx() -> EvalContext {
-        EvalContext::new(16, 16, Region::UNIT, 0)
+        EvalContext::new(16, 16, Region::UNIT, 0).with_world_height(TEST_WORLD_HEIGHT)
     }
 
+    /// Clamps between two heights given as *fractions* of the world's vertical range.
+    ///
+    /// The parameters are metres, so this converts. Stating the tests in fractions keeps what
+    /// they mean readable while still exercising the conversion: break it and every one fails.
     fn clamp(input: &Field, min: f64, max: f64) -> Field {
         let params = Params::new()
-            .with("min", ParamValue::Float(min))
-            .with("max", ParamValue::Float(max));
+            .with("min", ParamValue::Float(min * TEST_WORLD_HEIGHT))
+            .with("max", ParamValue::Float(max * TEST_WORLD_HEIGHT));
         Clamp
             .eval(Inputs::required_only(&[input]), &params, &ctx())
             .unwrap()
@@ -145,6 +159,45 @@ mod tests {
             (0.25..=0.75).contains(&mid),
             "in-range value passes through: {mid}"
         );
+    }
+
+    #[test]
+    fn the_bounds_are_metres_against_the_worlds_vertical_scale() {
+        // The existing tests run in a world one metre tall, where metres and normalized height
+        // are the same number, so they say nothing about the conversion. This one does.
+        let ctx = EvalContext::new(16, 16, Region::UNIT, 0).with_world_height(256.0);
+        let input = ramp(16, 1.0, 1.0);
+        // A ceiling of 128 m on a 256 m world is a normalized 0.5.
+        let params = Params::new()
+            .with("min", ParamValue::Float(0.0))
+            .with("max", ParamValue::Float(128.0));
+        let out = Clamp
+            .eval(Inputs::required_only(&[&input]), &params, &ctx)
+            .expect("evaluates");
+        let capped = out[0].layer(layers::HEIGHT).unwrap().as_slice()[0];
+        assert!(
+            (capped - 0.5).abs() < 1e-6,
+            "128 m of a 256 m world should cap at 0.5, got {capped}"
+        );
+    }
+
+    #[test]
+    fn a_taller_world_makes_the_same_metres_a_smaller_height() {
+        // The reason this node now declares a dependency on world height: the same stated metres
+        // mean a different normalized height when the world's vertical scale changes.
+        let cap = |world_height: f64| {
+            let ctx = EvalContext::new(16, 16, Region::UNIT, 0).with_world_height(world_height);
+            let params = Params::new()
+                .with("min", ParamValue::Float(0.0))
+                .with("max", ParamValue::Float(100.0));
+            Clamp
+                .eval(Inputs::required_only(&[&ramp(16, 1.0, 1.0)]), &params, &ctx)
+                .expect("evaluates")[0]
+                .layer(layers::HEIGHT)
+                .unwrap()
+                .as_slice()[0]
+        };
+        assert!(cap(200.0) > cap(400.0));
     }
 
     #[test]

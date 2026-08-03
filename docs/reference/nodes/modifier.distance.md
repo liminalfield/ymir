@@ -29,7 +29,7 @@ Selects a band around a height contour, measured by true distance in metres so t
 | Parameter | Type | Range | Default | Unit | Description | Field-driven |
 |---|---|---|---|---|---|---|
 | From (`from`) | enum | height, sea | height |  | Which contour to measure from: a height you name, or the world's sea level. Under sea level, only water joined to the map edge counts, so an enclosed hollow measures its distance to the real coast rather than making a shore of its own. | no |
-| Level (`level`) | float | [-4, 4] | 0.5 |  |  | no |
+| Level (`level`) | float | [-100000, 100000] | 128 | m |  | no |
 | Range (`range`) | float | [0, 100000] | 100 | m |  | no |
 | Side (`side`) | enum | both, outside, inside | both |  | Which side of the contour the band covers: both, only above, or only below. | no |
 

@@ -195,6 +195,22 @@ impl EvalContext {
         self.world_height / self.meters_per_cell()
     }
 
+    /// Converts a height declared in metres into the normalized units the `height` layer works in.
+    ///
+    /// A height parameter states an elevation a person can picture: a three metre berm, a snow
+    /// line at eight hundred. The layer itself stays normalized, so the node converts where it
+    /// applies the value (#377). Guards a zero-height world, which would otherwise divide by zero
+    /// and produce infinities across a whole field.
+    ///
+    /// An operator using this depends on the world's vertical scale and must say so in its
+    /// [`context_deps`](crate::Operator::context_deps), or a change to world height will not
+    /// invalidate its cached result.
+    #[must_use]
+    pub fn height_from_meters(&self, meters: f64) -> f32 {
+        self.record(Self::ACCESS_WORLD_HEIGHT);
+        (meters / self.world_height.max(1e-6)) as f32
+    }
+
     /// The world's vertical span (meters) that a normalized height of `1.0` represents.
     ///
     /// Export reads this to write absolute-meters heightmaps (`height × world_height`).

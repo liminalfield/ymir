@@ -28,14 +28,23 @@ fn fbm_then_thermal_matches_golden() {
     // left at the unit default, which described a 1 m map: the noise did not care, since it was
     // sized in cycles per map, but the erosion did, since its repose angle is a real slope over real
     // cells. Now that the noise is sized in metres too, an unstated world is not a world.
-    let request = EvalRequest::new(64, 64, Region::UNIT, 42).with_world_extent(1024.0);
+    // The vertical extent is stated for the same reason as the horizontal one, and now has to be:
+    // the noise's amplitude is metres (#377), and the erosion's repose angle is a real slope, so
+    // both halves of this graph read it. An unstated 1 m tall world is not a world either.
+    let request = EvalRequest::new(64, 64, Region::UNIT, 42)
+        .with_world_extent(1024.0)
+        .with_world_height(256.0);
     let mut cache = EvalCache::new(16);
     let out = graph.evaluate(erosion, &request, &mut cache).unwrap();
 
-    // Re-pinned twice over. #361 stated the world above, which moved both halves of the graph: the
+    // Re-pinned a third time, by #377: the vertical extent is stated above, which moves both
+    // halves again. The generator's amplitude is metres against that height rather than a bare
+    // multiplier, and the erosion's repose angle sees a 256 m world instead of a 1 m one.
+    //
+    // Re-pinned twice before that. #361 stated the world above, which moved both halves of the graph: the
     // generator samples a 512 m wavelength across 1024 m rather than 2 cycles across an unstated map,
     // and the erosion sees 16 m cells rather than 1.6 cm ones, so its repose angle bites differently.
     // Then centring the noise on the field moved the sampled patch by half a world, and fixing the
     // coordinate hash changed every lattice gradient.
-    assert_eq!(out[0].content_hash().to_u64(), 0x48ed_fdec_5040_a0b6);
+    assert_eq!(out[0].content_hash().to_u64(), 0x2c73_a3b4_1624_06ed);
 }

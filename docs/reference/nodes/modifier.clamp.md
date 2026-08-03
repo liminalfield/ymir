@@ -27,8 +27,8 @@ Caps the height to a range, flattening anything above or below it. Reach for it 
 
 | Parameter | Type | Range | Default | Unit | Description | Field-driven |
 |---|---|---|---|---|---|---|
-| Min (`min`) | float | [-4, 4] | 0 |  |  | no |
-| Max (`max`) | float | [-4, 4] | 1 |  |  | no |
+| Min (`min`) | float | [-100000, 100000] | 0 | m |  | no |
+| Max (`max`) | float | [-100000, 100000] | 256 | m |  | no |
 
 ## Layer contract
 

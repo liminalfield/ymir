@@ -1331,7 +1331,8 @@ mod tests {
             Ok(3.0)
         );
         // Reads the world settings too, and tolerates the character that opened the field.
-        assert_eq!(draft_status("=sea_level", "amplitude", &env), Ok(0.25));
+        // `sea_level` reads in metres: a quarter of the way up a 512 m world (#377).
+        assert_eq!(draft_status("=sea_level", "amplitude", &env), Ok(128.0));
     }
 
     #[test]

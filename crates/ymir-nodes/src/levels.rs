@@ -19,11 +19,15 @@ use std::sync::Arc;
 use ymir_core::registry::OperatorEntry;
 use ymir_core::{
     EvalContext, Field, Inputs, Layer, LevelsTransfer, NodeSpec, Operator, ParamGroup, ParamKind,
-    ParamSpec, ParamValue, Params, PortSpec, Result, layers,
+    ParamSpec, ParamValue, Params, PortSpec, Result, Unit, layers,
 };
 
 /// Stable type identifier and registry key.
 const TYPE_ID: &str = "modifier.levels";
+
+/// Default top of the output window, in metres: the default world height, so an unset Levels maps
+/// its input window onto the full vertical range exactly as it did when this read `1.0` (#377).
+const DEFAULT_OUT_HIGH: f64 = 256.0;
 
 /// Levels modifier: one input, one output.
 #[derive(Clone)]
@@ -79,28 +83,35 @@ impl Operator for Levels {
                 )
                 .logarithmic()
                 .in_group(ParamGroup::Levels),
-                // Output window mapped into. A narrow window scales amplitude down (a
-                // gentle plain). Allowed past [0, 1] and negative, symmetric with the input
-                // window, so Levels can produce signed or over-range output: a small signed
-                // window (e.g. -0.01..0.01) centres a 0..1 field on zero to add as detail
-                // without shifting the base up, matching the no-hard-clamp height model.
+                // Output window mapped into, in metres of elevation (#377): what leaves Levels
+                // is a height, and a height is a thing a person can picture. A narrow window
+                // scales amplitude down (a gentle plain). Allowed negative and past the world's
+                // height, so Levels can still produce signed or over-range output: a small signed
+                // window centres a field on zero to add as detail without shifting the base up,
+                // matching the no-hard-clamp height model.
+                //
+                // The *input* window above stays unitless, and the asymmetry is real rather than
+                // an oversight: it windows whatever arrives, which may be metres from Distance, a
+                // selection, or a height, so it has no one unit to declare.
                 ParamSpec::new(
                     "out_low",
                     ParamKind::Float {
-                        min: -4.0,
-                        max: 4.0,
+                        min: -100_000.0,
+                        max: 100_000.0,
                     },
                     ParamValue::Float(0.0),
                 )
+                .with_unit(Unit::Meters)
                 .in_group(ParamGroup::Levels),
                 ParamSpec::new(
                     "out_high",
                     ParamKind::Float {
-                        min: -4.0,
-                        max: 4.0,
+                        min: -100_000.0,
+                        max: 100_000.0,
                     },
-                    ParamValue::Float(1.0),
+                    ParamValue::Float(DEFAULT_OUT_HIGH),
                 )
+                .with_unit(Unit::Meters)
                 .in_group(ParamGroup::Levels),
             ],
             emitted_layers: Vec::new(),
@@ -110,11 +121,13 @@ impl Operator for Levels {
 
     /// Pure of the world globals: no sea level, world height, or world extent, so those
     /// world-setting sliders never invalidate this node.
+    /// The output window is metres, converted against the world's vertical scale, so a change to
+    /// world height changes what it means (#377).
     fn context_deps(&self) -> ymir_core::ContextDeps {
-        ymir_core::ContextDeps::NO_WORLD
+        ymir_core::ContextDeps::WORLD_HEIGHT
     }
 
-    fn eval(&self, inputs: Inputs, params: &Params, _ctx: &EvalContext) -> Result<Vec<Field>> {
+    fn eval(&self, inputs: Inputs, params: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
         let input = inputs[0];
         let width = input.width();
         let height = input.height();
@@ -122,8 +135,11 @@ impl Operator for Levels {
         let mask = input.layer_or(layers::MASK, 1.0);
 
         // The transfer lives in `ymir-core` beside the `ParamGroup::Levels` declaration, so the
-        // inspector draws the same curve this applies rather than a second copy of it.
-        let levels = LevelsTransfer::from_params(params);
+        // inspector draws the same curve this applies rather than a second copy of it. The output
+        // window is declared in metres and the layer is normalized, so it converts here (#377).
+        let mut levels = LevelsTransfer::from_params(params);
+        levels.out_low = ctx.height_from_meters(params.get_f64("out_low", 0.0));
+        levels.out_high = ctx.height_from_meters(params.get_f64("out_high", DEFAULT_OUT_HIGH));
 
         let shaped = Layer::from_fn(width, height, |x, y| {
             let original = h.get(x, y).unwrap_or(0.0);
@@ -166,10 +182,37 @@ mod tests {
     }
 
     #[test]
-    fn the_transfers_fallbacks_match_the_declared_defaults() {
-        // `LevelsTransfer::NEUTRAL` and the schema defaults state the same five numbers in two
-        // places, so an edit to one has to be an edit to both. Reading an empty parameter map
-        // must land on exactly what an unset node would use.
+    fn an_unset_node_is_the_neutral_transfer_once_converted() {
+        // The schema defaults are metres and `LevelsTransfer::NEUTRAL` is normalized, so they are
+        // no longer the same numbers (#377). What must still hold is that an unset node, once its
+        // output window is converted, *is* the neutral transfer: input unchanged in, unchanged
+        // out. Asserted through the node rather than by comparing the two constants.
+        for height in [1.0, 0.5, 0.0] {
+            let out = at(&run(&field_with(height, None), &Params::new()), 0, 0);
+            assert!(
+                (out - height).abs() < 1e-6,
+                "an unset Levels should pass {height} through, got {out}"
+            );
+        }
+
+        // And the declared defaults still agree with each other: `out_low` at the bottom of the
+        // range, `out_high` at the world's height, so the window is the whole vertical extent.
+        let spec = Levels.spec();
+        let declared_out_high = spec
+            .params
+            .iter()
+            .find(|p| p.name == "out_high")
+            .and_then(|p| match p.default {
+                ParamValue::Float(v) => Some(v),
+                _ => None,
+            })
+            .expect("out_high is declared");
+        assert!((declared_out_high - DEFAULT_OUT_HIGH).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn the_input_window_fallbacks_match_the_declared_defaults() {
+        // The input window is still unitless, so its fallbacks and its declaration must agree.
         let from_empty = LevelsTransfer::from_params(&Params::new());
         let spec = Levels.spec();
         let declared = |name: &str| {
@@ -187,9 +230,6 @@ mod tests {
         assert_eq!(from_empty.in_low, declared("in_low"));
         assert_eq!(from_empty.in_high, declared("in_high"));
         assert_eq!(from_empty.gamma, declared("gamma"));
-        assert_eq!(from_empty.out_low, declared("out_low"));
-        assert_eq!(from_empty.out_high, declared("out_high"));
-        assert_eq!(from_empty, LevelsTransfer::NEUTRAL);
     }
 
     #[test]
@@ -212,8 +252,10 @@ mod tests {
         );
     }
 
+    /// A world as tall as the default output window, so an unset Levels is the identity and the
+    /// `[0, 1]` fields these tests build read directly as metres of that world (#377).
     fn ctx() -> EvalContext {
-        EvalContext::new(8, 8, Region::UNIT, 0)
+        EvalContext::new(8, 8, Region::UNIT, 0).with_world_height(DEFAULT_OUT_HIGH)
     }
 
     fn field_with(height: f32, mask: Option<f32>) -> Field {
@@ -252,8 +294,9 @@ mod tests {
 
     #[test]
     fn output_window_scales_amplitude() {
-        // out [0, 0.25] halves-and-quarters the full range: 1.0 -> 0.25, 0.5 -> 0.125.
-        let p = params(&[("out_low", 0.0), ("out_high", 0.25)]);
+        // A window a quarter of the world tall quarters the range: 1.0 -> 0.25, 0.5 -> 0.125.
+        // Stated in metres now, against a world `DEFAULT_OUT_HIGH` tall (#377).
+        let p = params(&[("out_low", 0.0), ("out_high", DEFAULT_OUT_HIGH * 0.25)]);
         assert!((at(&run(&field_with(1.0, None), &p), 0, 0) - 0.25).abs() < 1e-6);
         assert!((at(&run(&field_with(0.5, None), &p), 0, 0) - 0.125).abs() < 1e-6);
     }
@@ -263,7 +306,10 @@ mod tests {
         // A signed window maps 0..1 to -0.01..0.01, so a mid-grey field lands on zero and the
         // extremes straddle it: the recipe for turning a 0..1 noise into signed detail to Add
         // without shifting the base up. The output is not clamped back into [0, 1].
-        let p = params(&[("out_low", -0.01), ("out_high", 0.01)]);
+        let p = params(&[
+            ("out_low", DEFAULT_OUT_HIGH * -0.01),
+            ("out_high", DEFAULT_OUT_HIGH * 0.01),
+        ]);
         assert!((at(&run(&field_with(0.5, None), &p), 0, 0) - 0.0).abs() < 1e-6);
         assert!((at(&run(&field_with(0.0, None), &p), 0, 0) - -0.01).abs() < 1e-6);
         assert!((at(&run(&field_with(1.0, None), &p), 0, 0) - 0.01).abs() < 1e-6);
@@ -353,12 +399,15 @@ mod tests {
             layers::HEIGHT,
             Arc::new(Layer::from_fn(16, 16, |x, _| x as f32 / 15.0)),
         );
+        // The output window is stated in metres now (#377). Naming the whole vertical range
+        // rather than the number 1.0 is the same transfer as before, so the golden is unmoved:
+        // this change is units, not maths.
         let p = params(&[
             ("in_low", 0.1),
             ("in_high", 0.9),
             ("gamma", 1.5),
             ("out_low", 0.0),
-            ("out_high", 1.0),
+            ("out_high", DEFAULT_OUT_HIGH),
         ]);
         let out = run(&input, &p);
         assert_eq!(out.content_hash().to_u64(), 0x524f_0b6f_4c94_0b91);

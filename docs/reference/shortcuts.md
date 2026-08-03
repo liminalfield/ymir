@@ -62,15 +62,15 @@ A number can be worked out rather than entered. Press `=` in a value box to open
 
 An expression can read the world settings, `sea_level`, `world_height` and `world_extent`, and any other numeric parameter on the same node by its name. It cannot read another node. Anything a subgraph needs from outside is wired in or declared on it, so that a subgraph does not stop working when it is used somewhere else.
 
-They are not all in the same units, and the rule is the one Ymir uses throughout: heights are normalized, horizontal lengths are metres.
+All three are in metres, the same units every height parameter is declared in, so a name you write is in the units the box beside it wants.
 
-| Name | Unit |
+| Name | What it is |
 |---|---|
-| `sea_level` | A height in `0` to `1`, the same as any height parameter |
-| `world_height` | Metres: the elevation a height of `1` represents |
+| `sea_level` | The waterline, in metres |
+| `world_height` | Metres: the elevation the top of the range represents |
 | `world_extent` | Metres across the map |
 
-So `sea_level * world_height` is the sea in metres, and `sea_level + 0.05` is a little above the water. `sea_level + 2` is two whole world heights up, which is almost certainly not what you meant.
+So `sea_level + 2` is two metres above the water, which is what it looks like.
 
 The row shows the number it currently computes, with `=` beside it. `=!` means the expression does not resolve, and hovering says why; the node cannot run until it does. Parameters that reference each other in a loop are reported the same way rather than hanging.
 

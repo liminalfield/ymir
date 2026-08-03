@@ -60,13 +60,14 @@ fn beach_inner() -> Graph {
             ParamValue::Curve(Curve::new([(0.0, 0.0), (0.5, 0.45), (1.0, 1.0)])),
         ),
     );
-    // The unit conversion, written where it is used: `amplitude` is declared in metres and a
-    // height works in [0, 1], so the reference divides by the world's vertical scale.
+    // Lift the profile so it sits at the waterline and rises by `amplitude`. Both sides of this
+    // are metres now (#377): the output window is declared in metres, `sea_level` reads in metres,
+    // and `amplitude` is declared in metres. No conversion is written anywhere.
     let lift = g.add_op(
         registry::make("modifier.levels").expect("levels"),
         Params::new()
             .with("out_low", expr("sea_level"))
-            .with("out_high", expr("sea_level + amplitude / world_height")),
+            .with("out_high", expr("sea_level + amplitude")),
     );
     // The band falls linearly to zero at its range, so a mask stopping at the beach's edge would
     // fade out over exactly the distance the profile is rising and the two would cancel. Reaching

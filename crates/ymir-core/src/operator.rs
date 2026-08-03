@@ -125,6 +125,17 @@ impl ContextDeps {
         ..Self::ALL
     };
 
+    /// Depends on the world *vertical* extent only: a node with a height parameter declared in
+    /// metres, which converts it against the world height where it applies it (#377). A change to
+    /// world height must invalidate such a node, since the same stated metres become a different
+    /// normalized height.
+    pub const WORLD_HEIGHT: Self = Self {
+        world_extent: false,
+        world_height: true,
+        sea_level: false,
+        ..Self::ALL
+    };
+
     /// Depends on the world *horizontal* extent (a param sized in world units, read through
     /// [`meters_per_cell`](crate::EvalContext::meters_per_cell) /
     /// [`world_to_cells`](crate::EvalContext::world_to_cells)), but not the vertical extent or the

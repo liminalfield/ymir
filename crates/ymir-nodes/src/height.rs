@@ -19,16 +19,16 @@ use std::sync::Arc;
 use ymir_core::registry::OperatorEntry;
 use ymir_core::{
     EvalContext, Field, Inputs, Layer, NodeSpec, Operator, ParamKind, ParamSpec, ParamValue,
-    Params, PortSpec, Result, layers,
+    Params, PortSpec, Result, Unit, layers,
 };
 
 /// Stable type identifier and registry key.
 const TYPE_ID: &str = "modifier.height";
 
 /// Default band: a mid-elevation selection that shows the band shape out of the box.
-const DEFAULT_MIN: f64 = 0.4;
-const DEFAULT_MAX: f64 = 0.7;
-const DEFAULT_FALLOFF: f64 = 0.1;
+const DEFAULT_MIN: f64 = 100.0;
+const DEFAULT_MAX: f64 = 180.0;
+const DEFAULT_FALLOFF: f64 = 25.0;
 
 /// Height selector: one input, one output. Writes the band selection to
 /// [`layers::HEIGHT`].
@@ -45,19 +45,31 @@ impl Operator for Height {
             params: vec![
                 ParamSpec::new(
                     "min",
-                    ParamKind::Float { min: 0.0, max: 1.0 },
+                    ParamKind::Float {
+                        min: 0.0,
+                        max: 100_000.0,
+                    },
                     ParamValue::Float(DEFAULT_MIN),
-                ),
+                )
+                .with_unit(Unit::Meters),
                 ParamSpec::new(
                     "max",
-                    ParamKind::Float { min: 0.0, max: 1.0 },
+                    ParamKind::Float {
+                        min: 0.0,
+                        max: 100_000.0,
+                    },
                     ParamValue::Float(DEFAULT_MAX),
-                ),
+                )
+                .with_unit(Unit::Meters),
                 ParamSpec::new(
                     "falloff",
-                    ParamKind::Float { min: 0.0, max: 1.0 },
+                    ParamKind::Float {
+                        min: 0.0,
+                        max: 100_000.0,
+                    },
                     ParamValue::Float(DEFAULT_FALLOFF),
-                ),
+                )
+                .with_unit(Unit::Meters),
                 crate::selector::output_param(),
             ],
             emitted_layers: Vec::new(),
@@ -67,19 +79,23 @@ impl Operator for Height {
 
     /// Pure of the world globals: no sea level, world height, or world extent, so those
     /// world-setting sliders never invalidate this node.
+    /// The band is stated in metres of elevation, converted against the world's vertical scale,
+    /// so a change to world height moves the band and must invalidate this node (#377).
     fn context_deps(&self) -> ymir_core::ContextDeps {
-        ymir_core::ContextDeps::NO_WORLD
+        ymir_core::ContextDeps::WORLD_HEIGHT
     }
 
-    fn eval(&self, inputs: Inputs, params: &Params, _ctx: &EvalContext) -> Result<Vec<Field>> {
+    fn eval(&self, inputs: Inputs, params: &Params, ctx: &EvalContext) -> Result<Vec<Field>> {
         let input = inputs[0];
         let width = input.width();
         let height = input.height();
         let h = input.layer_or(layers::HEIGHT, 0.0);
 
-        let min = params.get_f64("min", DEFAULT_MIN) as f32;
-        let max = params.get_f64("max", DEFAULT_MAX) as f32;
-        let falloff = params.get_f64("falloff", DEFAULT_FALLOFF).max(0.0) as f32;
+        // Declared as elevations in metres; the layer they are compared against is normalized,
+        // so they convert here (#377). `falloff` is a span of elevation and converts the same way.
+        let min = ctx.height_from_meters(params.get_f64("min", DEFAULT_MIN));
+        let max = ctx.height_from_meters(params.get_f64("max", DEFAULT_MAX));
+        let falloff = ctx.height_from_meters(params.get_f64("falloff", DEFAULT_FALLOFF).max(0.0));
 
         let measure = crate::selector::is_measure(params);
         let selection = Layer::from_fn(width, height, |x, y| {
@@ -122,8 +138,13 @@ mod tests {
     use super::*;
     use ymir_core::Region;
 
+    /// A world with a real vertical scale. Left at the default of one metre, metres and
+    /// normalized height are the same number and nothing below would notice the band being
+    /// converted at all, which is exactly how a conversion bug survives a green suite (#377).
+    const TEST_WORLD_HEIGHT: f64 = 256.0;
+
     fn ctx() -> EvalContext {
-        EvalContext::new(16, 16, Region::UNIT, 0)
+        EvalContext::new(16, 16, Region::UNIT, 0).with_world_height(TEST_WORLD_HEIGHT)
     }
 
     fn flat(size: usize, value: f32) -> Field {
@@ -141,11 +162,16 @@ mod tests {
         )
     }
 
+    /// Selects a band given as *fractions* of the world's vertical range.
+    ///
+    /// The parameters are metres, so this converts. Stating the tests in fractions keeps what
+    /// they mean readable while still exercising the conversion: break it and every one fails.
     fn select(input: &Field, min: f32, max: f32, falloff: f32) -> Field {
+        let metres = |v: f32| ParamValue::Float(f64::from(v) * TEST_WORLD_HEIGHT);
         let params = Params::new()
-            .with("min", ParamValue::Float(f64::from(min)))
-            .with("max", ParamValue::Float(f64::from(max)))
-            .with("falloff", ParamValue::Float(f64::from(falloff)));
+            .with("min", metres(min))
+            .with("max", metres(max))
+            .with("falloff", metres(falloff));
         Height
             .eval(Inputs::required_only(&[input]), &params, &ctx())
             .unwrap()

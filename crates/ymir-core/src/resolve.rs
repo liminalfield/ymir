@@ -44,12 +44,15 @@ use crate::project::WorldSettings;
 /// They are not all in the same units, and the rule is the one the rest of Ymir follows:
 /// **vertical is normalized, horizontal is metres.**
 ///
-/// - `sea_level` is a **normalized height** in `[0, 1]`, the same quantity as the `height` layer
-///   and as a height parameter such as `Distance`'s `level`. It has to be: those are compared
-///   against each other directly, and `Distance` feeds either one into the same function
-///   depending on its `from`.
-/// - `world_height` is **metres**, the elevation a normalized height of `1.0` represents. It is
-///   the conversion factor between the two, so `sea_level * world_height` is the sea in metres.
+/// Everything vertical is **metres**, because every height parameter is (#377). A parameter
+/// declared in metres and an expression speaking normalized fractions would be the worst of both:
+/// you would write `sea_level * world_height` to say "the waterline" into a box that already
+/// wanted metres.
+///
+/// - `sea_level` is the waterline in **metres**. Stored normalized, since the `height` layer is,
+///   but multiplied out here so what an expression writes matches what the box beside it wants.
+/// - `world_height` is **metres**, the elevation the top of the normalized range represents. It
+///   is the conversion factor, and needed far less often now than it was.
 /// - `world_extent` is **metres** across the map, a horizontal length.
 const WORLD_VARS: [&str; 3] = ["sea_level", "world_height", "world_extent"];
 
@@ -92,13 +95,17 @@ impl From<&WorldSettings> for WorldGlobals {
 impl WorldGlobals {
     /// The values bound to [`WORLD_VARS`], in the same order.
     ///
+    /// `sea_level` is multiplied out to metres here. It is stored normalized because the `height`
+    /// layer is, but an expression is user-facing and every height parameter it might be typed
+    /// into is declared in metres (#377), so it speaks metres too.
+    ///
     /// Narrowed to `f32` because that is what the expression engine works in, being built for a
     /// per-cell path over `f32` layers. About seven significant digits, which is far finer than
     /// any terrain parameter is meaningful to, and the alternative is slowing the hot path this
     /// engine exists for.
     fn values(self) -> [f32; WORLD_VARS.len()] {
         [
-            self.sea_level as f32,
+            (self.sea_level * self.world_height) as f32,
             self.world_height as f32,
             self.world_extent as f32,
         ]
@@ -337,15 +344,15 @@ mod tests {
         //
         // Compared approximately, because the engine evaluates in `f32`: 0.25 + 0.05 widens back
         // to 0.30000001192092896, which is the documented precision rather than a fault.
-        let value =
-            resolved(&params_with("height", expr("sea_level + 0.05"))).get_f64("height", 0.0);
-        assert!((value - 0.3).abs() < 1e-6, "got {value}");
+        let value = resolved(&params_with("height", expr("sea_level + 12"))).get_f64("height", 0.0);
+        assert!((value - 140.0).abs() < 1e-3, "got {value}");
     }
 
     #[test]
     fn every_world_global_is_reachable() {
         for (name, expected) in [
-            ("sea_level", 0.25),
+            // Metres: a quarter of the way up a 512 m world (#377).
+            ("sea_level", 128.0),
             ("world_height", 512.0),
             ("world_extent", 1000.0),
         ] {
@@ -585,7 +592,7 @@ mod tests {
         let out = resolve_params(&params, &[], &scope, "test.node")
             .expect("compiles")
             .expect("resolved");
-        assert_eq!(out.get_f64("p", 0.0), 0.25);
+        assert_eq!(out.get_f64("p", 0.0), 128.0);
     }
 
     #[test]
@@ -594,6 +601,6 @@ mod tests {
         let params = Params::new()
             .with("sea_level", ParamValue::Float(99.0))
             .with("p", expr("sea_level"));
-        assert_eq!(resolved(&params).get_f64("p", 0.0), 0.25);
+        assert_eq!(resolved(&params).get_f64("p", 0.0), 128.0);
     }
 }
