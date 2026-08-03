@@ -3,9 +3,23 @@
 //! A second background evaluator, alongside the preview engine, that renders a small
 //! grayscale image of *every visible node's* output and uploads one texture per node
 //! for the canvas to draw in the node body. It mirrors [`PreviewEngine`] but is
-//! multi-target: one worker, a shared persistent cache so common upstreams compute
-//! once, and recompute driven only by per-node `output_key` change (the same signal
-//! behind the stale dots), throttled and latest-wins.
+//! multi-target: one worker, recompute driven only by per-node `output_key` change (the
+//! same signal behind the stale dots), throttled and latest-wins.
+//!
+//! # Resolution (#382)
+//!
+//! Nodes are evaluated at the *preview's* resolution and the resulting image is scaled
+//! down, rather than the graph being evaluated small. Evaluating small is not a cheap
+//! approximation of the node's output: erosion is resolution-dependent physics, so a
+//! thumbnail computed at 96 cells is a picture of different terrain, and anything
+//! downstream that thresholds it turns a small difference into a total one. A thumbnail
+//! that shows something other than the node's output is worse than none, because it is
+//! read as information.
+//!
+//! That is affordable only because the cache is shared with the preview
+//! ([`LiveCache`](crate::live_cache::LiveCache)): the previewed node's chain is already
+//! computed, so most thumbnails cost a cache hit and a downscale. A node off that chain
+//! is genuinely evaluated, once, and then cached like any other.
 //!
 //! [`PreviewEngine`]: crate::preview::PreviewEngine
 
@@ -14,17 +28,16 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::{self, JoinHandle};
 
 use eframe::egui;
-use ymir_core::{CancelToken, EvalCache, EvalRequest, Graph, OUTPUT_TYPE_ID};
+use ymir_core::{CancelToken, EvalRequest, Graph, OUTPUT_TYPE_ID};
 
 use crate::canvas::Handle;
-use crate::shade::{HeightScale, height_image};
+use crate::live_cache::LiveCache;
+use crate::shade::{HeightScale, height_image, reduced};
 
-/// Thumbnail evaluation resolution. Small enough that even erosion is cheap per node;
-/// the canvas only ever draws these scaled down into a node body.
+/// Thumbnail *image* size, in pixels a side. The evaluation happens at the preview's
+/// resolution (see the module docs); this is only how far the picture is scaled down
+/// before it is uploaded, and the canvas draws it smaller still inside a node body.
 pub(crate) const THUMB_RES: usize = 96;
-/// Worker cache capacity, in cached node results. Larger than the preview's so a
-/// graph's worth of small thumbnail fields can stay resident.
-const THUMB_CACHE_CAP: usize = 128;
 /// Minimum interval between thumbnail submissions, so a fast parameter drag throttles
 /// instead of resubmitting every frame.
 const THUMB_DEBOUNCE_SECS: f64 = 0.08;
@@ -84,10 +97,11 @@ pub(crate) struct ThumbnailEngine {
 }
 
 impl ThumbnailEngine {
-    pub(crate) fn new() -> Self {
+    /// Starts the engine and its worker, evaluating against the shared live cache (#382).
+    pub(crate) fn new(cache: LiveCache) -> Self {
         let (job_tx, job_rx) = channel::<Job>();
         let (result_tx, result_rx) = channel::<Shaded>();
-        let worker = thread::spawn(move || worker_loop(&job_rx, &result_tx));
+        let worker = thread::spawn(move || worker_loop(&job_rx, &result_tx, &cache));
         Self {
             job_tx,
             result_rx,
@@ -241,16 +255,15 @@ fn plan_submit(entries: &HashMap<Handle, ThumbEntry>) -> Vec<Target> {
     dirty
 }
 
-/// The worker: evaluates submitted jobs with a persistent shared cache, draining to
+/// The worker: evaluates submitted jobs against the shared live cache, draining to
 /// the newest queued job so a backlog collapses to the current state. Exits when the
 /// job channel closes (the engine is dropped).
-fn worker_loop(job_rx: &Receiver<Job>, result_tx: &Sender<Shaded>) {
-    let mut cache = EvalCache::new(THUMB_CACHE_CAP);
+fn worker_loop(job_rx: &Receiver<Job>, result_tx: &Sender<Shaded>, cache: &LiveCache) {
     while let Ok(mut job) = job_rx.recv() {
         while let Ok(newer) = job_rx.try_recv() {
             job = newer;
         }
-        for shaded in evaluate_thumb_job(&job, &mut cache) {
+        for shaded in evaluate_thumb_job(&job, cache) {
             if result_tx.send(shaded).is_err() {
                 return; // the UI is gone
             }
@@ -261,15 +274,21 @@ fn worker_loop(job_rx: &Receiver<Job>, result_tx: &Sender<Shaded>) {
 /// Evaluates each target to a small grayscale image, sharing the cache so common
 /// upstreams compute once. A node that fails (disconnected, cycle, cancelled, or an
 /// operator error) simply yields no thumbnail this round.
-fn evaluate_thumb_job(job: &Job, cache: &mut EvalCache) -> Vec<Shaded> {
+///
+/// The cache is locked per node rather than for the whole pass, so a preview job submitted
+/// while this is running waits for one node rather than for the whole visible graph.
+fn evaluate_thumb_job(job: &Job, cache: &LiveCache) -> Vec<Shaded> {
     let mut out = Vec::new();
     // Thumbnails always show the height layer, auto-ranged, so each node's shape is legible
-    // at a glance regardless of its amplitude.
+    // at a glance regardless of its amplitude. The field is reduced to the thumbnail's pixel
+    // size first: it was evaluated at the preview's resolution so that it is the node's real
+    // output (#382), and what the canvas draws is a scaled-down picture of it.
     let push = |out: &mut Vec<Shaded>, t: &Target, field: &ymir_core::Field| {
+        let small = reduced(field, ymir_core::layers::HEIGHT, THUMB_RES);
         out.push(Shaded {
             handle: t.handle,
             key: t.key,
-            image: height_image(field, ymir_core::layers::HEIGHT, HeightScale::Auto),
+            image: height_image(&small, ymir_core::layers::HEIGHT, HeightScale::Auto),
         });
     };
     // Inside a subgraph (#106), bind the live input fields to the Input markers, so the
@@ -277,7 +296,7 @@ fn evaluate_thumb_job(job: &Job, cache: &mut EvalCache) -> Vec<Shaded> {
     let bound = job
         .binding
         .as_ref()
-        .map(|b| b.bound_fields(&job.graph, &job.request, cache));
+        .map(|b| b.bound_fields(&job.graph, &job.request, &mut cache.lock()));
     for t in &job.targets {
         let Some(node_id) = job.graph.node_id_of(t.handle) else {
             continue;
@@ -297,17 +316,20 @@ fn evaluate_thumb_job(job: &Job, cache: &mut EvalCache) -> Vec<Shaded> {
         } else {
             (node_id, 0)
         };
-        let field = match &bound {
-            Some(bound) => job
-                .graph
-                .evaluate_bound(bound, &[source], &job.request, cache)
-                .ok()
-                .and_then(|fields| fields.into_iter().next()),
-            None => job
-                .graph
-                .evaluate(source.0, &job.request, cache)
-                .ok()
-                .and_then(|outputs| outputs.get(source.1).cloned()),
+        let field = {
+            let mut cache = cache.lock();
+            match &bound {
+                Some(bound) => job
+                    .graph
+                    .evaluate_bound(bound, &[source], &job.request, &mut cache)
+                    .ok()
+                    .and_then(|fields| fields.into_iter().next()),
+                None => job
+                    .graph
+                    .evaluate(source.0, &job.request, &mut cache)
+                    .ok()
+                    .and_then(|outputs| outputs.get(source.1).cloned()),
+            }
         };
         if let Some(field) = field {
             push(&mut out, t, &field);
@@ -371,11 +393,69 @@ mod tests {
             request: EvalRequest::new(16, 16, Region::UNIT, 0),
             binding: None,
         };
-        let mut cache = EvalCache::new(8);
-        let images = evaluate_thumb_job(&job, &mut cache);
+        let images = evaluate_thumb_job(&job, &LiveCache::new());
         assert_eq!(images.len(), 1, "the marker shows its incoming field");
         assert_eq!(images[0].handle, handle);
         assert_eq!(images[0].image.size, [16, 16]);
+    }
+
+    #[test]
+    fn the_image_is_reduced_to_thumbnail_size_not_the_evaluation() {
+        // The defect this fixes (#382): a thumbnail used to be evaluated at 96 cells, which for
+        // anything downstream of erosion is a picture of different terrain rather than a smaller
+        // picture of this one. The evaluation now runs at whatever resolution the request carries
+        // (the preview's), and only the image is scaled down.
+        let mut graph = Graph::new();
+        let id = graph.add_op(registry::make("generator.fbm").expect("fbm"), Params::new());
+        let handle = graph.stable_id(id).expect("stable id");
+        let request = EvalRequest::new(256, 256, Region::UNIT, 0);
+        let job = Job {
+            graph,
+            targets: vec![Target { handle, key: 1 }],
+            request,
+            binding: None,
+        };
+        let images = evaluate_thumb_job(&job, &LiveCache::new());
+        assert_eq!(images.len(), 1);
+        assert_eq!(
+            images[0].image.size,
+            [THUMB_RES, THUMB_RES],
+            "the picture is thumbnail-sized however large the field it came from"
+        );
+    }
+
+    #[test]
+    fn a_thumbnail_of_a_previewed_node_costs_no_second_evaluation() {
+        // Why the resolution above is affordable: the preview and the thumbnails share one cache,
+        // so a node the preview already built is a hit here rather than a second run of it. With a
+        // cache each, an eroded node was computed twice, concurrently, at full preview resolution.
+        let cache = LiveCache::new();
+        let mut graph = Graph::new();
+        let id = graph.add_op(registry::make("generator.fbm").expect("fbm"), Params::new());
+        let handle = graph.stable_id(id).expect("stable id");
+        let request = EvalRequest::new(64, 64, Region::UNIT, 0);
+
+        // Stand in for the preview worker: evaluate the node through the shared cache.
+        graph
+            .evaluate(id, &request, &mut cache.lock())
+            .expect("preview evaluates");
+
+        let job = Job {
+            graph: graph.clone(),
+            targets: vec![Target { handle, key: 1 }],
+            request: request.clone(),
+            binding: None,
+        };
+        assert_eq!(evaluate_thumb_job(&job, &cache).len(), 1);
+        // Still current after the thumbnail pass: it read the entry rather than replacing it.
+        let status = graph
+            .cache_status(id, &request, &cache.lock())
+            .expect("status");
+        assert_eq!(
+            status.get(&id),
+            Some(&true),
+            "the thumbnail must reuse the preview's cached result"
+        );
     }
 
     #[test]
@@ -389,8 +469,7 @@ mod tests {
             request: EvalRequest::new(16, 16, Region::UNIT, 0),
             binding: None,
         };
-        let mut cache = EvalCache::new(8);
-        let images = evaluate_thumb_job(&job, &mut cache);
+        let images = evaluate_thumb_job(&job, &LiveCache::new());
         assert_eq!(images.len(), 1);
         assert_eq!(images[0].handle, handle);
         assert_eq!(images[0].key, 7);

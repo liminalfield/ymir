@@ -16,12 +16,11 @@ use ymir_core::{
     CancelToken, Error, EvalCache, EvalRequest, Field, Graph, NodeId, OUTPUT_TYPE_ID, layers,
 };
 
+use crate::live_cache::LiveCache;
 use crate::shade::{
     DEFAULT_LIGHT, HeightScale, ShadeMode, WaterStyle, apply_water, field_to_image,
 };
 
-/// Worker-side persistent cache capacity, in cached node results.
-const WORKER_CACHE_CAP: usize = 64;
 /// Number of bins in the input histogram drawn behind the curve/levels editors (#15).
 const HISTOGRAM_BINS: usize = 64;
 /// Minimum interval between preview submissions. A fast parameter drag throttles to
@@ -208,10 +207,11 @@ pub(crate) struct PreviewEngine {
 }
 
 impl PreviewEngine {
-    pub(crate) fn new() -> Self {
+    /// Starts the engine and its worker, evaluating against the shared live cache (#382).
+    pub(crate) fn new(cache: LiveCache) -> Self {
         let (job_tx, job_rx) = channel::<Job>();
         let (result_tx, result_rx) = channel::<Outcome>();
-        let worker = thread::spawn(move || worker_loop(&job_rx, &result_tx));
+        let worker = thread::spawn(move || worker_loop(&job_rx, &result_tx, &cache));
         Self {
             job_tx,
             result_rx,
@@ -729,10 +729,14 @@ fn cache_report(graph: &Graph, request: &EvalRequest, cache: &EvalCache) -> Hash
     report
 }
 
-/// The worker: evaluates submitted jobs with a persistent cache, skipping
+/// The worker: evaluates submitted jobs against the shared live cache, skipping
 /// superseded ones. Exits when the job channel closes (the engine is dropped).
-fn worker_loop(job_rx: &Receiver<Job>, result_tx: &Sender<Outcome>) {
-    let mut cache = EvalCache::new(WORKER_CACHE_CAP);
+///
+/// The cache is locked once around the whole job rather than per lookup, so the thumbnail
+/// worker waits for a node this job is computing instead of starting its own copy of it
+/// (see [`LiveCache`](crate::live_cache::LiveCache)). Draining to the newest job happens
+/// before taking the lock, so a superseded job never holds it.
+fn worker_loop(job_rx: &Receiver<Job>, result_tx: &Sender<Outcome>, cache: &LiveCache) {
     while let Ok(mut job) = job_rx.recv() {
         // Latest-wins: drain to the newest queued job and skip the rest entirely.
         while let Ok(newer) = job_rx.try_recv() {
@@ -740,7 +744,8 @@ fn worker_loop(job_rx: &Receiver<Job>, result_tx: &Sender<Outcome>) {
         }
         // A cancelled job was superseded: evaluate_job returns None and nothing is
         // reported, avoiding a flash of a stale or "cancelled" result.
-        if let Some(outcome) = evaluate_job(&job, &mut cache)
+        let outcome = evaluate_job(&job, &mut cache.lock());
+        if let Some(outcome) = outcome
             && result_tx.send(outcome).is_err()
         {
             break; // the UI is gone
