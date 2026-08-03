@@ -36,6 +36,16 @@ pub enum Carries {
     Terrain,
     /// A `[0, 1]` selection: a mask, a weight, an erosion byproduct.
     Selection,
+    /// A measurement: unbounded data in some real unit, such as metres from a contour.
+    ///
+    /// Neither of the other two, and it needed its own word rather than being forced into one.
+    /// It is not terrain: nobody stands on a field of distances, and drawing it as lit relief with
+    /// a waterline says nothing true. Nor is it a selection: a selection's display range is fixed
+    /// to `[0, 1]` because its values are a weight, and clamping metres that way hides everything
+    /// past the first one.
+    ///
+    /// So it is shown flat, at true scale, with no water, and auto-ranged.
+    Measurement,
 }
 
 impl PortSpec {
@@ -53,6 +63,14 @@ impl PortSpec {
     #[must_use]
     pub fn selection(mut self) -> Self {
         self.carries = Carries::Selection;
+        self
+    }
+
+    /// Marks this port as carrying a measurement: unbounded data in a real unit, shown flat and
+    /// auto-ranged rather than as relief or as a weight. See [`Carries::Measurement`].
+    #[must_use]
+    pub fn measurement(mut self) -> Self {
+        self.carries = Carries::Measurement;
         self
     }
 
