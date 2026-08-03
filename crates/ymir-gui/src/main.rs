@@ -337,19 +337,26 @@ impl SubgraphInputs {
     /// [`Graph::evaluate_bound`](ymir_core::Graph::evaluate_bound). A source that fails (or a
     /// marker no longer present) is skipped, so its marker falls back to its zero stand-in.
     /// Called on a worker thread, so the parent evaluation never blocks the UI.
+    /// The parent-side field feeding each of the inner graph's Input markers.
+    ///
+    /// Takes the caller's cache rather than making its own. It used to build a fresh one per call
+    /// and drop it on return, so every preview update while dived into a subgraph re-evaluated the
+    /// whole parent chain from nothing. With erosion upstream at a real preview resolution that is
+    /// seconds, every time, including returning to a node just looked at. Both callers that matter
+    /// already hold a cache that outlives the call.
     pub(crate) fn bound_fields(
         &self,
         inner: &Graph,
         request: &EvalRequest,
+        cache: &mut EvalCache,
     ) -> Vec<(NodeId, Field)> {
-        let mut cache = EvalCache::new(THUMB_INPUT_CACHE_CAP);
         self.markers
             .iter()
             .filter_map(|&(marker, source, output)| {
                 let source_id = self.parent.node_id_of(source)?;
                 let field = self
                     .parent
-                    .evaluate(source_id, request, &mut cache)
+                    .evaluate(source_id, request, cache)
                     .ok()?
                     .get(output)?
                     .clone();
@@ -358,9 +365,6 @@ impl SubgraphInputs {
             .collect()
     }
 }
-
-/// Worker-cache capacity for evaluating a subgraph's parent-side input fields.
-const THUMB_INPUT_CACHE_CAP: usize = 64;
 
 /// A suspended parent editing context, pushed when diving into a subgraph (#106). The
 /// active context lives in [`AppState`]'s `graph`/`snarl`/`frames`/`selection`; this holds
@@ -2183,9 +2187,10 @@ impl AppState {
             // meshed terrain has no vertices for. A generator would otherwise open in 3D.
             viewport2d::Mode::TwoD
         } else {
-            match self.previewed_kind {
-                output_kind::OutputKind::Selection => viewport2d::Mode::TwoD,
-                output_kind::OutputKind::Terrain => viewport2d::Mode::ThreeD,
+            if self.previewed_kind.is_flat() {
+                viewport2d::Mode::TwoD
+            } else {
+                viewport2d::Mode::ThreeD
             }
         };
     }
@@ -2237,8 +2242,7 @@ impl AppState {
         // solo-silenced ones are already filtered out, so the preview never evaluates a material
         // it is not going to draw.
         self.preview.set_materials(self.material_sets.showing());
-        let selection = self.previewed_kind == output_kind::OutputKind::Selection;
-        self.preview.set_selection(selection);
+        self.preview.set_output_kind(self.previewed_kind);
         self.preview
             .sync(&self.graph, id, request, now, binding.as_ref());
         self.preview.poll(ctx, &self.graph);
@@ -9578,7 +9582,7 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // What the previewed node produces, which decides how to show it (#339). A selection is
     // judged by where it applies and how strongly, so it wants a flat image at true scale with no
     // water; terrain is judged by its shape, so it wants the lit relief.
-    let showing_selection = state.previewed_kind_now() == output_kind::OutputKind::Selection;
+    let shown_kind = state.previewed_kind_now();
 
     // Sea level and the Show water toggle drive the same overlay across projections: the 3D water
     // plane and the 2D map's water tint. Presentation only, so no re-evaluation on change (#96).
@@ -9587,7 +9591,7 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // across it is meaningless. Suppressed here rather than by changing the setting, so switching
     // to a mask and back does not clobber the water you set up for the terrain.
     let sea_level = state.sea_level as f32;
-    let show_water = state.show_water && !showing_selection;
+    let show_water = state.show_water && shown_kind.has_waterline();
 
     // Paint mode is on when a paint node is the target and is the previewed node.
     let paint_active = state.paint_target.is_some() && state.preview_target() == state.paint_target;
@@ -9738,7 +9742,7 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
                     // confident white shape while contributing almost nothing as a weight. The
                     // question about a selection is its strength, and auto range hides exactly
                     // that.
-                    scale: if showing_selection {
+                    scale: if shown_kind.fixed_range() {
                         shade::HeightScale::Fixed
                     } else {
                         state.viewport_scale
@@ -11679,7 +11683,8 @@ mod tests {
         // Inside, the lone Input marker binds to the fbm feeding the container.
         let inputs = state.subgraph_inputs().expect("bound inputs exist");
         let request = EvalRequest::new(16, 16, ymir_core::Region::UNIT, state.seed);
-        let bound = inputs.bound_fields(&state.graph, &request);
+        let mut cache = EvalCache::new(8);
+        let bound = inputs.bound_fields(&state.graph, &request, &mut cache);
         assert_eq!(bound.len(), 1, "one input marker is bound");
         let (_, field) = &bound[0];
         // It is the real fbm field (has variation), not the markers' flat zero stand-in.

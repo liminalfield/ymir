@@ -45,6 +45,34 @@ pub(crate) enum OutputKind {
     Terrain,
     /// A `[0, 1]` selection. Shown flat, at true scale, without water.
     Selection,
+    /// A measurement in a real unit, such as metres from a contour. Shown flat and without water
+    /// like a selection, but auto-ranged like terrain: its values are unbounded, so clamping them
+    /// to `[0, 1]` would hide everything past the first metre.
+    Measurement,
+}
+
+impl OutputKind {
+    /// Whether this is drawn flat rather than as lit relief.
+    ///
+    /// Only terrain is a shape anyone stands on. A selection is a weight and a measurement is
+    /// data; relief and a water plane say nothing true about either.
+    pub(crate) fn is_flat(self) -> bool {
+        !matches!(self, Self::Terrain)
+    }
+
+    /// Whether the display range is pinned to `[0, 1]` rather than taken from the values.
+    ///
+    /// Only a selection. Its question is *how strongly*, and auto-ranging answers a different one:
+    /// a mask reaching `0.03` would fill the screen. Terrain and a measurement are both judged by
+    /// their shape, and both are unbounded, so both auto-range.
+    pub(crate) fn fixed_range(self) -> bool {
+        matches!(self, Self::Selection)
+    }
+
+    /// Whether a waterline means anything drawn across this.
+    pub(crate) fn has_waterline(self) -> bool {
+        matches!(self, Self::Terrain)
+    }
 }
 
 /// A ceiling on the upstream walk.
@@ -88,12 +116,10 @@ fn walk(
     // heightfield beside `wear` and `flow`, Coastal one beside `shore`, `beach` and `bluff`. Which
     // output a wire came from is the whole question, and position cannot answer it either, since
     // Frequency Split's two outputs are both terrain.
-    if spec
-        .outputs
-        .get(port)
-        .is_some_and(|out| out.carries == Carries::Selection)
-    {
-        return OutputKind::Selection;
+    match spec.outputs.get(port).map(|out| out.carries) {
+        Some(Carries::Selection) => return OutputKind::Selection,
+        Some(Carries::Measurement) => return OutputKind::Measurement,
+        _ => {}
     }
     // No inputs means nothing to inherit from: a generator, or a subgraph boundary marker standing
     // in for one. Terrain is the right answer for both, and the honest default for anything else
@@ -137,7 +163,7 @@ fn walk(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ymir_core::registry;
+    use ymir_core::{Params, registry};
 
     /// Builds a graph from `(type_id, wired_to)` pairs, returning the node ids in order. Each entry
     /// wires its input 0 to an earlier node by index.
@@ -166,6 +192,67 @@ mod tests {
         // It answers a question about terrain, and the answer is a mask, so it does not inherit.
         let (graph, ids) = graph_of(&[("generator.fbm", None), ("modifier.slope", Some(0))]);
         assert_eq!(of(&graph, ids[1], 0), OutputKind::Selection);
+    }
+
+    #[test]
+    fn distances_two_outputs_carry_different_things() {
+        // The same node, two ports. The band is a weight; the measurement beside it is metres.
+        let (graph, ids) = graph_of(&[("generator.fbm", None), ("modifier.distance", Some(0))]);
+        assert_eq!(of(&graph, ids[1], 0), OutputKind::Selection);
+        assert_eq!(of(&graph, ids[1], 1), OutputKind::Measurement);
+    }
+
+    #[test]
+    fn a_measurement_stays_one_through_the_nodes_that_shape_it() {
+        // The case that was reported: wiring the distance into a Levels turned the view to 3D
+        // relief, because the branch had no way to say it was carrying metres. Levels and Curve
+        // are generic, so the answer has to travel with the branch (#383).
+        let mut graph = Graph::new();
+        let noise = graph.add_op(registry::make("generator.fbm").unwrap(), Params::default());
+        let distance = graph.add_op(
+            registry::make("modifier.distance").unwrap(),
+            Params::default(),
+        );
+        let levels = graph.add_op(
+            registry::make("modifier.levels").unwrap(),
+            Params::default(),
+        );
+        let curve = graph.add_op(registry::make("modifier.curve").unwrap(), Params::default());
+        graph.connect(noise, 0, distance, 0).unwrap();
+        // Output 1: the measurement, not the band.
+        graph.connect(distance, 1, levels, 0).unwrap();
+        graph.connect(levels, 0, curve, 0).unwrap();
+        assert_eq!(of(&graph, levels, 0), OutputKind::Measurement);
+        assert_eq!(of(&graph, curve, 0), OutputKind::Measurement);
+    }
+
+    #[test]
+    fn taking_the_band_instead_is_still_a_selection() {
+        // The other port of the same node, to show the two do not bleed into each other.
+        let mut graph = Graph::new();
+        let noise = graph.add_op(registry::make("generator.fbm").unwrap(), Params::default());
+        let distance = graph.add_op(
+            registry::make("modifier.distance").unwrap(),
+            Params::default(),
+        );
+        let levels = graph.add_op(
+            registry::make("modifier.levels").unwrap(),
+            Params::default(),
+        );
+        graph.connect(noise, 0, distance, 0).unwrap();
+        graph.connect(distance, 0, levels, 0).unwrap();
+        assert_eq!(of(&graph, levels, 0), OutputKind::Selection);
+    }
+
+    #[test]
+    fn each_kind_answers_the_three_display_questions_distinctly() {
+        // Three kinds, three questions, and no two kinds answer all three alike. If they did,
+        // one of them would not need to exist.
+        let answers = |k: OutputKind| (k.is_flat(), k.fixed_range(), k.has_waterline());
+        assert_eq!(answers(OutputKind::Terrain), (false, false, true));
+        assert_eq!(answers(OutputKind::Selection), (true, true, false));
+        // Flat like a selection, auto-ranged like terrain: the combination neither of them offers.
+        assert_eq!(answers(OutputKind::Measurement), (true, false, false));
     }
 
     #[test]

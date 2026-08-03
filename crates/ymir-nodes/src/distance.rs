@@ -323,15 +323,16 @@ impl Operator for Distance {
             outputs: vec![
                 PortSpec::new("out").selection(),
                 // The signed distance itself, in world metres: negative on the far side of the
-                // contour, positive on the near side, zero on it. Not a selection, so it is not
-                // marked as one: it is unbounded data, and clamping it to [0, 1] for display would
-                // hide everything past a metre.
+                // contour, positive on the near side, zero on it. A measurement rather than a
+                // selection or terrain (#383): clamping it to [0, 1] would hide everything past a
+                // metre, and drawing it as lit relief with a waterline says nothing true about a
+                // field of distances.
                 //
                 // This is the contour's own coordinate system, which is what makes it worth emitting
                 // rather than recomputing downstream. The gradient is the contour normal and the
                 // level sets run parallel to it, so any "distance from the shore" shaping becomes a
                 // one-dimensional transfer function of this field with no tangent math anywhere.
-                PortSpec::new("distance"),
+                PortSpec::new("distance").measurement(),
             ],
             params: vec![
                 ParamSpec::new(
