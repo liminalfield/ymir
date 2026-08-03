@@ -44,6 +44,9 @@ mod curve_edit;
 mod levels_edit;
 // Authoring a subgraph's parameter interface (#373).
 mod interface_ui;
+// The evaluation cache the preview and thumbnail workers share (#382).
+mod live_cache;
+use live_cache::LiveCache;
 // Background preview evaluation (GUI step 6b): off-thread, latest-wins.
 mod preview;
 use preview::{Histogram, PreviewEngine};
@@ -902,6 +905,8 @@ impl AppState {
         // The water look/effect defaults, taken from one source so the fresh-session fields below
         // and the persisted `WaterSettings::default` (used for older project files) stay in step.
         let water_defaults = project_file::WaterSettings::default();
+        // The live evaluation cache, made here and handed to both background workers.
+        let live_cache = LiveCache::new();
         Self {
             graph,
             snarl,
@@ -917,8 +922,10 @@ impl AppState {
             pending_wire: None,
             consume_wire: false,
             seed: 0,
-            preview: PreviewEngine::new(),
-            thumbnails: ThumbnailEngine::new(),
+            // One cache behind both workers, so the previewed chain is computed once and a
+            // thumbnail of a node on it costs a hit rather than a second erosion (#382).
+            preview: PreviewEngine::new(live_cache.clone()),
+            thumbnails: ThumbnailEngine::new(live_cache),
             thumbnails_enabled: true,
             build: BuildRunner::new(),
             active_tab: None,
@@ -7907,13 +7914,27 @@ fn canvas_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // must retry next frame rather than being consumed to no effect (the startup top-left bug).
     let frame_to_graph = state.frame_to_graph_request;
 
-    // Per-node thumbnails (#42): evaluate every output-producing node at thumbnail
-    // resolution off-thread, and draw each result in its node body below.
+    // Per-node thumbnails (#42): evaluate every output-producing node off-thread, and draw each
+    // result in its node body below.
+    //
+    // At the *preview's* resolution, not a smaller thumbnail one (#382). Erosion is
+    // resolution-dependent physics, so a node evaluated small is a picture of different terrain
+    // rather than a cheap approximation of this one. Matching the preview also means matching its
+    // cache keys, so a node on the previewed chain is a hit in the cache the two workers share and
+    // the whole graph's thumbnails cost about what the preview already paid.
+    //
+    // Deliberately the settled world rather than `preview_request`'s: while exploring, the preview
+    // widens the world to show more field (#361), and a thumbnail's job is to show the node's place
+    // in the graph, which does not move because the explorer is zoomed out.
+    //
     // Same reason as the preview: inside a subgraph these nodes are evaluated directly, so the
     // container never hands the interface down and a thumbnail of a node that names one would
     // fail rather than draw.
-    let thumb_request = EvalRequest::from_world(&state.world_settings(), thumbnails::THUMB_RES)
+    let mut thumb_request = EvalRequest::from_world(&state.world_settings(), state.preview_res)
         .with_interface(state.enclosing_interface());
+    if let Some(gpu) = &state.gpu {
+        thumb_request = thumb_request.with_compute(gpu.clone());
+    }
     // The working set is culled to the last-frame view (#74): off-screen nodes and a
     // zoomed-out canvas (where a thumbnail is too small to read) are skipped, so a
     // large graph evaluates only what is on screen. Disabled entirely from the View

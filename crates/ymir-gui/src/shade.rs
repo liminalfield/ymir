@@ -105,11 +105,16 @@ pub(crate) const THUMB_RES: usize = 512;
 
 /// `field` reduced to at most `cap` cells per side, carrying only `layer`.
 ///
-/// Nearest sampling, which is what a thumbnail wants: it is cheap, and the relief gradient is
-/// normalized by the grid size (see [`relief_image`]), so a reduced grid shades to the same
-/// apparent slope and differs only in detail. Auto range is taken over the sampled cells, so a
-/// lone extreme cell can be missed and the mapping shift slightly; that is a thumbnail's business,
-/// and the viewports show the field itself.
+/// Each target cell is the mean of the source cells it covers. Averaging rather than sampling a
+/// representative cell, because the reduction ratios here are large: a node thumbnail is 96 cells
+/// a side taken from a preview that may be 1024 (#382), so a sample keeps one cell in more than a
+/// hundred and discards the rest. On eroded terrain that reads as speckle rather than as the same
+/// map seen smaller, which is the whole point of drawing it. The cost is one pass over the source,
+/// which is nothing beside evaluating the node that produced it.
+///
+/// Auto range is then taken over the averaged cells, so a lone extreme cell is blended away and the
+/// mapping can shift slightly against the full field; that is a thumbnail's business, and the
+/// viewports shade the field itself.
 ///
 /// Returns the field unchanged when it is already within the cap. `Field` clones share their
 /// layers through `Arc`, so that costs nothing.
@@ -120,15 +125,29 @@ pub(crate) fn reduced(field: &Field, layer: &str, cap: usize) -> Field {
     }
     let src = field.layer_or(layer, 0.0);
     let (tw, th) = (w.min(cap).max(1), h.min(cap).max(1));
-    // Sample the centre of each source block, so the reduction is symmetric rather than biased
-    // toward the top-left corner of the grid.
-    let sampled = Layer::from_fn(tw, th, |x, y| {
-        let sx = ((x * 2 + 1) * w / (tw * 2)).min(w - 1);
-        let sy = ((y * 2 + 1) * h / (th * 2)).min(h - 1);
-        src.get(sx, sy).unwrap_or(0.0)
+    // The source block a target cell covers. Derived from the target index rather than a fixed
+    // block size so the blocks tile the source exactly, with no remainder row or column dropped
+    // when the sizes do not divide evenly.
+    let span = |i: usize, target: usize, source: usize| {
+        let start = i * source / target;
+        let end = ((i + 1) * source / target).max(start + 1).min(source);
+        start..end
+    };
+    let averaged = Layer::from_fn(tw, th, |x, y| {
+        let (xs, ys) = (span(x, tw, w), span(y, th, h));
+        let mut sum = 0.0f32;
+        let mut count = 0u32;
+        for sy in ys {
+            for sx in xs.clone() {
+                sum += src.get(sx, sy).unwrap_or(0.0);
+                count += 1;
+            }
+        }
+        // `span` yields at least one cell, so the count is never zero.
+        sum / count.max(1) as f32
     });
     let mut out = Field::new(tw, th, field.region());
-    out.set_layer(layer, Arc::new(sampled));
+    out.set_layer(layer, Arc::new(averaged));
     out
 }
 
@@ -485,5 +504,63 @@ mod reduction {
         };
         let (a, b) = (centre(&full), centre(&small));
         assert!(a.abs_diff(b) <= 2, "full {a} against reduced {b}");
+    }
+
+    #[test]
+    fn reducing_averages_the_block_rather_than_sampling_one_cell() {
+        // A field where every cell alternates between 0 and 1, so the mean of any block is 0.5 and
+        // a single sample is 0 or 1. This is what a large reduction ratio does to detail: sampled,
+        // a thumbnail of eroded terrain is speckle; averaged, it is the same map seen smaller.
+        let mut field = Field::new(64, 64, Region::UNIT);
+        field.set_layer(
+            layers::HEIGHT,
+            Arc::new(Layer::from_fn(64, 64, |x, y| ((x + y) % 2) as f32)),
+        );
+        let small = reduced(&field, layers::HEIGHT, 8);
+        let layer = small.layer_or(layers::HEIGHT, 0.0);
+        for y in 0..8 {
+            for x in 0..8 {
+                let v = layer.get(x, y).expect("cell");
+                assert!(
+                    (v - 0.5).abs() < 1e-6,
+                    "cell ({x}, {y}) reduced to {v}, expected the block mean 0.5"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_source_cell_reaches_exactly_one_reduced_cell() {
+        // The blocks must tile the source with no gap and no overlap, or a reduction whose sizes do
+        // not divide evenly drops a strip of the map. Checked by summing: the mean of the means is
+        // the mean of the whole field only if every cell was counted once.
+        let mut field = Field::new(100, 100, Region::UNIT);
+        field.set_layer(
+            layers::HEIGHT,
+            Arc::new(Layer::from_fn(100, 100, |x, y| (x * 100 + y) as f32)),
+        );
+        let full_mean: f64 = field
+            .layer_or(layers::HEIGHT, 0.0)
+            .as_slice()
+            .iter()
+            .map(|&v| f64::from(v))
+            .sum::<f64>()
+            / 10_000.0;
+        // 100 into 8 divides unevenly, so the blocks are a mix of 12 and 13 cells wide.
+        let small = reduced(&field, layers::HEIGHT, 8);
+        let reduced_mean: f64 = small
+            .layer_or(layers::HEIGHT, 0.0)
+            .as_slice()
+            .iter()
+            .map(|&v| f64::from(v))
+            .sum::<f64>()
+            / 64.0;
+        // Not exactly equal: unequal block sizes weight the means slightly differently. Close is
+        // the claim, and a dropped strip would be nowhere near.
+        let tolerance = full_mean * 0.02;
+        assert!(
+            (full_mean - reduced_mean).abs() < tolerance,
+            "full mean {full_mean} against reduced {reduced_mean}"
+        );
     }
 }
