@@ -33,8 +33,8 @@ This node takes no inputs.
 | Octaves (`octaves`) | int | [1, 12] | 5 |  | The number of noise layers summed together; more octaves add finer detail. | no |
 | Lacunarity (`lacunarity`) | float | [1, 4] | 2 |  | How much finer each octave is than the one before it; higher values widen the gap between coarse and fine detail. | no |
 | Gain (`gain`) | float | [0, 1] | 0.5 |  | How much each finer octave contributes; higher values make the fine detail rougher and more pronounced. | no |
-| Amplitude (`amplitude`) | float | [0, 4] | 1 |  |  | no |
-| Bias (`bias`) | float | [-1, 1] | 0 |  |  | no |
+| Amplitude (`amplitude`) | float | [0, 100000] | 256 | m |  | no |
+| Bias (`bias`) | float | [-100000, 100000] | 0 | m |  | no |
 | Seed (`seed`) | int | [0, 2147483647] | 0 |  | The random seed; changing it regenerates a different variation of the same pattern. | no |
 | Offset X (`offset_x`) | float | [-100000, 100000] | 0 | m | Slides the sampling window along the X axis, in world units, to take a different patch of the pattern without changing its shape. | no |
 | Offset Y (`offset_y`) | float | [-100000, 100000] | 0 | m | Slides the sampling window along the Y axis, in world units, to take a different patch of the pattern without changing its shape. | no |

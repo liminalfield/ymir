@@ -21,6 +21,10 @@ use crate::noise::{FbmParams, cycles_per_region, fbm_field, pan_in_region_widths
 /// Stable type identifier and registry key.
 const TYPE_ID: &str = "generator.fbm";
 
+/// Default vertical span, in metres, matching the default world height so a fresh project's noise
+/// fills the range exactly as it did when this was a bare multiplier of one (#377).
+const DEFAULT_AMPLITUDE: f64 = 256.0;
+
 /// Default feature size, in world units.
 ///
 /// The old default was 2 cycles per map, and the default world is 1024 m across, so 512 m is the
@@ -76,17 +80,22 @@ impl Operator for Fbm {
                 // detail layer, a tall base form) without a downstream Levels.
                 ParamSpec::new(
                     "amplitude",
-                    ParamKind::Float { min: 0.0, max: 4.0 },
-                    ParamValue::Float(1.0),
-                ),
+                    ParamKind::Float {
+                        min: 0.0,
+                        max: 100_000.0,
+                    },
+                    ParamValue::Float(DEFAULT_AMPLITUDE),
+                )
+                .with_unit(Unit::Meters),
                 ParamSpec::new(
                     "bias",
                     ParamKind::Float {
-                        min: -1.0,
-                        max: 1.0,
+                        min: -100_000.0,
+                        max: 100_000.0,
                     },
                     ParamValue::Float(0.0),
-                ),
+                )
+                .with_unit(Unit::Meters),
                 // Per-node seed: rerolls this generator's texture without a new node
                 // or touching the world seed. Mixed into the node's derived seed, so
                 // the world seed still reshuffles everything and instances still
@@ -125,8 +134,13 @@ impl Operator for Fbm {
 
     /// Reads the world extent, which sets how many cycles of the wavelength span the map. Sea level
     /// and world height are still nothing to do with this node.
+    /// Both extents: the horizontal one sizes the noise, and the vertical one converts the
+    /// amplitude and bias now that they are stated in metres (#377).
     fn context_deps(&self) -> ymir_core::ContextDeps {
-        ymir_core::ContextDeps::WORLD_EXTENT
+        ymir_core::ContextDeps {
+            world_height: true,
+            ..ymir_core::ContextDeps::WORLD_EXTENT
+        }
     }
 
     /// A window onto an unbounded coherent-noise field: `offset_x` / `offset_y` slide across it, so
@@ -154,10 +168,12 @@ impl Operator for Fbm {
         let seed = ctx.seed.wrapping_add(params.get_i64("seed", 0) as u64);
         let mut field = fbm_field(ctx.width, ctx.height, ctx.region, fbm, seed);
 
-        // Apply the output vertical scale. The identity case (amplitude 1, bias 0) returns the
-        // shape untouched, so the default path stays byte-for-byte the noise golden.
-        let amplitude = params.get_f64("amplitude", 1.0) as f32;
-        let bias = params.get_f64("bias", 0.0) as f32;
+        // Apply the output vertical scale. Both are stated in metres (#377) and the shape they
+        // scale spans [0, 1], so an amplitude equal to the world height fills the vertical range
+        // exactly, which is the identity. That case returns the shape untouched, so the default
+        // path stays byte-for-byte the noise golden.
+        let amplitude = ctx.height_from_meters(params.get_f64("amplitude", DEFAULT_AMPLITUDE));
+        let bias = ctx.height_from_meters(params.get_f64("bias", 0.0));
         if amplitude != 1.0 || bias != 0.0 {
             let scaled = {
                 let shape = field.layer_or(layers::HEIGHT, 0.0);
@@ -190,8 +206,12 @@ mod tests {
     ///
     /// Stated rather than left at the context's unit default: the wavelength is in world units now,
     /// so a context with no world describes a 1 m map, on which a 512 m feature is half a cycle.
+    /// A world as tall as the default amplitude, so an unset `amplitude` is the identity and the
+    /// default path still reproduces the noise golden byte for byte (#377).
     fn default_ctx() -> EvalContext {
-        EvalContext::new(8, 8, Region::UNIT, 42).with_world_extent(1024.0)
+        EvalContext::new(8, 8, Region::UNIT, 42)
+            .with_world_extent(1024.0)
+            .with_world_height(DEFAULT_AMPLITUDE)
     }
 
     #[test]
@@ -397,7 +417,8 @@ mod tests {
                 Inputs::required_only(&[]),
                 &Params::new()
                     .with("amplitude", ParamValue::Float(0.0))
-                    .with("bias", ParamValue::Float(0.3)),
+                    // Metres now, so a flat level three tenths of the way up the world (#377).
+                    .with("bias", ParamValue::Float(DEFAULT_AMPLITUDE * 0.3)),
                 &ctx,
             )
             .unwrap();
@@ -412,7 +433,7 @@ mod tests {
         let half = op
             .eval(
                 Inputs::required_only(&[]),
-                &Params::new().with("amplitude", ParamValue::Float(0.5)),
+                &Params::new().with("amplitude", ParamValue::Float(DEFAULT_AMPLITUDE * 0.5)),
                 &ctx,
             )
             .unwrap();

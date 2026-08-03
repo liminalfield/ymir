@@ -66,6 +66,9 @@ fn chain(curve: Curve, inland_m: f64) -> (Graph, NodeId) {
 fn request(n: usize) -> EvalRequest {
     EvalRequest::new(n, n, Region::UNIT, 0)
         .with_world_extent(1000.0)
+        // Stated, because Levels' output window is metres now (#377) and an unstated world is one
+        // metre tall, which would scale the profile by the world height instead of filling it.
+        .with_world_height(256.0)
         .with_sea_level(0.35)
 }
 
