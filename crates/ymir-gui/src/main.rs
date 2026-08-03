@@ -2187,9 +2187,10 @@ impl AppState {
             // meshed terrain has no vertices for. A generator would otherwise open in 3D.
             viewport2d::Mode::TwoD
         } else {
-            match self.previewed_kind {
-                output_kind::OutputKind::Selection => viewport2d::Mode::TwoD,
-                output_kind::OutputKind::Terrain => viewport2d::Mode::ThreeD,
+            if self.previewed_kind.is_flat() {
+                viewport2d::Mode::TwoD
+            } else {
+                viewport2d::Mode::ThreeD
             }
         };
     }
@@ -2241,8 +2242,7 @@ impl AppState {
         // solo-silenced ones are already filtered out, so the preview never evaluates a material
         // it is not going to draw.
         self.preview.set_materials(self.material_sets.showing());
-        let selection = self.previewed_kind == output_kind::OutputKind::Selection;
-        self.preview.set_selection(selection);
+        self.preview.set_output_kind(self.previewed_kind);
         self.preview
             .sync(&self.graph, id, request, now, binding.as_ref());
         self.preview.poll(ctx, &self.graph);
@@ -9582,7 +9582,7 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // What the previewed node produces, which decides how to show it (#339). A selection is
     // judged by where it applies and how strongly, so it wants a flat image at true scale with no
     // water; terrain is judged by its shape, so it wants the lit relief.
-    let showing_selection = state.previewed_kind_now() == output_kind::OutputKind::Selection;
+    let shown_kind = state.previewed_kind_now();
 
     // Sea level and the Show water toggle drive the same overlay across projections: the 3D water
     // plane and the 2D map's water tint. Presentation only, so no re-evaluation on change (#96).
@@ -9591,7 +9591,7 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
     // across it is meaningless. Suppressed here rather than by changing the setting, so switching
     // to a mask and back does not clobber the water you set up for the terrain.
     let sea_level = state.sea_level as f32;
-    let show_water = state.show_water && !showing_selection;
+    let show_water = state.show_water && shown_kind.has_waterline();
 
     // Paint mode is on when a paint node is the target and is the previewed node.
     let paint_active = state.paint_target.is_some() && state.preview_target() == state.paint_target;
@@ -9742,7 +9742,7 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
                     // confident white shape while contributing almost nothing as a weight. The
                     // question about a selection is its strength, and auto range hides exactly
                     // that.
-                    scale: if showing_selection {
+                    scale: if shown_kind.fixed_range() {
                         shade::HeightScale::Fixed
                     } else {
                         state.viewport_scale

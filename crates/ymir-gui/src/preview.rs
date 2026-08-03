@@ -175,7 +175,7 @@ pub(crate) struct PreviewEngine {
     /// Whether the previewed node produces a selection rather than terrain (#339). A selection is
     /// drawn at true scale with no water, because its values are a weight and the question about
     /// it is its strength.
-    selection: bool,
+    output_kind: crate::output_kind::OutputKind,
     /// The material nodes the last completed job evaluated, in composite order. Distinct from
     /// `materials`, which is what the *next* job will use: pairing the live list with finished
     /// weights mismatches them whenever the set changed while a job was running.
@@ -232,7 +232,7 @@ impl PreviewEngine {
             display_output: 0,
             last_outputs: Vec::new(),
             materials: Vec::new(),
-            selection: false,
+            output_kind: crate::output_kind::OutputKind::Terrain,
             evaluated_materials: Vec::new(),
             material_weights: Vec::new(),
             material_overlay: None,
@@ -356,10 +356,13 @@ impl PreviewEngine {
         self.materials = materials;
     }
 
-    /// Records whether the previewed node produces a selection (#339), which changes how the
-    /// thumbnail is drawn: true scale, and no water.
-    pub(crate) fn set_selection(&mut self, selection: bool) {
-        self.selection = selection;
+    /// Records what the previewed output is, which decides how it is drawn (#339, #383).
+    ///
+    /// The kind itself rather than a flag, because two separate questions hang off it: whether
+    /// the display range is pinned, and whether a waterline means anything. They coincided while
+    /// there were only two kinds, and a single flag is how they would quietly drift apart again.
+    pub(crate) fn set_output_kind(&mut self, kind: crate::output_kind::OutputKind) {
+        self.output_kind = kind;
     }
 
     /// Submits a fresh evaluation if the previewed output would differ from the last
@@ -546,7 +549,7 @@ impl PreviewEngine {
             self.material_signature(),
             // The drawing rule itself: switching between true and auto scale changes the picture
             // without changing the field, so the key has to notice it.
-            self.selection,
+            self.output_kind.fixed_range(),
         );
         if self.texture_key == Some(key) {
             return;
@@ -554,7 +557,7 @@ impl PreviewEngine {
         // A selection is drawn at true scale: auto range maps the layer's own range to black and
         // white, so one that only reaches 0.03 looks fully selected while being nearly nothing as
         // a weight. Its strength is the question, and auto range hides exactly that.
-        let scale = if self.selection {
+        let scale = if self.output_kind.fixed_range() {
             HeightScale::Fixed
         } else {
             self.scale
@@ -567,7 +570,7 @@ impl PreviewEngine {
         let thumb = crate::shade::reduced(field, layers::HEIGHT, crate::shade::THUMB_RES);
         let mut image = field_to_image(&thumb, layers::HEIGHT, self.mode, scale, self.light);
         // A selection has no waterline: its values are a weight, not a height.
-        if self.show_water && !self.selection {
+        if self.show_water && self.output_kind.has_waterline() {
             apply_water(
                 &mut image,
                 &thumb,
