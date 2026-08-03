@@ -337,19 +337,26 @@ impl SubgraphInputs {
     /// [`Graph::evaluate_bound`](ymir_core::Graph::evaluate_bound). A source that fails (or a
     /// marker no longer present) is skipped, so its marker falls back to its zero stand-in.
     /// Called on a worker thread, so the parent evaluation never blocks the UI.
+    /// The parent-side field feeding each of the inner graph's Input markers.
+    ///
+    /// Takes the caller's cache rather than making its own. It used to build a fresh one per call
+    /// and drop it on return, so every preview update while dived into a subgraph re-evaluated the
+    /// whole parent chain from nothing. With erosion upstream at a real preview resolution that is
+    /// seconds, every time, including returning to a node just looked at. Both callers that matter
+    /// already hold a cache that outlives the call.
     pub(crate) fn bound_fields(
         &self,
         inner: &Graph,
         request: &EvalRequest,
+        cache: &mut EvalCache,
     ) -> Vec<(NodeId, Field)> {
-        let mut cache = EvalCache::new(THUMB_INPUT_CACHE_CAP);
         self.markers
             .iter()
             .filter_map(|&(marker, source, output)| {
                 let source_id = self.parent.node_id_of(source)?;
                 let field = self
                     .parent
-                    .evaluate(source_id, request, &mut cache)
+                    .evaluate(source_id, request, cache)
                     .ok()?
                     .get(output)?
                     .clone();
@@ -358,9 +365,6 @@ impl SubgraphInputs {
             .collect()
     }
 }
-
-/// Worker-cache capacity for evaluating a subgraph's parent-side input fields.
-const THUMB_INPUT_CACHE_CAP: usize = 64;
 
 /// A suspended parent editing context, pushed when diving into a subgraph (#106). The
 /// active context lives in [`AppState`]'s `graph`/`snarl`/`frames`/`selection`; this holds
@@ -11679,7 +11683,8 @@ mod tests {
         // Inside, the lone Input marker binds to the fbm feeding the container.
         let inputs = state.subgraph_inputs().expect("bound inputs exist");
         let request = EvalRequest::new(16, 16, ymir_core::Region::UNIT, state.seed);
-        let bound = inputs.bound_fields(&state.graph, &request);
+        let mut cache = EvalCache::new(8);
+        let bound = inputs.bound_fields(&state.graph, &request, &mut cache);
         assert_eq!(bound.len(), 1, "one input marker is bound");
         let (_, field) = &bound[0];
         // It is the real fbm field (has variation), not the markers' flat zero stand-in.

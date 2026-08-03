@@ -762,7 +762,7 @@ fn evaluate_job(job: &Job, cache: &mut EvalCache) -> Option<Outcome> {
     let bound = job
         .binding
         .as_ref()
-        .map(|b| b.bound_fields(&job.graph, &job.request));
+        .map(|b| b.bound_fields(&job.graph, &job.request, cache));
     // The (source, port) pairs to display: a normal node's own outputs (so a multi-output
     // node previews all of them), or for an Output marker the single field feeding it (the
     // subgraph's result), since the marker itself is an endpoint with no output.
