@@ -67,6 +67,7 @@ mod terrace;
 mod thermal;
 mod thermal_gpu;
 mod warp;
+mod wave_exposure;
 mod waves;
 
 pub use aspect::Aspect;
@@ -115,3 +116,4 @@ pub use strings::{ParamSource, ResolvedParam, prettify_param, resolve_param, tr}
 pub use terrace::Terrace;
 pub use thermal::ThermalErosion;
 pub use warp::Warp;
+pub use wave_exposure::WaveExposure;

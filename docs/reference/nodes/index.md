@@ -79,6 +79,7 @@ Every node, grouped by category.
 - [Height](modifier.height.md). Selects a band of elevation: high where the normalized height is within min..max, softening over the falloff.
 - [Occlusion](modifier.occlusion.md). Ambient-occlusion / sky-view measure: high in crevices and valley floors hemmed in by higher ground, low on open peaks and flats.
 - [Slope](modifier.slope.md). Selects a band of steepness: high where the slope angle is within min..max degrees, softening over the falloff.
+- [Wave Exposure](modifier.wave_exposure.md). Selects the coast the sea works hardest, high on headlands and low in sheltered bays.
 
 ## Utility
 
