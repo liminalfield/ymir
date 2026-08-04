@@ -73,6 +73,15 @@ pub const BEDROCK: &str = "bedrock";
 /// [`Field::layer_or`](crate::Field::layer_or) and degrade gracefully.
 pub const COVER: &str = "cover";
 
+/// Wave energy reaching the coast, normalized to `[0, 1]`: high on ground the sea works hard and
+/// low where it is sheltered. Written by the Exposure node.
+///
+/// Named for the wave specifically, not `exposure`, because the same word wants to mean three
+/// different fields: sun exposure, wind exposure, and this. A generic exposure vocabulary can be
+/// introduced deliberately later; it must not arrive by two nodes colliding on one name, since a
+/// canonical layer name cannot be renamed without breaking saved projects.
+pub const WAVE_ENERGY: &str = "wave_energy";
+
 /// Backdrop terrain height, carried for display only: the terrain a Paint node is painted over, so
 /// the viewport can mesh the real surface (geometry) while the painted mask rides the height layer
 /// as a texture (not displacement). Never consumed by an operator; a pass-through for the editor.
@@ -98,6 +107,9 @@ mod tests {
             DEPOSITION,
             ERODIBILITY,
             BEDROCK,
+            COVER,
+            WAVE_ENERGY,
+            BACKDROP,
         ];
         let mut unique = names.to_vec();
         unique.sort_unstable();

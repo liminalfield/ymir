@@ -179,6 +179,11 @@ fn lookup(key: &str) -> Option<&'static str> {
             "Selects a band around a height contour by true distance, fading over a range in metres."
         }
 
+        "node-modifier.wave_exposure" => "Wave Exposure",
+        "node-modifier.wave_exposure-desc" => {
+            "Selects the coast the sea works hardest, high on headlands and low in sheltered bays."
+        }
+
         // Invert.
         "node-modifier.invert" => "Invert",
         "node-modifier.invert-desc" => "Flips the height layer (1 - height).",

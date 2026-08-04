@@ -81,6 +81,7 @@ const EXPECTED: &[&str] = &[
     "modifier.terrace",
     "modifier.thermal_erosion",
     "modifier.warp",
+    "modifier.wave_exposure",
 ];
 
 /// The registered set matches the expected set exactly: nothing dropped, nothing
