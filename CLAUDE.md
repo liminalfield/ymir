@@ -4,11 +4,12 @@ Guidance for Claude Code working in this repository. Read it fully before making
 
 ## What Ymir is
 
-Ymir is an open-source (GPL-3.0), native-Linux, node-based procedural terrain
-generator. It is a personal, non-commercial project, and it is meant to be a serious
-one: the architecture, code quality, and structure should hold up to scrutiny from
-experienced Rust developers. Nothing here should read as a weekend hack. The goal is a
-tool that is genuinely pleasant to compose with, not a clone of Gaea or World Machine.
+Ymir is an open-source (GPL-3.0), node-based procedural terrain generator that runs
+natively on Linux and Windows. It is a personal, non-commercial project, and it is meant
+to be a serious one: the architecture, code quality, and structure should hold up to
+scrutiny from experienced Rust developers. Nothing here should read as a weekend hack.
+The goal is a tool that is genuinely pleasant to compose with, not a clone of Gaea or
+World Machine.
 
 ## How to build it (working style)
 
