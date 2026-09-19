@@ -232,7 +232,18 @@ impl Gpu2d {
         let upload_key = (field.content_hash().to_u64(), output, w, h);
         if self.upload_key != Some(upload_key) {
             write_height(&rs.queue, &self.height_texture, layer.as_slice(), w, h);
-            self.range = layer.value_range();
+            // The same robust range the thumbnails and the CPU shader use, so a node looks the
+            // same wherever it is drawn (#389).
+            self.range = shade::display_range(&layer);
+            // What this view was handed, once per new field rather than per frame: the raw extent
+            // beside the range drawn, which is what explains a picture that looks wrong.
+            let (raw_lo, raw_hi) = layer.value_range();
+            log::debug!(
+                "viewport2d: output {output}, {w}x{h}, raw {raw_lo:.5}..{raw_hi:.5}, \
+                 display {:.5}..{:.5}",
+                self.range.0,
+                self.range.1
+            );
             self.upload_key = Some(upload_key);
             self.shade_key = None;
         }
@@ -251,6 +262,10 @@ impl Gpu2d {
                 HeightScale::Auto => self.range,
                 HeightScale::Fixed => (0.0, 1.0),
             };
+            log::debug!(
+                "viewport2d: shading mode {mode:?} scale {scale:?} over {min:.5}..{max:.5}, \
+                 water {show_water}"
+            );
             let style = shade::WaterStyle::default();
             let uniforms = Uniforms {
                 mode_scale_range: [
