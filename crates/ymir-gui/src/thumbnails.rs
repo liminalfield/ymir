@@ -32,7 +32,7 @@ use ymir_core::{CancelToken, EvalRequest, Graph, OUTPUT_TYPE_ID};
 
 use crate::canvas::Handle;
 use crate::live_cache::LiveCache;
-use crate::shade::{HeightScale, height_image, reduced};
+use crate::shade::{height_image, reduced};
 
 /// Thumbnail *image* size, in pixels a side. The evaluation happens at the preview's
 /// resolution (see the module docs); this is only how far the picture is scaled down
@@ -284,11 +284,16 @@ fn evaluate_thumb_job(job: &Job, cache: &LiveCache) -> Vec<Shaded> {
     // size first: it was evaluated at the preview's resolution so that it is the node's real
     // output (#382), and what the canvas draws is a scaled-down picture of it.
     let push = |out: &mut Vec<Shaded>, t: &Target, field: &ymir_core::Field| {
+        // Ranged against the *full* field, then reduced. Auto-ranging the reduced copy instead is
+        // what made a node look different in its thumbnail than in the 2D view (#389): block
+        // averaging pulls the extremes in, so the thumbnail quietly got a tighter range and a
+        // legible picture while the viewport, ranging over the raw values, went black.
+        let range = crate::shade::display_range(&field.layer_or(ymir_core::layers::HEIGHT, 0.0));
         let small = reduced(field, ymir_core::layers::HEIGHT, THUMB_RES);
         out.push(Shaded {
             handle: t.handle,
             key: t.key,
-            image: height_image(&small, ymir_core::layers::HEIGHT, HeightScale::Auto),
+            image: height_image(&small, ymir_core::layers::HEIGHT, range),
         });
     };
     // Inside a subgraph (#106), bind the live input fields to the Input markers, so the

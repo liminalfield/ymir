@@ -567,8 +567,13 @@ impl PreviewEngine {
         // postage stamp, on the UI thread, every time the field changes: during a parameter drag
         // that is the whole frame budget, several times over. The viewports still work from the
         // field itself, so nothing that is looked at closely is reduced.
+        //
+        // The range, though, comes from the full field. Auto-ranging the reduced copy would let
+        // block averaging pull its extremes in, so this pane would draw a tighter range than the
+        // 2D view and the same node would look different in the two places (#389).
+        let range = crate::shade::scale_range(&field.layer_or(layers::HEIGHT, 0.0), scale);
         let thumb = crate::shade::reduced(field, layers::HEIGHT, crate::shade::THUMB_RES);
-        let mut image = field_to_image(&thumb, layers::HEIGHT, self.mode, scale, self.light);
+        let mut image = field_to_image(&thumb, layers::HEIGHT, self.mode, range, self.light);
         // A selection has no waterline: its values are a weight, not a height.
         if self.show_water && self.output_kind.has_waterline() {
             apply_water(
