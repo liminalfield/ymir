@@ -82,10 +82,23 @@ fn input_range(histogram: Option<&Histogram>) -> Range {
     }
 }
 
-/// The vertical axis: the unit domain, since what leaves Levels is a height and heights work in
-/// `[0, 1]`. Fixed for the same reason the input axis is.
-fn output_range() -> Range {
-    padded(UNIT_DOMAIN.0, UNIT_DOMAIN.1)
+/// The vertical axis: nothing to the full world height, because the output bounds are declared in
+/// metres (#377). Fixed for the same reason the input axis is.
+///
+/// It used to be the unit domain, on the reasoning that what leaves Levels is a height and heights
+/// work in `[0, 1]`. That stopped being true when the bounds became metres, and the mismatch made
+/// the editor useless for its main job: dragging a handle to the top of the axis set one metre, so
+/// on a 256 m world the whole editor addressed the bottom 0.4% of the range, and a field remapped
+/// with it came out at effectively zero. Reported as "I'm trying to remap it and there's nothing
+/// there", which is exactly what it did.
+fn output_range(world_height: f32) -> Range {
+    // A world with no height would collapse the axis to a point, so fall back to the unit domain
+    // and let the numbers on the rows do the work.
+    if world_height > 0.0 {
+        padded(0.0, world_height)
+    } else {
+        padded(UNIT_DOMAIN.0, UNIT_DOMAIN.1)
+    }
 }
 
 /// Whether `value` falls outside the axis, so its handle is parked at the edge rather than
@@ -151,6 +164,7 @@ pub(crate) fn levels_editor(
     specs: &[ParamSpec],
     transfer: LevelsTransfer,
     histogram: Option<&Histogram>,
+    world_height: f32,
 ) -> Option<(usize, f64)> {
     let size = egui::vec2(ui.available_width().min(MAX_WIDTH), HEIGHT);
     let (rect, bg) = ui.allocate_exact_size(size, egui::Sense::hover());
@@ -166,7 +180,8 @@ pub(crate) fn levels_editor(
     // unit domain and jolt the picture mid-gesture.
     let store_id = bg.id.with("axes");
     let frozen: Option<(Range, Range)> = ui.data(|d| d.get_temp(store_id));
-    let (x_range, y_range) = frozen.unwrap_or_else(|| (input_range(histogram), output_range()));
+    let (x_range, y_range) =
+        frozen.unwrap_or_else(|| (input_range(histogram), output_range(world_height)));
 
     let visuals = ui.visuals().clone();
     let radius = egui::CornerRadius::same(2);
@@ -397,15 +412,41 @@ mod tests {
             out_high: v,
             ..LevelsTransfer::NEUTRAL
         };
-        let at = |t: LevelsTransfer| y_of(t.out_high, output_range(), r);
+        // The bounds are metres, so the values here are too: half a 256 m world, and all of it.
+        let at = |t: LevelsTransfer| y_of(t.out_high, output_range(256.0), r);
         // y is up, so lowering the bound must move its handle *down* the screen.
         assert!(
-            at(high(0.5)) > at(high(1.0)),
-            "out_high 0.5 drew at {} and 1.0 at {}",
-            at(high(0.5)),
-            at(high(1.0))
+            at(high(128.0)) > at(high(256.0)),
+            "out_high 128 m drew at {} and 256 m at {}",
+            at(high(128.0)),
+            at(high(256.0))
         );
-        assert!(at(high(0.25)) > at(high(0.5)));
+        assert!(at(high(64.0)) > at(high(128.0)));
+    }
+
+    #[test]
+    fn the_output_axis_spans_the_world_height() {
+        // The output bounds are declared in metres (#377) while this axis was still drawn over
+        // [0, 1]. Dragging a handle to the top therefore set one metre, so on a 256 m world the
+        // editor addressed the bottom 0.4% of the range and a field remapped with it came out at
+        // effectively nothing. Reported as "I'm trying to remap it and there's nothing there".
+        let r = rect();
+        let range = output_range(256.0);
+        assert!(
+            range.1 >= 256.0,
+            "the axis must reach the top of the world: {range:?}"
+        );
+        // One metre now sits near the floor of the axis, where it belongs, rather than at its top.
+        let one_metre = y_of(1.0, range, r);
+        let full = y_of(256.0, range, r);
+        // The axis carries a margin below zero, so a metre sits a little above the very floor
+        // rather than on it. What matters is that it is down there at all: on the old unit axis it
+        // drew at the very top, which is what made the editor unusable.
+        let fraction = (r.bottom() - one_metre) / (r.bottom() - full).max(1e-6);
+        assert!(
+            fraction < 0.15,
+            "1 m should sit near the bottom of a 256 m axis, drew {fraction} of the way up"
+        );
     }
 
     #[test]
