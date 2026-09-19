@@ -5536,6 +5536,8 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
                 &spec.params[range.clone()],
                 ymir_core::LevelsTransfer::from_params(&params),
                 histogram.as_ref(),
+                // The output bounds are metres, so the axis they are drawn on has to be too.
+                state.world_height as f32,
             );
             // The editor reports its members by position within the run, so the name comes from
             // the schema rather than being spelled out again here.
