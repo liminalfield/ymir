@@ -106,8 +106,8 @@ enum Status {
 }
 
 /// The identity a preview texture was built from: field hash, output index, shading mode and
-/// scale, relief light bits, sea-level bits, and whether water is shown. The texture is rebuilt
-/// when any of these change.
+/// scale, relief light bits, sea-level bits, whether water is shown, and the material colours and
+/// weights. The texture is rebuilt when any of these change.
 type TextureKey = (
     u64,
     usize,
@@ -118,7 +118,6 @@ type TextureKey = (
     bool,
     u64,
     u64,
-    bool,
 );
 
 /// Drives background preview evaluation. The UI calls [`sync`](Self::sync) (submit
@@ -547,28 +546,25 @@ impl PreviewEngine {
             // most: a job finishing with fresh weights while the field it was keyed on is
             // unchanged, and muting or soloing, which touches no graph and no field at all.
             self.material_signature(),
-            // The drawing rule itself: switching between true and auto scale changes the picture
-            // without changing the field, so the key has to notice it.
-            self.output_kind.fixed_range(),
         );
         if self.texture_key == Some(key) {
             return;
         }
-        // A selection is drawn at true scale: auto range maps the layer's own range to black and
-        // white, so one that only reaches 0.03 looks fully selected while being nearly nothing as
-        // a weight. Its strength is the question, and auto range hides exactly that.
-        let scale = if self.output_kind.fixed_range() {
-            HeightScale::Fixed
-        } else {
-            self.scale
-        };
+        // Whatever the toggle says, so this pane and the 2D view agree. The kind picks the scale
+        // it opens at rather than forcing one every frame (`OutputKind::default_scale`).
+        let scale = self.scale;
         // Shaded from a reduced copy, not the field itself. The pane draws this a few hundred
         // points wide, so shading the field's own resolution spends a million cells per pass on a
         // postage stamp, on the UI thread, every time the field changes: during a parameter drag
         // that is the whole frame budget, several times over. The viewports still work from the
         // field itself, so nothing that is looked at closely is reduced.
+        //
+        // The range, though, comes from the full field. Auto-ranging the reduced copy would let
+        // block averaging pull its extremes in, so this pane would draw a tighter range than the
+        // 2D view and the same node would look different in the two places (#389).
+        let range = crate::shade::scale_range(&field.layer_or(layers::HEIGHT, 0.0), scale);
         let thumb = crate::shade::reduced(field, layers::HEIGHT, crate::shade::THUMB_RES);
-        let mut image = field_to_image(&thumb, layers::HEIGHT, self.mode, scale, self.light);
+        let mut image = field_to_image(&thumb, layers::HEIGHT, self.mode, range, self.light);
         // A selection has no waterline: its values are a weight, not a height.
         if self.show_water && self.output_kind.has_waterline() {
             apply_water(

@@ -10,10 +10,10 @@ use std::sync::Arc;
 use ymir_core::{Field, Layer};
 
 /// How the height layer is shaded.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum ShadeMode {
-    /// Height mapped to grayscale, scaled per [`HeightScale`] (auto-ranged to the
-    /// field's extent, or a fixed `[0, 1]`).
+    /// Height mapped to grayscale, scaled per [`HeightScale`] (auto-ranged to the bulk of
+    /// the field's values, or a fixed `[0, 1]`).
     Height,
     /// Relief: each cell shaded by its surface normal under a fixed light, so height
     /// *changes* (slopes, carved valleys) are legible even when subtle (#40).
@@ -21,10 +21,11 @@ pub(crate) enum ShadeMode {
 }
 
 /// How Height shading maps values to grey (#83).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum HeightScale {
-    /// Map the field's actual `[min, max]` to black/white. Always shows the shape, but
-    /// hides absolute amplitude: every field, tall or flat, fills the range.
+    /// Map the bulk of the field's values to black/white, ignoring a sliver of outliers at each
+    /// end (see [`display_range`]). Always shows the shape, but hides absolute amplitude: every
+    /// field, tall or flat, fills the range.
     Auto,
     /// Map a fixed `[0, 1]` to black/white. Shows true height (a low field reads dark, a
     /// tall one bright) and clips values outside `[0, 1]`.
@@ -151,18 +152,103 @@ pub(crate) fn reduced(field: &Field, layer: &str, cap: usize) -> Field {
     out
 }
 
-/// Builds an image from the named layer of `field`, in the chosen mode and (for Height)
-/// scale. The layer is usually `height`, but any layer the field carries can be shown
-/// (a `water` depth, a selection `mask`, …) so intermediates are inspectable.
+/// Share of the cells allowed to saturate at each end of the Auto display range.
+///
+/// The exact minimum and maximum are the wrong ends to anchor to. A handful of extreme cells then
+/// set the range for the whole picture and everything else is squeezed into a sliver of it: on a
+/// real graph the middle 99% of an erosion `wear` field occupied under a quarter of its own range,
+/// and a water-depth field occupied about 2%, which reads as a black square with nothing in it
+/// (#389). Nor can the graph work around it, since Levels is a linear remap that deliberately does
+/// not clamp, so remapping carries the outlier along and it still sets the range.
+///
+/// Half a percent at each end is what photo tools do, and the handful of saturated cells is
+/// invisible beside the field it makes readable.
+const DISPLAY_SATURATION: f64 = 0.005;
+/// Bins in the histogram behind [`display_range`]. Fine enough that a bin edge shifts the range by
+/// a fraction of a percent, coarse enough to build in one pass over a preview-sized field.
+const DISPLAY_BINS: usize = 4096;
+
+/// The value range the Auto scale maps to black and white: the field's span with the outermost
+/// [`DISPLAY_SATURATION`] of cells at each end allowed to clip.
+///
+/// Estimated from a histogram rather than by sorting, so it stays one linear pass over the values
+/// at preview resolution. The bin boundaries are derived from the exact extremes, so the result is
+/// a deterministic function of the data with no dependence on iteration order.
+///
+/// Falls back to the exact extremes when the histogram cannot improve on them: a flat field, a
+/// field small enough that half a percent is less than one cell, or values that are not finite.
+pub(crate) fn display_range(layer: &Layer) -> (f32, f32) {
+    let values = layer.as_slice();
+    let (min, max) = layer.value_range();
+    let span = max - min;
+    if !span.is_finite() || span <= 0.0 {
+        return (min, max);
+    }
+    let cutoff = (values.len() as f64 * DISPLAY_SATURATION) as usize;
+    if cutoff == 0 {
+        return (min, max);
+    }
+
+    let mut bins = vec![0_u32; DISPLAY_BINS];
+    let scale = DISPLAY_BINS as f32 / span;
+    for &v in values {
+        if !v.is_finite() {
+            continue;
+        }
+        let bin = (((v - min) * scale) as usize).min(DISPLAY_BINS - 1);
+        bins[bin] += 1;
+    }
+
+    // Walk in from each end until the allowed number of cells has been passed over.
+    let bin_value = |i: usize| min + (i as f32 / DISPLAY_BINS as f32) * span;
+    let mut seen = 0_u64;
+    let mut low = 0;
+    for (i, &count) in bins.iter().enumerate() {
+        seen += u64::from(count);
+        if seen > cutoff as u64 {
+            low = i;
+            break;
+        }
+    }
+    seen = 0;
+    let mut high = DISPLAY_BINS - 1;
+    for (i, &count) in bins.iter().enumerate().rev() {
+        seen += u64::from(count);
+        if seen > cutoff as u64 {
+            high = i;
+            break;
+        }
+    }
+    // The upper edge of the last kept bin, so the values inside it are not clipped.
+    let (lo, hi) = (bin_value(low), bin_value(high + 1).min(max));
+    if hi > lo { (lo, hi) } else { (min, max) }
+}
+
+/// The value range `scale` maps to black and white for `layer`: its [`display_range`] (Auto), or a
+/// fixed `[0, 1]` (Fixed).
+///
+/// Resolved separately from the shading so a reduced copy of a field can be drawn against the range
+/// of the field it came from, and the small picture and the large one are the same picture (#389).
+pub(crate) fn scale_range(layer: &Layer, scale: HeightScale) -> (f32, f32) {
+    match scale {
+        HeightScale::Auto => display_range(layer),
+        HeightScale::Fixed => (0.0, 1.0),
+    }
+}
+
+/// Builds an image from the named layer of `field`, in the chosen mode, with Height mapping
+/// `range` to black and white (see [`scale_range`]). The layer is usually `height`, but any layer
+/// the field carries can be shown (a `water` depth, a selection `mask`, …) so intermediates are
+/// inspectable.
 pub(crate) fn field_to_image(
     field: &Field,
     layer: &str,
     mode: ShadeMode,
-    scale: HeightScale,
+    range: (f32, f32),
     light: [f32; 3],
 ) -> egui::ColorImage {
     match mode {
-        ShadeMode::Height => height_image(field, layer, scale),
+        ShadeMode::Height => height_image(field, layer, range),
         ShadeMode::Relief => relief_image(field, layer, light),
     }
 }
@@ -214,15 +300,12 @@ fn blend(base: egui::Color32, over: [u8; 3], alpha: f32) -> egui::Color32 {
     )
 }
 
-/// The named layer mapped to grayscale over the chosen [`HeightScale`]: the layer's actual
-/// `[min, max]` (Auto), or a fixed `[0, 1]` that shows true amplitude and clips
-/// out-of-range (Fixed). A flat layer, or any zero-width range, maps to a single tone.
-pub(crate) fn height_image(field: &Field, layer: &str, scale: HeightScale) -> egui::ColorImage {
+/// The named layer mapped to grayscale, `range` running from black to white (see
+/// [`scale_range`]). Values outside it clip. A flat layer, or any zero-width range, maps to a
+/// single tone.
+pub(crate) fn height_image(field: &Field, layer: &str, range: (f32, f32)) -> egui::ColorImage {
     let layer = field.layer_or(layer, 0.0);
-    let (min, max) = match scale {
-        HeightScale::Auto => layer.value_range(),
-        HeightScale::Fixed => (0.0, 1.0),
-    };
+    let (min, max) = range;
     let span = max - min;
     let mut rgba = Vec::with_capacity(layer.len() * 4);
     for &value in layer.as_slice() {
@@ -269,6 +352,15 @@ mod tests {
     use std::sync::Arc;
     use ymir_core::{Layer, Region, layers};
 
+    /// `field`'s height shaded at `scale`, ranged over the field itself.
+    fn shaded(field: &Field, scale: HeightScale) -> egui::ColorImage {
+        height_image(
+            field,
+            layers::HEIGHT,
+            scale_range(&field.layer_or(layers::HEIGHT, 0.0), scale),
+        )
+    }
+
     fn height_field(values: &[f32]) -> Field {
         let n = values.len();
         Field::new(n, 1, Region::UNIT).with_layer(
@@ -281,11 +373,7 @@ mod tests {
     fn auto_ranges_to_the_field_extent() {
         // A compressed range [0.4, 0.6] is stretched across the display: the min reads
         // black and the max white, so the shape is visible rather than near-uniform gray.
-        let img = height_image(
-            &height_field(&[0.4, 0.6]),
-            layers::HEIGHT,
-            HeightScale::Auto,
-        );
+        let img = shaded(&height_field(&[0.4, 0.6]), HeightScale::Auto);
         assert_eq!(img.pixels[0].r(), 0);
         assert_eq!(img.pixels[1].r(), 255);
     }
@@ -294,11 +382,7 @@ mod tests {
     fn auto_shows_out_of_range_without_clipping() {
         // Values below 0 and above 1 are not clamped: the extremes anchor the range and
         // the middle stays distinct.
-        let img = height_image(
-            &height_field(&[-0.5, 0.5, 2.0]),
-            layers::HEIGHT,
-            HeightScale::Auto,
-        );
+        let img = shaded(&height_field(&[-0.5, 0.5, 2.0]), HeightScale::Auto);
         assert_eq!(img.pixels[0].r(), 0); // -0.5 (min)
         assert_eq!(img.pixels[2].r(), 255); // 2.0 (max)
         let mid = img.pixels[1].r();
@@ -310,11 +394,7 @@ mod tests {
         // Fixed maps [0, 1] to black/white regardless of the field: a field that only
         // reaches 0.5 reads mid-grey (true amplitude, not stretched to white), and a
         // value past 1 clips to white.
-        let img = height_image(
-            &height_field(&[0.0, 0.5, 2.0]),
-            layers::HEIGHT,
-            HeightScale::Fixed,
-        );
+        let img = shaded(&height_field(&[0.0, 0.5, 2.0]), HeightScale::Fixed);
         assert_eq!(img.pixels[0].r(), 0); // 0.0
         assert_eq!(img.pixels[1].r(), 128); // 0.5 stays mid-grey, not stretched
         assert_eq!(img.pixels[2].r(), 255); // 2.0 clips
@@ -322,11 +402,7 @@ mod tests {
 
     #[test]
     fn a_flat_field_is_a_single_tone() {
-        let img = height_image(
-            &height_field(&[0.7, 0.7, 0.7]),
-            layers::HEIGHT,
-            HeightScale::Auto,
-        );
+        let img = shaded(&height_field(&[0.7, 0.7, 0.7]), HeightScale::Auto);
         assert_eq!(img.pixels[0], img.pixels[1]);
         assert_eq!(img.pixels[1], img.pixels[2]);
     }
@@ -344,7 +420,7 @@ mod tests {
     fn water_tints_below_sea_level_and_leaves_dry_cells() {
         // One cell below the sea level (0.5), one above.
         let field = height_field(&[0.2, 0.8]);
-        let mut img = height_image(&field, layers::HEIGHT, HeightScale::Fixed);
+        let mut img = shaded(&field, HeightScale::Fixed);
         let dry_before = img.pixels[1];
         apply_water(
             &mut img,
@@ -389,7 +465,7 @@ mod tests {
     fn default_sea_level_leaves_a_normalized_field_dry() {
         // sea_level 0.0: nothing is strictly below it, so a [0, 1] field is unchanged.
         let field = height_field(&[0.0, 0.5, 1.0]);
-        let mut img = height_image(&field, layers::HEIGHT, HeightScale::Fixed);
+        let mut img = shaded(&field, HeightScale::Fixed);
         let before = img.pixels.clone();
         apply_water(
             &mut img,
@@ -504,6 +580,94 @@ mod reduction {
         };
         let (a, b) = (centre(&full), centre(&small));
         assert!(a.abs_diff(b) <= 2, "full {a} against reduced {b}");
+    }
+
+    /// A field where nearly every cell sits in a narrow band and a few sit far above it: the shape
+    /// that made the 2D view render as black (#389).
+    fn field_with_outliers() -> Field {
+        let mut field = Field::new(64, 64, Region::UNIT);
+        field.set_layer(
+            layers::HEIGHT,
+            Arc::new(Layer::from_fn(64, 64, |x, y| {
+                // Four cells at 100, everything else spread across [0, 1].
+                if y == 0 && x < 4 {
+                    100.0
+                } else {
+                    (x as f32) / 63.0
+                }
+            })),
+        );
+        field
+    }
+
+    #[test]
+    fn the_display_range_ignores_a_sliver_of_outliers() {
+        // Four cells in four thousand is well under the half percent allowed to saturate, so they
+        // must not be allowed to set the range for the other 4092.
+        let field = field_with_outliers();
+        let layer = field.layer_or(layers::HEIGHT, 0.0);
+        assert_eq!(layer.value_range(), (0.0, 100.0), "the raw extremes");
+        let (lo, hi) = display_range(&layer);
+        assert!(
+            hi < 2.0,
+            "the display range must follow the bulk of the data, not the outliers: {lo} to {hi}"
+        );
+        assert!(lo <= 0.1, "and still start at the bottom of it: {lo}");
+    }
+
+    #[test]
+    fn a_field_with_no_outliers_keeps_its_own_extremes() {
+        // Nothing is thrown away where nothing is unusual: an ordinary field still fills the range.
+        let mut field = Field::new(64, 64, Region::UNIT);
+        field.set_layer(
+            layers::HEIGHT,
+            Arc::new(Layer::from_fn(64, 64, |x, _| (x as f32) / 63.0)),
+        );
+        let layer = field.layer_or(layers::HEIGHT, 0.0);
+        let (lo, hi) = display_range(&layer);
+        assert!(lo < 0.02 && hi > 0.98, "{lo} to {hi}");
+    }
+
+    #[test]
+    fn a_flat_field_reports_its_own_value() {
+        // No span to work with, and no division by zero either.
+        let mut field = Field::new(16, 16, Region::UNIT);
+        field.set_layer(
+            layers::HEIGHT,
+            Arc::new(Layer::from_fn(16, 16, |_, _| 0.42)),
+        );
+        let layer = field.layer_or(layers::HEIGHT, 0.0);
+        assert_eq!(display_range(&layer), (0.42, 0.42));
+    }
+
+    #[test]
+    fn a_thumbnail_and_the_full_field_are_shaded_the_same() {
+        // The inconsistency the maintainer reported: the same node legible in its thumbnail and
+        // black in the 2D view. The thumbnail used to auto-range its own averaged copy, whose
+        // extremes are pulled in by the averaging. Both now range against the full field.
+        let field = field_with_outliers();
+        let range = display_range(&field.layer_or(layers::HEIGHT, 0.0));
+        let small = reduced(&field, layers::HEIGHT, 16);
+        let thumb = height_image(&small, layers::HEIGHT, range);
+        let full = height_image(
+            &field,
+            layers::HEIGHT,
+            scale_range(&field.layer_or(layers::HEIGHT, 0.0), HeightScale::Auto),
+        );
+        // Same column of the map, once at 64 cells and once reduced to 16: the same ground should
+        // read as the same tone.
+        let sample = |img: &egui::ColorImage, fx: f32| {
+            let [w, h] = img.size;
+            let x = ((w as f32 - 1.0) * fx) as usize;
+            img.pixels[(h / 2) * w + x].r()
+        };
+        for fx in [0.25_f32, 0.5, 0.75] {
+            let (a, b) = (sample(&thumb, fx), sample(&full, fx));
+            assert!(
+                a.abs_diff(b) <= 8,
+                "thumbnail {a} against viewport {b} at {fx} across"
+            );
+        }
     }
 
     #[test]

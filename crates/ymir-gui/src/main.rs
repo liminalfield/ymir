@@ -2183,6 +2183,9 @@ impl AppState {
             return;
         }
         self.viewed = Some(viewing);
+        // The newly shown output picks the scale that suits it, once. From here the toggle is the
+        // user's, and it stays theirs until something else is shown.
+        self.viewport_scale = self.previewed_kind.default_scale();
         if self.paint_target.is_some() && target == self.paint_target {
             return;
         }
@@ -5533,6 +5536,8 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState) {
                 &spec.params[range.clone()],
                 ymir_core::LevelsTransfer::from_params(&params),
                 histogram.as_ref(),
+                // The output bounds are metres, so the axis they are drawn on has to be too.
+                state.world_height as f32,
             );
             // The editor reports its members by position within the run, so the name comes from
             // the schema rather than being spelled out again here.
@@ -9758,16 +9763,10 @@ fn viewport_pane(ui: &mut egui::Ui, state: &mut AppState) {
                 field,
                 viewport2d::MapDisplay {
                     output: display,
-                    // Fixed range for a selection, always. Auto maps the layer's own range to
-                    // black and white, so a selection that only reaches 0.03 renders as a
-                    // confident white shape while contributing almost nothing as a weight. The
-                    // question about a selection is its strength, and auto range hides exactly
-                    // that.
-                    scale: if shown_kind.fixed_range() {
-                        shade::HeightScale::Fixed
-                    } else {
-                        state.viewport_scale
-                    },
+                    // Whatever the toggle says. The kind chose its own default when this output
+                    // started being shown (`OutputKind::default_scale`); overriding it here as
+                    // well is what made the control inert.
+                    scale: state.viewport_scale,
                     sea_level,
                     show_water,
                     explore: exploring.then_some(viewport2d::Explore {

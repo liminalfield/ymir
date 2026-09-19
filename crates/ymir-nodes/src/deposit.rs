@@ -81,7 +81,7 @@ impl Operator for Deposit {
             inputs: vec![PortSpec::new("in"), PortSpec::optional("mask")],
             outputs: vec![
                 PortSpec::new("heightfield"),
-                PortSpec::new("cover").selection(),
+                PortSpec::new("cover").measurement(),
             ],
             params: vec![
                 ParamSpec::new(

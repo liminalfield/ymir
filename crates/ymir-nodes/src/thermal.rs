@@ -55,8 +55,8 @@ impl Operator for ThermalErosion {
             ],
             outputs: vec![
                 PortSpec::new("heightfield"),
-                PortSpec::new("wear").selection(),
-                PortSpec::new("debris").selection(),
+                PortSpec::new("wear").measurement(),
+                PortSpec::new("debris").measurement(),
             ],
             params: vec![
                 ParamSpec::new(

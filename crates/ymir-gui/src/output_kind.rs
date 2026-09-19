@@ -60,13 +60,21 @@ impl OutputKind {
         !matches!(self, Self::Terrain)
     }
 
-    /// Whether the display range is pinned to `[0, 1]` rather than taken from the values.
+    /// The scale to switch to when this kind starts being shown.
     ///
-    /// Only a selection. Its question is *how strongly*, and auto-ranging answers a different one:
-    /// a mask reaching `0.03` would fill the screen. Terrain and a measurement are both judged by
-    /// their shape, and both are unbounded, so both auto-range.
-    pub(crate) fn fixed_range(self) -> bool {
-        matches!(self, Self::Selection)
+    /// A *default*, not a rule. It used to be enforced on every frame, which meant the Auto/Fixed
+    /// toggle did nothing at all while a selection was shown: the control was there, it moved, and
+    /// the picture never changed. A control that does nothing reads as broken, because it is.
+    ///
+    /// A selection opens at true scale because the question about a weight is its strength, and
+    /// auto range hides exactly that: one that only reaches 0.03 would render as a confident white
+    /// shape while contributing almost nothing. A measurement opens auto-ranged because its values
+    /// are unbounded and it is judged by shape. Terrain opens at true scale, as it always has.
+    pub(crate) fn default_scale(self) -> crate::shade::HeightScale {
+        match self {
+            Self::Measurement => crate::shade::HeightScale::Auto,
+            Self::Terrain | Self::Selection => crate::shade::HeightScale::Fixed,
+        }
     }
 
     /// Whether a waterline means anything drawn across this.
@@ -248,11 +256,21 @@ mod tests {
     fn each_kind_answers_the_three_display_questions_distinctly() {
         // Three kinds, three questions, and no two kinds answer all three alike. If they did,
         // one of them would not need to exist.
-        let answers = |k: OutputKind| (k.is_flat(), k.fixed_range(), k.has_waterline());
-        assert_eq!(answers(OutputKind::Terrain), (false, false, true));
-        assert_eq!(answers(OutputKind::Selection), (true, true, false));
+        use crate::shade::HeightScale;
+        let answers = |k: OutputKind| (k.is_flat(), k.default_scale(), k.has_waterline());
+        assert_eq!(
+            answers(OutputKind::Terrain),
+            (false, HeightScale::Fixed, true)
+        );
+        assert_eq!(
+            answers(OutputKind::Selection),
+            (true, HeightScale::Fixed, false)
+        );
         // Flat like a selection, auto-ranged like terrain: the combination neither of them offers.
-        assert_eq!(answers(OutputKind::Measurement), (true, false, false));
+        assert_eq!(
+            answers(OutputKind::Measurement),
+            (true, HeightScale::Auto, false)
+        );
     }
 
     #[test]
@@ -325,16 +343,42 @@ mod tests {
     }
 
     #[test]
-    fn an_erosion_byproduct_is_a_selection_but_its_heightfield_is_not() {
+    fn an_erosion_byproduct_is_a_measurement_but_its_heightfield_is_not() {
         // The same node answers differently per port, which is why the declaration is on the port
         // and not the node.
+        //
+        // Wear and its like are measurements, not selections: they are depths of material moved,
+        // unbounded above (a real run reaches 1.06), and judged by shape. Declaring them
+        // selections pinned the view to [0, 1], where a field whose median cell sits at 0.09 is
+        // nearly black, which is how it was reported: legible in the node thumbnail and invisible
+        // in the 2D view.
         let (graph, ids) = graph_of(&[
             ("generator.fbm", None),
             ("modifier.thermal_erosion", Some(0)),
         ]);
         assert_eq!(of(&graph, ids[1], 0), OutputKind::Terrain, "heightfield");
-        assert_eq!(of(&graph, ids[1], 1), OutputKind::Selection, "wear");
-        assert_eq!(of(&graph, ids[1], 2), OutputKind::Selection, "debris");
+        assert_eq!(of(&graph, ids[1], 1), OutputKind::Measurement, "wear");
+        assert_eq!(of(&graph, ids[1], 2), OutputKind::Measurement, "debris");
+    }
+
+    #[test]
+    fn each_kind_opens_at_the_scale_that_suits_it() {
+        // A default, not a rule: the toggle is the user's once the output is showing. Enforcing it
+        // every frame instead is what made the Auto/Fixed control inert.
+        assert_eq!(
+            OutputKind::Selection.default_scale(),
+            crate::shade::HeightScale::Fixed,
+            "a weight is judged by its strength, which auto range hides"
+        );
+        assert_eq!(
+            OutputKind::Measurement.default_scale(),
+            crate::shade::HeightScale::Auto,
+            "a measurement is unbounded and judged by shape"
+        );
+        assert_eq!(
+            OutputKind::Terrain.default_scale(),
+            crate::shade::HeightScale::Fixed
+        );
     }
 
     #[test]
@@ -359,7 +403,7 @@ mod tests {
         graph
             .connect(erosion, 1, levels, 0)
             .expect("wear -> levels");
-        assert_eq!(of(&graph, levels, 0), OutputKind::Selection);
+        assert_eq!(of(&graph, levels, 0), OutputKind::Measurement);
     }
 
     #[test]
